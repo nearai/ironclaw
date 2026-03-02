@@ -109,6 +109,15 @@ impl OutgoingResponse {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ReasoningDecisionUpdate {
+    pub tool_call_id: Option<String>,
+    pub tool_name: String,
+    pub rationale: String,
+    pub outcome: String,
+    pub parallel_group: Option<usize>,
+}
+
 /// Status update types for showing agent activity.
 #[derive(Debug, Clone)]
 pub enum StatusUpdate {
@@ -122,6 +131,14 @@ pub enum StatusUpdate {
     ToolResult { name: String, preview: String },
     /// Streaming text chunk.
     StreamChunk(String),
+    /// Structured reasoning summary update.
+    ReasoningUpdate {
+        session_id: String,
+        thread_id: String,
+        turn_number: usize,
+        narrative: Option<String>,
+        tool_decisions: Vec<ReasoningDecisionUpdate>,
+    },
     /// General status message.
     Status(String),
     /// A sandbox job has started (shown as a clickable card in the UI).

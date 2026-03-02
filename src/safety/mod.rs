@@ -34,6 +34,12 @@ pub struct SafetyLayer {
 }
 
 impl SafetyLayer {
+    /// Block sentinel returned when leak detection fails.
+    pub const BLOCKED_BY_LEAK_DETECTOR: &'static str =
+        "[Output blocked due to potential secret leakage]";
+    /// Block sentinel returned when safety policy blocks content.
+    pub const BLOCKED_BY_POLICY: &'static str = "[Output blocked by safety policy]";
+
     /// Create a new safety layer with the given configuration.
     pub fn new(config: &SafetyConfig) -> Self {
         Self {
@@ -43,6 +49,11 @@ impl SafetyLayer {
             leak_detector: LeakDetector::new(),
             config: config.clone(),
         }
+    }
+
+    /// Returns true if text matches a safety blocked-output sentinel.
+    pub fn is_blocked_output(&self, text: &str) -> bool {
+        text == Self::BLOCKED_BY_LEAK_DETECTOR || text == Self::BLOCKED_BY_POLICY
     }
 
     /// Sanitize tool output before it reaches the LLM.
@@ -81,7 +92,7 @@ impl SafetyLayer {
             }
             Err(_) => {
                 return SanitizedOutput {
-                    content: "[Output blocked due to potential secret leakage]".to_string(),
+                    content: Self::BLOCKED_BY_LEAK_DETECTOR.to_string(),
                     warnings: vec![],
                     was_modified: true,
                 };
@@ -95,7 +106,7 @@ impl SafetyLayer {
             .any(|rule| rule.action == crate::safety::PolicyAction::Block)
         {
             return SanitizedOutput {
-                content: "[Output blocked by safety policy]".to_string(),
+                content: Self::BLOCKED_BY_POLICY.to_string(),
                 warnings: vec![],
                 was_modified: true,
             };

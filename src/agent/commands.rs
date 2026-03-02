@@ -12,7 +12,6 @@ use crate::agent::session::Session;
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{Agent, MessageIntent};
 use crate::channels::{IncomingMessage, StatusUpdate};
-use crate::context::JobState;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
 
@@ -118,22 +117,6 @@ impl Agent {
                 let uuid = Uuid::parse_str(&id)
                     .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
-                // Try DB first for persistent state, fall back to ContextManager.
-                if let Some(store) = self.store()
-                    && let Ok(Some(ctx)) = store.get_job(uuid).await
-                {
-                    return Ok(format!(
-                        "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}",
-                        ctx.title,
-                        ctx.state,
-                        ctx.created_at.format("%Y-%m-%d %H:%M:%S"),
-                        ctx.started_at
-                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-                            .unwrap_or_else(|| "Not started".to_string()),
-                        ctx.actual_cost
-                    ));
-                }
-
                 let ctx = self.context_manager.get_context(uuid).await?;
                 if ctx.user_id != user_id {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
@@ -151,38 +134,10 @@ impl Agent {
                 ))
             }
             None => {
-                // Show summary from DB for consistency with Jobs tab.
-                if let Some(store) = self.store() {
-                    let mut total = 0;
-                    let mut in_progress = 0;
-                    let mut completed = 0;
-                    let mut failed = 0;
-                    let mut stuck = 0;
-
-                    if let Ok(s) = store.agent_job_summary().await {
-                        total += s.total;
-                        in_progress += s.in_progress;
-                        completed += s.completed;
-                        failed += s.failed;
-                        stuck += s.stuck;
-                    }
-                    if let Ok(s) = store.sandbox_job_summary().await {
-                        total += s.total;
-                        in_progress += s.running;
-                        completed += s.completed;
-                        failed += s.failed + s.interrupted;
-                    }
-
-                    return Ok(format!(
-                        "Jobs summary: Total: {} In Progress: {} Completed: {} Failed: {} Stuck: {}",
-                        total, in_progress, completed, failed, stuck
-                    ));
-                }
-
-                // Fallback to ContextManager if no DB.
+                // Show summary of all jobs
                 let summary = self.context_manager.summary_for(user_id).await;
                 Ok(format!(
-                    "Jobs summary: Total: {} In Progress: {} Completed: {} Failed: {} Stuck: {}",
+                    "Jobs summary:\n  Total: {}\n  In Progress: {}\n  Completed: {}\n  Failed: {}\n  Stuck: {}",
                     summary.total,
                     summary.in_progress,
                     summary.completed,
@@ -204,15 +159,6 @@ impl Agent {
 
         self.scheduler.stop(uuid).await?;
 
-        // Also update DB so the Jobs tab reflects cancellation immediately.
-        if let Some(store) = self.store()
-            && let Err(e) = store
-                .update_job_status(uuid, JobState::Cancelled, Some("Cancelled by user"))
-                .await
-        {
-            tracing::warn!(job_id = %uuid, "Failed to persist cancellation to DB: {}", e);
-        }
-
         Ok(format!("Job {} has been cancelled.", job_id))
     }
 
@@ -221,49 +167,21 @@ impl Agent {
         user_id: &str,
         _filter: Option<String>,
     ) -> Result<String, Error> {
-        // List from DB for consistency with Jobs tab.
-        if let Some(store) = self.store() {
-            let agent_jobs = match store.list_agent_jobs().await {
-                Ok(jobs) => jobs,
-                Err(e) => {
-                    tracing::warn!("Failed to list agent jobs: {}", e);
-                    Vec::new()
-                }
-            };
-            let sandbox_jobs = match store.list_sandbox_jobs().await {
-                Ok(jobs) => jobs,
-                Err(e) => {
-                    tracing::warn!("Failed to list sandbox jobs: {}", e);
-                    Vec::new()
-                }
-            };
-
-            if agent_jobs.is_empty() && sandbox_jobs.is_empty() {
-                return Ok("No jobs found.".to_string());
-            }
-
-            let mut output = String::from("Jobs:\n");
-            for j in &agent_jobs {
-                output.push_str(&format!("  {} - {} ({})\n", j.id, j.title, j.status));
-            }
-            for j in &sandbox_jobs {
-                output.push_str(&format!("  {} - {} ({})\n", j.id, j.task, j.status));
-            }
-            return Ok(output);
-        }
-
-        // Fallback to ContextManager if no DB.
         let jobs = self.context_manager.all_jobs_for(user_id).await;
+
         if jobs.is_empty() {
             return Ok("No jobs found.".to_string());
         }
 
         let mut output = String::from("Jobs:\n");
         for job_id in jobs {
-            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
+            if let Ok(ctx) = self.context_manager.get_context(job_id).await
+                && ctx.user_id == user_id
+            {
                 output.push_str(&format!("  {} - {} ({:?})\n", job_id, ctx.title, ctx.state));
             }
         }
+
         Ok(output)
     }
 
@@ -299,33 +217,6 @@ impl Agent {
                 "Job {} is not stuck (current state: {:?}). No help needed.",
                 job_id, ctx.state
             ))
-        }
-    }
-
-    /// Show job status inline — either all jobs (no id) or a specific job.
-    pub(super) async fn process_job_status(
-        &self,
-        user_id: &str,
-        job_id: Option<&str>,
-    ) -> Result<SubmissionResult, Error> {
-        match self
-            .handle_check_status(user_id, job_id.map(|s| s.to_string()))
-            .await
-        {
-            Ok(text) => Ok(SubmissionResult::response(text)),
-            Err(e) => Ok(SubmissionResult::error(format!("Job status error: {}", e))),
-        }
-    }
-
-    /// Cancel a job by ID.
-    pub(super) async fn process_job_cancel(
-        &self,
-        user_id: &str,
-        job_id: &str,
-    ) -> Result<SubmissionResult, Error> {
-        match self.handle_cancel_job(user_id, job_id).await {
-            Ok(text) => Ok(SubmissionResult::response(text)),
-            Err(e) => Ok(SubmissionResult::error(format!("Cancel error: {}", e))),
         }
     }
 
@@ -461,6 +352,126 @@ impl Agent {
         }
     }
 
+    pub(super) async fn process_reasoning(
+        &self,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        arg: Option<String>,
+    ) -> Result<SubmissionResult, Error> {
+        let sess = session.lock().await;
+        let thread = sess
+            .threads
+            .get(&thread_id)
+            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+        let format_turn = |turn: &crate::agent::session::Turn| -> String {
+            if turn.tool_calls.is_empty() {
+                return format!("  ─ Turn {} had no tool calls.", turn.turn_number + 1);
+            }
+
+            let mut out = format!("  ┄ Reasoning — turn {}\n", turn.turn_number + 1);
+            if let Some(narrative) = turn.narrative.as_deref().map(str::trim)
+                && !narrative.is_empty()
+            {
+                out.push_str(&format!("  Narrative: \"{}\"\n", narrative));
+            }
+
+            let mut groups: std::collections::BTreeMap<
+                Option<usize>,
+                Vec<&crate::agent::session::TurnToolCall>,
+            > = std::collections::BTreeMap::new();
+            for call in &turn.tool_calls {
+                groups.entry(call.parallel_group).or_default().push(call);
+            }
+
+            for (group, calls) in groups {
+                if let Some(g) = group
+                    && calls.len() > 1
+                {
+                    out.push_str(&format!("\n  ┄ [parallel batch {}]\n", g));
+                }
+
+                for call in calls {
+                    let prefix = if call.parallel_group.is_some() && turn.tool_calls.len() > 1 {
+                        "  ┄   ↳"
+                    } else {
+                        "  ┄"
+                    };
+                    out.push_str(&format!("{} {}\n", prefix, call.name));
+                    out.push_str(&format!("    rationale: \"{}\"\n", call.rationale.trim()));
+
+                    let params = crate::tools::redaction::redact_sensitive_json(&call.parameters)
+                        .to_string();
+                    let params_preview = if params.chars().count() > 200 {
+                        let truncated: String = params.chars().take(200).collect();
+                        format!("{}...", truncated)
+                    } else {
+                        params
+                    };
+                    out.push_str(&format!("    params:    {}\n", params_preview));
+
+                    let outcome = if let Some(err) = &call.error {
+                        format!("error ({})", err)
+                    } else if call.result.is_some() {
+                        "success".to_string()
+                    } else {
+                        "pending".to_string()
+                    };
+                    out.push_str(&format!("    outcome:   {}\n", outcome));
+                }
+            }
+
+            out.trim_end().to_string()
+        };
+
+        let response = match arg.as_deref().map(str::trim) {
+            None => {
+                if let Some(turn) = thread.turns.last() {
+                    format_turn(turn)
+                } else {
+                    "  ✗ No turns in this thread yet.".to_string()
+                }
+            }
+            Some("all") => {
+                if thread.turns.is_empty() {
+                    "  ✗ No turns in this thread yet.".to_string()
+                } else {
+                    thread
+                        .turns
+                        .iter()
+                        .map(format_turn)
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                }
+            }
+            Some(raw_turn) => {
+                let turn_number = match raw_turn.parse::<usize>() {
+                    Ok(n) if n > 0 => n,
+                    _ => {
+                        return Ok(SubmissionResult::error(
+                            "Usage: /reasoning [N|all] (N must be >= 1)",
+                        ));
+                    }
+                };
+
+                if let Some(turn) = thread
+                    .turns
+                    .iter()
+                    .find(|t| t.turn_number + 1 == turn_number)
+                {
+                    format_turn(turn)
+                } else {
+                    format!(
+                        "  ✗ No reasoning data for turn {} in this thread.",
+                        turn_number
+                    )
+                }
+            }
+        };
+
+        Ok(SubmissionResult::response(response))
+    }
+
     /// Handle system commands that bypass thread-state checks entirely.
     pub(super) async fn handle_system_command(
         &self,
@@ -501,6 +512,7 @@ impl Agent {
                 "  /heartbeat        Run heartbeat check\n",
                 "  /summarize        Summarize current thread\n",
                 "  /suggest          Suggest next steps\n",
+                "  /reasoning [N|all] Show reasoning summaries\n",
                 "\n",
                 "  /quit             Exit",
             ))),
@@ -752,6 +764,220 @@ impl Agent {
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             _ => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use tokio::sync::Mutex;
+    use uuid::Uuid;
+
+    use crate::agent::Agent;
+    use crate::agent::agent_loop::AgentDeps;
+    use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+    use crate::agent::session::Session;
+    use crate::agent::submission::SubmissionResult;
+    use crate::channels::ChannelManager;
+    use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
+    use crate::context::ContextManager;
+    use crate::hooks::HookRegistry;
+    use crate::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
+    use crate::safety::SafetyLayer;
+    use crate::tools::ToolRegistry;
+
+    struct StaticLlmProvider;
+
+    #[async_trait]
+    impl LlmProvider for StaticLlmProvider {
+        fn model_name(&self) -> &str {
+            "static-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+    }
+
+    fn make_test_agent() -> Agent {
+        let deps = AgentDeps {
+            store: None,
+            llm: Arc::new(StaticLlmProvider),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: true,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+        };
+
+        Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        )
+    }
+
+    fn session_with_reasoning_turn() -> (Arc<Mutex<Session>>, Uuid) {
+        let mut sess = Session::new("user-test");
+        let thread_id = sess.create_thread().id;
+
+        {
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .expect("thread should exist");
+            let turn = thread.start_turn("hello");
+            turn.record_tool_call(
+                "echo",
+                serde_json::json!({"message": "hi"}),
+                "confirm greeting".to_string(),
+                None,
+            );
+            turn.record_tool_result(serde_json::json!("hi"));
+            thread.complete_turn("done");
+            thread.updated_at = thread
+                .updated_at
+                .checked_add_signed(chrono::TimeDelta::seconds(1))
+                .expect("valid timestamp shift");
+        }
+
+        (Arc::new(Mutex::new(sess)), thread_id)
+    }
+
+    #[tokio::test]
+    async fn test_process_reasoning_out_of_range_turn() {
+        let agent = make_test_agent();
+        let (session, thread_id) = session_with_reasoning_turn();
+
+        let result = agent
+            .process_reasoning(session, thread_id, Some("99".to_string()))
+            .await
+            .expect("process_reasoning should succeed");
+
+        match result {
+            SubmissionResult::Response { content } => {
+                assert!(content.contains("No reasoning data for turn 99"));
+            }
+            _ => panic!("expected response submission result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_reasoning_invalid_turn_usage_error() {
+        let agent = make_test_agent();
+        let (session, thread_id) = session_with_reasoning_turn();
+
+        let result = agent
+            .process_reasoning(session, thread_id, Some("0".to_string()))
+            .await
+            .expect("process_reasoning should succeed");
+
+        match result {
+            SubmissionResult::Error { message } => {
+                assert_eq!(message, "Usage: /reasoning [N|all] (N must be >= 1)");
+            }
+            _ => panic!("expected error submission result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_reasoning_redacts_sensitive_parameters_in_output() {
+        let agent = make_test_agent();
+        let mut sess = Session::new("user-test");
+        let thread_id = sess.create_thread().id;
+
+        {
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .expect("thread should exist");
+            let turn = thread.start_turn("hello");
+            turn.record_tool_call(
+                "http",
+                serde_json::json!({
+                    "headers": { "Authorization": "Bearer abc" },
+                    "token": "secret-token"
+                }),
+                "call http".to_string(),
+                None,
+            );
+            turn.record_tool_result(serde_json::json!("ok"));
+            thread.complete_turn("done");
+        }
+
+        let session = Arc::new(Mutex::new(sess));
+        let result = agent
+            .process_reasoning(session, thread_id, None)
+            .await
+            .expect("process_reasoning should succeed");
+
+        match result {
+            SubmissionResult::Response { content } => {
+                assert!(content.contains("[REDACTED]"));
+                assert!(!content.contains("secret-token"));
+                assert!(!content.contains("Bearer abc"));
+            }
+            _ => panic!("expected response submission result"),
         }
     }
 }

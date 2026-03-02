@@ -2502,6 +2502,11 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             message: chunk.clone(),
             metadata_json,
         },
+        StatusUpdate::ReasoningUpdate { .. } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: "Reasoning update".to_string(),
+            metadata_json,
+        },
         StatusUpdate::Status(msg) => {
             // Map well-known status strings to WIT types (case-insensitive
             // to stay consistent with is_terminal_text_status and the

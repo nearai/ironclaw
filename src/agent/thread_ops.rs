@@ -16,11 +16,32 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
-use crate::channels::web::util::truncate_preview;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, DEFAULT_TOOL_RATIONALE, normalize_tool_reasoning};
+use crate::tools::redaction::redact_sensitive_json;
+
+pub(crate) fn sanitize_pending_tool_rationale(
+    safety: &crate::safety::SafetyLayer,
+    raw: &str,
+) -> String {
+    let normalized = normalize_tool_reasoning(raw);
+    let sanitized = safety.sanitize_tool_output("reasoning", &normalized);
+    let cleaned = sanitized.content.trim();
+    if cleaned.is_empty() || safety.is_blocked_output(cleaned) {
+        DEFAULT_TOOL_RATIONALE.to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+type DeferredApprovalCandidate = (
+    usize,
+    crate::llm::ToolCall,
+    Arc<dyn crate::tools::Tool>,
+    String,
+);
 
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
@@ -60,6 +81,30 @@ impl Agent {
         let msg_count;
 
         if let Some(store) = self.store() {
+            let owned = match store
+                .conversation_belongs_to_user(thread_uuid, &message.user_id)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        thread_id = %thread_uuid,
+                        user_id = %message.user_id,
+                        "Failed ownership check during thread hydration: {}",
+                        e
+                    );
+                    false
+                }
+            };
+            if !owned {
+                tracing::warn!(
+                    thread_id = %thread_uuid,
+                    user_id = %message.user_id,
+                    "Refusing to hydrate unowned thread"
+                );
+                return;
+            }
+
             let db_messages = store
                 .list_conversation_messages(thread_uuid)
                 .await
@@ -70,8 +115,6 @@ impl Agent {
                 .filter_map(|m| match m.role.as_str() {
                     "user" => Some(ChatMessage::user(&m.content)),
                     "assistant" => Some(ChatMessage::assistant(&m.content)),
-                    // tool_calls rows are UI metadata (tool name + preview),
-                    // not part of the LLM conversation context.
                     _ => None,
                 })
                 .collect();
@@ -174,18 +217,6 @@ impl Agent {
             .any(|rule| rule.action == crate::safety::PolicyAction::Block)
         {
             return Ok(SubmissionResult::error("Input rejected by safety policy."));
-        }
-
-        // Scan inbound messages for secrets (API keys, tokens).
-        // Catching them here prevents the LLM from echoing them back, which
-        // would trigger the outbound leak detector and create error loops.
-        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
-            tracing::warn!(
-                user = %message.user_id,
-                channel = %message.channel,
-                "Inbound message blocked: contains leaked secret"
-            );
-            return Ok(SubmissionResult::error(warning));
         }
 
         // Handle explicit commands (starting with /) directly
@@ -330,11 +361,6 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
-                let tool_calls = thread
-                    .turns
-                    .last()
-                    .map(|t| t.tool_calls.clone())
-                    .unwrap_or_default();
                 let _ = self
                     .channels
                     .send_status(
@@ -344,9 +370,7 @@ impl Agent {
                     )
                     .await;
 
-                // Persist tool calls then assistant response (user message already persisted at turn start)
-                self.persist_tool_calls(thread_id, &message.user_id, &tool_calls)
-                    .await;
+                // Persist assistant response (user message already persisted at turn start)
                 self.persist_assistant_response(thread_id, &message.user_id, &response)
                     .await;
 
@@ -442,68 +466,6 @@ impl Agent {
             .await
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
-        }
-    }
-
-    /// Persist tool call summaries to the DB as a `role="tool_calls"` message.
-    ///
-    /// Stored between the user and assistant messages so that
-    /// `build_turns_from_db_messages` can reconstruct the tool call history.
-    /// Content is a JSON array of tool call summaries.
-    pub(super) async fn persist_tool_calls(
-        &self,
-        thread_id: Uuid,
-        user_id: &str,
-        tool_calls: &[crate::agent::session::TurnToolCall],
-    ) {
-        if tool_calls.is_empty() {
-            return;
-        }
-
-        let store = match self.store() {
-            Some(s) => Arc::clone(s),
-            None => return,
-        };
-
-        let summaries: Vec<serde_json::Value> = tool_calls
-            .iter()
-            .map(|tc| {
-                let mut obj = serde_json::json!({ "name": tc.name });
-                if let Some(ref result) = tc.result {
-                    let preview = match result {
-                        serde_json::Value::String(s) => truncate_preview(s, 500),
-                        other => truncate_preview(&other.to_string(), 500),
-                    };
-                    obj["result_preview"] = serde_json::Value::String(preview);
-                }
-                if let Some(ref error) = tc.error {
-                    obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
-                }
-                obj
-            })
-            .collect();
-
-        let content = match serde_json::to_string(&summaries) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Failed to serialize tool calls: {}", e);
-                return;
-            }
-        };
-
-        if let Err(e) = store
-            .ensure_conversation(thread_id, "gateway", user_id, None)
-            .await
-        {
-            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
-            return;
-        }
-
-        if let Err(e) = store
-            .add_conversation_message(thread_id, "tool_calls", &content)
-            .await
-        {
-            tracing::warn!("Failed to persist tool calls: {}", e);
         }
     }
 
@@ -675,13 +637,7 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             if thread.state != ThreadState::AwaitingApproval {
-                // Stale or duplicate approval (tool already executed) — silently ignore.
-                tracing::debug!(
-                    %thread_id,
-                    state = ?thread.state,
-                    "Ignoring stale approval: thread not in AwaitingApproval state"
-                );
-                return Ok(SubmissionResult::ok_with_message(""));
+                return Ok(SubmissionResult::error("No pending approval request."));
             }
 
             thread.take_pending_approval()
@@ -689,13 +645,7 @@ impl Agent {
 
         let pending = match pending {
             Some(p) => p,
-            None => {
-                tracing::debug!(
-                    %thread_id,
-                    "Ignoring stale approval: no pending approval found"
-                );
-                return Ok(SubmissionResult::ok_with_message(""));
-            }
+            None => return Ok(SubmissionResult::error("No pending approval request.")),
         };
 
         // Verify request ID if provided
@@ -783,18 +733,28 @@ impl Agent {
             let mut context_messages = pending.context_messages;
             let deferred_tool_calls = pending.deferred_tool_calls;
 
-            // Record result in thread
+            // Record approved tool call + result in thread
             {
                 let mut sess = session.lock().await;
                 if let Some(thread) = sess.threads.get_mut(&thread_id)
                     && let Some(turn) = thread.last_turn_mut()
                 {
+                    turn.record_tool_call_with_id(
+                        Some(pending.tool_call_id.clone()),
+                        pending.tool_name.clone(),
+                        redact_sensitive_json(&pending.parameters),
+                        pending.rationale.clone(),
+                        pending.parallel_group,
+                    );
                     match &tool_result {
                         Ok(output) => {
-                            turn.record_tool_result(serde_json::json!(output));
+                            turn.record_tool_result_for(
+                                &pending.tool_call_id,
+                                serde_json::json!(output),
+                            );
                         }
                         Err(e) => {
-                            turn.record_tool_error(e.to_string());
+                            turn.record_tool_error_for(&pending.tool_call_id, e.to_string());
                         }
                     }
                 }
@@ -859,11 +819,7 @@ impl Agent {
             // Walk deferred tools checking approval. Collect runnable
             // tools; stop at the first that needs approval.
             let mut runnable: Vec<crate::llm::ToolCall> = Vec::new();
-            let mut approval_needed: Option<(
-                usize,
-                crate::llm::ToolCall,
-                Arc<dyn crate::tools::Tool>,
-            )> = None;
+            let mut approval_needed: Option<DeferredApprovalCandidate> = None;
 
             for (idx, tc) in deferred_tool_calls.iter().enumerate() {
                 if let Some(tool) = self.tools().get(&tc.name).await {
@@ -878,7 +834,9 @@ impl Agent {
                     };
 
                     if needs_approval {
-                        approval_needed = Some((idx, tc.clone(), tool));
+                        let rationale =
+                            sanitize_pending_tool_rationale(self.safety(), &tc.reasoning);
+                        approval_needed = Some((idx, tc.clone(), tool, rationale));
                         break; // remaining tools stay deferred
                     }
                 }
@@ -1011,6 +969,30 @@ impl Agent {
             // === Phase 3: Post-flight (sequential, in original order) ===
             // Process all results before any conditional return so every
             // tool result is recorded in the session audit trail.
+            let deferred_batch_parallel_group = {
+                let sess = session.lock().await;
+                let existing_tool_calls: &[crate::agent::session::TurnToolCall] =
+                    if let Some(thread) = sess.threads.get(&thread_id)
+                        && let Some(turn) = thread.last_turn()
+                    {
+                        &turn.tool_calls
+                    } else {
+                        &[]
+                    };
+
+                if runnable.len() > 1 {
+                    Some(
+                        existing_tool_calls
+                            .iter()
+                            .filter_map(|call| call.parallel_group)
+                            .max()
+                            .map_or(0, |max_group| max_group + 1),
+                    )
+                } else {
+                    None
+                }
+            };
+
             let mut deferred_auth: Option<String> = None;
 
             for (tc, deferred_result) in exec_results {
@@ -1030,15 +1012,24 @@ impl Agent {
                         .await;
                 }
 
-                // Record in thread
+                // Record deferred tool call + result in thread
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id)
                         && let Some(turn) = thread.last_turn_mut()
                     {
+                        turn.record_tool_call_with_id(
+                            Some(tc.id.clone()),
+                            tc.name.clone(),
+                            redact_sensitive_json(&tc.arguments),
+                            sanitize_pending_tool_rationale(self.safety(), &tc.reasoning),
+                            deferred_batch_parallel_group,
+                        );
                         match &deferred_result {
-                            Ok(output) => turn.record_tool_result(serde_json::json!(output)),
-                            Err(e) => turn.record_tool_error(e.to_string()),
+                            Ok(output) => {
+                                turn.record_tool_result_for(&tc.id, serde_json::json!(output))
+                            }
+                            Err(e) => turn.record_tool_error_for(&tc.id, e.to_string()),
                         }
                     }
                 }
@@ -1081,13 +1072,40 @@ impl Agent {
             }
 
             // Handle approval if a tool needed it
-            if let Some((approval_idx, tc, tool)) = approval_needed {
+            if let Some((approval_idx, tc, tool, rationale)) = approval_needed {
+                let approval_parallel_group = {
+                    let remaining = deferred_tool_calls.len() - approval_idx;
+                    let sess = session.lock().await;
+                    let existing_tool_calls: &[crate::agent::session::TurnToolCall] =
+                        if let Some(thread) = sess.threads.get(&thread_id)
+                            && let Some(turn) = thread.last_turn()
+                        {
+                            &turn.tool_calls
+                        } else {
+                            &[]
+                        };
+
+                    if remaining > 1 {
+                        Some(
+                            existing_tool_calls
+                                .iter()
+                                .filter_map(|call| call.parallel_group)
+                                .max()
+                                .map_or(0, |max_group| max_group + 1),
+                        )
+                    } else {
+                        None
+                    }
+                };
+
                 let new_pending = PendingApproval {
                     request_id: Uuid::new_v4(),
                     tool_name: tc.name.clone(),
                     parameters: tc.arguments.clone(),
                     description: tool.description().to_string(),
                     tool_call_id: tc.id.clone(),
+                    rationale,
+                    parallel_group: approval_parallel_group,
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
                 };
@@ -1136,14 +1154,7 @@ impl Agent {
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
                     thread.complete_turn(&response);
-                    let tool_calls = thread
-                        .turns
-                        .last()
-                        .map(|t| t.tool_calls.clone())
-                        .unwrap_or_default();
-                    // User message already persisted at turn start; save tool calls then assistant response
-                    self.persist_tool_calls(thread_id, &message.user_id, &tool_calls)
-                        .await;
+                    // User message already persisted at turn start; save assistant response
                     self.persist_assistant_response(thread_id, &message.user_id, &response)
                         .await;
                     let _ = self
