@@ -427,7 +427,9 @@ fn should_suppress_rig_openai_usage_panic_details(
     let Some(file) = location_file else {
         return false;
     };
-    file.contains("/src/providers/openai/completion/mod.rs") && file.contains("/rig-core-")
+    let normalized_file = file.replace('\\', "/");
+    normalized_file.contains("/src/providers/openai/completion/mod.rs")
+        && normalized_file.contains("/rig-core-")
 }
 
 fn should_suppress_rig_openai_usage_panic(info: &PanicHookInfo<'_>) -> bool {
