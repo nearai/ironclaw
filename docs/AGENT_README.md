@@ -3,6 +3,8 @@
 > **AI Agent Use**: Optimized for code review, bug triage, and targeted fixes.
 > Jump directly to the section relevant to the error or task — no narrative reading required.
 
+> Version baseline: IronClaw v0.12.0 (`v0.12.0` tag snapshot)
+
 **Source**: IronClaw v0.12.0 (`v0.12.0`) · `~/src/ironclaw/`
 
 ---
