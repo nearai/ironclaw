@@ -150,6 +150,13 @@ fn docker_binary_exists() -> bool {
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
+        ||
+        std::process::Command::new("which")
+            .arg("podman")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
     }
     #[cfg(windows)]
     {
