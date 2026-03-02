@@ -173,12 +173,26 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
+/// Deterministic fallback rationale used when providers don't emit per-tool reasoning.
+pub const DEFAULT_TOOL_RATIONALE: &str = "Tool selected to satisfy the current subtask.";
+
+/// Normalize provider-supplied tool rationale to a non-empty string.
+pub fn normalize_tool_reasoning(reasoning: &str) -> String {
+    let trimmed = reasoning.trim();
+    if trimmed.is_empty() {
+        DEFAULT_TOOL_RATIONALE.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// A tool call requested by the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    pub reasoning: String,
 }
 
 /// Result of a tool execution to send back to the LLM.
@@ -392,6 +406,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: normalize_tool_reasoning(""),
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -435,6 +450,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: normalize_tool_reasoning(""),
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -448,5 +464,16 @@ mod tests {
         assert_eq!(messages[2].role, Role::Tool); // call_1 is valid
         assert_eq!(messages[3].role, Role::User); // call_2 orphaned
         assert_eq!(messages[4].role, Role::User); // call_3 orphaned
+    }
+
+    #[test]
+    fn test_normalize_tool_reasoning_fallback_when_empty() {
+        assert_eq!(normalize_tool_reasoning(""), DEFAULT_TOOL_RATIONALE);
+        assert_eq!(normalize_tool_reasoning("   \n\t"), DEFAULT_TOOL_RATIONALE);
+    }
+
+    #[test]
+    fn test_normalize_tool_reasoning_preserves_non_empty_trimmed() {
+        assert_eq!(normalize_tool_reasoning("  explain step  "), "explain step");
     }
 }
