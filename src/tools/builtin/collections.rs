@@ -191,7 +191,7 @@ Call these tools to manage records. ALWAYS call the tool — never just acknowle
 
 - **{name}_add** — Add a record. Fields:
 {fields_doc}
-- **{name}_query** — Search and filter records (eq, neq, gt, lt, gte, lte, between, in, contains).
+- **{name}_query** — Search and filter records (eq, neq, gt, gte, lt, lte, is_null, is_not_null).
 - **{name}_summary** — Aggregations: sum, count, avg, min, max. Use group_by for breakdowns.
 - **{name}_update** — Update a record by ID (partial update).
 - **{name}_delete** — Delete a record by ID.
