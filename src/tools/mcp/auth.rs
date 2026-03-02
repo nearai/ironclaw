@@ -4,6 +4,7 @@
 //! See: https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/authorization/
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,6 +50,90 @@ pub enum AuthError {
 
     #[error("Secrets error: {0}")]
     Secrets(String),
+}
+
+/// Validate that a URL is safe for network requests (prevents SSRF).
+///
+/// Checks that:
+/// - The URL uses HTTPS scheme (or HTTP for localhost)
+/// - The URL does not resolve to private, loopback, or link-local IP addresses
+fn validate_url_safe(url: &str) -> Result<(), AuthError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid URL: {}", e)))?;
+
+    // Only allow https:// (or http:// for localhost)
+    match parsed.scheme() {
+        "https" => {}
+        "http" => {
+            // Only allow HTTP for localhost/127.0.0.1
+            if let Some(host) = parsed.host_str() {
+                if host != "localhost" && host != "127.0.0.1" && host != "[::1]" {
+                    return Err(AuthError::DiscoveryFailed(
+                        "HTTP URLs are only allowed for localhost".to_string(),
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(AuthError::DiscoveryFailed(format!(
+                "Unsupported URL scheme: {}",
+                parsed.scheme()
+            )))
+        }
+    }
+
+    // Check if the host resolves to a dangerous IP address
+    if let Some(host) = parsed.host_str() {
+        // Skip resolution check for localhost (which is explicitly allowed above)
+        if host == "localhost" || host == "127.0.0.1" || host == "[::1]" {
+            return Ok(());
+        }
+
+        // Try to resolve the hostname to IP addresses
+        if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 443)) {
+            for addr in addrs {
+                let ip = addr.ip();
+                if is_dangerous_ip(&ip) {
+                    return Err(AuthError::DiscoveryFailed(format!(
+                        "URL resolves to prohibited IP address: {}",
+                        ip
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if an IP address is dangerous for SSRF (private, loopback, link-local).
+fn is_dangerous_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            // Loopback: 127.0.0.0/8
+            v4.is_loopback()
+                // Private: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || v4.is_private()
+                // Link-local: 169.254.0.0/16
+                || v4.is_link_local()
+                // Multicast: 224.0.0.0/4
+                || v4.is_multicast()
+                // Broadcast: 255.255.255.255
+                || v4.is_broadcast()
+                // Documentation/TEST-NET: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+                || v4.is_documentation()
+        }
+        IpAddr::V6(v6) => {
+            // Loopback: ::1
+            v6.is_loopback()
+                // Multicast: ff00::/8
+                || v6.is_multicast()
+                // Link-local: fe80::/10
+                || ((v6.segments()[0] & 0xffc0) == 0xfe80)
+                // Unique local: fc00::/7
+                || ((v6.segments()[0] & 0xfe00) == 0xfc00)
+        }
+    }
 }
 
 /// OAuth protected resource metadata.
@@ -199,51 +284,161 @@ impl PkceChallenge {
     }
 }
 
-/// Discover protected resource metadata from an MCP server.
-pub async fn discover_protected_resource(
-    server_url: &str,
-) -> Result<ProtectedResourceMetadata, AuthError> {
+/// Build a well-known URI per RFC 8414 / RFC 9728.
+///
+/// The path component of the base URL is moved *after* the well-known suffix,
+/// not appended to the end of the full URL:
+///   `https://example.com/path` + `oauth-authorization-server`
+///     -> `https://example.com/.well-known/oauth-authorization-server/path`
+fn build_well_known_uri(base_url: &str, well_known_suffix: &str) -> Result<String, AuthError> {
+    let parsed = reqwest::Url::parse(base_url)
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid URL: {}", e)))?;
+
+    let origin = parsed.origin().ascii_serialization();
+    let path = parsed.path().trim_matches('/');
+
+    if path.is_empty() {
+        Ok(format!("{}/.well-known/{}", origin, well_known_suffix))
+    } else {
+        Ok(format!(
+            "{}/.well-known/{}/{}",
+            origin, well_known_suffix, path
+        ))
+    }
+}
+
+/// Build the canonical resource URI for RFC 8707 `resource` parameter.
+///
+/// Removes URL fragments and trailing slashes to create a normalized resource identifier.
+pub fn canonical_resource_uri(server_url: &str) -> String {
+    let mut url = server_url.to_string();
+    if let Some(pos) = url.find('#') {
+        url.truncate(pos);
+    }
+    url.trim_end_matches('/').to_string()
+}
+
+/// Parse a `WWW-Authenticate` header to extract the `resource_metadata` URL.
+///
+/// Per RFC 9728 Section 5.1, the server returns:
+///   `WWW-Authenticate: Bearer resource_metadata="https://..."`
+fn parse_resource_metadata_url(www_authenticate: &str) -> Option<String> {
+    let key = "resource_metadata=\"";
+    let start = www_authenticate.find(key)?;
+    let value_start = start + key.len();
+    let end = www_authenticate[value_start..].find('"')?;
+    Some(www_authenticate[value_start..value_start + end].to_string())
+}
+
+/// Attempt 401-based OAuth discovery per the MCP authorization spec.
+///
+/// Sends an unauthenticated request to the MCP server and parses the
+/// `WWW-Authenticate` header from the 401 response to extract the
+/// `resource_metadata` URL.
+async fn discover_via_401(server_url: &str) -> Result<Option<String>, AuthError> {
+    // Validate the URL before making the request
+    validate_url_safe(server_url)?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        // Disable redirects to prevent SSRF via redirect chains
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
-    // Parse the server URL to extract the origin (scheme + host + port)
-    // The .well-known endpoints are always at the root of the origin, not under any path
-    let parsed = reqwest::Url::parse(server_url)
-        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid server URL: {}", e)))?;
-    let origin = parsed.origin().ascii_serialization();
+    let response = client
+        .post(server_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .body("{}")
+        .send()
+        .await
+        .map_err(|e| AuthError::Http(e.to_string()))?;
 
-    // Try the well-known endpoint at the origin root
-    let well_known_url = format!("{}/.well-known/oauth-protected-resource", origin);
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED
+        && let Some(www_auth) = response.headers().get("www-authenticate")
+        && let Ok(header_str) = www_auth.to_str()
+    {
+        let metadata_url = parse_resource_metadata_url(header_str);
+        // Validate the resource_metadata URL from the header
+        if let Some(ref url) = metadata_url {
+            validate_url_safe(url)?;
+        }
+        return Ok(metadata_url);
+    }
+
+    Ok(None)
+}
+
+/// Fetch protected resource metadata from a specific URL.
+async fn fetch_resource_metadata(
+    url: &str,
+) -> Result<ProtectedResourceMetadata, AuthError> {
+    // Validate URL to prevent SSRF
+    validate_url_safe(url)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        // Disable redirects to prevent SSRF via redirect chains
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| AuthError::Http(e.to_string()))?;
 
     let response = client
-        .get(&well_known_url)
+        .get(url)
         .send()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
 
     if !response.status().is_success() {
-        return Err(AuthError::NotSupported);
+        return Err(AuthError::DiscoveryFailed(format!(
+            "HTTP {} from {}",
+            response.status(),
+            url
+        )));
     }
 
     response
         .json()
         .await
-        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid metadata: {}", e)))
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid metadata from {}: {}", url, e)))
+}
+
+/// Discover protected resource metadata from an MCP server.
+///
+/// Constructs the well-known URI per RFC 9728: the path component of the
+/// server URL is placed after `/.well-known/oauth-protected-resource`.
+pub async fn discover_protected_resource(
+    server_url: &str,
+) -> Result<ProtectedResourceMetadata, AuthError> {
+    let well_known_url = build_well_known_uri(server_url, "oauth-protected-resource")?;
+    match fetch_resource_metadata(&well_known_url).await {
+        Ok(meta) => Ok(meta),
+        Err(AuthError::DiscoveryFailed(_)) => Err(AuthError::NotSupported),
+        Err(e) => Err(e),
+    }
 }
 
 /// Discover authorization server metadata.
+///
+/// Constructs the well-known URI per RFC 8414: the path component of the
+/// auth server URL is placed after `/.well-known/oauth-authorization-server`.
 pub async fn discover_authorization_server(
     auth_server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
+    let well_known_url =
+        build_well_known_uri(auth_server_url, "oauth-authorization-server")?;
+
+    // Validate URL to prevent SSRF
+    validate_url_safe(&well_known_url)?;
+
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
-    let base_url = auth_server_url.trim_end_matches('/');
-    let well_known_url = format!("{}/.well-known/oauth-authorization-server", base_url);
+    tracing::debug!("Fetching auth server metadata from {}", well_known_url);
 
     let response = client
         .get(&well_known_url)
@@ -253,8 +448,9 @@ pub async fn discover_authorization_server(
 
     if !response.status().is_success() {
         return Err(AuthError::DiscoveryFailed(format!(
-            "HTTP {}",
-            response.status()
+            "HTTP {} from {}",
+            response.status(),
+            well_known_url
         )));
     }
 
@@ -264,9 +460,29 @@ pub async fn discover_authorization_server(
         .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid metadata: {}", e)))
 }
 
+/// Try to discover authorization server metadata from a list of authorization server URLs.
+///
+/// Iterates through the list and returns the first successful discovery.
+async fn try_discover_from_auth_servers(
+    servers: &[String],
+) -> Result<Option<AuthorizationServerMetadata>, AuthError> {
+    for auth_server_url in servers {
+        match discover_authorization_server(auth_server_url).await {
+            Ok(meta) => return Ok(Some(meta)),
+            Err(e) => tracing::debug!(
+                "Auth server discovery failed for {}: {}",
+                auth_server_url,
+                e
+            ),
+        }
+    }
+    Ok(None)
+}
+
 /// Discover OAuth endpoints for an MCP server.
 ///
-/// First checks if endpoints are explicitly configured, then falls back to discovery.
+/// First checks if endpoints are explicitly configured, then falls back to
+/// the full multi-strategy discovery chain.
 pub async fn discover_oauth_endpoints(
     server_config: &McpServerConfig,
 ) -> Result<(String, String), AuthError> {
@@ -275,43 +491,84 @@ pub async fn discover_oauth_endpoints(
         .as_ref()
         .ok_or(AuthError::NotSupported)?;
 
-    // If endpoints are explicitly configured, use them
     if let (Some(auth_url), Some(token_url)) = (&oauth.authorization_url, &oauth.token_url) {
         return Ok((auth_url.clone(), token_url.clone()));
     }
 
-    // Try to discover from the server
-    let resource_meta = discover_protected_resource(&server_config.url).await?;
-
-    // Get the first authorization server
-    let auth_server_url = resource_meta
-        .authorization_servers
-        .first()
-        .ok_or_else(|| AuthError::DiscoveryFailed("No authorization servers listed".to_string()))?;
-
-    // Discover the authorization server metadata
-    let auth_meta = discover_authorization_server(auth_server_url).await?;
-
+    let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
     Ok((auth_meta.authorization_endpoint, auth_meta.token_endpoint))
 }
 
-/// Discover full OAuth metadata including DCR support.
+/// Discover full OAuth metadata using multiple strategies.
 ///
-/// Returns authorization server metadata which includes registration_endpoint if DCR is supported.
+/// Tries three discovery approaches in order:
+/// 1. **401-based**: Send unauthenticated request, parse `WWW-Authenticate`
+///    header for `resource_metadata` URL (per MCP spec flow).
+/// 2. **RFC 9728**: Fetch `/.well-known/oauth-protected-resource` from the
+///    MCP server, then `/.well-known/oauth-authorization-server` from the
+///    advertised authorization server.
+/// 3. **Direct**: Treat the MCP server as its own authorization server and
+///    fetch `/.well-known/oauth-authorization-server` directly from it.
 pub async fn discover_full_oauth_metadata(
     server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
-    // Try to discover from the server
-    let resource_meta = discover_protected_resource(server_url).await?;
+    // Strategy 1: 401-based discovery per MCP spec
+    tracing::debug!("Trying 401-based OAuth discovery for {}", server_url);
+    match discover_via_401(server_url).await {
+        Ok(Some(resource_metadata_url)) => {
+            tracing::debug!(
+                "Got resource_metadata URL from 401: {}",
+                resource_metadata_url
+            );
+            if let Ok(resource_meta) = fetch_resource_metadata(&resource_metadata_url).await {
+                if let Ok(Some(meta)) =
+                    try_discover_from_auth_servers(&resource_meta.authorization_servers).await
+                {
+                    return Ok(meta);
+                }
+            }
+        }
+        Ok(None) => tracing::debug!("No resource_metadata in 401 response"),
+        Err(e) => tracing::debug!("401-based discovery failed: {}", e),
+    }
 
-    // Get the first authorization server
-    let auth_server_url = resource_meta
-        .authorization_servers
-        .first()
-        .ok_or_else(|| AuthError::DiscoveryFailed("No authorization servers listed".to_string()))?;
+    // Strategy 2: RFC 9728 protected resource metadata
+    tracing::debug!(
+        "Trying RFC 9728 protected resource metadata for {}",
+        server_url
+    );
+    match discover_protected_resource(server_url).await {
+        Ok(resource_meta) => {
+            if let Ok(Some(meta)) =
+                try_discover_from_auth_servers(&resource_meta.authorization_servers).await
+            {
+                return Ok(meta);
+            }
+            if resource_meta.authorization_servers.is_empty() {
+                tracing::debug!("No authorization_servers in protected resource metadata");
+            }
+        }
+        Err(e) => tracing::debug!("Protected resource discovery failed: {}", e),
+    }
 
-    // Discover the authorization server metadata
-    discover_authorization_server(auth_server_url).await
+    // Strategy 3: Treat MCP server as its own authorization server
+    tracing::debug!("Trying MCP server as its own auth server: {}", server_url);
+    match discover_authorization_server(server_url).await {
+        Ok(meta) => return Ok(meta),
+        Err(e) => tracing::debug!(
+            "Direct auth server discovery failed for {}: {}",
+            server_url,
+            e
+        ),
+    }
+
+    Err(AuthError::DiscoveryFailed(format!(
+        "Could not discover OAuth endpoints for {}. \
+         Tried: 401 response, protected resource metadata, and direct auth server metadata. \
+         You may need to configure OAuth endpoints manually with \
+         --client-id, --auth-url, and --token-url.",
+        server_url
+    )))
 }
 
 /// Perform Dynamic Client Registration with an authorization server.
@@ -393,6 +650,9 @@ pub async fn authorize_mcp_server(
         println!("           ssh -L {port}:127.0.0.1:{port} user@{host}");
     }
 
+    // RFC 8707 resource parameter -- scopes the token to this MCP server
+    let resource = canonical_resource_uri(&server_config.url);
+
     // Determine client_id and endpoints
     let (client_id, authorization_url, token_url, use_pkce, scopes, extra_params) =
         if let Some(oauth) = &server_config.oauth {
@@ -444,6 +704,7 @@ pub async fn authorize_mcp_server(
         &scopes,
         pkce.as_ref(),
         &extra_params,
+        Some(&resource),
     );
 
     // Open browser
@@ -462,9 +723,15 @@ pub async fn authorize_mcp_server(
     println!("  Exchanging code for token...");
 
     // Exchange code for token
-    let token =
-        exchange_code_for_token(&token_url, &client_id, &code, &redirect_uri, pkce.as_ref())
-            .await?;
+    let token = exchange_code_for_token(
+        &token_url,
+        &client_id,
+        &code,
+        &redirect_uri,
+        pkce.as_ref(),
+        Some(&resource),
+    )
+    .await?;
 
     // Store the tokens
     store_tokens(secrets, user_id, server_config, &token).await?;
@@ -486,6 +753,9 @@ pub async fn find_available_port() -> Result<(TcpListener, u16), AuthError> {
 }
 
 /// Build the authorization URL with all required parameters.
+///
+/// The `resource` parameter (RFC 8707) binds the token to the MCP server.
+/// Per the MCP spec, clients MUST include it in authorization requests.
 pub fn build_authorization_url(
     base_url: &str,
     client_id: &str,
@@ -493,6 +763,7 @@ pub fn build_authorization_url(
     scopes: &[String],
     pkce: Option<&PkceChallenge>,
     extra_params: &HashMap<String, String>,
+    resource: Option<&str>,
 ) -> String {
     let mut url = format!(
         "{}?client_id={}&response_type=code&redirect_uri={}",
@@ -513,6 +784,10 @@ pub fn build_authorization_url(
             "&code_challenge={}&code_challenge_method=S256",
             pkce.challenge
         ));
+    }
+
+    if let Some(resource) = resource {
+        url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
     }
 
     for (key, value) in extra_params {
@@ -544,12 +819,16 @@ pub async fn wait_for_authorization_callback(
 }
 
 /// Exchange the authorization code for an access token.
+///
+/// The `resource` parameter (RFC 8707) MUST match the value sent in the
+/// authorization request so the token is scoped to the correct MCP server.
 pub async fn exchange_code_for_token(
     token_url: &str,
     client_id: &str,
     code: &str,
     redirect_uri: &str,
     pkce: Option<&PkceChallenge>,
+    resource: Option<&str>,
 ) -> Result<AccessToken, AuthError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -565,6 +844,10 @@ pub async fn exchange_code_for_token(
 
     if let Some(pkce) = pkce {
         params.push(("code_verifier", pkce.verifier.clone()));
+    }
+
+    if let Some(resource) = resource {
+        params.push(("resource", resource.to_string()));
     }
 
     let response = client
@@ -789,18 +1072,96 @@ mod tests {
     fn test_pkce_challenge_generation() {
         let pkce = PkceChallenge::generate();
 
-        // Verifier should be base64url encoded
         assert!(!pkce.verifier.is_empty());
         assert!(!pkce.verifier.contains('+'));
         assert!(!pkce.verifier.contains('/'));
         assert!(!pkce.verifier.contains('='));
-
-        // Challenge should be different from verifier
         assert_ne!(pkce.verifier, pkce.challenge);
 
-        // Two challenges should be different
         let pkce2 = PkceChallenge::generate();
         assert_ne!(pkce.verifier, pkce2.verifier);
+    }
+
+    #[test]
+    fn test_build_well_known_uri_root() {
+        let url = build_well_known_uri(
+            "https://example.com",
+            "oauth-authorization-server",
+        )
+        .unwrap();
+        assert_eq!(url, "https://example.com/.well-known/oauth-authorization-server");
+    }
+
+    #[test]
+    fn test_build_well_known_uri_with_path() {
+        let url = build_well_known_uri(
+            "https://auth.example.com/o/oauth2",
+            "oauth-authorization-server",
+        )
+        .unwrap();
+        assert_eq!(
+            url,
+            "https://auth.example.com/.well-known/oauth-authorization-server/o/oauth2"
+        );
+    }
+
+    #[test]
+    fn test_build_well_known_uri_trailing_slash() {
+        let url = build_well_known_uri(
+            "https://example.com/",
+            "oauth-protected-resource",
+        )
+        .unwrap();
+        assert_eq!(url, "https://example.com/.well-known/oauth-protected-resource");
+    }
+
+    #[test]
+    fn test_build_well_known_uri_with_port() {
+        let url = build_well_known_uri(
+            "https://example.com:8443/tenant1",
+            "oauth-authorization-server",
+        )
+        .unwrap();
+        assert_eq!(
+            url,
+            "https://example.com:8443/.well-known/oauth-authorization-server/tenant1"
+        );
+    }
+
+    #[test]
+    fn test_canonical_resource_uri() {
+        assert_eq!(
+            canonical_resource_uri("https://mcp.example.com/"),
+            "https://mcp.example.com"
+        );
+        assert_eq!(
+            canonical_resource_uri("https://mcp.example.com/v1/mcp"),
+            "https://mcp.example.com/v1/mcp"
+        );
+        assert_eq!(
+            canonical_resource_uri("https://mcp.example.com#frag"),
+            "https://mcp.example.com"
+        );
+    }
+
+    #[test]
+    fn test_parse_resource_metadata_url() {
+        assert_eq!(
+            parse_resource_metadata_url(
+                r#"Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource""#
+            ),
+            Some("https://example.com/.well-known/oauth-protected-resource".to_string())
+        );
+
+        assert_eq!(
+            parse_resource_metadata_url(
+                r#"Bearer realm="mcp", resource_metadata="https://auth.ex.com/meta""#
+            ),
+            Some("https://auth.ex.com/meta".to_string())
+        );
+
+        assert_eq!(parse_resource_metadata_url("Bearer"), None);
+        assert_eq!(parse_resource_metadata_url("Basic abc"), None);
     }
 
     #[test]
@@ -812,6 +1173,7 @@ mod tests {
             &["read".to_string(), "write".to_string()],
             None,
             &HashMap::new(),
+            None,
         );
 
         assert!(url.starts_with("https://auth.example.com/authorize?"));
@@ -819,6 +1181,7 @@ mod tests {
         assert!(url.contains("response_type=code"));
         assert!(url.contains("redirect_uri="));
         assert!(url.contains("scope=read%20write"));
+        assert!(!url.contains("resource="));
     }
 
     #[test]
@@ -831,10 +1194,26 @@ mod tests {
             &[],
             Some(&pkce),
             &HashMap::new(),
+            None,
         );
 
         assert!(url.contains(&format!("code_challenge={}", pkce.challenge)));
         assert!(url.contains("code_challenge_method=S256"));
+    }
+
+    #[test]
+    fn test_build_authorization_url_with_resource() {
+        let url = build_authorization_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "http://localhost:9876/callback",
+            &[],
+            None,
+            &HashMap::new(),
+            Some("https://mcp.example.com"),
+        );
+
+        assert!(url.contains("resource=https%3A%2F%2Fmcp.example.com"));
     }
 
     #[test]
@@ -850,9 +1229,182 @@ mod tests {
             &[],
             None,
             &extra,
+            None,
         );
 
         assert!(url.contains("owner=user"));
         assert!(url.contains("state=abc123"));
+    }
+
+    #[test]
+    fn test_validate_url_safe_https_allowed() {
+        // HTTPS URLs should be allowed
+        assert!(validate_url_safe("https://example.com").is_ok());
+        assert!(validate_url_safe("https://api.example.com/path").is_ok());
+        assert!(validate_url_safe("https://sub.domain.example.com:8443/path").is_ok());
+    }
+
+    #[test]
+    fn test_validate_url_safe_http_localhost_allowed() {
+        // HTTP is only allowed for localhost
+        assert!(validate_url_safe("http://localhost").is_ok());
+        assert!(validate_url_safe("http://localhost:8080").is_ok());
+        assert!(validate_url_safe("http://127.0.0.1").is_ok());
+        assert!(validate_url_safe("http://127.0.0.1:3000").is_ok());
+        assert!(validate_url_safe("http://[::1]").is_ok());
+        assert!(validate_url_safe("http://[::1]:8080").is_ok());
+    }
+
+    #[test]
+    fn test_validate_url_safe_http_remote_blocked() {
+        // HTTP to remote hosts should be blocked
+        assert!(validate_url_safe("http://example.com").is_err());
+        assert!(validate_url_safe("http://192.168.1.1").is_err());
+        assert!(validate_url_safe("http://10.0.0.1").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_safe_http_localhost_bypass_blocked() {
+        // HTTP to domains that resolve to localhost should be blocked
+        // Only the exact strings "localhost", "127.0.0.1", and "[::1]" are allowed
+        // This prevents bypasses using domains like localtest.me that resolve to 127.0.0.1
+        assert!(validate_url_safe("http://localtest.me").is_err());
+        assert!(validate_url_safe("http://vcap.me").is_err());
+        assert!(validate_url_safe("http://lvh.me").is_err());
+        assert!(validate_url_safe("http://127.0.0.2").is_err()); // Different loopback IP
+    }
+
+    #[test]
+    fn test_validate_url_safe_invalid_scheme() {
+        // Only HTTP and HTTPS should be allowed
+        assert!(validate_url_safe("ftp://example.com").is_err());
+        assert!(validate_url_safe("file:///etc/passwd").is_err());
+        assert!(validate_url_safe("javascript:alert(1)").is_err());
+        assert!(validate_url_safe("data:text/html,<script>alert(1)</script>").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_safe_invalid_url() {
+        // Malformed URLs should be rejected
+        assert!(validate_url_safe("not a url").is_err());
+        assert!(validate_url_safe("").is_err());
+        assert!(validate_url_safe("https://").is_err());
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_loopback() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        // IPv4 loopback
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(127, 255, 255, 255))));
+
+        // IPv6 loopback
+        assert!(is_dangerous_ip(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_private() {
+        use std::net::Ipv4Addr;
+
+        // 10.0.0.0/8
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))));
+
+        // 172.16.0.0/12
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255))));
+
+        // 192.168.0.0/16
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 255, 255))));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_link_local() {
+        use std::net::Ipv4Addr;
+
+        // IPv4 link-local: 169.254.0.0/16 (includes AWS metadata endpoint)
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 255, 255))));
+
+        // IPv6 link-local: fe80::/10
+        let fe80 = "fe80::1".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(is_dangerous_ip(&IpAddr::V6(fe80)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_multicast() {
+        use std::net::Ipv4Addr;
+
+        // IPv4 multicast: 224.0.0.0/4
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(239, 255, 255, 255))));
+
+        // IPv6 multicast: ff00::/8
+        let ff00 = "ff00::1".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(is_dangerous_ip(&IpAddr::V6(ff00)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_broadcast() {
+        use std::net::Ipv4Addr;
+
+        // IPv4 broadcast
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::BROADCAST)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_documentation() {
+        use std::net::Ipv4Addr;
+
+        // TEST-NET-1: 192.0.2.0/24
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+
+        // TEST-NET-2: 198.51.100.0/24
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))));
+
+        // TEST-NET-3: 203.0.113.0/24
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_ipv6_unique_local() {
+        // IPv6 unique local: fc00::/7
+        let fc00 = "fc00::1".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(is_dangerous_ip(&IpAddr::V6(fc00)));
+
+        let fd00 = "fd00::1".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(is_dangerous_ip(&IpAddr::V6(fd00)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_safe_public() {
+        use std::net::Ipv4Addr;
+
+        // Public IPs should not be flagged as dangerous
+        // Google DNS
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        // Cloudflare DNS
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+
+        // Public IPv6 should not be flagged
+        let public_v6 = "2001:4860:4860::8888".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(!is_dangerous_ip(&IpAddr::V6(public_v6)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_edge_cases() {
+        use std::net::Ipv4Addr;
+
+        // Edge of private ranges - should be safe
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(9, 255, 255, 255))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(11, 0, 0, 0))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(172, 15, 255, 255))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(172, 32, 0, 0))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 167, 255, 255))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 169, 0, 0))));
     }
 }

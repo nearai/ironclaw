@@ -1322,6 +1322,7 @@ impl ExtensionManager {
         };
 
         let pkce = PkceChallenge::generate();
+        let resource = crate::tools::mcp::auth::canonical_resource_uri(&server.url);
         let auth_url = build_authorization_url(
             &metadata.authorization_endpoint,
             &client_id,
@@ -1329,6 +1330,7 @@ impl ExtensionManager {
             &metadata.scopes_supported,
             Some(&pkce),
             &std::collections::HashMap::new(),
+            Some(&resource),
         );
 
         // Store pending auth for later callback handling
