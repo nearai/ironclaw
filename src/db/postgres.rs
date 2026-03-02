@@ -666,30 +666,11 @@ impl WorkspaceStore for PgBackend {
 
 #[async_trait]
 impl WebhookDedupStore for PgBackend {
-    async fn is_webhook_message_processed(
-        &self,
-        channel: &str,
-        external_message_id: &str,
-    ) -> Result<bool, DatabaseError> {
-        let client = self.store.pool().get().await?;
-        let stmt = client
-            .prepare(
-                "SELECT 1 FROM webhook_message_dedup \
-                 WHERE channel = $1 AND external_message_id = $2",
-            )
-            .await?;
-
-        let rows = client
-            .query(&stmt, &[&channel, &external_message_id])
-            .await?;
-        Ok(!rows.is_empty())
-    }
-
     async fn record_webhook_message_processed(
         &self,
         channel: &str,
         external_message_id: &str,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         let client = self.store.pool().get().await?;
         let stmt = client
             .prepare(
@@ -699,10 +680,10 @@ impl WebhookDedupStore for PgBackend {
             )
             .await?;
 
-        client
+        let rows_affected = client
             .execute(&stmt, &[&channel, &external_message_id])
             .await?;
-        Ok(())
+        Ok(rows_affected > 0)
     }
 
     async fn cleanup_old_webhook_dedup_records(&self) -> Result<u64, DatabaseError> {

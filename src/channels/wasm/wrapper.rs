@@ -1276,11 +1276,9 @@ impl WasmChannel {
         let workspace_store = self.workspace_store.clone();
 
         // Pre-resolve host credentials for automatic injection (before spawn_blocking)
-        let host_credentials = resolve_channel_host_credentials(
-            &self.capabilities,
-            self.secrets_store.as_deref(),
-        )
-        .await;
+        let host_credentials =
+            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+                .await;
 
         // Prepare request data
         let method = method.to_string();

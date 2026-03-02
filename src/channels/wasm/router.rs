@@ -819,14 +819,18 @@ async fn webhook_handler(
                         (format!("{}:{}", channel_name, msg.user_id), None)
                     };
 
-                    // Check for duplicate messages if database is available
-                    // Record immediately after check to prevent race conditions
+                    // Atomic deduplication: try to INSERT first
+                    // Returns true if inserted (new message), false if duplicate
+                    // This eliminates TOCTOU race condition between SELECT and INSERT
                     if let Some(ref db) = state.db
                         && let Some(msg_id) = &external_msg_id
                     {
-                        match db.is_webhook_message_processed(channel_name, msg_id).await {
-                            Ok(is_processed) => {
-                                if is_processed {
+                        match db
+                            .record_webhook_message_processed(channel_name, msg_id)
+                            .await
+                        {
+                            Ok(was_inserted) => {
+                                if !was_inserted {
                                     tracing::info!(
                                         channel = %channel_name,
                                         message_id = %msg_id,
@@ -834,26 +838,14 @@ async fn webhook_handler(
                                     );
                                     continue; // Skip this duplicate message
                                 }
-                                // Not a duplicate - record immediately to prevent races
-                                // This ensures concurrent webhooks for the same message will be caught
-                                if let Err(e) = db
-                                    .record_webhook_message_processed(channel_name, msg_id)
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        channel = %channel_name,
-                                        message_id = %msg_id,
-                                        error = %e,
-                                        "Failed to record message as processed, dedup may not work on retry"
-                                    );
-                                }
+                                // New message - will process below
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     channel = %channel_name,
                                     message_id = %msg_id,
                                     error = %e,
-                                    "Failed to check dedup, proceeding anyway"
+                                    "Failed to record message, proceeding anyway (fail open)"
                                 );
                                 // Continue processing on error (fail open)
                             }
@@ -894,6 +886,12 @@ async fn webhook_handler(
                 // Using join_all ensures we don't accumulate timeouts (3 messages ≠ 30s wait)
                 let ack_timeout = state.webhook_ack_timeout;
 
+                // Keep track of ack_keys for cleanup on timeout
+                let ack_keys: Vec<String> = ack_receivers
+                    .iter()
+                    .map(|(key, _, _)| key.clone())
+                    .collect();
+
                 let ack_futures: Vec<_> = ack_receivers
                     .into_iter()
                     .map(|(ack_key, ack_rx, _)| async move {
@@ -921,6 +919,10 @@ async fn webhook_handler(
                                 timeout_secs = ack_timeout.as_secs(),
                                 "Webhook ACK wait timed out, returning 500 to trigger retry"
                             );
+                            // Clean up pending ACKs that were registered but never signaled
+                            for ack_key in &ack_keys {
+                                state.router.pending_acks.write().await.remove(ack_key);
+                            }
                             // Return 500 so WhatsApp retries - deduplication will handle duplicates
                             return (
                                 StatusCode::INTERNAL_SERVER_ERROR,

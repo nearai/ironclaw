@@ -337,24 +337,14 @@ pub trait SettingsStore: Send + Sync {
 /// when platforms like WhatsApp retry after a 500 response.
 #[async_trait]
 pub trait WebhookDedupStore: Send + Sync {
-    /// Check if a message has already been processed.
-    ///
-    /// Returns `true` if the message was already processed (duplicate),
-    /// `false` if this is a new message.
-    async fn is_webhook_message_processed(
-        &self,
-        channel: &str,
-        external_message_id: &str,
-    ) -> Result<bool, DatabaseError>;
-
-    /// Record that a message has been successfully processed.
-    ///
-    /// Should be called AFTER the message is fully processed (persisted to DB).
+    /// Try to record that a message is processed, atomically.
+    /// Returns `true` if this is a new message (was inserted), `false` if it was a duplicate.
+    /// Uses INSERT ... ON CONFLICT DO NOTHING pattern for atomic dedup with no race condition.
     async fn record_webhook_message_processed(
         &self,
         channel: &str,
         external_message_id: &str,
-    ) -> Result<(), DatabaseError>;
+    ) -> Result<bool, DatabaseError>;
 
     /// Clean up old dedup records (older than 7 days).
     ///
