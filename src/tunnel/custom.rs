@@ -214,12 +214,14 @@ mod tests {
 
     #[tokio::test]
     async fn health_with_unreachable_url_is_false() {
+        // Use a non-routable IP to ensure consistent connection failure.
+        // 192.0.2.0/24 is TEST-NET-1, reserved for documentation/examples.
         let tunnel = CustomTunnel::new(
             "sleep 1".into(),
-            Some("http://127.0.0.1:9/healthz".into()),
+            Some("http://192.0.2.1:9999/healthz".into()),
             None,
         );
-        assert!(!tunnel.health_check().await);
+        assert!(!tunnel.health_check().await, "Health check should fail for unreachable URL");
     }
 
     #[test]
