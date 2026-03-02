@@ -130,6 +130,15 @@ pub struct LlmConfig {
     pub backend: LlmBackend,
     /// NEAR AI config (always populated for NEAR AI embeddings, etc.)
     pub nearai: NearAiConfig,
+    /// Cheap/fast model for smart routing (works with any backend).
+    /// Set via `LLM_CHEAP_MODEL` env var. Simple tasks go to this model,
+    /// complex tasks go to the primary. Falls back to `NEARAI_CHEAP_MODEL`
+    /// when backend is NearAI.
+    pub cheap_model: Option<String>,
+    /// Enable cascade mode for smart routing (any backend).
+    /// When a moderate-complexity task gets an uncertain response from the
+    /// cheap model, re-send to primary. Default: true.
+    pub smart_routing_cascade: bool,
     /// Direct OpenAI config (populated when backend=openai)
     pub openai: Option<OpenAiDirectConfig>,
     /// Direct Anthropic config (populated when backend=anthropic)
@@ -350,6 +359,10 @@ impl LlmConfig {
             None
         };
 
+        // Generic cheap model for smart routing (any backend)
+        let cheap_model = optional_env("LLM_CHEAP_MODEL")?;
+        let smart_routing_cascade = parse_optional_env("SMART_ROUTING_CASCADE", true)?;
+
         Ok(Self {
             backend,
             nearai,
@@ -358,6 +371,8 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            cheap_model,
+            smart_routing_cascade,
         })
     }
 }
