@@ -378,7 +378,7 @@ impl ConversationStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             Some(row) => {
-                let id_str: String = row.get(0).unwrap_or_default();
+                let id_str: String = row.get(0).map_err(|e| DatabaseError::Query(e.to_string()))?;
                 id_str
                     .parse()
                     .map(Some)

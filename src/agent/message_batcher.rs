@@ -432,18 +432,22 @@ mod tests {
         batcher.flush_all().await;
 
         // Should receive both messages
-        let count = tokio::time::timeout(
-            Duration::from_millis(100),
-            async {
-                let mut c = 0;
-                while rx.try_recv().is_ok() {
-                    c += 1;
-                }
-                c
+        let mut received_messages = Vec::new();
+        for _ in 0..2 {
+            match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(msg)) => received_messages.push(msg.content),
+                _ => break,
             }
-        ).await;
+        }
 
-        // At least one should be flushed
-        assert!(count.is_ok());
+        assert_eq!(received_messages.len(), 2, "Expected to receive two messages");
+        assert!(
+            received_messages.contains(&"user1_msg".to_string()),
+            "Message from user1 not found"
+        );
+        assert!(
+            received_messages.contains(&"user2_msg".to_string()),
+            "Message from user2 not found"
+        );
     }
 }
