@@ -1,6 +1,6 @@
 # Telegram Channel Setup
 
-> Version baseline: IronClaw v0.12.0 (`v0.12.0` tag snapshot)
+> Version baseline: IronClaw v0.13.0 (`v0.13.0` tag snapshot)
 
 This guide covers configuring the Telegram channel for IronClaw, including DM pairing for access control.
 

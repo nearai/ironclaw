@@ -15,7 +15,7 @@ Run ALL checks before pushing to PR:
 ### 1. Date Consistency
 ```bash
 # Check all dates are current
-grep -rn "2026-02-" . --include="*.md" | grep -v "$(date +%Y-%m-%d)"
+grep -rnE "[0-9]{4}-[0-9]{2}-[0-9]{2}" . --include="*.md" | grep -v "$(date +%Y-%m-%d)"
 # Should return empty (all dates = today)
 ```
 
@@ -50,8 +50,8 @@ grep -B2 "AUTH_TOKEN\|API_KEY\|SECRET" . --include="*.md" | grep -i "warning\|se
 ### 6. Spelling & Branding
 ```bash
 # Common branding mistakes
-grep -rn "Github\|github.com\|npmjs\|postgres\|sqlite" . --include="*.md"
-# Should be: GitHub, github.com, npmjs.com, PostgreSQL, SQLite/libSQL
+grep -rn "Github\|npmjs\|postgres\|sqlite" . --include="*.md"
+# Should be: GitHub, npmjs.com, PostgreSQL, SQLite/libSQL
 ```
 
 ### 7. Auto-Generated Content
@@ -204,4 +204,4 @@ Unless a document explicitly describes a different value, use repo defaults:
 
 ---
 
-*Last updated: 2026-02-22 | Version: 1.0*
+*Last updated: 2026-03-02 | Version: 1.0*
