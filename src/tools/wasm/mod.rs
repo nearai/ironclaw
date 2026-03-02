@@ -76,7 +76,7 @@
 mod allowlist;
 mod capabilities;
 mod capabilities_schema;
-mod credential_injector;
+pub(crate) mod credential_injector;
 mod error;
 mod host;
 mod limits;

@@ -155,7 +155,7 @@ impl ExtensionManifest {
     /// extension discovery system.
     pub fn to_registry_entry(&self) -> RegistryEntry {
         let buildable = ExtensionSource::WasmBuildable {
-            repo_url: self.source.dir.clone(),
+            source_dir: self.source.dir.clone(),
             build_dir: Some(self.source.dir.clone()),
             crate_name: Some(self.source.crate_name.clone()),
         };
