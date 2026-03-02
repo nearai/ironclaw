@@ -371,9 +371,12 @@ impl LlmConfig {
         };
 
         let bedrock = if backend == LlmBackend::Bedrock {
-            let region = optional_env("BEDROCK_REGION")?
-                .or_else(|| settings.bedrock_region.clone())
-                .unwrap_or_else(|| "us-east-1".to_string());
+            let explicit_region =
+                optional_env("BEDROCK_REGION")?.or_else(|| settings.bedrock_region.clone());
+            if explicit_region.is_none() {
+                tracing::info!("BEDROCK_REGION not set, defaulting to us-east-1");
+            }
+            let region = explicit_region.unwrap_or_else(|| "us-east-1".to_string());
             let model = optional_env("BEDROCK_MODEL")?
                 .or_else(|| settings.selected_model.clone())
                 .ok_or_else(|| ConfigError::MissingRequired {
@@ -382,6 +385,17 @@ impl LlmConfig {
                 })?;
             let cross_region = optional_env("BEDROCK_CROSS_REGION")?
                 .or_else(|| settings.bedrock_cross_region.clone());
+            if let Some(ref cr) = cross_region
+                && !matches!(cr.as_str(), "us" | "eu" | "apac" | "global")
+            {
+                return Err(ConfigError::InvalidValue {
+                    key: "BEDROCK_CROSS_REGION".to_string(),
+                    message: format!(
+                        "'{}' is not valid, expected one of: us, eu, apac, global",
+                        cr
+                    ),
+                });
+            }
             let profile = optional_env("AWS_PROFILE")?;
             Some(BedrockConfig {
                 region,

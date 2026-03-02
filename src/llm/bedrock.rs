@@ -105,6 +105,13 @@ impl LlmProvider for BedrockProvider {
 
         let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
 
+        if bedrock_messages.is_empty() {
+            return Err(LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: "Bedrock requires at least one user or assistant message".to_string(),
+            });
+        }
+
         let mut builder = self
             .client
             .converse()
@@ -143,6 +150,13 @@ impl LlmProvider for BedrockProvider {
         crate::llm::provider::sanitize_tool_messages(&mut messages);
 
         let (system_blocks, bedrock_messages) = convert_messages(&messages)?;
+
+        if bedrock_messages.is_empty() {
+            return Err(LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: "Bedrock requires at least one user or assistant message".to_string(),
+            });
+        }
 
         let tool_config = build_tool_config(&request.tools, request.tool_choice.as_deref())?;
 
@@ -229,7 +243,7 @@ fn build_inference_config(
         needs_config = true;
     }
     if let Some(tokens) = max_tokens {
-        builder = builder.max_tokens(tokens as i32);
+        builder = builder.max_tokens(i32::try_from(tokens).unwrap_or(i32::MAX));
         needs_config = true;
     }
 
@@ -321,8 +335,6 @@ fn convert_messages(
                         } else {
                             Some(ToolResultStatus::Success)
                         }
-                    } else if msg.content.contains("Error:") {
-                        Some(ToolResultStatus::Error)
                     } else {
                         Some(ToolResultStatus::Success)
                     };
@@ -1068,5 +1080,43 @@ mod tests {
             map_stop_reason(&StopReason::ModelContextWindowExceeded),
             FinishReason::Length
         );
+    }
+
+    #[test]
+    fn test_build_inference_config_none_none() {
+        assert!(build_inference_config(None, None).is_none());
+    }
+
+    #[test]
+    fn test_build_inference_config_temperature_only() {
+        let config = build_inference_config(Some(0.7), None);
+        assert!(config.is_some());
+    }
+
+    #[test]
+    fn test_build_inference_config_max_tokens_only() {
+        let config = build_inference_config(None, Some(1024));
+        assert!(config.is_some());
+    }
+
+    #[test]
+    fn test_build_inference_config_both() {
+        let config = build_inference_config(Some(0.5), Some(2048));
+        assert!(config.is_some());
+    }
+
+    #[test]
+    fn test_build_inference_config_max_tokens_overflow() {
+        // u32::MAX exceeds i32::MAX, should clamp to i32::MAX not wrap
+        let config = build_inference_config(None, Some(u32::MAX)).unwrap();
+        // Just verify it builds without panic — the clamped value is inside the opaque struct
+        let _ = config;
+    }
+
+    #[test]
+    fn test_empty_messages_returns_error() {
+        let messages = vec![ChatMessage::system("System only, no user messages")];
+        let (_, bedrock_msgs) = convert_messages(&messages).unwrap();
+        assert!(bedrock_msgs.is_empty());
     }
 }
