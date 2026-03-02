@@ -117,7 +117,7 @@ static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(
         "init 0",
         "init 6",
         "iptables",
-        "nft ",
+        "nft",
         "useradd",
         "userdel",
         "passwd",
@@ -139,7 +139,7 @@ static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(
         "DROP DATABASE",
         "TRUNCATE",
         "DELETE FROM",
-        "sudo ",
+        "sudo",
     ]
 });
 
@@ -335,29 +335,20 @@ fn matches_command_pattern(segment: &str, pattern: &str) -> bool {
 
 /// Classify a shell command into a [`RiskLevel`].
 ///
-/// Classification rules (in order):
-/// 1. **High** — any part of the command matches [`NEVER_AUTO_APPROVE_PATTERNS`]
-///    (destructive / irreversible). Checked across the entire string so that a
-///    dangerous sub-command in a pipeline is never missed.
-/// 2. **Pipeline max** — the command is split on `|`, `&`, `;` and each segment
-///    is classified independently; the overall risk is the **maximum** across all
-///    segments, so `echo hello | cargo build` → Medium, not Low.
-/// 3. Per-segment: Low if it matches [`LOW_RISK_PATTERNS`], Medium if it matches
-///    [`MEDIUM_RISK_PATTERNS`], Medium for unknown commands (safer default).
+/// The command is split on `|`, `&`, `;` and each segment is classified
+/// independently; the overall risk is the **maximum** across all segments
+/// so a dangerous sub-command in a pipeline is never missed.
 ///
-/// Matching uses word-boundary rules (see [`matches_command_pattern`]) to prevent
-/// false positives like `"lsblk"` matching the `"ls"` Low-risk prefix.
+/// Per-segment priority (highest wins):
+/// 1. **High** — segment matches [`NEVER_AUTO_APPROVE_PATTERNS`] (destructive / irreversible).
+/// 2. **Low** — segment matches [`LOW_RISK_PATTERNS`] (strictly read-only).
+/// 3. **Medium** — segment matches [`MEDIUM_RISK_PATTERNS`] (reversible mutations).
+/// 4. **Medium** — unknown commands default to Medium (safer than auto-approving).
+///
+/// All matching uses word-boundary rules (see [`matches_command_pattern`]) to
+/// prevent false positives like `"makeshutdownscript"` matching `"shutdown"` or
+/// `"lsblk"` matching `"ls"`.
 pub fn classify_command_risk(command: &str) -> RiskLevel {
-    let lower = command.to_lowercase();
-
-    // High wins over everything — check across the whole command string.
-    if NEVER_AUTO_APPROVE_PATTERNS
-        .iter()
-        .any(|p| lower.contains(&p.to_lowercase()))
-    {
-        return RiskLevel::High;
-    }
-
     // For pipelines/chains, take the maximum risk across all segments.
     command
         .split(['|', '&', ';'])
@@ -365,7 +356,12 @@ pub fn classify_command_risk(command: &str) -> RiskLevel {
         .filter(|s| !s.is_empty())
         .map(|segment| {
             let seg_lower = segment.to_lowercase();
-            if LOW_RISK_PATTERNS
+            if NEVER_AUTO_APPROVE_PATTERNS
+                .iter()
+                .any(|p| matches_command_pattern(&seg_lower, &p.to_lowercase()))
+            {
+                RiskLevel::High
+            } else if LOW_RISK_PATTERNS
                 .iter()
                 .any(|p| matches_command_pattern(&seg_lower, p))
             {
@@ -1008,6 +1004,14 @@ mod tests {
             classify_command_risk("sudo apt install something"),
             RiskLevel::High
         );
+        // Word-boundary: these contain High-risk pattern names as substrings but
+        // must NOT be classified High (they are not the actual commands).
+        assert_eq!(
+            classify_command_risk("makeshutdownscript --help"),
+            RiskLevel::Medium
+        );
+        assert_eq!(classify_command_risk("nftables-config"), RiskLevel::Medium);
+        assert_eq!(classify_command_risk("passwdqc-check"), RiskLevel::Medium);
     }
 
     #[test]
