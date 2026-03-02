@@ -264,12 +264,28 @@ impl LoadedChannel {
             .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()))
     }
 
+    /// Get the webhook verification mode from capabilities.
+    ///
+    /// Returns "query_param", "signature", or None (default behavior).
+    pub fn verification_mode(&self) -> Option<&str> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.webhook_verification_mode())
+    }
+
     /// Get the webhook secret name from capabilities.
     pub fn webhook_secret_name(&self) -> String {
         self.capabilities_file
             .as_ref()
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.channel.channel_name()))
+    }
+
+    /// Get the HMAC secret name from capabilities.
+    pub fn hmac_secret_name(&self) -> Option<String> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.webhook_hmac_secret_name().map(|s| s.to_string()))
     }
 }
 

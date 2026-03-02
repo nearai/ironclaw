@@ -14,9 +14,14 @@
         "prompt": "Webhook verify token (leave empty to auto-generate)",
         "optional": true,
         "auto_generate": { "length": 32 }
+      },
+      {
+        "name": "whatsapp_app_secret",
+        "prompt": "Enter your WhatsApp App Secret (from Meta Developer Portal > App Settings > Basic)",
+        "validation": "^[a-f0-9]{32}$"
       }
     ],
-    "validation_endpoint": "https://graph.facebook.com/v18.0/me?access_token={whatsapp_access_token}"
+    "validation_endpoint": "https://graph.facebook.com/v25.0/me?access_token={whatsapp_access_token}"
   },
   "capabilities": {
     "http": {
@@ -42,12 +47,13 @@
       "webhook": {
         "secret_header": "X-Hub-Signature-256",
         "secret_name": "whatsapp_verify_token",
-        "verify_token_param": "hub.verify_token"
+        "verification_mode": "query_param",
+        "hmac_secret_name": "whatsapp_app_secret"
       }
     }
   },
   "config": {
-    "api_version": "v18.0",
+    "api_version": "v25.0",
     "reply_to_message": true,
     "owner_id": null,
     "dm_policy": "pairing",

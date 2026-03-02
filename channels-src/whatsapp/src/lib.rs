@@ -652,6 +652,11 @@ fn handle_message(
         return;
     }
 
+    // Note: mark_as_read is now handled by the host after DB persistence.
+    // The host will call the WhatsApp API directly after receiving the ACK
+    // from the agent loop. This ensures the webhook returns 200 OK only after
+    // the message is durably stored.
+
     // Build metadata for response routing
     // This is critical - the response handler uses this to know where to send
     let metadata = WhatsAppMessageMetadata {
@@ -680,10 +685,6 @@ fn handle_message(
         ),
     );
 }
-
-// ============================================================================
-// Utilities
-// ============================================================================
 
 // ============================================================================
 // Permission & Pairing

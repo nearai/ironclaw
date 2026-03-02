@@ -271,6 +271,39 @@ impl Agent {
         self.persist_user_message(thread_id, &message.user_id, content)
             .await;
 
+        // Signal webhook ACK after persistence (if router available)
+        // This tells the webhook handler that the message was stored and it can
+        // return blue checkmarks on supported platforms.
+        if let Some(router) = &self.deps.wasm_router {
+            // Build ack_key from channel name and message metadata
+            // For WhatsApp, metadata contains: phone_number_id, sender_phone, message_id, timestamp
+            #[derive(serde::Deserialize)]
+            struct WhatsAppMetadata {
+                message_id: Option<String>,
+            }
+
+            let ack_key = if let Ok(meta) =
+                serde_json::from_value::<WhatsAppMetadata>(message.metadata.clone())
+            {
+                if let Some(msg_id) = meta.message_id {
+                    format!("{}:{}", message.channel, msg_id)
+                } else {
+                    // Fallback to user_id if no message_id in metadata
+                    format!("{}:{}", message.channel, message.user_id)
+                }
+            } else {
+                // Fallback to user_id if metadata parsing fails
+                format!("{}:{}", message.channel, message.user_id)
+            };
+
+            tracing::debug!(ack_key = %ack_key, "Signaling webhook ACK after persistence");
+
+            // Signal ACK with metadata for mark_as_read
+            router
+                .ack_message(&ack_key, Some(&message.metadata.to_string()))
+                .await;
+        }
+
         // Send thinking status
         let _ = self
             .channels

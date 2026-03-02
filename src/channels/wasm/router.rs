@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Json, Router,
@@ -15,9 +16,19 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, oneshot};
 
-use crate::channels::wasm::wrapper::WasmChannel;
+use crate::channels::wasm::wrapper::{HttpResponseWithMessages, WasmChannel};
+
+/// Metadata extracted from WhatsApp webhook messages.
+/// Used for ACK keys, deduplication, and mark_as_read API calls.
+#[derive(Deserialize)]
+struct WhatsAppMetadata {
+    /// The WhatsApp message ID (wamid.xxx) used for ACK and deduplication.
+    message_id: Option<String>,
+    /// The phone number ID for the WhatsApp Business account.
+    phone_number_id: Option<String>,
+}
 
 /// A registered HTTP endpoint for a WASM channel.
 #[derive(Debug, Clone)]
@@ -44,6 +55,19 @@ pub struct WasmChannelRouter {
     secret_headers: RwLock<HashMap<String, String>>,
     /// Ed25519 public keys for signature verification by channel name (hex-encoded).
     signature_keys: RwLock<HashMap<String, String>>,
+    /// Verification mode per channel: "query_param", "signature", etc.
+    verification_modes: RwLock<HashMap<String, String>>,
+    /// HMAC secrets for signature verification by channel name (WhatsApp/Slack style).
+    hmac_secrets: RwLock<HashMap<String, String>>,
+    /// Pending webhook acknowledgments by "channel:message_id" key.
+    /// Used to delay webhook 200 response until message is persisted to DB.
+    pending_acks: RwLock<HashMap<String, oneshot::Sender<()>>>,
+    /// Access tokens by channel name (for host-side API calls like mark_as_read).
+    access_tokens: RwLock<HashMap<String, String>>,
+    /// API versions by channel name (for host-side API calls).
+    api_versions: RwLock<HashMap<String, String>>,
+    /// Database for webhook message deduplication.
+    db: RwLock<Option<Arc<dyn crate::db::WebhookDedupStore + Send + Sync>>>,
 }
 
 impl WasmChannelRouter {
@@ -55,6 +79,51 @@ impl WasmChannelRouter {
             secrets: RwLock::new(HashMap::new()),
             secret_headers: RwLock::new(HashMap::new()),
             signature_keys: RwLock::new(HashMap::new()),
+            verification_modes: RwLock::new(HashMap::new()),
+            hmac_secrets: RwLock::new(HashMap::new()),
+            pending_acks: RwLock::new(HashMap::new()),
+            access_tokens: RwLock::new(HashMap::new()),
+            api_versions: RwLock::new(HashMap::new()),
+            db: RwLock::new(None),
+        }
+    }
+
+    /// Set the database for webhook message deduplication.
+    pub async fn set_db(&self, db: Arc<dyn crate::db::WebhookDedupStore + Send + Sync>) {
+        *self.db.write().await = Some(db);
+    }
+
+    /// Get the database for webhook message deduplication.
+    pub async fn get_db(&self) -> Option<Arc<dyn crate::db::WebhookDedupStore + Send + Sync>> {
+        self.db.read().await.clone()
+    }
+
+    /// Clean up old webhook dedup records.
+    ///
+    /// Called periodically to prevent unbounded growth of the dedup table.
+    /// Returns the number of records deleted.
+    pub async fn cleanup_old_dedup_records(&self) -> usize {
+        if let Some(db) = self.get_db().await {
+            match db.cleanup_old_webhook_dedup_records().await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!(
+                            deleted_count = count,
+                            "Cleaned up old webhook dedup records"
+                        );
+                    }
+                    count as usize
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to clean up old webhook dedup records"
+                    );
+                    0
+                }
+            }
+        } else {
+            0
         }
     }
 
@@ -66,12 +135,16 @@ impl WasmChannelRouter {
     /// * `secret` - Optional webhook secret for validation
     /// * `secret_header` - Optional HTTP header name for secret validation
     ///   (e.g., "X-Telegram-Bot-Api-Secret-Token"). Defaults to "X-Webhook-Secret".
+    /// * `verification_mode` - Optional verification mode for GET requests:
+    ///   - "query_param": Skip host-level secret validation for GET, WASM validates via query param
+    ///   - "signature": Always require signature validation
     pub async fn register(
         &self,
         channel: Arc<WasmChannel>,
         endpoints: Vec<RegisteredEndpoint>,
         secret: Option<String>,
         secret_header: Option<String>,
+        verification_mode: Option<String>,
     ) {
         let name = channel.channel_name().to_string();
 
@@ -97,7 +170,12 @@ impl WasmChannelRouter {
 
         // Store secret header if provided
         if let Some(h) = secret_header {
-            self.secret_headers.write().await.insert(name, h);
+            self.secret_headers.write().await.insert(name.clone(), h);
+        }
+
+        // Store verification mode if provided
+        if let Some(m) = verification_mode {
+            self.verification_modes.write().await.insert(name, m);
         }
     }
 
@@ -111,6 +189,17 @@ impl WasmChannelRouter {
             .get(channel_name)
             .cloned()
             .unwrap_or_else(|| "X-Webhook-Secret".to_string())
+    }
+
+    /// Get the verification mode for a channel.
+    ///
+    /// Returns the configured mode or None (default behavior).
+    pub async fn get_verification_mode(&self, channel_name: &str) -> Option<String> {
+        self.verification_modes
+            .read()
+            .await
+            .get(channel_name)
+            .cloned()
     }
 
     /// Update the webhook secret for an already-registered channel.
@@ -134,6 +223,8 @@ impl WasmChannelRouter {
         self.secrets.write().await.remove(channel_name);
         self.secret_headers.write().await.remove(channel_name);
         self.signature_keys.write().await.remove(channel_name);
+        self.verification_modes.write().await.remove(channel_name);
+        self.hmac_secrets.write().await.remove(channel_name);
 
         // Remove all paths for this channel
         self.path_to_channel
@@ -208,6 +299,173 @@ impl WasmChannelRouter {
     pub async fn get_signature_key(&self, channel_name: &str) -> Option<String> {
         self.signature_keys.read().await.get(channel_name).cloned()
     }
+
+    /// Register an HMAC secret for a channel.
+    ///
+    /// The secret is used for HMAC-SHA256 signature verification
+    /// (WhatsApp/Slack style with X-Hub-Signature-256 header).
+    pub async fn register_hmac_secret(&self, channel_name: &str, secret: String) {
+        self.hmac_secrets
+            .write()
+            .await
+            .insert(channel_name.to_string(), secret);
+        tracing::info!(
+            channel = %channel_name,
+            "Registered HMAC secret for webhook signature verification"
+        );
+    }
+
+    /// Get the HMAC secret for a channel.
+    ///
+    /// Returns `None` if no HMAC secret is registered.
+    pub async fn get_hmac_secret(&self, channel_name: &str) -> Option<String> {
+        self.hmac_secrets.read().await.get(channel_name).cloned()
+    }
+
+    // ========================================================================
+    // Webhook Acknowledgment (reliable message processing)
+    // ========================================================================
+
+    /// Register a pending acknowledgment for a webhook message.
+    ///
+    /// Call this before processing a webhook message. The returned receiver
+    /// will be signaled when the message has been persisted to the database.
+    /// The webhook handler should wait on this receiver before returning 200 OK.
+    ///
+    /// # Arguments
+    /// * `key` - Unique identifier for the message, typically "channel:message_id"
+    ///
+    /// # Returns
+    /// A oneshot receiver that will be signaled when ack_message() is called.
+    pub async fn register_pending_ack(&self, key: String) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_acks.write().await.insert(key.clone(), tx);
+        tracing::debug!(key = %key, "Registered pending webhook ACK");
+        rx
+    }
+
+    /// Signal that a message has been persisted and the webhook can return 200 OK.
+    ///
+    /// Called by the agent loop after persist_user_message() completes.
+    /// Also triggers mark_as_read for channels that support it (WhatsApp).
+    ///
+    /// Note: Deduplication recording happens at webhook handler level (before
+    /// sending to agent) to prevent race conditions with concurrent webhooks.
+    ///
+    /// # Arguments
+    /// * `key` - The same key passed to register_pending_ack()
+    /// * `message_metadata` - Optional JSON metadata for mark_as_read (phone_number_id, etc.)
+    pub async fn ack_message(&self, key: &str, message_metadata: Option<&str>) {
+        if let Some(tx) = self.pending_acks.write().await.remove(key) {
+            // Signal the webhook handler to return 200 OK
+            let _ = tx.send(());
+            tracing::debug!(key = %key, "Webhook ACK signaled");
+
+            // Trigger mark_as_read for supported channels
+            if let Some(metadata) = message_metadata
+                && let Err(e) = self.trigger_mark_as_read(key, metadata).await
+            {
+                tracing::warn!(key = %key, error = %e, "Failed to mark message as read");
+            }
+        } else {
+            tracing::debug!(key = %key, "No pending ACK found (may have timed out)");
+        }
+    }
+
+    /// Store access token for a channel (for host-side API calls like mark_as_read).
+    pub async fn register_access_token(&self, channel_name: &str, token: String) {
+        self.access_tokens
+            .write()
+            .await
+            .insert(channel_name.to_string(), token);
+        tracing::info!(channel = %channel_name, "Registered access token for mark_as_read");
+    }
+
+    /// Store API version for a channel (for host-side API calls).
+    pub async fn register_api_version(&self, channel_name: &str, version: String) {
+        self.api_versions
+            .write()
+            .await
+            .insert(channel_name.to_string(), version);
+    }
+
+    /// Get the access token for a channel.
+    pub async fn get_access_token(&self, channel_name: &str) -> Option<String> {
+        self.access_tokens.read().await.get(channel_name).cloned()
+    }
+
+    /// Get the API version for a channel.
+    pub async fn get_api_version(&self, channel_name: &str) -> Option<String> {
+        self.api_versions.read().await.get(channel_name).cloned()
+    }
+
+    /// Trigger mark_as_read for a message after it's been persisted.
+    ///
+    /// Parses the key to extract channel name and calls the appropriate API.
+    async fn trigger_mark_as_read(&self, key: &str, metadata_json: &str) -> Result<(), String> {
+        // Parse key format: "channel:message_id"
+        let parts: Vec<&str> = key.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(format!("Invalid ACK key format: {}", key));
+        }
+        let channel_name = parts[0];
+        let message_id = parts[1];
+
+        // Only WhatsApp supports mark_as_read currently
+        if channel_name != "whatsapp" {
+            tracing::debug!(channel = %channel_name, "Channel does not support mark_as_read");
+            return Ok(());
+        }
+
+        // Parse metadata to get phone_number_id
+        let metadata: WhatsAppMetadata =
+            serde_json::from_str(metadata_json).map_err(|e| format!("Invalid metadata: {}", e))?;
+
+        let phone_number_id = metadata
+            .phone_number_id
+            .ok_or_else(|| "Missing phone_number_id in metadata".to_string())?;
+
+        // Get stored credentials
+        let access_token = self
+            .get_access_token(channel_name)
+            .await
+            .ok_or_else(|| "No access token registered for WhatsApp".to_string())?;
+        let api_version = self
+            .get_api_version(channel_name)
+            .await
+            .unwrap_or_else(|| "v25.0".to_string());
+
+        // Call WhatsApp API to mark as read
+        let url = format!(
+            "https://graph.facebook.com/{}/{}/messages",
+            api_version, phone_number_id
+        );
+        let payload = serde_json::json!({
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id
+        });
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", access_token))
+            .json(&payload)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+        if response.status().is_success() {
+            tracing::debug!(message_id = %message_id, "Marked WhatsApp message as read");
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(format!("WhatsApp API error: {} - {}", status, body))
+        }
+    }
 }
 
 impl Default for WasmChannelRouter {
@@ -222,6 +480,10 @@ impl Default for WasmChannelRouter {
 pub struct RouterState {
     router: Arc<WasmChannelRouter>,
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
+    /// Database for webhook message deduplication.
+    db: Option<Arc<dyn crate::db::Database>>,
+    /// Timeout for waiting on webhook ACK before returning 500.
+    webhook_ack_timeout: Duration,
 }
 
 impl RouterState {
@@ -229,6 +491,8 @@ impl RouterState {
         Self {
             router,
             extension_manager: None,
+            db: None,
+            webhook_ack_timeout: Duration::from_secs(10),
         }
     }
 
@@ -237,6 +501,18 @@ impl RouterState {
         manager: Arc<crate::extensions::ExtensionManager>,
     ) -> Self {
         self.extension_manager = Some(manager);
+        self
+    }
+
+    /// Add database for webhook message deduplication.
+    pub fn with_db(mut self, db: Arc<dyn crate::db::Database>) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    /// Set the webhook ACK timeout.
+    pub fn with_webhook_ack_timeout(mut self, timeout: Duration) -> Self {
+        self.webhook_ack_timeout = timeout;
         self
     }
 }
@@ -312,7 +588,13 @@ async fn webhook_handler(
     let channel_name = channel.channel_name();
 
     // Check if secret is required
-    if state.router.requires_secret(channel_name).await {
+    // Skip secret validation if using query_param verification mode
+    // (e.g., WhatsApp uses hub.verify_token for GET verification and X-Hub-Signature-256
+    // for POST validation - both handled by the WASM module internally)
+    let verification_mode = state.router.get_verification_mode(channel_name).await;
+    let skip_secret_validation = verification_mode.as_deref() == Some("query_param");
+
+    if !skip_secret_validation && state.router.requires_secret(channel_name).await {
         // Get the secret header name for this channel (from capabilities or default)
         let secret_header_name = state.router.get_secret_header(channel_name).await;
 
@@ -374,6 +656,12 @@ async fn webhook_handler(
                 );
             }
         }
+    } else if skip_secret_validation {
+        tracing::debug!(
+            channel = %channel_name,
+            verification_mode = ?verification_mode,
+            "Skipping secret validation for channel with query_param verification mode"
+        );
     }
 
     // Ed25519 signature verification (Discord-style)
@@ -427,6 +715,43 @@ async fn webhook_handler(
         }
     }
 
+    // HMAC-SHA256 signature verification (WhatsApp/Slack style)
+    if let Some(hmac_secret) = state.router.get_hmac_secret(channel_name).await {
+        let signature_header = headers
+            .get("X-Hub-Signature-256")
+            .and_then(|v| v.to_str().ok());
+
+        match signature_header {
+            Some(sig) => {
+                if !crate::channels::wasm::signature::verify_hmac_sha256(&hmac_secret, sig, &body) {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        "HMAC-SHA256 signature verification failed"
+                    );
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "error": "Invalid signature"
+                        })),
+                    );
+                }
+                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified");
+            }
+            None => {
+                tracing::warn!(
+                    channel = %channel_name,
+                    "X-Hub-Signature-256 header missing but HMAC secret is registered"
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "Missing signature header"
+                    })),
+                );
+            }
+        }
+    }
+
     // Convert headers to HashMap
     let headers_map: HashMap<String, String> = headers
         .iter()
@@ -437,17 +762,17 @@ async fn webhook_handler(
         })
         .collect();
 
-    // Call the WASM channel
+    // Call the WASM channel (with messages returned for ACK coordination)
     let secret_validated = state.router.requires_secret(channel_name).await;
 
     tracing::info!(
         channel = %channel_name,
         secret_validated = secret_validated,
-        "Calling WASM channel on_http_request"
+        "Calling WASM channel on_http_request_with_messages"
     );
 
     match channel
-        .call_on_http_request(
+        .call_on_http_request_with_messages(
             method.as_str(),
             &full_path,
             &headers_map,
@@ -457,7 +782,10 @@ async fn webhook_handler(
         )
         .await
     {
-        Ok(response) => {
+        Ok(HttpResponseWithMessages {
+            response,
+            emitted_messages,
+        }) => {
             let status =
                 StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -465,8 +793,162 @@ async fn webhook_handler(
                 channel = %channel_name,
                 status = %status,
                 body_len = response.body.len(),
-                "WASM channel on_http_request completed successfully"
+                emitted_count = emitted_messages.len(),
+                "WASM channel on_http_request completed"
             );
+
+            // If there are emitted messages, wait for ACK before returning
+            if !emitted_messages.is_empty() {
+                // Register ACK receivers for each NEW message (skip duplicates)
+                let mut ack_receivers: Vec<(String, oneshot::Receiver<()>, String)> = Vec::new();
+                let mut new_messages: Vec<_> = Vec::new();
+
+                for msg in &emitted_messages {
+                    // Parse metadata to extract message_id for ACK key and deduplication
+                    // For WhatsApp, metadata contains: phone_number_id, sender_phone, message_id, timestamp
+                    let (ack_key, external_msg_id) = if let Ok(meta) =
+                        serde_json::from_str::<WhatsAppMetadata>(&msg.metadata_json)
+                    {
+                        if let Some(msg_id) = &meta.message_id {
+                            (format!("{}:{}", channel_name, msg_id), Some(msg_id.clone()))
+                        } else {
+                            // Fallback to user_id if no message_id
+                            (format!("{}:{}", channel_name, msg.user_id), None)
+                        }
+                    } else {
+                        (format!("{}:{}", channel_name, msg.user_id), None)
+                    };
+
+                    // Atomic deduplication: try to INSERT first
+                    // Returns true if inserted (new message), false if duplicate
+                    // This eliminates TOCTOU race condition between SELECT and INSERT
+                    if let Some(ref db) = state.db
+                        && let Some(msg_id) = &external_msg_id
+                    {
+                        match db
+                            .record_webhook_message_processed(channel_name, msg_id)
+                            .await
+                        {
+                            Ok(was_inserted) => {
+                                if !was_inserted {
+                                    tracing::info!(
+                                        channel = %channel_name,
+                                        message_id = %msg_id,
+                                        "Duplicate webhook message detected, skipping"
+                                    );
+                                    continue; // Skip this duplicate message
+                                }
+                                // New message - will process below
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    channel = %channel_name,
+                                    message_id = %msg_id,
+                                    error = %e,
+                                    "Failed to record message, proceeding anyway (fail open)"
+                                );
+                                // Continue processing on error (fail open)
+                            }
+                        }
+                    }
+
+                    let ack_rx = state.router.register_pending_ack(ack_key.clone()).await;
+                    ack_receivers.push((ack_key, ack_rx, msg.metadata_json.clone()));
+                    new_messages.push(msg.clone());
+                }
+
+                // If all messages were duplicates, return success immediately
+                if new_messages.is_empty() {
+                    tracing::info!(
+                        channel = %channel_name,
+                        "All webhook messages were duplicates, returning 200"
+                    );
+                    let body_json: serde_json::Value = serde_json::from_slice(&response.body)
+                        .unwrap_or_else(|_| {
+                            serde_json::json!({
+                                "raw": String::from_utf8_lossy(&response.body).to_string()
+                            })
+                        });
+                    return (status, Json(body_json));
+                }
+
+                // Send only NEW messages to the agent
+                if let Err(e) = channel.send_emitted_messages(new_messages).await {
+                    tracing::error!(
+                        channel = %channel_name,
+                        error = %e,
+                        "Failed to send emitted messages to agent"
+                    );
+                    // Continue to return response even if sending failed
+                }
+
+                // Wait for all ACKs with a configurable timeout for all messages
+                // Using join_all ensures we don't accumulate timeouts (3 messages ≠ 30s wait)
+                let ack_timeout = state.webhook_ack_timeout;
+
+                // Keep track of ack_keys for cleanup on timeout
+                let ack_keys: Vec<String> = ack_receivers
+                    .iter()
+                    .map(|(key, _, _)| key.clone())
+                    .collect();
+
+                let ack_futures: Vec<_> = ack_receivers
+                    .into_iter()
+                    .map(|(ack_key, ack_rx, _)| async move {
+                        match ack_rx.await {
+                            Ok(()) => {
+                                tracing::debug!(key = %ack_key, "Webhook ACK received");
+                                true
+                            }
+                            Err(_) => {
+                                tracing::warn!(key = %ack_key, "Webhook ACK channel closed");
+                                false
+                            }
+                        }
+                    })
+                    .collect();
+
+                let all_acked =
+                    match tokio::time::timeout(ack_timeout, futures::future::join_all(ack_futures))
+                        .await
+                    {
+                        Ok(results) => results.iter().all(|&r| r),
+                        Err(_) => {
+                            tracing::warn!(
+                                channel = %channel_name,
+                                timeout_secs = ack_timeout.as_secs(),
+                                "Webhook ACK wait timed out, returning 500 to trigger retry"
+                            );
+                            // Clean up pending ACKs that were registered but never signaled
+                            for ack_key in &ack_keys {
+                                state.router.pending_acks.write().await.remove(ack_key);
+                            }
+                            // Return 500 so WhatsApp retries - deduplication will handle duplicates
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({
+                                    "error": "ACK timeout",
+                                    "message": "Message processing timed out, will retry"
+                                })),
+                            );
+                        }
+                    };
+
+                if !all_acked {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        "Some webhook ACKs were not received, returning 500 to trigger retry"
+                    );
+                    // Return 500 so WhatsApp retries - deduplication will handle duplicates
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": "ACK not received",
+                            "message": "Message persistence not confirmed, will retry"
+                        })),
+                    );
+                }
+            }
 
             // Build response with headers
             let body_json: serde_json::Value = serde_json::from_slice(&response.body)
@@ -553,10 +1035,18 @@ async fn oauth_callback_handler(
 pub fn create_wasm_channel_router(
     router: Arc<WasmChannelRouter>,
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
+    db: Option<Arc<dyn crate::db::Database>>,
+    webhook_ack_timeout: Option<Duration>,
 ) -> Router {
     let mut state = RouterState::new(router);
     if let Some(manager) = extension_manager {
         state = state.with_extension_manager(manager);
+    }
+    if let Some(database) = db {
+        state = state.with_db(database);
+    }
+    if let Some(timeout) = webhook_ack_timeout {
+        state = state.with_webhook_ack_timeout(timeout);
     }
 
     Router::new()
@@ -618,7 +1108,13 @@ mod tests {
         }];
 
         router
-            .register(channel, endpoints, Some("secret123".to_string()), None)
+            .register(
+                channel,
+                endpoints,
+                Some("secret123".to_string()),
+                None,
+                None,
+            )
             .await;
 
         // Should find channel by path
@@ -637,7 +1133,7 @@ mod tests {
         let channel = create_test_channel("slack");
 
         router
-            .register(channel, vec![], Some("secret123".to_string()), None)
+            .register(channel, vec![], Some("secret123".to_string()), None, None)
             .await;
 
         // Correct secret
@@ -648,7 +1144,7 @@ mod tests {
 
         // Channel without secret always validates
         let channel2 = create_test_channel("telegram");
-        router.register(channel2, vec![], None, None).await;
+        router.register(channel2, vec![], None, None, None).await;
         assert!(router.validate_secret("telegram", "anything").await);
     }
 
@@ -664,7 +1160,7 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None).await;
+        router.register(channel, endpoints, None, None, None).await;
 
         // Should exist
         assert!(
@@ -693,8 +1189,8 @@ mod tests {
         let channel1 = create_test_channel("slack");
         let channel2 = create_test_channel("telegram");
 
-        router.register(channel1, vec![], None, None).await;
-        router.register(channel2, vec![], None, None).await;
+        router.register(channel1, vec![], None, None, None).await;
+        router.register(channel2, vec![], None, None, None).await;
 
         let channels = router.list_channels().await;
         assert_eq!(channels.len(), 2);
@@ -714,6 +1210,7 @@ mod tests {
                 vec![],
                 Some("secret123".to_string()),
                 Some("X-Telegram-Bot-Api-Secret-Token".to_string()),
+                None,
             )
             .await;
 
@@ -726,7 +1223,7 @@ mod tests {
         // Channel without custom header should use default
         let channel2 = create_test_channel("slack");
         router
-            .register(channel2, vec![], Some("secret456".to_string()), None)
+            .register(channel2, vec![], Some("secret456".to_string()), None, None)
             .await;
         assert_eq!(router.get_secret_header("slack").await, "X-Webhook-Secret");
     }
@@ -738,7 +1235,7 @@ mod tests {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
 
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         let fake_pub_key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
         router
@@ -754,7 +1251,7 @@ mod tests {
     async fn test_no_signature_key_returns_none() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("slack");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         // Slack has no signature key registered
         let key = router.get_signature_key("slack").await;
@@ -773,7 +1270,7 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None).await;
+        router.register(channel, endpoints, None, None, None).await;
         // Use a valid 32-byte Ed25519 key for this test
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
         router
@@ -797,7 +1294,7 @@ mod tests {
     async fn test_register_valid_signature_key_succeeds() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         // Valid 32-byte Ed25519 public key (from test keypair)
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
@@ -809,7 +1306,7 @@ mod tests {
     async fn test_register_invalid_hex_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         let result = router
             .register_signature_key("discord", "not-valid-hex-zzz")
@@ -821,7 +1318,7 @@ mod tests {
     async fn test_register_wrong_length_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         // 16 bytes instead of 32
         let short_key = hex::encode([0u8; 16]);
@@ -833,7 +1330,7 @@ mod tests {
     async fn test_register_empty_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         let result = router.register_signature_key("discord", "").await;
         assert!(result.is_err(), "Empty key should be rejected");
@@ -843,7 +1340,7 @@ mod tests {
     async fn test_valid_key_is_retrievable() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
         router
@@ -859,7 +1356,7 @@ mod tests {
     async fn test_invalid_key_does_not_store() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         // Attempt to register invalid key
         let _ = router
@@ -893,9 +1390,11 @@ mod tests {
             require_secret: false,
         }];
 
-        wasm_router.register(channel, endpoints, None, None).await;
+        wasm_router
+            .register(channel, endpoints, None, None, None)
+            .await;
 
-        let app = create_wasm_channel_router(wasm_router.clone(), None);
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
         (wasm_router, app)
     }
 
@@ -1120,7 +1619,13 @@ mod tests {
 
         // Register with BOTH secret and signature key
         wasm_router
-            .register(channel, endpoints, Some("my-secret".to_string()), None)
+            .register(
+                channel,
+                endpoints,
+                Some("my-secret".to_string()),
+                None,
+                None,
+            )
             .await;
 
         let signing_key = test_signing_key();
@@ -1130,7 +1635,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = create_wasm_channel_router(wasm_router.clone(), None);
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
 
         // Use current timestamp so staleness check passes
         let now_secs = std::time::SystemTime::now()
@@ -1162,5 +1667,275 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "Valid secret + valid signature should not return 401"
         );
+    }
+
+    // ── HMAC-SHA256 Router Tests (WhatsApp/Slack style) ─────────────────
+
+    /// Helper: compute HMAC-SHA256 signature in WhatsApp format.
+    fn compute_hmac_signature(secret: &str, body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let result = mac.finalize();
+        format!("sha256={}", hex::encode(result.into_bytes()))
+    }
+
+    #[tokio::test]
+    async fn test_register_and_get_hmac_secret() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("whatsapp");
+
+        router.register(channel, vec![], None, None, None).await;
+
+        router
+            .register_hmac_secret("whatsapp", "my_app_secret".to_string())
+            .await;
+
+        let secret = router.get_hmac_secret("whatsapp").await;
+        assert_eq!(secret, Some("my_app_secret".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_no_hmac_secret_returns_none() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("telegram");
+        router.register(channel, vec![], None, None, None).await;
+
+        let secret = router.get_hmac_secret("telegram").await;
+        assert!(secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_removes_hmac_secret() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("whatsapp");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        router.register(channel, endpoints, None, None, None).await;
+        router
+            .register_hmac_secret("whatsapp", "secret123".to_string())
+            .await;
+
+        // Secret should exist
+        assert!(router.get_hmac_secret("whatsapp").await.is_some());
+
+        // Unregister
+        router.unregister("whatsapp").await;
+
+        // Secret should be gone
+        assert!(router.get_hmac_secret("whatsapp").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_webhook_rejects_missing_hmac_header() {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("whatsapp");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        wasm_router
+            .register(
+                channel,
+                endpoints,
+                None,
+                None,
+                Some("query_param".to_string()),
+            )
+            .await;
+
+        // Register HMAC secret
+        wasm_router
+            .register_hmac_secret("whatsapp", "my_app_secret".to_string())
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
+
+        // Send request without X-Hub-Signature-256 header
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"entry":[]}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Missing HMAC header should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_rejects_invalid_hmac_signature() {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("whatsapp");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        wasm_router
+            .register(
+                channel,
+                endpoints,
+                None,
+                None,
+                Some("query_param".to_string()),
+            )
+            .await;
+
+        wasm_router
+            .register_hmac_secret("whatsapp", "correct_secret".to_string())
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
+
+        let body = br#"{"entry":[]}"#;
+        // Sign with wrong secret
+        let sig = compute_hmac_signature("wrong_secret", body);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp")
+            .header("content-type", "application/json")
+            .header("X-Hub-Signature-256", &sig)
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Invalid HMAC signature should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_accepts_valid_hmac_signature() {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("whatsapp");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        wasm_router
+            .register(
+                channel,
+                endpoints,
+                None,
+                None,
+                Some("query_param".to_string()),
+            )
+            .await;
+
+        wasm_router
+            .register_hmac_secret("whatsapp", "my_app_secret".to_string())
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
+
+        let body = br#"{"entry":[]}"#;
+        let sig = compute_hmac_signature("my_app_secret", body);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp")
+            .header("content-type", "application/json")
+            .header("X-Hub-Signature-256", &sig)
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Should pass HMAC check (may be 500 due to no WASM module, but not 401)
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Valid HMAC signature should not return 401"
+        );
+    }
+
+    // ==================== Webhook ACK mechanism tests ====================
+
+    #[tokio::test]
+    async fn test_register_and_ack_message() {
+        let router = WasmChannelRouter::new();
+
+        // Register pending ACK
+        let ack_key = "whatsapp:wamid.test123";
+        let rx = router.register_pending_ack(ack_key.to_string()).await;
+
+        // Ack the message
+        router.ack_message(ack_key, None).await;
+
+        // Verify the ACK was received
+        let result = rx.await;
+        assert!(result.is_ok(), "ACK should be received");
+    }
+
+    #[tokio::test]
+    async fn test_ack_message_removes_pending_entry() {
+        let router = WasmChannelRouter::new();
+
+        let ack_key = "whatsapp:wamid.test456";
+        let _rx = router.register_pending_ack(ack_key.to_string()).await;
+
+        // Verify entry exists
+        assert!(
+            router.pending_acks.read().await.contains_key(ack_key),
+            "Pending ACK should exist"
+        );
+
+        // Ack the message
+        router.ack_message(ack_key, None).await;
+
+        // Verify entry was removed
+        assert!(
+            !router.pending_acks.read().await.contains_key(ack_key),
+            "Pending ACK should be removed after ACK"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ack_nonexistent_key_is_safe() {
+        let router = WasmChannelRouter::new();
+
+        // Should not panic when ACKing a key that was never registered
+        router.ack_message("nonexistent:key", None).await;
+    }
+
+    #[tokio::test]
+    async fn test_double_ack_same_key() {
+        let router = WasmChannelRouter::new();
+
+        let ack_key = "whatsapp:wamid.test789";
+        let _rx = router.register_pending_ack(ack_key.to_string()).await;
+
+        // First ACK
+        router.ack_message(ack_key, None).await;
+
+        // Second ACK should be safe (no panic)
+        router.ack_message(ack_key, None).await;
     }
 }

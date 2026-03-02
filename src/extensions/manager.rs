@@ -1924,7 +1924,9 @@ impl ExtensionManager {
         let channel_name = loaded.name().to_string();
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let verification_mode = loaded.verification_mode().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
+        let hmac_secret_name = loaded.hmac_secret_name();
 
         // Get webhook secret from secrets store
         let webhook_secret = self
@@ -1987,6 +1989,7 @@ impl ExtensionManager {
                     endpoints,
                     webhook_secret,
                     secret_header,
+                    verification_mode,
                 )
                 .await;
             tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
@@ -2009,6 +2012,15 @@ impl ExtensionManager {
                         tracing::error!(channel = %channel_name, error = %e, "Failed to register signature key")
                     }
                 }
+            }
+
+            // Register HMAC secret if declared in capabilities (WhatsApp/Slack style)
+            if let Some(ref hmac_name) = hmac_secret_name
+                && let Ok(hmac_secret) = self.secrets.get_decrypted(&self.user_id, hmac_name).await
+            {
+                wasm_channel_router
+                    .register_hmac_secret(&channel_name, hmac_secret.expose().to_string())
+                    .await;
             }
         }
 
@@ -2177,6 +2189,26 @@ impl ExtensionManager {
                     tracing::error!(channel = %name, error = %e, "Failed to refresh signature key")
                 }
             }
+        }
+
+        // Also refresh HMAC secret in the router (WhatsApp/Slack style)
+        let hmac_secret_name = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .ok()
+                    .and_then(|f| f.webhook_hmac_secret_name().map(|s| s.to_string())),
+                Err(_) => None,
+            }
+        };
+        if let Some(ref hmac_name) = hmac_secret_name
+            && let Ok(hmac_secret) = self.secrets.get_decrypted(&self.user_id, hmac_name).await
+        {
+            router
+                .register_hmac_secret(name, hmac_secret.expose().to_string())
+                .await;
         }
 
         // Refresh tunnel_url in case it wasn't set at startup

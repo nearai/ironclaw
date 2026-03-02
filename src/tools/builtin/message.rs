@@ -3,10 +3,9 @@
 //! Allows the agent to proactively message users on any connected channel.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::{ChannelManager, OutgoingResponse};
@@ -19,6 +18,7 @@ use crate::tools::tool::{
 pub struct MessageTool {
     channel_manager: Arc<ChannelManager>,
     /// Default channel for current conversation (set per-turn).
+    /// Uses std::sync::RwLock because requires_approval() is sync and called from async context.
     default_channel: Arc<RwLock<Option<String>>>,
     /// Default target (user_id or group_id) for current conversation (set per-turn).
     default_target: Arc<RwLock<Option<String>>>,
@@ -48,8 +48,14 @@ impl MessageTool {
     /// Set the default channel and target for the current conversation turn.
     /// Call this before each agent turn with the incoming message's channel/target.
     pub async fn set_context(&self, channel: Option<String>, target: Option<String>) {
-        *self.default_channel.write().await = channel;
-        *self.default_target.write().await = target;
+        *self
+            .default_channel
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = channel;
+        *self
+            .default_target
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = target;
     }
 }
 
@@ -106,24 +112,32 @@ impl Tool for MessageTool {
         let channel = if let Some(c) = params.get("channel").and_then(|v| v.as_str()) {
             c.to_string()
         } else {
-            self.default_channel.read().await.clone().ok_or_else(|| {
-                ToolError::ExecutionFailed(
+            self.default_channel
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
                     "No channel specified and no active conversation. Provide channel parameter."
                         .to_string(),
                 )
-            })?
+                })?
         };
 
         // Get target: use param or fall back to default
         let target = if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
             t.to_string()
         } else {
-            self.default_target.read().await.clone().ok_or_else(|| {
-                ToolError::ExecutionFailed(
-                    "No target specified and no active conversation. Provide target parameter."
-                        .to_string(),
-                )
-            })?
+            self.default_target
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
+                        "No target specified and no active conversation. Provide target parameter."
+                            .to_string(),
+                    )
+                })?
         };
 
         let attachments: Vec<String> = match params.get("attachments") {
@@ -199,7 +213,10 @@ impl Tool for MessageTool {
         let param_channel = params.get("channel").and_then(|v| v.as_str());
         if let Some(channel) = param_channel {
             // Check if it differs from the default channel
-            let default_channel = self.default_channel.blocking_read();
+            let default_channel = self
+                .default_channel
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(default) = default_channel.as_ref()
                 && channel != default
             {
