@@ -100,6 +100,12 @@ pub struct ExtensionManager {
     /// SSE broadcast sender (set post-construction via `set_sse_sender()`).
     sse_sender:
         RwLock<Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>>,
+    /// Shared registry of pending OAuth flows for gateway-routed callbacks.
+    ///
+    /// Keyed by CSRF `state` parameter. Populated in `start_wasm_oauth()`
+    /// when running in gateway mode, consumed by the web gateway's
+    /// `/auth/callback` handler.
+    pending_oauth_flows: crate::cli::oauth_defaults::PendingOAuthRegistry,
 }
 
 impl ExtensionManager {
@@ -141,6 +147,7 @@ impl ExtensionManager {
             active_channel_names: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
             sse_sender: RwLock::new(None),
+            pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
         }
     }
 
@@ -226,6 +233,14 @@ impl ExtensionManager {
         sender: tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>,
     ) {
         *self.sse_sender.write().await = Some(sender);
+    }
+
+    /// Returns the pending OAuth flow registry for sharing with the web gateway.
+    ///
+    /// The gateway's `/auth/callback` handler uses this to look up pending flows
+    /// by CSRF `state` parameter and complete the token exchange.
+    pub fn pending_oauth_flows(&self) -> &crate::cli::oauth_defaults::PendingOAuthRegistry {
+        &self.pending_oauth_flows
     }
 
     /// Broadcast an extension status change to the web UI via SSE.
@@ -1819,7 +1834,7 @@ impl ExtensionManager {
             )
             .await;
 
-        // Cancel any existing pending auth for this tool (frees port 9876)
+        // Cancel any existing pending auth for this tool (frees port 9876 in TCP mode)
         {
             let mut pending = self.pending_auth.write().await;
             if let Some(old) = pending.remove(name)
@@ -1828,11 +1843,11 @@ impl ExtensionManager {
                 handle.abort();
             }
         }
-
-        // Bind callback listener
-        let listener = oauth_defaults::bind_callback_listener()
-            .await
-            .map_err(|e| format!("Failed to start OAuth callback listener: {}", e))?;
+        // Also clean up any gateway-mode pending flows for this tool
+        {
+            let mut flows = self.pending_oauth_flows.write().await;
+            flows.retain(|_, flow| flow.extension_name != name);
+        }
 
         let redirect_uri = format!("{}/callback", oauth_defaults::callback_url());
 
@@ -1854,129 +1869,249 @@ impl ExtensionManager {
         let code_verifier = oauth_result.code_verifier;
         let expected_state = oauth_result.state;
 
-        // Spawn background task: wait for callback → exchange code → validate → store tokens
         let display_name = auth
             .display_name
             .clone()
             .unwrap_or_else(|| name.to_string());
-        let token_url = oauth.token_url.clone();
-        let access_token_field = oauth.access_token_field.clone();
-        let secret_name = auth.secret_name.clone();
-        let provider = auth.provider.clone();
-        let validation_endpoint = auth.validation_endpoint.clone();
-        let user_id = self.user_id.clone();
-        let secrets = Arc::clone(&self.secrets);
-        let sse_sender = self.sse_sender.read().await.clone();
-        let ext_name = name.to_string();
 
-        let task_handle = tokio::spawn(async move {
-            let result: Result<(), String> = async {
-                let code = oauth_defaults::wait_for_callback(
-                    listener,
-                    "/callback",
-                    "code",
-                    &display_name,
-                    Some(&expected_state),
+        if oauth_defaults::use_gateway_callback() {
+            // Gateway mode: store pending flow state for the web gateway's
+            // `/oauth/callback` handler to complete the exchange. No TCP listener
+            // needed — the OAuth provider redirects to the gateway URL.
+            oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
+
+            // Wrap the CSRF nonce with instance name for platform routing.
+            // Nginx at auth.DOMAIN parses `instance:nonce` to route the callback
+            // to the correct container. The flow is keyed by the raw nonce.
+            let platform_state = oauth_defaults::build_platform_state(&expected_state);
+            let auth_url = if platform_state != expected_state {
+                auth_url.replace(
+                    &format!("state={}", urlencoding::encode(&expected_state)),
+                    &format!("state={}", urlencoding::encode(&platform_state)),
                 )
-                .await
-                .map_err(|e| e.to_string())?;
-
-                let token_response = oauth_defaults::exchange_oauth_code(
-                    &token_url,
-                    &client_id,
-                    client_secret.as_deref(),
-                    &code,
-                    &redirect_uri,
-                    code_verifier.as_deref(),
-                    &access_token_field,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-
-                // Validate the token before storing (catches wrong account, etc.)
-                if let Some(ref validation) = validation_endpoint {
-                    oauth_defaults::validate_oauth_token(&token_response.access_token, validation)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                }
-
-                oauth_defaults::store_oauth_tokens(
-                    secrets.as_ref(),
-                    &user_id,
-                    &secret_name,
-                    provider.as_deref(),
-                    &token_response.access_token,
-                    token_response.refresh_token.as_deref(),
-                    token_response.expires_in,
-                    &merged_scopes,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-
-                Ok(())
-            }
-            .await;
-
-            // Broadcast SSE event
-            let (success, message) = match result {
-                Ok(()) => (true, format!("{} authenticated successfully", display_name)),
-                Err(ref e) => (
-                    false,
-                    format!("{} authentication failed: {}", display_name, e),
-                ),
+            } else {
+                auth_url
             };
 
-            match &result {
-                Ok(()) => {
-                    tracing::info!(
-                        tool = %ext_name,
-                        "OAuth completed successfully"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        tool = %ext_name,
-                        error = %e,
-                        "WASM tool OAuth failed"
-                    );
-                }
-            }
-
-            if let Some(ref sender) = sse_sender {
-                let _ = sender.send(crate::channels::web::types::SseEvent::AuthCompleted {
-                    extension_name: ext_name,
-                    success,
-                    message,
-                });
-            }
-        });
-
-        // Store pending auth with task handle
-        self.pending_auth.write().await.insert(
-            name.to_string(),
-            PendingAuth {
-                _name: name.to_string(),
-                _kind: ExtensionKind::WasmTool,
+            let flow = oauth_defaults::PendingOAuthFlow {
+                extension_name: name.to_string(),
+                display_name: display_name.clone(),
+                token_url: oauth.token_url.clone(),
+                client_id: client_id.clone(),
+                client_secret: client_secret.clone(),
+                redirect_uri: redirect_uri.clone(),
+                code_verifier,
+                access_token_field: oauth.access_token_field.clone(),
+                secret_name: auth.secret_name.clone(),
+                provider: auth.provider.clone(),
+                validation_endpoint: auth.validation_endpoint.clone(),
+                scopes: merged_scopes,
+                user_id: self.user_id.clone(),
+                secrets: Arc::clone(&self.secrets),
+                sse_sender: self.sse_sender.read().await.clone(),
+                gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
                 created_at: std::time::Instant::now(),
-                task_handle: Some(task_handle),
-            },
-        );
+            };
 
-        Ok(AuthResult {
-            name: name.to_string(),
-            kind: ExtensionKind::WasmTool,
-            auth_url: Some(auth_url),
-            callback_type: Some("local".to_string()),
-            instructions: None,
-            setup_url: None,
-            awaiting_token: false,
-            status: "awaiting_authorization".to_string(),
-        })
+            // Key by raw nonce (without instance prefix) — the callback handler
+            // strips the prefix before lookup.
+            self.pending_oauth_flows
+                .write()
+                .await
+                .insert(expected_state, flow);
+
+            // Register pending auth without a task handle (gateway handles completion)
+            self.pending_auth.write().await.insert(
+                name.to_string(),
+                PendingAuth {
+                    _name: name.to_string(),
+                    _kind: ExtensionKind::WasmTool,
+                    created_at: std::time::Instant::now(),
+                    task_handle: None,
+                },
+            );
+
+            Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmTool,
+                auth_url: Some(auth_url),
+                callback_type: Some("gateway".to_string()),
+                instructions: None,
+                setup_url: None,
+                awaiting_token: false,
+                status: "awaiting_authorization".to_string(),
+            })
+        } else {
+            // TCP listener mode: bind port 9876 and spawn a background task
+            // to wait for the callback. This is the original flow for local/desktop use.
+            let listener = oauth_defaults::bind_callback_listener()
+                .await
+                .map_err(|e| format!("Failed to start OAuth callback listener: {}", e))?;
+
+            let token_url = oauth.token_url.clone();
+            let access_token_field = oauth.access_token_field.clone();
+            let secret_name = auth.secret_name.clone();
+            let provider = auth.provider.clone();
+            let validation_endpoint = auth.validation_endpoint.clone();
+            let user_id = self.user_id.clone();
+            let secrets = Arc::clone(&self.secrets);
+            let sse_sender = self.sse_sender.read().await.clone();
+            let ext_name = name.to_string();
+
+            let task_handle = tokio::spawn(async move {
+                let result: Result<(), String> = async {
+                    let code = oauth_defaults::wait_for_callback(
+                        listener,
+                        "/callback",
+                        "code",
+                        &display_name,
+                        Some(&expected_state),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                    let token_response = oauth_defaults::exchange_oauth_code(
+                        &token_url,
+                        &client_id,
+                        client_secret.as_deref(),
+                        &code,
+                        &redirect_uri,
+                        code_verifier.as_deref(),
+                        &access_token_field,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                    // Validate the token before storing (catches wrong account, etc.)
+                    if let Some(ref validation) = validation_endpoint {
+                        oauth_defaults::validate_oauth_token(
+                            &token_response.access_token,
+                            validation,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    }
+
+                    oauth_defaults::store_oauth_tokens(
+                        secrets.as_ref(),
+                        &user_id,
+                        &secret_name,
+                        provider.as_deref(),
+                        &token_response.access_token,
+                        token_response.refresh_token.as_deref(),
+                        token_response.expires_in,
+                        &merged_scopes,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                    Ok(())
+                }
+                .await;
+
+                // Broadcast SSE event
+                let (success, message) = match result {
+                    Ok(()) => (true, format!("{} authenticated successfully", display_name)),
+                    Err(ref e) => (
+                        false,
+                        format!("{} authentication failed: {}", display_name, e),
+                    ),
+                };
+
+                match &result {
+                    Ok(()) => {
+                        tracing::info!(
+                            tool = %ext_name,
+                            "OAuth completed successfully"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %ext_name,
+                            error = %e,
+                            "WASM tool OAuth failed"
+                        );
+                    }
+                }
+
+                if let Some(ref sender) = sse_sender {
+                    let _ = sender.send(crate::channels::web::types::SseEvent::AuthCompleted {
+                        extension_name: ext_name,
+                        success,
+                        message,
+                    });
+                }
+            });
+
+            // Store pending auth with task handle
+            self.pending_auth.write().await.insert(
+                name.to_string(),
+                PendingAuth {
+                    _name: name.to_string(),
+                    _kind: ExtensionKind::WasmTool,
+                    created_at: std::time::Instant::now(),
+                    task_handle: Some(task_handle),
+                },
+            );
+
+            Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmTool,
+                auth_url: Some(auth_url),
+                callback_type: Some("local".to_string()),
+                instructions: None,
+                setup_url: None,
+                awaiting_token: false,
+                status: "awaiting_authorization".to_string(),
+            })
+        }
+    }
+
+    /// Returns `true` if a setup secret is an OAuth credential (client_id or client_secret)
+    /// that can be resolved without user input — via inline capabilities, env var, or
+    /// builtin defaults.
+    ///
+    /// Used by `check_tool_auth_status()` and `get_setup_schema()` to hide setup fields
+    /// that the user doesn't need to fill (e.g., Google tools with builtin credentials).
+    fn is_auto_resolved_oauth_field(
+        secret_name: &str,
+        cap_file: &crate::tools::wasm::CapabilitiesFile,
+    ) -> bool {
+        let lower = secret_name.to_lowercase();
+        let is_client_id = lower.ends_with("client_id") || lower == "client_id";
+        let is_client_secret = lower.ends_with("client_secret") || lower == "client_secret";
+        if !is_client_id && !is_client_secret {
+            return false;
+        }
+        let Some(ref auth) = cap_file.auth else {
+            return false;
+        };
+        let Some(ref oauth) = auth.oauth else {
+            return false;
+        };
+        let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
+
+        if is_client_id {
+            oauth.client_id.is_some()
+                || oauth
+                    .client_id_env
+                    .as_ref()
+                    .is_some_and(|e| std::env::var(e).is_ok())
+                || builtin.is_some()
+        } else {
+            oauth.client_secret.is_some()
+                || oauth
+                    .client_secret_env
+                    .as_ref()
+                    .is_some_and(|e| std::env::var(e).is_ok())
+                || builtin.is_some()
+        }
     }
 
     /// Check whether a WASM tool's required setup secrets are provided.
     ///
     /// Returns `(authenticated, needs_setup)` — same semantics as `check_channel_auth_status`.
+    /// Skips OAuth credential fields that resolve automatically (builtin/env).
     async fn check_tool_auth_status(&self, name: &str) -> (bool, bool) {
         let Some(cap_file) = self.load_tool_capabilities(name).await else {
             return (true, false);
@@ -1990,6 +2125,9 @@ impl ExtensionManager {
         let mut all_provided = true;
         for secret in &setup.required_secrets {
             if secret.optional {
+                continue;
+            }
+            if Self::is_auto_resolved_oauth_field(&secret.name, &cap_file) {
                 continue;
             }
             if !self
@@ -2759,6 +2897,10 @@ impl ExtensionManager {
                 let mut fields = Vec::new();
                 if let Some(setup) = &cap_file.setup {
                     for secret in &setup.required_secrets {
+                        // Skip OAuth client_id/secret fields that resolve automatically
+                        if Self::is_auto_resolved_oauth_field(&secret.name, &cap_file) {
+                            continue;
+                        }
                         let provided = self
                             .secrets
                             .exists(&self.user_id, &secret.name)

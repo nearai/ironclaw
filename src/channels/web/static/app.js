@@ -1987,7 +1987,11 @@ function renderExtensionCard(ext) {
       actions.appendChild(activateBtn);
     }
 
-    if (ext.needs_setup || ext.has_auth) {
+    // Show Configure/Reconfigure button when there are secrets to enter.
+    // Skip when has_auth is true but needs_setup is false and not yet authenticated —
+    // this means OAuth credentials resolve automatically (builtin/env) and the user
+    // just needs to complete the OAuth flow, not fill in a config form.
+    if (ext.needs_setup || (ext.has_auth && ext.authenticated)) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
       configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
