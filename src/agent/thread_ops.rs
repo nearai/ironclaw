@@ -751,14 +751,17 @@ impl Agent {
                 .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
                 .await;
 
+            let tool_ref = self.tools().get(&pending.tool_name).await;
             let _ = self
                 .channels
                 .send_status(
                     &message.channel,
-                    StatusUpdate::ToolCompleted {
-                        name: pending.tool_name.clone(),
-                        success: tool_result.is_ok(),
-                    },
+                    StatusUpdate::tool_completed(
+                        pending.tool_name.clone(),
+                        &tool_result,
+                        &pending.parameters,
+                        tool_ref.as_deref(),
+                    ),
                     &message.metadata,
                 )
                 .await;
@@ -908,14 +911,17 @@ impl Agent {
                         .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                         .await;
 
+                    let deferred_tool = self.tools().get(&tc.name).await;
                     let _ = self
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::ToolCompleted {
-                                name: tc.name.clone(),
-                                success: result.is_ok(),
-                            },
+                            StatusUpdate::tool_completed(
+                                tc.name.clone(),
+                                &result,
+                                &tc.arguments,
+                                deferred_tool.as_deref(),
+                            ),
                             &message.metadata,
                         )
                         .await;
@@ -957,13 +963,16 @@ impl Agent {
                         )
                         .await;
 
+                        let par_tool = tools.get(&tc.name).await;
                         let _ = channels
                             .send_status(
                                 &channel,
-                                StatusUpdate::ToolCompleted {
-                                    name: tc.name.clone(),
-                                    success: result.is_ok(),
-                                },
+                                StatusUpdate::tool_completed(
+                                    tc.name.clone(),
+                                    &result,
+                                    &tc.arguments,
+                                    par_tool.as_deref(),
+                                ),
                                 &metadata,
                             )
                             .await;

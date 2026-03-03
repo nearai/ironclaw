@@ -180,7 +180,7 @@ function connectSSE() {
   eventSource.addEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    completeToolCard(data.name, data.success);
+    completeToolCard(data.name, data.success, data.error, data.parameters);
   });
 
   eventSource.addEventListener('tool_result', (e) => {
@@ -222,17 +222,22 @@ function connectSSE() {
 
   eventSource.addEventListener('auth_required', (e) => {
     const data = JSON.parse(e.data);
-    showAuthCard(data);
+    if (data.auth_url) {
+      // OAuth flow: show the auth card with an OAuth button + optional token paste field.
+      showAuthCard(data);
+    } else {
+      // Setup flow: fetch the extension's credential schema and show the multi-field
+      // configure modal (the same UI used by the Extensions tab "Setup" button).
+      showConfigureModal(data.extension_name);
+    }
   });
 
   eventSource.addEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
+    // Dismiss whichever UI path was active: auth card (OAuth) or configure modal (setup).
     removeAuthCard(data.extension_name);
-    if (data.success) {
-      showToast(data.message, 'success');
-    } else {
-      showToast(data.message, 'error');
-    }
+    closeConfigureModal();
+    showToast(data.message, data.success ? 'success' : 'error');
     // Refresh extensions list so status indicators update
     if (currentTab === 'extensions') loadExtensions();
     enableChatInput();
@@ -590,7 +595,7 @@ function addToolCard(name) {
   container.scrollTop = container.scrollHeight;
 }
 
-function completeToolCard(name, success) {
+function completeToolCard(name, success, error, parameters) {
   const entries = _activeToolCards[name];
   if (!entries || entries.length === 0) return;
   // Find first running card
@@ -611,6 +616,27 @@ function completeToolCard(name, success) {
     ? '<span class="activity-icon-success">&#10003;</span>'
     : '<span class="activity-icon-fail">&#10007;</span>';
   entry.card.setAttribute('data-status', success ? 'success' : 'fail');
+
+  // For failed tools, populate the body with error details and auto-expand
+  if (!success && (error || parameters)) {
+    const output = entry.card.querySelector('.activity-tool-output');
+    if (output) {
+      let detail = '';
+      if (parameters) {
+        detail += 'Input:\n' + parameters + '\n\n';
+      }
+      if (error) {
+        detail += 'Error:\n' + error;
+      }
+      output.textContent = detail;
+
+      // Auto-expand so the error is immediately visible
+      const body = entry.card.querySelector('.activity-tool-body');
+      const chevron = entry.card.querySelector('.activity-tool-chevron');
+      if (body) body.style.display = 'block';
+      if (chevron) chevron.classList.add('expanded');
+    }
+  }
 }
 
 function setToolCardOutput(name, preview) {
