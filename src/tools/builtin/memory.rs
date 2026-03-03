@@ -95,16 +95,17 @@ impl Tool for MemorySearchTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
 
+        let result_count = results.len();
         let output = serde_json::json!({
             "query": query,
-            "results": results.iter().map(|r| serde_json::json!({
+            "results": results.into_iter().map(|r| serde_json::json!({
                 "content": r.content,
                 "score": r.score,
                 "path": r.document_path,
                 "document_id": r.document_id.to_string(),
                 "is_hybrid_match": r.is_hybrid(),
             })).collect::<Vec<_>>(),
-            "result_count": results.len(),
+            "result_count": result_count,
         });
 
         Ok(ToolOutput::success(output, start.elapsed()))
