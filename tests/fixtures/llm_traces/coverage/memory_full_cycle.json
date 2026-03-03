@@ -1,0 +1,80 @@
+{
+  "model_name": "test-memory-cycle",
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "memory" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mem_write",
+            "name": "memory_write",
+            "arguments": {
+              "target": "test/coverage-note.md",
+              "content": "# Coverage Test Note\n\nThis document was created by the memory full cycle test.\n\nKey fact: The answer is 42."
+            }
+          }
+        ],
+        "input_tokens": 80,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mem_tree",
+            "name": "memory_tree",
+            "arguments": {
+              "path": "",
+              "depth": 2
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 15
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mem_read",
+            "name": "memory_read",
+            "arguments": {
+              "path": "test/coverage-note.md"
+            }
+          }
+        ],
+        "input_tokens": 150,
+        "output_tokens": 15
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mem_search",
+            "name": "memory_search",
+            "arguments": {
+              "query": "answer is 42"
+            }
+          }
+        ],
+        "input_tokens": 180,
+        "output_tokens": 15
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I wrote a note to memory, listed the tree, read it back, and searched for it. All four memory operations completed successfully.",
+        "input_tokens": 220,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

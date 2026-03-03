@@ -1,0 +1,30 @@
+{
+  "model_name": "spot-robust-correct-tool",
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "time"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_time_1",
+            "name": "time",
+            "arguments": { "operation": "now" }
+          }
+        ],
+        "input_tokens": 40,
+        "output_tokens": 15
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "It's currently 2026-03-03 10:30 AM PST.",
+        "input_tokens": 80,
+        "output_tokens": 15
+      }
+    }
+  ]
+}
