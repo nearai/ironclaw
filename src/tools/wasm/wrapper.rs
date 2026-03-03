@@ -1115,26 +1115,26 @@ fn coerce_params_to_schema(
             None => continue,
         };
 
-        if let Some(current_value) = obj.get_mut(key) {
-            if let Some(s) = current_value.as_str() {
-                if declared_type == "string" {
-                    continue;
-                }
+        if let Some(current_value) = obj.get_mut(key)
+            && let Some(s) = current_value.as_str()
+        {
+            if declared_type == "string" {
+                continue;
+            }
 
-                let coerced = match declared_type {
-                    "number" => s.parse::<f64>().ok().map(serde_json::Value::from),
-                    "integer" => s.parse::<i64>().ok().map(serde_json::Value::from),
-                    "boolean" => match s.to_lowercase().as_str() {
-                        "true" => Some(serde_json::json!(true)),
-                        "false" => Some(serde_json::json!(false)),
-                        _ => None,
-                    },
+            let coerced = match declared_type {
+                "number" => s.parse::<f64>().ok().map(serde_json::Value::from),
+                "integer" => s.parse::<i64>().ok().map(serde_json::Value::from),
+                "boolean" => match s.to_lowercase().as_str() {
+                    "true" => Some(serde_json::json!(true)),
+                    "false" => Some(serde_json::json!(false)),
                     _ => None,
-                };
+                },
+                _ => None,
+            };
 
-                if let Some(new_val) = coerced {
-                    *current_value = new_val;
-                }
+            if let Some(new_val) = coerced {
+                *current_value = new_val;
             }
         }
     }
