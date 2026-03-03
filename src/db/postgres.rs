@@ -223,6 +223,13 @@ impl JobStore for PgBackend {
         self.store.agent_job_summary().await
     }
 
+    async fn get_agent_job_failure_reason(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        self.store.get_agent_job_failure_reason(id).await
+    }
+
     async fn save_action(&self, job_id: Uuid, action: &ActionRecord) -> Result<(), DatabaseError> {
         self.store.save_action(job_id, action).await
     }

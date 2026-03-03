@@ -332,6 +332,15 @@ pub struct JobDetailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_mode: Option<String>,
     pub transitions: Vec<TransitionInfo>,
+    /// Whether this job can be restarted from the UI.
+    #[serde(default)]
+    pub can_restart: bool,
+    /// Whether follow-up prompts can be sent to this job.
+    #[serde(default)]
+    pub can_prompt: bool,
+    /// The kind of job: "sandbox" or "agent".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_kind: Option<String>,
 }
 
 // --- Project Files ---

@@ -506,6 +506,7 @@ async fn async_main() -> anyhow::Result<()> {
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
         }
+        gw = gw.with_scheduler(scheduler_slot.clone());
         if let Some(ref sr) = components.skill_registry {
             gw = gw.with_skill_registry(Arc::clone(sr));
         }
@@ -646,9 +647,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Wire SSE sender into extension manager for broadcasting status events.
     if let Some(ref ext_mgr) = components.extension_manager
-        && let Some(sender) = sse_sender
+        && let Some(ref sender) = sse_sender
     {
-        ext_mgr.set_sse_sender(sender).await;
+        ext_mgr.set_sse_sender(sender.clone()).await;
     }
 
     let deps = AgentDeps {
@@ -664,6 +665,7 @@ async fn async_main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
+        sse_tx: sse_sender,
     };
 
     let agent = Agent::new(

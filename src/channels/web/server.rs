@@ -156,6 +156,8 @@ pub struct GatewayState {
     pub skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
     pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
+    /// Scheduler for sending follow-up messages to running agent jobs.
+    pub scheduler: Option<crate::tools::builtin::SchedulerSlot>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
