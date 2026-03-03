@@ -2410,6 +2410,7 @@ function restartJob(jobId) {
     })
     .catch((err) => {
       showToast('Failed to restart job: ' + err.message, 'error');
+      loadJobs();
     });
 }
 
