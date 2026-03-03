@@ -150,7 +150,11 @@ pub async fn skills_install_handler(
     } else if let Some(ref catalog) = state.skill_catalog {
         // Prefer slug (e.g. "owner/skill-name") over display name for the
         // download URL, since the registry endpoint expects a slug.
-        let download_key = req.slug.as_deref().filter(|s| !s.is_empty()).unwrap_or(&req.name);
+        let download_key = req
+            .slug
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&req.name);
         let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), download_key);
         crate::tools::builtin::skill_tools::fetch_skill_content(&url)
             .await
