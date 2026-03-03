@@ -4,7 +4,7 @@
 //! This matches NEAR blockchain patterns for deterministic, isolated execution.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +17,55 @@ use crate::tools::wasm::limits::{FuelConfig, ResourceLimits};
 /// Default epoch tick interval. Each tick increments the engine's epoch counter,
 /// which causes any store with an expired epoch deadline to trap.
 pub const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Enable wasmtime's persistent compilation cache for a [`Config`].
+///
+/// On Unix, this delegates to `cache_config_load_default()` which uses a
+/// shared cache directory. On Windows, each engine gets its own subdirectory
+/// (keyed by `label`) to avoid OS error 33 (`ERROR_LOCK_VIOLATION`) when
+/// multiple engines memory-map files in the same cache directory. See #448.
+///
+/// If `explicit_dir` is `Some`, it is used as the cache directory on all
+/// platforms, bypassing the default.
+pub fn enable_compilation_cache(
+    wasmtime_config: &mut Config,
+    label: &str,
+    explicit_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    // If the caller provided an explicit directory, or we're on Windows and
+    // need per-engine isolation, write a TOML config with a custom directory.
+    let custom_dir = match explicit_dir {
+        Some(dir) => Some(dir.to_path_buf()),
+        #[cfg(windows)]
+        None => {
+            let base = dirs::cache_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("ironclaw");
+            Some(base.join(format!("wasmtime-{}", label)))
+        }
+        #[cfg(not(windows))]
+        None => {
+            let _ = label;
+            None
+        }
+    };
+
+    match custom_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(&dir)?;
+            let toml_path = dir.join("wasmtime-cache.toml");
+            let toml_content =
+                format!("[cache]\nenabled = true\ndirectory = '{}'\n", dir.display());
+            std::fs::write(&toml_path, toml_content)?;
+            wasmtime_config.cache_config_load(&toml_path)?;
+            Ok(())
+        }
+        None => {
+            wasmtime_config.cache_config_load_default()?;
+            Ok(())
+        }
+    }
+}
 
 /// Configuration for the WASM runtime.
 #[derive(Debug, Clone)]
@@ -136,7 +185,14 @@ impl WasmToolRuntime {
         // Enable persistent compilation cache. Wasmtime serializes compiled native
         // code to disk (~/.cache/wasmtime by default), so subsequent startups
         // deserialize instead of recompiling — typically 10-50x faster.
-        if let Err(e) = wasmtime_config.cache_config_load_default() {
+        //
+        // On Windows, each Engine gets its own cache subdirectory to avoid
+        // OS error 33 (ERROR_LOCK_VIOLATION) when multiple engines share the
+        // default cache and Windows holds exclusive locks on memory-mapped
+        // files. See #448.
+        if let Err(e) =
+            enable_compilation_cache(&mut wasmtime_config, "tools", config.cache_dir.as_deref())
+        {
             tracing::warn!("Failed to enable wasmtime compilation cache: {}", e);
         }
 
