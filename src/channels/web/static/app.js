@@ -2406,10 +2406,11 @@ function restartJob(jobId) {
   apiFetch('/api/jobs/' + jobId + '/restart', { method: 'POST' })
     .then((res) => {
       showToast('Job restarted as ' + (res.new_job_id || '').substring(0, 8), 'success');
-      loadJobs();
     })
     .catch((err) => {
       showToast('Failed to restart job: ' + err.message, 'error');
+    })
+    .finally(() => {
       loadJobs();
     });
 }
