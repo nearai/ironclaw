@@ -1071,6 +1071,18 @@ mod tests {
     }
 
     #[test]
+    fn test_wasm_channel_owner_ids_via_set() {
+        let mut settings = Settings::default();
+        settings
+            .set("channels.wasm_channel_owner_ids.telegram", "987654321")
+            .unwrap();
+        assert_eq!(
+            settings.channels.wasm_channel_owner_ids.get("telegram"),
+            Some(&987654321)
+        );
+    }
+
+    #[test]
     fn test_llm_backend_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
