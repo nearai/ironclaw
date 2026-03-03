@@ -165,8 +165,7 @@ pub async fn routines_trigger_handler(
         routine_id,
         chrono::Utc::now().timestamp_millis()
     );
-    let msg = IncomingMessage::new("gateway", &state.user_id, content)
-        .with_thread(thread_id);
+    let msg = IncomingMessage::new("gateway", &state.user_id, content).with_thread(thread_id);
 
     let tx_guard = state.msg_tx.read().await;
     let tx = tx_guard.as_ref().ok_or((
