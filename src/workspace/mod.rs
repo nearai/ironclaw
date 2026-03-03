@@ -863,16 +863,15 @@ impl Workspace {
         // files exist yet). This prevents existing users from getting a
         // spurious first-run ritual after upgrading.
         if self.read(paths::BOOTSTRAP).await.is_err() {
-            let is_fresh_workspace = matches!(
-                self.read(paths::AGENTS).await,
-                Err(WorkspaceError::DocumentNotFound { .. })
-            ) && matches!(
-                self.read(paths::SOUL).await,
-                Err(WorkspaceError::DocumentNotFound { .. })
-            ) && matches!(
-                self.read(paths::USER).await,
-                Err(WorkspaceError::DocumentNotFound { .. })
+            let (agents_res, soul_res, user_res) = tokio::join!(
+                self.read(paths::AGENTS),
+                self.read(paths::SOUL),
+                self.read(paths::USER),
             );
+            let is_fresh_workspace =
+                matches!(agents_res, Err(WorkspaceError::DocumentNotFound { .. }))
+                    && matches!(soul_res, Err(WorkspaceError::DocumentNotFound { .. }))
+                    && matches!(user_res, Err(WorkspaceError::DocumentNotFound { .. }));
 
             if is_fresh_workspace {
                 if let Err(e) = self.write(paths::BOOTSTRAP, BOOTSTRAP_SEED).await {
@@ -915,13 +914,17 @@ impl Workspace {
 
         let mut count = 0;
         for entry in entries {
-            let entry = entry.map_err(|e| WorkspaceError::IoError {
-                reason: format!("failed to read directory entry: {}", e),
-            })?;
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("Failed to read directory entry in {}: {}", dir.display(), e);
+                    continue;
+                }
+            };
 
             let path = entry.path();
             // Only import .md files
-            if path.extension().is_none_or(|ext| ext != "md") {
+            if path.extension() != Some(std::ffi::OsStr::new("md")) {
                 continue;
             }
 
@@ -939,9 +942,13 @@ impl Workspace {
                 }
             }
 
-            let content = std::fs::read_to_string(&path).map_err(|e| WorkspaceError::IoError {
-                reason: format!("failed to read {}: {}", path.display(), e),
-            })?;
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("Failed to read import file {}: {}", path.display(), e);
+                    continue;
+                }
+            };
 
             if content.trim().is_empty() {
                 continue;
