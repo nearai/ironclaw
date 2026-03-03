@@ -911,11 +911,14 @@ async fn setup_wasm_channels(
     let pairing_store = Arc::new(PairingStore::new());
     let settings_store: Option<Arc<dyn ironclaw::db::SettingsStore>> =
         database.map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
-    let loader = WasmChannelLoader::new(
+    let mut loader = WasmChannelLoader::new(
         Arc::clone(&runtime),
         Arc::clone(&pairing_store),
         settings_store,
     );
+    if let Some(secrets) = secrets_store {
+        loader = loader.with_secrets_store(Arc::clone(secrets));
+    }
 
     let results = match loader
         .load_from_dir(&config.channels.wasm_channels_dir)
