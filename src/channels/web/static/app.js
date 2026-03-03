@@ -1931,14 +1931,6 @@ function renderExtensionCard(ext) {
     card.appendChild(errorDiv);
   }
 
-  // Show "coming soon" note for non-Telegram channels that are configured but not fully supported yet
-  if (ext.kind === 'wasm_channel' && ext.name !== 'telegram'
-      && (ext.activation_status === 'configured' || ext.active)) {
-    const noteDiv = document.createElement('div');
-    noteDiv.className = 'ext-note';
-    noteDiv.textContent = 'Full integration coming soon. Use the CLI to complete setup.';
-    card.appendChild(noteDiv);
-  }
 
   const actions = document.createElement('div');
   actions.className = 'ext-actions';
@@ -2168,10 +2160,8 @@ function submitConfigureModal(name, fields) {
       if (res.success) {
         if (res.activated) {
           showToast('Configured and activated ' + name, 'success');
-        } else if (res.needs_restart) {
-          showToast('Configured ' + name + '. Use Reconfigure to re-enter credentials and activate.', 'info');
         } else {
-          showToast(res.message, 'success');
+          showToast(res.message || 'Configuration saved but activation failed', 'warning');
         }
       } else {
         showToast(res.message || 'Configuration failed', 'error');
@@ -2235,7 +2225,7 @@ function approvePairing(channel, code, container) {
   }).then(res => {
     if (res.success) {
       showToast('Pairing approved', 'success');
-      loadPairingRequests(channel, container);
+      loadExtensions();
     } else {
       showToast(res.message || 'Approve failed', 'error');
     }
@@ -2258,53 +2248,6 @@ function stopPairingPoll() {
   }
 }
 
-// --- Gateway restart ---
-
-function restartGateway() {
-  if (!confirm('Restart IronClaw gateway? Active connections will be dropped.')) return;
-
-  apiFetch('/api/gateway/restart', { method: 'POST' })
-    .then(function() {
-      showRestartOverlay();
-    })
-    .catch(function() {
-      showRestartOverlay();
-    });
-}
-
-function showRestartOverlay() {
-  var overlay = document.createElement('div');
-  overlay.className = 'restart-overlay';
-  overlay.innerHTML = '<div class="restart-message">'
-    + '<div class="restart-spinner"></div>'
-    + '<h2>Restarting IronClaw...</h2>'
-    + '<p>Waiting for server to come back online</p>'
-    + '</div>';
-  document.body.appendChild(overlay);
-
-  var pollCount = 0;
-  var pollTimer = setInterval(function() {
-    pollCount++;
-    if (pollCount > 30) { // 60 seconds
-      clearInterval(pollTimer);
-      overlay.querySelector('h2').textContent = 'Restart timed out';
-      overlay.querySelector('p').textContent = 'Server did not come back within 60 seconds. Check logs.';
-      overlay.querySelector('.restart-spinner').style.display = 'none';
-      return;
-    }
-    fetch('/api/gateway/status', {
-      headers: { 'Authorization': 'Bearer ' + token },
-    })
-    .then(function(r) {
-      if (r.ok) {
-        clearInterval(pollTimer);
-        window.location.reload();
-      }
-    })
-    .catch(function() { /* still restarting */ });
-  }, 2000);
-}
-
 // --- WASM channel stepper ---
 
 function renderWasmChannelStepper(ext) {
@@ -2312,23 +2255,17 @@ function renderWasmChannelStepper(ext) {
   stepper.className = 'ext-stepper';
 
   var status = ext.activation_status || 'installed';
-  var isTelegram = ext.name === 'telegram';
 
-  // Telegram gets a 3-step stepper (Installed → Configured → Active/Pairing).
-  // Other channels only get 2 steps (Installed → Configured) since full
-  // integration isn't available in the web UI yet.
   var steps = [
     { label: 'Installed', key: 'installed' },
     { label: 'Configured', key: 'configured' },
+    { label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' },
   ];
-  if (isTelegram) {
-    steps.push({ label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' });
-  }
 
   var reachedIdx;
-  if (status === 'active') reachedIdx = isTelegram ? 2 : 1;
+  if (status === 'active') reachedIdx = 2;
   else if (status === 'pairing') reachedIdx = 2;
-  else if (status === 'failed') reachedIdx = isTelegram ? 2 : 1;
+  else if (status === 'failed') reachedIdx = 2;
   else if (status === 'configured') reachedIdx = 1;
   else reachedIdx = 0;
 

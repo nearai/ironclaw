@@ -27,6 +27,10 @@ pub mod paths {
     pub const DAILY_DIR: &str = "daily/";
     /// Context directory (for identity-related docs).
     pub const CONTEXT_DIR: &str = "context/";
+    /// User-editable notes for environment-specific tool guidance.
+    pub const TOOLS: &str = "TOOLS.md";
+    /// First-run ritual file; self-deletes after onboarding completes.
+    pub const BOOTSTRAP: &str = "BOOTSTRAP.md";
 }
 
 /// A memory document stored in the database.
