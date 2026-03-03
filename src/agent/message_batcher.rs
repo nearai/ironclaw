@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 use tracing::{debug, trace};
 
@@ -173,9 +173,12 @@ impl MessageBatcher {
                 channel = %key.1,
                 "Starting new batch"
             );
-            pending.insert(key.clone(), PendingBatch {
-                messages: vec![message],
-            });
+            pending.insert(
+                key.clone(),
+                PendingBatch {
+                    messages: vec![message],
+                },
+            );
 
             // Drop the lock before spawning the timer task
             drop(pending);
@@ -223,9 +226,7 @@ impl MessageBatcher {
         });
 
         let mut timers = self.timers.lock().await;
-        timers.insert(key, TimerHandle {
-            handle,
-        });
+        timers.insert(key, TimerHandle { handle });
     }
 
     /// Flush a specific batch (must hold pending lock).
@@ -279,7 +280,8 @@ impl MessageBatcher {
         let first = &batch.messages[0];
 
         // Join message contents with double newlines
-        let content = batch.messages
+        let content = batch
+            .messages
             .iter()
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
@@ -348,10 +350,7 @@ mod tests {
         batcher.push(msg).await;
 
         // Should receive immediately
-        let received = tokio::time::timeout(
-            Duration::from_millis(100),
-            rx.recv()
-        ).await;
+        let received = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
 
         assert!(received.is_ok());
     }
@@ -372,10 +371,7 @@ mod tests {
         batcher.push(test_message("msg3")).await;
 
         // Should flush immediately due to max_messages
-        let received = tokio::time::timeout(
-            Duration::from_millis(50),
-            rx.recv()
-        ).await;
+        let received = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
 
         assert!(received.is_ok());
         let merged = received.unwrap().unwrap();
@@ -396,17 +392,11 @@ mod tests {
         batcher.push(test_message("delayed")).await;
 
         // Should not receive immediately
-        let immediate = tokio::time::timeout(
-            Duration::from_millis(20),
-            rx.recv()
-        ).await;
+        let immediate = tokio::time::timeout(Duration::from_millis(20), rx.recv()).await;
         assert!(immediate.is_err());
 
         // Should receive after timer expires
-        let received = tokio::time::timeout(
-            Duration::from_millis(100),
-            rx.recv()
-        ).await;
+        let received = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
 
         assert!(received.is_ok());
     }
@@ -440,7 +430,11 @@ mod tests {
             }
         }
 
-        assert_eq!(received_messages.len(), 2, "Expected to receive two messages");
+        assert_eq!(
+            received_messages.len(),
+            2,
+            "Expected to receive two messages"
+        );
         assert!(
             received_messages.contains(&"user1_msg".to_string()),
             "Message from user1 not found"
