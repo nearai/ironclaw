@@ -915,12 +915,10 @@ fn strip_internal_tool_call_text(text: &str) -> String {
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            !(
-                (trimmed.starts_with("[Called tool ") && trimmed.ends_with(']'))
+            !((trimmed.starts_with("[Called tool ") && trimmed.ends_with(']'))
                 || (trimmed.starts_with("[Tool ")
                     && trimmed.contains(" returned:")
-                    && trimmed.ends_with(']'))
-            )
+                    && trimmed.ends_with(']')))
         })
         .fold(String::new(), |mut acc, s| {
             if !acc.is_empty() {
