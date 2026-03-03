@@ -217,7 +217,7 @@ impl NearAiChatProvider {
                     // Use max(0) so past/present dates yield Duration::ZERO
                     // rather than None (which would cause an immediate retry).
                     return Some(std::time::Duration::from_secs(
-                        delta.num_seconds().max(0) as u64,
+                        delta.num_seconds().max(0) as u64
                     ));
                 }
                 None
