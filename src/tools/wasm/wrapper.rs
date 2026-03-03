@@ -1117,30 +1117,27 @@ fn coerce_params_to_schema(
             None => continue,
         };
 
-        let current = match obj.get(key) {
-            Some(v) => v.clone(),
-            None => continue,
-        };
+        if let Some(current_value) = obj.get_mut(key) {
+            if let Some(s) = current_value.as_str() {
+                if declared_type == "string" {
+                    continue;
+                }
 
-        // Only coerce if the current value is a string but the schema expects something else.
-        let s = match current.as_str() {
-            Some(s) if declared_type != "string" => s,
-            _ => continue,
-        };
+                let coerced = match declared_type {
+                    "number" => s.parse::<f64>().ok().map(serde_json::Value::from),
+                    "integer" => s.parse::<i64>().ok().map(serde_json::Value::from),
+                    "boolean" => match s.to_lowercase().as_str() {
+                        "true" => Some(serde_json::json!(true)),
+                        "false" => Some(serde_json::json!(false)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
 
-        let coerced = match declared_type {
-            "number" => s.parse::<f64>().ok().map(|n| serde_json::json!(n)),
-            "integer" => s.parse::<i64>().ok().map(|n| serde_json::json!(n)),
-            "boolean" => match s {
-                "true" => Some(serde_json::json!(true)),
-                "false" => Some(serde_json::json!(false)),
-                _ => None,
-            },
-            _ => None,
-        };
-
-        if let Some(val) = coerced {
-            obj.insert(key.clone(), val);
+                if let Some(new_val) = coerced {
+                    *current_value = new_val;
+                }
+            }
         }
     }
 
@@ -1686,12 +1683,23 @@ mod tests {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "verbose": { "type": "boolean" }
+                "a": { "type": "boolean" },
+                "b": { "type": "boolean" },
+                "c": { "type": "boolean" },
+                "d": { "type": "boolean" }
             }
         });
-        let params = serde_json::json!({"verbose": "true"});
+        let params = serde_json::json!({
+            "a": "true",
+            "b": "false",
+            "c": "True",
+            "d": "FALSE"
+        });
         let result = super::coerce_params_to_schema(params, &schema);
-        assert_eq!(result["verbose"], serde_json::json!(true));
+        assert_eq!(result["a"], serde_json::json!(true));
+        assert_eq!(result["b"], serde_json::json!(false));
+        assert_eq!(result["c"], serde_json::json!(true));
+        assert_eq!(result["d"], serde_json::json!(false));
     }
 
     #[test]
