@@ -188,10 +188,7 @@ mod tests {
             .await
             .unwrap();
 
-        let list_result = list
-            .execute(serde_json::json!({}), &ctx)
-            .await
-            .unwrap();
+        let list_result = list.execute(serde_json::json!({}), &ctx).await.unwrap();
         assert_eq!(list_result.result["count"], 1);
         assert_eq!(list_result.result["secrets"][0]["name"], "openai_key");
         assert!(list_result.result["secrets"][0].get("value").is_none());
@@ -205,10 +202,7 @@ mod tests {
         let ctx = test_ctx();
 
         store
-            .create(
-                &ctx.user_id,
-                CreateSecretParams::new("to_delete", "secret"),
-            )
+            .create(&ctx.user_id, CreateSecretParams::new("to_delete", "secret"))
             .await
             .unwrap();
 

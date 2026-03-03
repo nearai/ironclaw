@@ -189,10 +189,7 @@ impl StatusUpdate {
             error: result.as_ref().err().map(|e| e.to_string()),
             parameters: if !success {
                 let safe = crate::tools::redact_params(params, sensitive);
-                Some(
-                    serde_json::to_string_pretty(&safe)
-                        .unwrap_or_else(|_| safe.to_string()),
-                )
+                Some(serde_json::to_string_pretty(&safe).unwrap_or_else(|_| safe.to_string()))
             } else {
                 None
             },
@@ -330,7 +327,9 @@ mod tests {
             assert!(!success);
             let err_msg = error.as_deref().expect("should have error");
             assert!(err_msg.contains("db error"), "error: {}", err_msg);
-            let param_str = parameters.as_ref().expect("should have parameters on failure");
+            let param_str = parameters
+                .as_ref()
+                .expect("should have parameters on failure");
             assert!(
                 param_str.contains("[REDACTED]"),
                 "sensitive value should be redacted: {}",
@@ -356,8 +355,7 @@ mod tests {
         let params = serde_json::json!({"name": "key", "value": "secret"});
         let ok: Result<String, crate::error::Error> = Ok("done".into());
 
-        let status =
-            StatusUpdate::tool_completed("secret_save".into(), &ok, &params, None);
+        let status = StatusUpdate::tool_completed("secret_save".into(), &ok, &params, None);
 
         if let StatusUpdate::ToolCompleted {
             success,
@@ -384,8 +382,7 @@ mod tests {
             }
             .into());
 
-        let status =
-            StatusUpdate::tool_completed("shell".into(), &err, &params, None);
+        let status = StatusUpdate::tool_completed("shell".into(), &err, &params, None);
 
         if let StatusUpdate::ToolCompleted { parameters, .. } = &status {
             let param_str = parameters.as_ref().expect("should have parameters");

@@ -719,8 +719,7 @@ impl Agent {
                         // Show redacted params in the approval UI — the user already knows
                         // the sensitive value (they provided it); showing it again is
                         // unnecessary and creates a leakage path through channel logs.
-                        let display_params =
-                            redact_params(&tc.arguments, tool.sensitive_params());
+                        let display_params = redact_params(&tc.arguments, tool.sensitive_params());
                         let pending = PendingApproval {
                             request_id: Uuid::new_v4(),
                             tool_name: tc.name.clone(),

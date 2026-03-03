@@ -18,8 +18,8 @@ use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::{ToolRegistry, redact_params};
 use crate::tools::rate_limiter::RateLimitResult;
+use crate::tools::{ToolRegistry, redact_params};
 
 /// Shared dependencies for worker execution.
 ///
