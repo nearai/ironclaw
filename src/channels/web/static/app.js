@@ -1972,11 +1972,20 @@ function renderExtensionCard(ext) {
       actions.appendChild(setupBtn);
     }
   } else {
-    // WASM tools / MCP servers: install = active, Configure for auth
+    // WASM tools / MCP servers
     const activeLabel = document.createElement('span');
     activeLabel.className = 'ext-active-label';
     activeLabel.textContent = ext.active ? 'Active' : 'Installed';
     actions.appendChild(activeLabel);
+
+    // MCP servers may be installed but inactive — show Activate button
+    if (ext.kind === 'mcp_server' && !ext.active) {
+      const activateBtn = document.createElement('button');
+      activateBtn.className = 'btn-ext activate';
+      activateBtn.textContent = 'Activate';
+      activateBtn.addEventListener('click', () => activateExtension(ext.name));
+      actions.appendChild(activateBtn);
+    }
 
     if (ext.needs_setup || ext.has_auth) {
       const configBtn = document.createElement('button');

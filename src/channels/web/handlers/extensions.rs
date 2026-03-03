@@ -59,6 +59,7 @@ pub async fn extensions_list_handler(
                 active: ext.active,
                 tools: ext.tools,
                 needs_setup: ext.needs_setup,
+                has_auth: ext.has_auth,
                 activation_status,
                 activation_error: ext.activation_error,
             }

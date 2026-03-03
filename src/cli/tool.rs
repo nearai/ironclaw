@@ -782,7 +782,7 @@ async fn auth_tool_oauth(
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     oauth: &crate::tools::wasm::OAuthConfigSchema,
 ) -> anyhow::Result<()> {
-    use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
+    use crate::cli::oauth_defaults;
 
     let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
 
@@ -823,10 +823,10 @@ async fn auth_tool_oauth(
     println!();
 
     let listener = oauth_defaults::bind_callback_listener().await?;
-    let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
+    let redirect_uri = format!("{}/callback", oauth_defaults::callback_url());
 
-    // Build authorization URL with PKCE
-    let (auth_url, code_verifier) = oauth_defaults::build_oauth_url(
+    // Build authorization URL with PKCE and CSRF state
+    let oauth_result = oauth_defaults::build_oauth_url(
         &oauth.authorization_url,
         &client_id,
         &redirect_uri,
@@ -834,20 +834,27 @@ async fn auth_tool_oauth(
         oauth.use_pkce,
         &oauth.extra_params,
     );
+    let code_verifier = oauth_result.code_verifier;
 
     println!("  Opening browser for {} login...", display_name);
     println!();
 
-    if let Err(e) = open::that(&auth_url) {
+    if let Err(e) = open::that(&oauth_result.url) {
         println!("  Could not open browser: {}", e);
         println!("  Please open this URL manually:");
-        println!("  {}", auth_url);
+        println!("  {}", oauth_result.url);
     }
 
     println!("  Waiting for authorization...");
 
-    let code =
-        oauth_defaults::wait_for_callback(listener, "/callback", "code", display_name).await?;
+    let code = oauth_defaults::wait_for_callback(
+        listener,
+        "/callback",
+        "code",
+        display_name,
+        Some(&oauth_result.state),
+    )
+    .await?;
 
     println!();
     println!("  Exchanging code for token...");

@@ -1505,16 +1505,34 @@ impl ExtensionManager {
         // But only if credentials are available — if the tool has setup secrets
         // for client_id/secret that aren't configured yet, return needs_setup.
         if let Some(ref oauth) = auth.oauth {
-            let (setup_client_id_name, _) = self.find_setup_credential_names(name).await;
-            let needs_setup = if let Some(ref id_name) = setup_client_id_name {
-                !self
+            let (setup_client_id_entry, setup_client_secret_entry) =
+                self.find_setup_credential_names(name).await;
+
+            // Check all required (non-optional) setup credentials before starting
+            // OAuth, to avoid starting a flow that will fail during token exchange
+            // due to missing credentials.
+            let mut needs_setup = false;
+            if let Some((ref id_name, optional)) = setup_client_id_entry
+                && !optional
+                && !self
                     .secrets
                     .exists(&self.user_id, id_name)
                     .await
                     .unwrap_or(false)
-            } else {
-                false
-            };
+            {
+                needs_setup = true;
+            }
+            if !needs_setup
+                && let Some((ref secret_name, optional)) = setup_client_secret_entry
+                && !optional
+                && !self
+                    .secrets
+                    .exists(&self.user_id, secret_name)
+                    .await
+                    .unwrap_or(false)
+            {
+                needs_setup = true;
+            }
 
             if needs_setup {
                 let display = auth.display_name.as_deref().unwrap_or(name);
@@ -1679,11 +1697,11 @@ impl ExtensionManager {
     /// Find the setup secret names for OAuth client_id and client_secret.
     ///
     /// Scans `setup.required_secrets` for names containing "client_id" and "client_secret".
-    /// Returns `(Option<client_id_name>, Option<client_secret_name>)`.
+    /// Returns `(Option<(name, optional)>, Option<(name, optional)>)`.
     async fn find_setup_credential_names(
         &self,
         tool_name: &str,
-    ) -> (Option<String>, Option<String>) {
+    ) -> (Option<(String, bool)>, Option<(String, bool)>) {
         let Some(cap) = self.load_tool_capabilities(tool_name).await else {
             return (None, None);
         };
@@ -1691,17 +1709,17 @@ impl ExtensionManager {
             return (None, None);
         };
 
-        let mut client_id_name = None;
-        let mut client_secret_name = None;
+        let mut client_id_entry = None;
+        let mut client_secret_entry = None;
         for secret in &setup.required_secrets {
             let lower = secret.name.to_lowercase();
             if lower.ends_with("client_id") || lower == "client_id" {
-                client_id_name = Some(secret.name.clone());
+                client_id_entry = Some((secret.name.clone(), secret.optional));
             } else if lower.ends_with("client_secret") || lower == "client_secret" {
-                client_secret_name = Some(secret.name.clone());
+                client_secret_entry = Some((secret.name.clone(), secret.optional));
             }
         }
-        (client_id_name, client_secret_name)
+        (client_id_entry, client_secret_entry)
     }
 
     /// Resolve an OAuth credential value via: secrets store → inline → env var → builtin.
@@ -1752,15 +1770,17 @@ impl ExtensionManager {
         auth: &crate::tools::wasm::AuthCapabilitySchema,
         oauth: &crate::tools::wasm::OAuthConfigSchema,
     ) -> Result<AuthResult, String> {
-        use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
+        use crate::cli::oauth_defaults;
 
         let builtin = oauth_defaults::builtin_credentials(&auth.secret_name);
 
         // Find setup secret names for client_id and client_secret from capabilities.
         // These are the actual names used in the Setup tab (e.g., "google_oauth_client_id"),
         // which may differ from "{secret_name}_client_id".
-        let (setup_client_id_name, setup_client_secret_name) =
+        let (setup_client_id_entry, setup_client_secret_entry) =
             self.find_setup_credential_names(name).await;
+        let setup_client_id_name = setup_client_id_entry.map(|(n, _)| n);
+        let setup_client_secret_name = setup_client_secret_entry.map(|(n, _)| n);
 
         // Resolve client_id: setup secrets → inline → env var → builtin
         let client_id = self
@@ -1772,12 +1792,21 @@ impl ExtensionManager {
             )
             .await
             .ok_or_else(|| {
-                format!(
+                let env_name = oauth
+                    .client_id_env
+                    .as_deref()
+                    .unwrap_or("the client_id env var");
+                let mut msg = format!(
                     "OAuth client_id not configured for '{}'. \
-                     Enter it in the Setup tab, set {} env var, or build with IRONCLAW_GOOGLE_CLIENT_ID.",
-                    name,
-                    oauth.client_id_env.as_deref().unwrap_or("the client_id env var")
-                )
+                     Enter it in the Setup tab or set {} env var",
+                    name, env_name
+                );
+                // Only mention the Google-specific build flag for Google providers
+                if auth.secret_name.to_lowercase().contains("google") {
+                    msg.push_str(", or build with IRONCLAW_GOOGLE_CLIENT_ID");
+                }
+                msg.push('.');
+                msg
             })?;
 
         // Resolve client_secret (optional for PKCE-only flows)
@@ -1805,15 +1834,15 @@ impl ExtensionManager {
             .await
             .map_err(|e| format!("Failed to start OAuth callback listener: {}", e))?;
 
-        let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
+        let redirect_uri = format!("{}/callback", oauth_defaults::callback_url());
 
         // Merge scopes from all tools sharing this provider
         let merged_scopes = self
             .collect_shared_scopes(&auth.secret_name, &oauth.scopes)
             .await;
 
-        // Build authorization URL
-        let (auth_url, code_verifier) = oauth_defaults::build_oauth_url(
+        // Build authorization URL with CSRF state
+        let oauth_result = oauth_defaults::build_oauth_url(
             &oauth.authorization_url,
             &client_id,
             &redirect_uri,
@@ -1821,6 +1850,9 @@ impl ExtensionManager {
             oauth.use_pkce,
             &oauth.extra_params,
         );
+        let auth_url = oauth_result.url.clone();
+        let code_verifier = oauth_result.code_verifier;
+        let expected_state = oauth_result.state;
 
         // Spawn background task: wait for callback → exchange code → validate → store tokens
         let display_name = auth
@@ -1839,10 +1871,15 @@ impl ExtensionManager {
 
         let task_handle = tokio::spawn(async move {
             let result: Result<(), String> = async {
-                let code =
-                    oauth_defaults::wait_for_callback(listener, "/callback", "code", &display_name)
-                        .await
-                        .map_err(|e| e.to_string())?;
+                let code = oauth_defaults::wait_for_callback(
+                    listener,
+                    "/callback",
+                    "code",
+                    &display_name,
+                    Some(&expected_state),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
 
                 let token_response = oauth_defaults::exchange_oauth_code(
                     &token_url,
@@ -2664,7 +2701,16 @@ impl ExtensionManager {
 
     async fn cleanup_expired_auths(&self) {
         let mut pending = self.pending_auth.write().await;
-        pending.retain(|_, auth| auth.created_at.elapsed() < std::time::Duration::from_secs(300));
+        pending.retain(|_, auth| {
+            let expired = auth.created_at.elapsed() >= std::time::Duration::from_secs(300);
+            if expired {
+                // Abort the background listener task to free port 9876
+                if let Some(ref handle) = auth.task_handle {
+                    handle.abort();
+                }
+            }
+            !expired
+        });
     }
 
     /// Get the setup schema for an extension (secret fields and their status).

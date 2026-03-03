@@ -1244,6 +1244,7 @@ async fn extensions_list_handler(
                 active: ext.active,
                 tools: ext.tools,
                 needs_setup: ext.needs_setup,
+                has_auth: ext.has_auth,
                 activation_status,
                 activation_error: ext.activation_error,
             }
@@ -1326,14 +1327,16 @@ async fn extensions_install_handler(
                     );
                 }
 
-                // Check auth — but only act on scope expansion (token already exists).
-                // First-time auth requires Configure first.
+                // Check auth after activation. This may initiate OAuth both for scope
+                // expansion and for first-time auth when credentials are already
+                // configured (e.g., built-in providers). We only surface an auth_url
+                // when the extension reports it is awaiting authorization.
                 match ext_mgr.auth(&req.name, None).await {
                     Ok(auth_result)
                         if auth_result.auth_url.is_some()
                             && auth_result.status == "awaiting_authorization" =>
                     {
-                        // Scope expansion: existing token needs more scopes
+                        // Scope expansion or initial OAuth: user needs to authorize
                         resp.auth_url = auth_result.auth_url;
                     }
                     _ => {}
@@ -1592,9 +1595,6 @@ async fn extensions_setup_submit_handler(
             let mut resp = ActionResponse::ok(result.message);
             resp.activated = Some(result.activated);
             resp.auth_url = result.auth_url;
-            if !result.activated {
-                resp.needs_restart = Some(true);
-            }
             Ok(Json(resp))
         }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),

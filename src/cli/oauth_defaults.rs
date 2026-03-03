@@ -127,6 +127,9 @@ pub enum OAuthCallbackError {
     #[error("Timed out waiting for authorization")]
     Timeout,
 
+    #[error("CSRF state mismatch: expected {expected}, got {actual}")]
+    StateMismatch { expected: String, actual: String },
+
     #[error("IO error: {0}")]
     Io(String),
 }
@@ -183,16 +186,22 @@ pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError>
 /// extracts the value of `param_name` (e.g., "code" or "token"), and shows a branded
 /// landing page using `display_name` (e.g., "Google", "Notion", "NEAR AI").
 ///
+/// When `expected_state` is `Some`, the callback's `state` query parameter is validated
+/// against it to prevent CSRF attacks. If the state doesn't match, the callback is
+/// rejected with an error page.
+///
 /// Times out after 5 minutes.
 pub async fn wait_for_callback(
     listener: TcpListener,
     path_prefix: &str,
     param_name: &str,
     display_name: &str,
+    expected_state: Option<&str>,
 ) -> Result<String, OAuthCallbackError> {
     let path_prefix = path_prefix.to_string();
     let param_name = param_name.to_string();
     let display_name = display_name.to_string();
+    let expected_state = expected_state.map(String::from);
 
     tokio::time::timeout(Duration::from_secs(300), async move {
         loop {
@@ -227,17 +236,29 @@ pub async fn wait_for_callback(
                     return Err(OAuthCallbackError::Denied);
                 }
 
-                // Look for the target parameter
-                for param in query.split('&') {
-                    let parts: Vec<&str> = param.splitn(2, '=').collect();
-                    if parts.len() == 2 && parts[0] == param_name {
-                        let value = urlencoding::decode(parts[1])
-                            .unwrap_or_else(|_| parts[1].into())
-                            .into_owned();
+                // Parse all query params into a map for validation
+                let params: HashMap<&str, String> = query
+                    .split('&')
+                    .filter_map(|p| {
+                        let mut parts = p.splitn(2, '=');
+                        let key = parts.next()?;
+                        let val = parts.next().unwrap_or("");
+                        Some((
+                            key,
+                            urlencoding::decode(val)
+                                .unwrap_or_else(|_| val.into())
+                                .into_owned(),
+                        ))
+                    })
+                    .collect();
 
-                        let html = landing_html(&display_name, true);
+                // Validate CSRF state parameter
+                if let Some(ref expected) = expected_state {
+                    let actual = params.get("state").cloned().unwrap_or_default();
+                    if actual != *expected {
+                        let html = landing_html(&display_name, false);
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\n\
+                            "HTTP/1.1 403 Forbidden\r\n\
                              Content-Type: text/html; charset=utf-8\r\n\
                              Connection: close\r\n\
                              \r\n\
@@ -245,10 +266,28 @@ pub async fn wait_for_callback(
                             html
                         );
                         let _ = socket.write_all(response.as_bytes()).await;
-                        let _ = socket.shutdown().await;
-
-                        return Ok(value);
+                        return Err(OAuthCallbackError::StateMismatch {
+                            expected: expected.clone(),
+                            actual,
+                        });
                     }
+                }
+
+                // Look for the target parameter
+                if let Some(value) = params.get(param_name.as_str()) {
+                    let html = landing_html(&display_name, true);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: text/html; charset=utf-8\r\n\
+                         Connection: close\r\n\
+                         \r\n\
+                         {}",
+                        html
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+
+                    return Ok(value.clone());
                 }
             }
 
@@ -286,10 +325,21 @@ pub struct OAuthTokenResponse {
     pub expires_in: Option<u64>,
 }
 
-/// Build an OAuth 2.0 authorization URL with optional PKCE.
+/// Result of building an OAuth 2.0 authorization URL.
+pub struct OAuthUrlResult {
+    /// The full authorization URL to redirect the user to.
+    pub url: String,
+    /// PKCE code verifier (must be sent with the token exchange request).
+    pub code_verifier: Option<String>,
+    /// Random state parameter for CSRF protection (must be validated in callback).
+    pub state: String,
+}
+
+/// Build an OAuth 2.0 authorization URL with optional PKCE and CSRF state.
 ///
-/// Returns `(authorization_url, Option<code_verifier>)`. The code verifier must
-/// be kept for the token exchange when PKCE is enabled.
+/// Returns an `OAuthUrlResult` containing the authorization URL, optional PKCE
+/// code verifier, and a random `state` parameter for CSRF protection. The caller
+/// must validate the `state` value in the callback before exchanging the code.
 pub fn build_oauth_url(
     authorization_url: &str,
     client_id: &str,
@@ -297,7 +347,7 @@ pub fn build_oauth_url(
     scopes: &[String],
     use_pkce: bool,
     extra_params: &HashMap<String, String>,
-) -> (String, Option<String>) {
+) -> OAuthUrlResult {
     // Generate PKCE verifier and challenge
     let (code_verifier, code_challenge) = if use_pkce {
         let mut verifier_bytes = [0u8; 32];
@@ -313,12 +363,18 @@ pub fn build_oauth_url(
         (None, None)
     };
 
+    // Generate random state for CSRF protection
+    let mut state_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut state_bytes);
+    let state = URL_SAFE_NO_PAD.encode(state_bytes);
+
     // Build authorization URL
     let mut auth_url = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}",
+        "{}?client_id={}&response_type=code&redirect_uri={}&state={}",
         authorization_url,
         urlencoding::encode(client_id),
-        urlencoding::encode(redirect_uri)
+        urlencoding::encode(redirect_uri),
+        urlencoding::encode(&state),
     );
 
     if !scopes.is_empty() {
@@ -343,7 +399,11 @@ pub fn build_oauth_url(
         ));
     }
 
-    (auth_url, code_verifier)
+    OAuthUrlResult {
+        url: auth_url,
+        code_verifier,
+        state,
+    }
 }
 
 /// Exchange an OAuth authorization code for tokens.
@@ -777,5 +837,106 @@ mod tests {
         assert!(html.contains("IronClaw"));
         assert!(html.contains("#ef4444")); // red accent
         assert!(!html.contains("Connected"));
+    }
+
+    #[test]
+    fn test_build_oauth_url_basic() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let result = build_oauth_url(
+            "https://accounts.google.com/o/oauth2/auth",
+            "my-client-id",
+            "http://localhost:9876/callback",
+            &["openid".to_string(), "email".to_string()],
+            false,
+            &HashMap::new(),
+        );
+
+        assert!(
+            result
+                .url
+                .starts_with("https://accounts.google.com/o/oauth2/auth?")
+        );
+        assert!(result.url.contains("client_id=my-client-id"));
+        assert!(result.url.contains("response_type=code"));
+        assert!(result.url.contains("redirect_uri="));
+        assert!(result.url.contains("scope=openid%20email"));
+        assert!(result.url.contains("state="));
+        assert!(result.code_verifier.is_none());
+        assert!(!result.state.is_empty());
+    }
+
+    #[test]
+    fn test_build_oauth_url_with_pkce() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let result = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "http://localhost:9876/callback",
+            &[],
+            true,
+            &HashMap::new(),
+        );
+
+        assert!(result.url.contains("code_challenge="));
+        assert!(result.url.contains("code_challenge_method=S256"));
+        assert!(result.code_verifier.is_some());
+        let verifier = result.code_verifier.unwrap();
+        assert!(!verifier.is_empty());
+    }
+
+    #[test]
+    fn test_build_oauth_url_with_extra_params() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let mut extra = HashMap::new();
+        extra.insert("access_type".to_string(), "offline".to_string());
+        extra.insert("prompt".to_string(), "consent".to_string());
+
+        let result = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "http://localhost:9876/callback",
+            &["read".to_string()],
+            false,
+            &extra,
+        );
+
+        assert!(result.url.contains("access_type=offline"));
+        assert!(result.url.contains("prompt=consent"));
+    }
+
+    #[test]
+    fn test_build_oauth_url_state_is_unique() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let result1 = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client",
+            "http://localhost:9876/callback",
+            &[],
+            false,
+            &HashMap::new(),
+        );
+        let result2 = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client",
+            "http://localhost:9876/callback",
+            &[],
+            false,
+            &HashMap::new(),
+        );
+
+        // State should be different each time (random)
+        assert_ne!(result1.state, result2.state);
     }
 }
