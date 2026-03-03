@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rand::Rng;
 use rust_decimal::Decimal;
 
 use crate::error::LlmError;
@@ -50,20 +49,9 @@ pub(crate) fn is_retryable(err: &LlmError) -> bool {
 /// Calculate exponential backoff delay with random jitter.
 ///
 /// Base delay is 1 second, doubled each attempt, with +/-25% jitter.
-/// - attempt 0: ~1s (0.75s - 1.25s)
-/// - attempt 1: ~2s (1.5s - 2.5s)
-/// - attempt 2: ~4s (3.0s - 5.0s)
+/// Delegates to [`crate::retry_backoff::exponential_backoff`] with no cap.
 pub(crate) fn retry_backoff_delay(attempt: u32) -> Duration {
-    let base_ms: u64 = 1000u64.saturating_mul(2u64.saturating_pow(attempt));
-    let jitter_range = base_ms / 4; // 25%
-    let jitter = if jitter_range > 0 {
-        let offset = rand::thread_rng().gen_range(0..=jitter_range * 2);
-        offset as i64 - jitter_range as i64
-    } else {
-        0
-    };
-    let delay_ms = (base_ms as i64 + jitter).max(100) as u64;
-    Duration::from_millis(delay_ms)
+    crate::retry_backoff::exponential_backoff(1000, attempt, None)
 }
 
 /// Configuration for the retry decorator.

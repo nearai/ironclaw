@@ -500,28 +500,18 @@ impl Scheduler {
             .into());
         }
 
-        // Execute with per-tool timeout and retry on transient errors
+        // Execute with per-tool timeout and retry on transient errors.
+        // Budget == timeout is intentional: budget is the cooperative graceful exit,
+        // tokio timeout is the hard cancellation backstop.
         let tool_timeout = tool.execution_timeout();
-        let retry_config = crate::tools::retry::effective_retry_config(tool.as_ref());
-        let retry_counter = std::sync::atomic::AtomicU32::new(0);
-        let result = tokio::time::timeout(tool_timeout, async {
-            crate::tools::retry::retry_tool_execute(
-                tool.as_ref(),
-                &params,
-                &job_ctx,
-                &retry_config,
-                tool_timeout,
-                &retry_counter,
-            )
-            .await
-        })
-        .await
-        .map_err(|_| {
-            let attempts = retry_counter.load(std::sync::atomic::Ordering::Relaxed);
-            if attempts > 0 {
+        let (timeout_result, retry_attempts, _elapsed) =
+            crate::tools::retry::execute_with_retry(tool.as_ref(), &params, &job_ctx).await;
+
+        let result = timeout_result.map_err(|_| {
+            if retry_attempts > 0 {
                 tracing::warn!(
                     tool = %tool_name,
-                    retry_attempts = attempts,
+                    retry_attempts,
                     "Subtask tool call timed out after retries"
                 );
             }
@@ -531,10 +521,10 @@ impl Scheduler {
             })
         })?;
 
-        if result.retry_attempts > 0 {
+        if retry_attempts > 0 {
             tracing::debug!(
                 tool = %tool_name,
-                retry_attempts = result.retry_attempts,
+                retry_attempts,
                 "Subtask tool call completed after retries"
             );
         }
