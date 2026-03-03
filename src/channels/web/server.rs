@@ -1364,6 +1364,7 @@ async fn extensions_activate_handler(
             let mut resp = ActionResponse::ok(result.message);
             if let Ok(auth_result) = ext_mgr.auth(&name, None).await
                 && auth_result.auth_url.is_some()
+                && auth_result.status == "awaiting_authorization"
             {
                 resp.auth_url = auth_result.auth_url;
             }

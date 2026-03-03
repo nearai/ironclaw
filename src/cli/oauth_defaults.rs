@@ -503,8 +503,14 @@ pub async fn validate_oauth_token(
         _ => client.get(&validation.url),
     };
 
+    let mut request = request.header("Authorization", format!("Bearer {}", token));
+
+    // Add custom headers from the validation schema (e.g., Notion-Version)
+    for (key, value) in &validation.headers {
+        request = request.header(key, value);
+    }
+
     let response = request
-        .header("Authorization", format!("Bearer {}", token))
         .send()
         .await
         .map_err(|e| OAuthCallbackError::Io(format!("Validation request failed: {}", e)))?;
@@ -516,7 +522,7 @@ pub async fn validate_oauth_token(
         let body = response.text().await.unwrap_or_default();
         let truncated: String = if body.len() > 200 {
             let mut end = 200;
-            while end < body.len() && !body.is_char_boundary(end) {
+            while end > 0 && !body.is_char_boundary(end) {
                 end -= 1;
             }
             format!("{}...", &body[..end])

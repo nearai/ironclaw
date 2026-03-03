@@ -2014,7 +2014,7 @@ function activateExtension(name) {
         // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
         if (res.auth_url) {
           showToast('Opening authentication for ' + name, 'info');
-          window.open(res.auth_url, '_blank');
+          window.open(res.auth_url, '_blank', 'width=600,height=700');
         }
         loadExtensions();
         return;
