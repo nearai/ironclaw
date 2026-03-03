@@ -118,9 +118,9 @@ impl Tool for MessageTool {
                 .clone()
                 .ok_or_else(|| {
                     ToolError::ExecutionFailed(
-                    "No channel specified and no active conversation. Provide channel parameter."
-                        .to_string(),
-                )
+                        "No channel specified and no active conversation. Provide channel parameter."
+                            .to_string(),
+                    )
                 })?
         };
 

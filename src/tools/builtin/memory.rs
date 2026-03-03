@@ -140,7 +140,8 @@ impl Tool for MemoryWriteTool {
          Use for important facts, decisions, preferences, or lessons learned that should \
          be remembered across sessions. Targets: 'memory' for curated long-term facts, \
          'daily_log' for timestamped session notes, 'heartbeat' for the periodic \
-         checklist (HEARTBEAT.md), or provide a custom path for arbitrary file creation."
+         checklist (HEARTBEAT.md), 'bootstrap' to clear the first-run ritual file, \
+         or provide a custom path for arbitrary file creation."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -153,7 +154,7 @@ impl Tool for MemoryWriteTool {
                 },
                 "target": {
                     "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, or a path like 'projects/alpha/notes.md'",
+                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a path like 'projects/alpha/notes.md'",
                     "default": "daily_log"
                 },
                 "append": {
@@ -175,16 +176,35 @@ impl Tool for MemoryWriteTool {
 
         let content = require_str(&params, "content")?;
 
+        let target = params
+            .get("target")
+            .and_then(|v| v.as_str())
+            .unwrap_or("daily_log");
+
+        // Bootstrap target: clear BOOTSTRAP.md to mark first-run ritual complete.
+        // Handled early because it accepts empty content (unlike other targets).
+        if target == "bootstrap" {
+            // Write empty content to effectively disable the bootstrap injection.
+            // system_prompt_for_context() skips empty files.
+            self.workspace
+                .write(paths::BOOTSTRAP, "")
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+
+            let output = serde_json::json!({
+                "status": "cleared",
+                "path": paths::BOOTSTRAP,
+                "message": "BOOTSTRAP.md cleared. First-run ritual will not repeat.",
+            });
+
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
         if content.trim().is_empty() {
             return Err(ToolError::InvalidParameters(
                 "content cannot be empty".to_string(),
             ));
         }
-
-        let target = params
-            .get("target")
-            .and_then(|v| v.as_str())
-            .unwrap_or("daily_log");
 
         // Reject writes to identity files that are loaded into the system prompt.
         // An attacker could use prompt injection to trick the agent into overwriting

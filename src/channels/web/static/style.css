@@ -2312,43 +2312,6 @@ body {
   margin-top: 6px;
 }
 
-/* Restart overlay */
-.restart-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.8);
-  z-index: 2000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.restart-message {
-  text-align: center;
-  color: var(--text);
-}
-
-.restart-message h2 {
-  margin: 16px 0 8px;
-}
-
-.restart-message p {
-  color: var(--text-secondary);
-}
-
-.restart-spinner {
-  width: 40px;
-  height: 40px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin: 0 auto;
-}
-
 @keyframes spin {
   to { transform: rotate(360deg); }
 }

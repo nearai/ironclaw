@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
 use crate::agent::worker::{Worker, WorkerDeps};
+use crate::channels::web::types::SseEvent;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
@@ -28,6 +29,8 @@ pub enum WorkerMessage {
     Stop,
     /// Check health.
     Ping,
+    /// Inject a follow-up user message into the worker's reasoning context.
+    UserMessage(String),
 }
 
 /// Status of a scheduled job.
@@ -51,6 +54,8 @@ pub struct Scheduler {
     tools: Arc<ToolRegistry>,
     store: Option<Arc<dyn Database>>,
     hooks: Arc<HookRegistry>,
+    /// SSE broadcast sender for live job event streaming.
+    sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -76,9 +81,15 @@ impl Scheduler {
             tools,
             store,
             hooks,
+            sse_tx: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Set the SSE broadcast sender for live job event streaming.
+    pub fn set_sse_sender(&mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) {
+        self.sse_tx = Some(tx);
     }
 
     /// Create, persist, and schedule a job in one shot.
@@ -169,6 +180,7 @@ impl Scheduler {
                 hooks: self.hooks.clone(),
                 timeout: self.config.job_timeout,
                 use_planning: self.config.use_planning,
+                sse_tx: self.sse_tx.clone(),
             };
             let worker = Worker::new(job_id, deps);
 
@@ -497,6 +509,26 @@ impl Scheduler {
             tracing::info!("Stopped job {}", job_id);
         }
 
+        Ok(())
+    }
+
+    /// Send a follow-up user message to a running job.
+    ///
+    /// Returns `Ok(())` if the message was queued, `Err` if the job is not running.
+    pub async fn send_message(&self, job_id: Uuid, content: String) -> Result<(), JobError> {
+        // Clone the sender while holding the lock, then release before the
+        // async send to avoid blocking scheduler writes during backpressure.
+        let tx = {
+            let jobs = self.jobs.read().await;
+            let scheduled = jobs.get(&job_id).ok_or(JobError::NotFound { id: job_id })?;
+            scheduled.tx.clone()
+        };
+        tx.send(WorkerMessage::UserMessage(content))
+            .await
+            .map_err(|_| JobError::Failed {
+                id: job_id,
+                reason: "Worker channel closed".to_string(),
+            })?;
         Ok(())
     }
 

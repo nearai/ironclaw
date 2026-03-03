@@ -19,12 +19,14 @@ use crate::channels::wasm::schema::ChannelCapabilitiesFile;
 use crate::channels::wasm::wrapper::WasmChannel;
 use crate::db::SettingsStore;
 use crate::pairing::PairingStore;
+use crate::secrets::SecretsStore;
 
 /// Loads WASM channels from the filesystem.
 pub struct WasmChannelLoader {
     runtime: Arc<WasmChannelRuntime>,
     pairing_store: Arc<PairingStore>,
     settings_store: Option<Arc<dyn SettingsStore>>,
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 impl WasmChannelLoader {
@@ -38,7 +40,14 @@ impl WasmChannelLoader {
             runtime,
             pairing_store,
             settings_store,
+            secrets_store: None,
         }
+    }
+
+    /// Set the secrets store for host-based credential injection in WASM channels.
+    pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
+        self.secrets_store = Some(store);
+        self
     }
 
     /// Load a single WASM channel from a file pair.
@@ -127,7 +136,7 @@ impl WasmChannelLoader {
             .await?;
 
         // Create the channel
-        let channel = WasmChannel::new(
+        let mut channel = WasmChannel::new(
             self.runtime.clone(),
             prepared,
             capabilities,
@@ -135,6 +144,9 @@ impl WasmChannelLoader {
             self.pairing_store.clone(),
             self.settings_store.clone(),
         );
+        if let Some(ref secrets) = self.secrets_store {
+            channel = channel.with_secrets_store(Arc::clone(secrets));
+        }
 
         tracing::info!(
             name = name,

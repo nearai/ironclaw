@@ -20,6 +20,8 @@ workspace/
 ├── SOUL.md                <- Core values
 ├── AGENTS.md              <- Behavior instructions
 ├── USER.md                <- User context
+├── TOOLS.md               <- Environment-specific tool notes
+├── BOOTSTRAP.md           <- First-run ritual (deleted after onboarding)
 ├── context/               <- Identity-related docs
 │   ├── vision.md
 │   └── priorities.md
