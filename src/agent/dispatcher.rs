@@ -911,25 +911,30 @@ fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
 fn strip_internal_tool_call_text(text: &str) -> String {
     // Remove lines that are purely internal tool-call markers.
     // Pattern: lines matching `[Called tool <name>(...)]` or `[Tool <name> returned: ...]`
-    let cleaned: Vec<&str> = text
+    let result = text
         .lines()
         .filter(|line| {
             let trimmed = line.trim();
-            if trimmed.starts_with("[Called tool ") && trimmed.ends_with(']') {
-                return false;
-            }
-            if trimmed.starts_with("[Tool ") && trimmed.contains(" returned:") && trimmed.ends_with(']') {
-                return false;
-            }
-            true
+            !(
+                (trimmed.starts_with("[Called tool ") && trimmed.ends_with(']'))
+                || (trimmed.starts_with("[Tool ")
+                    && trimmed.contains(" returned:")
+                    && trimmed.ends_with(']'))
+            )
         })
-        .collect();
+        .fold(String::new(), |mut acc, s| {
+            if !acc.is_empty() {
+                acc.push('\n');
+            }
+            acc.push_str(s);
+            acc
+        });
 
-    let result = cleaned.join("\n").trim().to_string();
+    let result = result.trim();
     if result.is_empty() {
         "I wasn't able to complete that request. Could you try rephrasing or providing more details?".to_string()
     } else {
-        result
+        result.to_string()
     }
 }
 
