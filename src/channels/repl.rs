@@ -489,6 +489,9 @@ impl Channel for ReplChannel {
                 print!("{chunk}");
                 let _ = io::stdout().flush();
             }
+            StatusUpdate::ReasoningUpdate { .. } => {
+                // Reasoning updates are surfaced via /reasoning and web gateway.
+            }
             StatusUpdate::JobStarted {
                 job_id,
                 title,

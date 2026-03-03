@@ -27,7 +27,7 @@ pub mod session;
 mod session_manager;
 pub mod submission;
 pub mod task;
-mod thread_ops;
+pub(crate) mod thread_ops;
 pub mod undo;
 pub mod worker;
 
@@ -47,3 +47,6 @@ pub use submission::{Submission, SubmissionParser, SubmissionResult};
 pub use task::{Task, TaskContext, TaskHandler, TaskOutput};
 pub use undo::{Checkpoint, UndoManager};
 pub use worker::{Worker, WorkerDeps};
+
+#[cfg(test)]
+mod thread_ops_tests;

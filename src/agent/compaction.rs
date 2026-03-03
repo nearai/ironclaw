@@ -626,7 +626,12 @@ mod tests {
         thread.start_turn("Search for X");
         // Record a tool call on the current turn
         if let Some(turn) = thread.turns.last_mut() {
-            turn.record_tool_call("search", serde_json::json!({"query": "X"}));
+            turn.record_tool_call(
+                "search",
+                serde_json::json!({"query": "X"}),
+                crate::llm::normalize_tool_reasoning(""),
+                None,
+            );
         }
         thread.complete_turn("Found X");
 

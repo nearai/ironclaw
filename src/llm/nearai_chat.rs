@@ -20,7 +20,7 @@ use crate::config::NearAiConfig;
 use crate::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ToolCompletionRequest, ToolCompletionResponse, normalize_tool_reasoning,
 };
 use crate::llm::{costs, session::SessionManager};
 
@@ -514,6 +514,7 @@ impl LlmProvider for NearAiChatProvider {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    reasoning: normalize_tool_reasoning(""),
                 }
             })
             .collect();
@@ -1027,11 +1028,13 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "list_issues".to_string(),
                 arguments: serde_json::json!({"owner": "foo", "repo": "bar"}),
+                reasoning: normalize_tool_reasoning(""),
             },
             ToolCall {
                 id: "call_2".to_string(),
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
+                reasoning: normalize_tool_reasoning(""),
             },
         ];
 
@@ -1064,6 +1067,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "test".to_string(),
             arguments: serde_json::json!({"key": "value"}),
+            reasoning: normalize_tool_reasoning(""),
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();

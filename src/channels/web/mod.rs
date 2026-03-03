@@ -311,6 +311,10 @@ impl Channel for GatewayChannel {
                 content,
                 thread_id: thread_id.clone(),
             },
+            StatusUpdate::ReasoningUpdate { narrative, .. } => SseEvent::Status {
+                message: narrative.unwrap_or_else(|| "Reasoning update".to_string()),
+                thread_id,
+            },
             StatusUpdate::Status(msg) => SseEvent::Status {
                 message: msg,
                 thread_id: thread_id.clone(),
