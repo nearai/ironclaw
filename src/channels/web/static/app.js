@@ -3009,7 +3009,11 @@ function renderRoutineDetail(routine) {
 
 function triggerRoutine(id) {
   apiFetch('/api/routines/' + id + '/trigger', { method: 'POST' })
-    .then(() => showToast('Routine triggered', 'success'))
+    .then(() => {
+      showToast('Routine triggered', 'success');
+      if (currentRoutineId) openRoutineDetail(currentRoutineId);
+      else loadRoutines();
+    })
     .catch((err) => showToast('Trigger failed: ' + err.message, 'error'));
 }
 
