@@ -45,6 +45,20 @@ cargo test test_name
 RUST_LOG=ironclaw=debug cargo run
 ```
 
+### Test Tiers
+
+| Tier | Command | What runs | External deps |
+|------|---------|-----------|---------------|
+| Unit | `cargo test` | All `mod tests` + self-contained integration tests | None |
+| Integration | `cargo test --features integration` | + PostgreSQL-dependent tests | Running PostgreSQL |
+| Live | `cargo test --features integration -- --ignored` | + LLM-dependent tests | PostgreSQL + LLM API keys |
+
+**Rules:**
+- Default `cargo test` must pass with zero external services
+- Tests needing PostgreSQL use `#![cfg(all(feature = "postgres", feature = "integration"))]`
+- Tests needing live LLM/API keys additionally use `#[ignore]`
+- Never use `try_connect()` skip patterns — if the feature is enabled, fail loudly
+
 ## Project Structure
 
 ```
