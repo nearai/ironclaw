@@ -38,6 +38,9 @@ struct PendingAuth {
     _name: String,
     _kind: ExtensionKind,
     created_at: std::time::Instant,
+    /// Background task listening for the OAuth callback.
+    /// Aborted when a new auth flow starts for the same extension.
+    task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Runtime infrastructure needed for hot-activating WASM channels.
@@ -58,6 +61,8 @@ pub struct SetupResult {
     pub message: String,
     /// Whether the channel was successfully activated after saving secrets.
     pub activated: bool,
+    /// OAuth authorization URL for the UI to open (if OAuth flow was started).
+    pub auth_url: Option<String>,
 }
 
 /// Central manager for extension lifecycle operations.
@@ -385,6 +390,7 @@ impl ExtensionManager {
                             active,
                             tools,
                             needs_setup: false,
+                            has_auth: false,
                             installed: true,
                             activation_error: None,
                         });
@@ -411,6 +417,11 @@ impl ExtensionManager {
                             .await
                             .map(|e| e.display_name);
                         let (authenticated, needs_setup) = self.check_tool_auth_status(&name).await;
+                        let has_auth = self
+                            .load_tool_capabilities(&name)
+                            .await
+                            .and_then(|c| c.auth)
+                            .is_some();
                         extensions.push(InstalledExtension {
                             name: name.clone(),
                             kind: ExtensionKind::WasmTool,
@@ -421,6 +432,7 @@ impl ExtensionManager {
                             active,
                             tools: if active { vec![name] } else { Vec::new() },
                             needs_setup,
+                            has_auth,
                             installed: true,
                             activation_error: None,
                         });
@@ -460,6 +472,7 @@ impl ExtensionManager {
                             active,
                             tools: Vec::new(),
                             needs_setup,
+                            has_auth: false,
                             installed: true,
                             activation_error,
                         });
@@ -497,6 +510,7 @@ impl ExtensionManager {
                     active: false,
                     tools: Vec::new(),
                     needs_setup: false,
+                    has_auth: false,
                     installed: false,
                     activation_error: None,
                 });
@@ -1338,6 +1352,7 @@ impl ExtensionManager {
                 _name: name.to_string(),
                 _kind: ExtensionKind::McpServer,
                 created_at: std::time::Instant::now(),
+                task_handle: None,
             },
         );
 
@@ -1424,23 +1439,45 @@ impl ExtensionManager {
             });
         }
 
-        // Check if already authenticated
-        if self
+        // Check if already authenticated (with scope expansion detection)
+        let token_exists = self
             .secrets
             .exists(&self.user_id, &auth.secret_name)
             .await
-            .unwrap_or(false)
-        {
-            return Ok(AuthResult {
-                name: name.to_string(),
-                kind: ExtensionKind::WasmTool,
-                auth_url: None,
-                callback_type: None,
-                instructions: None,
-                setup_url: None,
-                awaiting_token: false,
-                status: "authenticated".to_string(),
-            });
+            .unwrap_or(false);
+
+        if token_exists {
+            // If this tool has OAuth config, check whether new scopes are needed
+            let needs_reauth = if let Some(ref oauth) = auth.oauth {
+                let merged = self
+                    .collect_shared_scopes(&auth.secret_name, &oauth.scopes)
+                    .await;
+                let needs = self.needs_scope_expansion(&auth.secret_name, &merged).await;
+                tracing::debug!(
+                    tool = name,
+                    secret_name = %auth.secret_name,
+                    merged_scopes = ?merged,
+                    needs_reauth = needs,
+                    "Scope expansion check"
+                );
+                needs
+            } else {
+                false
+            };
+
+            if !needs_reauth {
+                return Ok(AuthResult {
+                    name: name.to_string(),
+                    kind: ExtensionKind::WasmTool,
+                    auth_url: None,
+                    callback_type: None,
+                    instructions: None,
+                    setup_url: None,
+                    awaiting_token: false,
+                    status: "authenticated".to_string(),
+                });
+            }
+            // Fall through to OAuth branch for scope expansion
         }
 
         // If a token was provided, store it
@@ -1462,6 +1499,44 @@ impl ExtensionManager {
                 awaiting_token: false,
                 status: "authenticated".to_string(),
             });
+        }
+
+        // OAuth flow: if the tool has OAuth config, start the browser-based flow.
+        // But only if credentials are available — if the tool has setup secrets
+        // for client_id/secret that aren't configured yet, return needs_setup.
+        if let Some(ref oauth) = auth.oauth {
+            let (setup_client_id_name, _) = self.find_setup_credential_names(name).await;
+            let needs_setup = if let Some(ref id_name) = setup_client_id_name {
+                !self
+                    .secrets
+                    .exists(&self.user_id, id_name)
+                    .await
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            if needs_setup {
+                let display = auth.display_name.as_deref().unwrap_or(name);
+                return Ok(AuthResult {
+                    name: name.to_string(),
+                    kind: ExtensionKind::WasmTool,
+                    auth_url: None,
+                    callback_type: None,
+                    instructions: Some(format!(
+                        "Configure OAuth credentials for {} in the Setup tab.",
+                        display
+                    )),
+                    setup_url: auth.setup_url.clone(),
+                    awaiting_token: false,
+                    status: "needs_setup".to_string(),
+                });
+            }
+
+            return self
+                .start_wasm_oauth(name, &auth, oauth)
+                .await
+                .map_err(|e| ExtensionError::AuthFailed(e.to_string()));
         }
 
         // Return instructions for manual token entry
@@ -1532,6 +1607,334 @@ impl ExtensionManager {
             .join(format!("{}.capabilities.json", name));
         let cap_bytes = tokio::fs::read(&cap_path).await.ok()?;
         crate::tools::wasm::CapabilitiesFile::from_bytes(&cap_bytes).ok()
+    }
+
+    /// Collect merged OAuth scopes from all installed tools sharing the same secret_name.
+    ///
+    /// When multiple tools share an OAuth provider (e.g., google-calendar and google-drive
+    /// both use `google_oauth_token`), we request all their scopes in a single OAuth flow
+    /// so one login covers everything.
+    async fn collect_shared_scopes(
+        &self,
+        secret_name: &str,
+        base_scopes: &[String],
+    ) -> Vec<String> {
+        let mut all_scopes: std::collections::BTreeSet<String> =
+            base_scopes.iter().cloned().collect();
+
+        if let Ok(tools) = discover_tools(&self.wasm_tools_dir).await {
+            for tool_name in tools.keys() {
+                if let Some(cap) = self.load_tool_capabilities(tool_name).await
+                    && let Some(auth) = &cap.auth
+                    && auth.secret_name == secret_name
+                    && let Some(oauth) = &auth.oauth
+                {
+                    all_scopes.extend(oauth.scopes.iter().cloned());
+                }
+            }
+        }
+
+        all_scopes.into_iter().collect()
+    }
+
+    /// Check whether the stored scopes are insufficient for the merged scopes.
+    async fn needs_scope_expansion(&self, secret_name: &str, merged_scopes: &[String]) -> bool {
+        if merged_scopes.is_empty() {
+            return false;
+        }
+
+        let scopes_key = format!("{}_scopes", secret_name);
+        let stored_scopes: std::collections::HashSet<String> =
+            match self.secrets.get_decrypted(&self.user_id, &scopes_key).await {
+                Ok(secret) => {
+                    let scopes: std::collections::HashSet<String> = secret
+                        .expose()
+                        .split_whitespace()
+                        .map(String::from)
+                        .collect();
+                    tracing::debug!(
+                        secret_name,
+                        stored_scopes = ?scopes,
+                        "Loaded stored scopes for expansion check"
+                    );
+                    scopes
+                }
+                Err(_) => {
+                    // No stored scopes record — this is a legacy token created before
+                    // scope tracking. Force re-auth to ensure all required scopes are granted.
+                    tracing::debug!(
+                        secret_name,
+                        "No stored scopes record, forcing re-auth for legacy token"
+                    );
+                    return true;
+                }
+            };
+
+        // Check if any merged scope is missing from stored scopes
+        merged_scopes
+            .iter()
+            .any(|scope| !stored_scopes.contains(scope))
+    }
+
+    /// Find the setup secret names for OAuth client_id and client_secret.
+    ///
+    /// Scans `setup.required_secrets` for names containing "client_id" and "client_secret".
+    /// Returns `(Option<client_id_name>, Option<client_secret_name>)`.
+    async fn find_setup_credential_names(
+        &self,
+        tool_name: &str,
+    ) -> (Option<String>, Option<String>) {
+        let Some(cap) = self.load_tool_capabilities(tool_name).await else {
+            return (None, None);
+        };
+        let Some(setup) = &cap.setup else {
+            return (None, None);
+        };
+
+        let mut client_id_name = None;
+        let mut client_secret_name = None;
+        for secret in &setup.required_secrets {
+            let lower = secret.name.to_lowercase();
+            if lower.ends_with("client_id") || lower == "client_id" {
+                client_id_name = Some(secret.name.clone());
+            } else if lower.ends_with("client_secret") || lower == "client_secret" {
+                client_secret_name = Some(secret.name.clone());
+            }
+        }
+        (client_id_name, client_secret_name)
+    }
+
+    /// Resolve an OAuth credential value via: secrets store → inline → env var → builtin.
+    ///
+    /// For web gateway users, the secrets store is checked first because client_id/secret
+    /// may have been entered via the Setup tab (stored as setup secrets).
+    async fn resolve_oauth_credential(
+        &self,
+        inline_value: &Option<String>,
+        env_var_name: &Option<String>,
+        builtin_value: Option<&str>,
+        setup_secret_name: Option<&str>,
+    ) -> Option<String> {
+        // 1. Check secrets store (entered via Setup tab)
+        if let Some(secret_name) = setup_secret_name
+            && let Ok(secret) = self.secrets.get_decrypted(&self.user_id, secret_name).await
+        {
+            let val = secret.expose();
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+
+        // 2. Inline value from capabilities.json
+        if let Some(val) = inline_value {
+            return Some(val.clone());
+        }
+
+        // 3. Runtime environment variable
+        if let Some(env) = env_var_name
+            && let Ok(val) = std::env::var(env)
+        {
+            return Some(val);
+        }
+
+        // 4. Built-in defaults
+        builtin_value.map(String::from)
+    }
+
+    /// Start the OAuth browser flow for a WASM tool.
+    ///
+    /// Binds a callback listener, builds the authorization URL, spawns a background
+    /// task to wait for the callback and exchange the code, then returns the auth URL
+    /// immediately so the web UI can open it.
+    async fn start_wasm_oauth(
+        &self,
+        name: &str,
+        auth: &crate::tools::wasm::AuthCapabilitySchema,
+        oauth: &crate::tools::wasm::OAuthConfigSchema,
+    ) -> Result<AuthResult, String> {
+        use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
+
+        let builtin = oauth_defaults::builtin_credentials(&auth.secret_name);
+
+        // Find setup secret names for client_id and client_secret from capabilities.
+        // These are the actual names used in the Setup tab (e.g., "google_oauth_client_id"),
+        // which may differ from "{secret_name}_client_id".
+        let (setup_client_id_name, setup_client_secret_name) =
+            self.find_setup_credential_names(name).await;
+
+        // Resolve client_id: setup secrets → inline → env var → builtin
+        let client_id = self
+            .resolve_oauth_credential(
+                &oauth.client_id,
+                &oauth.client_id_env,
+                builtin.as_ref().map(|c| c.client_id),
+                setup_client_id_name.as_deref(),
+            )
+            .await
+            .ok_or_else(|| {
+                format!(
+                    "OAuth client_id not configured for '{}'. \
+                     Enter it in the Setup tab, set {} env var, or build with IRONCLAW_GOOGLE_CLIENT_ID.",
+                    name,
+                    oauth.client_id_env.as_deref().unwrap_or("the client_id env var")
+                )
+            })?;
+
+        // Resolve client_secret (optional for PKCE-only flows)
+        let client_secret = self
+            .resolve_oauth_credential(
+                &oauth.client_secret,
+                &oauth.client_secret_env,
+                builtin.as_ref().map(|c| c.client_secret),
+                setup_client_secret_name.as_deref(),
+            )
+            .await;
+
+        // Cancel any existing pending auth for this tool (frees port 9876)
+        {
+            let mut pending = self.pending_auth.write().await;
+            if let Some(old) = pending.remove(name)
+                && let Some(handle) = old.task_handle
+            {
+                handle.abort();
+            }
+        }
+
+        // Bind callback listener
+        let listener = oauth_defaults::bind_callback_listener()
+            .await
+            .map_err(|e| format!("Failed to start OAuth callback listener: {}", e))?;
+
+        let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
+
+        // Merge scopes from all tools sharing this provider
+        let merged_scopes = self
+            .collect_shared_scopes(&auth.secret_name, &oauth.scopes)
+            .await;
+
+        // Build authorization URL
+        let (auth_url, code_verifier) = oauth_defaults::build_oauth_url(
+            &oauth.authorization_url,
+            &client_id,
+            &redirect_uri,
+            &merged_scopes,
+            oauth.use_pkce,
+            &oauth.extra_params,
+        );
+
+        // Spawn background task: wait for callback → exchange code → validate → store tokens
+        let display_name = auth
+            .display_name
+            .clone()
+            .unwrap_or_else(|| name.to_string());
+        let token_url = oauth.token_url.clone();
+        let access_token_field = oauth.access_token_field.clone();
+        let secret_name = auth.secret_name.clone();
+        let provider = auth.provider.clone();
+        let validation_endpoint = auth.validation_endpoint.clone();
+        let user_id = self.user_id.clone();
+        let secrets = Arc::clone(&self.secrets);
+        let sse_sender = self.sse_sender.read().await.clone();
+        let ext_name = name.to_string();
+
+        let task_handle = tokio::spawn(async move {
+            let result: Result<(), String> = async {
+                let code =
+                    oauth_defaults::wait_for_callback(listener, "/callback", "code", &display_name)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                let token_response = oauth_defaults::exchange_oauth_code(
+                    &token_url,
+                    &client_id,
+                    client_secret.as_deref(),
+                    &code,
+                    &redirect_uri,
+                    code_verifier.as_deref(),
+                    &access_token_field,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                // Validate the token before storing (catches wrong account, etc.)
+                if let Some(ref validation) = validation_endpoint {
+                    oauth_defaults::validate_oauth_token(&token_response.access_token, validation)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+
+                oauth_defaults::store_oauth_tokens(
+                    secrets.as_ref(),
+                    &user_id,
+                    &secret_name,
+                    provider.as_deref(),
+                    &token_response.access_token,
+                    token_response.refresh_token.as_deref(),
+                    token_response.expires_in,
+                    &merged_scopes,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+                Ok(())
+            }
+            .await;
+
+            // Broadcast SSE event
+            let (success, message) = match result {
+                Ok(()) => (true, format!("{} authenticated successfully", display_name)),
+                Err(ref e) => (
+                    false,
+                    format!("{} authentication failed: {}", display_name, e),
+                ),
+            };
+
+            match &result {
+                Ok(()) => {
+                    tracing::info!(
+                        tool = %ext_name,
+                        "OAuth completed successfully"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tool = %ext_name,
+                        error = %e,
+                        "WASM tool OAuth failed"
+                    );
+                }
+            }
+
+            if let Some(ref sender) = sse_sender {
+                let _ = sender.send(crate::channels::web::types::SseEvent::AuthCompleted {
+                    extension_name: ext_name,
+                    success,
+                    message,
+                });
+            }
+        });
+
+        // Store pending auth with task handle
+        self.pending_auth.write().await.insert(
+            name.to_string(),
+            PendingAuth {
+                _name: name.to_string(),
+                _kind: ExtensionKind::WasmTool,
+                created_at: std::time::Instant::now(),
+                task_handle: Some(task_handle),
+            },
+        );
+
+        Ok(AuthResult {
+            name: name.to_string(),
+            kind: ExtensionKind::WasmTool,
+            auth_url: Some(auth_url),
+            callback_type: Some("local".to_string()),
+            instructions: None,
+            setup_url: None,
+            awaiting_token: false,
+            status: "awaiting_authorization".to_string(),
+        })
     }
 
     /// Check whether a WASM tool's required setup secrets are provided.
@@ -2478,16 +2881,55 @@ impl ExtensionManager {
             }
         }
 
-        // For tools, save and attempt auto-activation
+        // For tools, save and attempt auto-activation, then check auth.
         if kind == ExtensionKind::WasmTool {
             match self.activate_wasm_tool(name).await {
                 Ok(result) => {
-                    return Ok(SetupResult {
-                        message: format!(
+                    // Delete existing OAuth token so auth() starts a fresh flow.
+                    // Done AFTER activation succeeds to avoid losing tokens on failure.
+                    // This covers Reconfigure: user wants to re-auth (switch account, update creds).
+                    if let Some(cap) = self.load_tool_capabilities(name).await
+                        && let Some(ref auth_cfg) = cap.auth
+                        && auth_cfg.oauth.is_some()
+                    {
+                        let _ = self
+                            .secrets
+                            .delete(&self.user_id, &auth_cfg.secret_name)
+                            .await;
+                        let _ = self
+                            .secrets
+                            .delete(&self.user_id, &format!("{}_scopes", auth_cfg.secret_name))
+                            .await;
+                        let _ = self
+                            .secrets
+                            .delete(
+                                &self.user_id,
+                                &format!("{}_refresh_token", auth_cfg.secret_name),
+                            )
+                            .await;
+                    }
+
+                    // Check if auth is needed (OAuth or manual token).
+                    // This is safe to call here — cancel-and-retry prevents port conflicts.
+                    let mut auth_url = None;
+                    if let Ok(auth_result) = self.auth(name, None).await {
+                        auth_url = auth_result.auth_url;
+                    }
+                    let message = if auth_url.is_some() {
+                        format!(
+                            "Configuration saved and tool '{}' activated. Complete OAuth in your browser.",
+                            name
+                        )
+                    } else {
+                        format!(
                             "Configuration saved and tool '{}' activated. {}",
                             name, result.message
-                        ),
+                        )
+                    };
+                    return Ok(SetupResult {
+                        message,
                         activated: true,
+                        auth_url,
                     });
                 }
                 Err(e) => {
@@ -2499,6 +2941,7 @@ impl ExtensionManager {
                     return Ok(SetupResult {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
+                        auth_url: None,
                     });
                 }
             }
@@ -2515,6 +2958,7 @@ impl ExtensionManager {
                         name, result.message
                     ),
                     activated: true,
+                    auth_url: None,
                 })
             }
             Err(e) => {
@@ -2536,6 +2980,7 @@ impl ExtensionManager {
                         name, e
                     ),
                     activated: false,
+                    auth_url: None,
                 })
             }
         }

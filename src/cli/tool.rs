@@ -782,10 +782,6 @@ async fn auth_tool_oauth(
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     oauth: &crate::tools::wasm::OAuthConfigSchema,
 ) -> anyhow::Result<()> {
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-    use rand::RngCore;
-    use sha2::{Digest, Sha256};
-
     use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 
     let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
@@ -829,51 +825,15 @@ async fn auth_tool_oauth(
     let listener = oauth_defaults::bind_callback_listener().await?;
     let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
 
-    // Generate PKCE verifier and challenge
-    let (code_verifier, code_challenge) = if oauth.use_pkce {
-        let mut verifier_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut verifier_bytes);
-        let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
-
-        let mut hasher = Sha256::new();
-        hasher.update(verifier.as_bytes());
-        let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
-
-        (Some(verifier), Some(challenge))
-    } else {
-        (None, None)
-    };
-
-    // Build authorization URL
-    let mut auth_url = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}",
-        oauth.authorization_url,
-        urlencoding::encode(&client_id),
-        urlencoding::encode(&redirect_uri)
+    // Build authorization URL with PKCE
+    let (auth_url, code_verifier) = oauth_defaults::build_oauth_url(
+        &oauth.authorization_url,
+        &client_id,
+        &redirect_uri,
+        &oauth.scopes,
+        oauth.use_pkce,
+        &oauth.extra_params,
     );
-
-    if !oauth.scopes.is_empty() {
-        auth_url.push_str(&format!(
-            "&scope={}",
-            urlencoding::encode(&oauth.scopes.join(" "))
-        ));
-    }
-
-    if let Some(ref challenge) = code_challenge {
-        auth_url.push_str(&format!(
-            "&code_challenge={}&code_challenge_method=S256",
-            challenge
-        ));
-    }
-
-    // Add extra params
-    for (key, value) in &oauth.extra_params {
-        auth_url.push_str(&format!(
-            "&{}={}",
-            urlencoding::encode(key),
-            urlencoding::encode(value)
-        ));
-    }
 
     println!("  Opening browser for {} login...", display_name);
     println!();
@@ -893,76 +853,32 @@ async fn auth_tool_oauth(
     println!("  Exchanging code for token...");
 
     // Exchange code for token
-    let client = reqwest::Client::new();
-    let mut token_params = vec![
-        ("grant_type", "authorization_code".to_string()),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-    ];
-
-    if let Some(ref verifier) = code_verifier {
-        token_params.push(("code_verifier", verifier.to_string()));
-    }
-
-    // Build token request
-    let mut request = client.post(&oauth.token_url);
-
-    // Use Basic auth if client_secret is provided, otherwise include client_id in body
-    if let Some(ref secret) = client_secret {
-        request = request.basic_auth(&client_id, Some(secret));
-    } else {
-        token_params.push(("client_id", client_id));
-    }
-
-    let token_response = request.form(&token_params).send().await?;
-
-    if !token_response.status().is_success() {
-        let status = token_response.status();
-        let body = token_response.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Token exchange failed: {} - {}",
-            status,
-            body
-        ));
-    }
-
-    let token_data: serde_json::Value = token_response.json().await?;
-    let access_token = token_data
-        .get(&oauth.access_token_field)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No {} in token response: {:?}",
-                oauth.access_token_field,
-                token_data
-            )
-        })?;
-
-    let refresh_token = token_data.get("refresh_token").and_then(|v| v.as_str());
-    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
-
-    // Save the token (with refresh token and expiry if provided)
-    save_token(
-        store,
-        user_id,
-        auth,
-        access_token,
-        refresh_token,
-        expires_in,
+    let token_response = oauth_defaults::exchange_oauth_code(
+        &oauth.token_url,
+        &client_id,
+        client_secret.as_deref(),
+        &code,
+        &redirect_uri,
+        code_verifier.as_deref(),
+        &oauth.access_token_field,
     )
     .await?;
 
-    // Extract any additional info for display
-    let workspace_name = token_data
-        .get("workspace_name")
-        .and_then(|v| v.as_str())
-        .or_else(|| token_data.get("team_name").and_then(|v| v.as_str()));
+    // Save tokens (access + refresh + scopes)
+    oauth_defaults::store_oauth_tokens(
+        store,
+        user_id,
+        &auth.secret_name,
+        auth.provider.as_deref(),
+        &token_response.access_token,
+        token_response.refresh_token.as_deref(),
+        token_response.expires_in,
+        &oauth.scopes,
+    )
+    .await?;
 
     println!();
     println!("  ✓ {} connected!", display_name);
-    if let Some(workspace) = workspace_name {
-        println!("    Workspace: {}", workspace);
-    }
     println!();
     println!("  The tool can now access the API.");
     println!();
@@ -1107,46 +1023,15 @@ async fn validate_token(
     validation: &crate::tools::wasm::ValidationEndpointSchema,
     _secret_name: &str,
 ) -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-
-    // Build request based on method
-    let request = match validation.method.to_uppercase().as_str() {
-        "GET" => client.get(&validation.url),
-        "POST" => client.post(&validation.url),
-        _ => client.get(&validation.url),
-    };
-
-    // Add authorization header (assume Bearer for now, could be extended)
-    let response = request
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Notion-Version", "2022-06-28") // Notion-specific, but harmless for others
-        .send()
-        .await?;
-
-    if response.status().as_u16() == validation.success_status {
-        Ok(())
-    } else {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Err(anyhow::anyhow!(
-            "HTTP {} (expected {}): {}",
-            status,
-            validation.success_status,
-            if body.len() > 100 {
-                format!("{}...", &body[..100])
-            } else {
-                body
-            }
-        ))
-    }
+    crate::cli::oauth_defaults::validate_oauth_token(token, validation)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Save token to secrets store.
 ///
-/// Optionally stores a refresh token (as `{secret_name}_refresh_token`) and
-/// sets `expires_at` on the access token so the runtime can auto-refresh.
+/// Delegates to the shared `store_oauth_tokens` for OAuth tokens, or stores
+/// directly for manual/env-var tokens (no scopes or refresh token).
 async fn save_token(
     store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
@@ -1155,36 +1040,18 @@ async fn save_token(
     refresh_token: Option<&str>,
     expires_in: Option<u64>,
 ) -> anyhow::Result<()> {
-    let mut params = CreateSecretParams::new(&auth.secret_name, token);
-
-    if let Some(ref provider) = auth.provider {
-        params = params.with_provider(provider);
-    }
-
-    if let Some(secs) = expires_in {
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
-        params = params.with_expiry(expires_at);
-    }
-
-    store
-        .create(user_id, params)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to save token: {}", e))?;
-
-    // Store refresh token separately (no expiry, it's long-lived)
-    if let Some(rt) = refresh_token {
-        let refresh_name = format!("{}_refresh_token", auth.secret_name);
-        let mut refresh_params = CreateSecretParams::new(&refresh_name, rt);
-        if let Some(ref provider) = auth.provider {
-            refresh_params = refresh_params.with_provider(provider);
-        }
-        store
-            .create(user_id, refresh_params)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to save refresh token: {}", e))?;
-    }
-
-    Ok(())
+    crate::cli::oauth_defaults::store_oauth_tokens(
+        store,
+        user_id,
+        &auth.secret_name,
+        auth.provider.as_deref(),
+        token,
+        refresh_token,
+        expires_in,
+        &[], // No scopes for manual/env-var tokens
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Print success message.

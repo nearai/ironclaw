@@ -204,6 +204,9 @@ pub struct InstalledExtension {
     /// Whether this extension has a setup schema (required_secrets) that can be configured.
     #[serde(default)]
     pub needs_setup: bool,
+    /// Whether this extension has an auth configuration (OAuth or manual token).
+    #[serde(default)]
+    pub has_auth: bool,
     /// Whether this extension is installed locally (false = available in registry but not installed).
     #[serde(default = "default_true")]
     pub installed: bool,

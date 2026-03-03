@@ -123,7 +123,11 @@ pub async fn extensions_activate_handler(
     ))?;
 
     match ext_mgr.activate(&name).await {
-        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
+        Ok(result) => {
+            // Activation just loads the WASM module. Auth (OAuth/manual) is
+            // triggered separately via save_setup_secrets or the auth endpoint.
+            Ok(Json(ActionResponse::ok(result.message)))
+        }
         Err(activate_err) => {
             let err_str = activate_err.to_string();
             let needs_auth = err_str.contains("authentication")

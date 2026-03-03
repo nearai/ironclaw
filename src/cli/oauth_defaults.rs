@@ -17,10 +17,16 @@
 //! - **Runtime**: Users can set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET
 //!   env vars, which take priority over built-in defaults.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+
+use crate::secrets::{CreateSecretParams, SecretsStore};
 
 // ── Built-in credentials ────────────────────────────────────────────────
 
@@ -271,7 +277,261 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-/// HTML landing page shown in the browser after an OAuth redirect.
+// ── Shared OAuth flow steps ─────────────────────────────────────────
+
+/// Response from the OAuth token exchange.
+pub struct OAuthTokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<u64>,
+}
+
+/// Build an OAuth 2.0 authorization URL with optional PKCE.
+///
+/// Returns `(authorization_url, Option<code_verifier>)`. The code verifier must
+/// be kept for the token exchange when PKCE is enabled.
+pub fn build_oauth_url(
+    authorization_url: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &[String],
+    use_pkce: bool,
+    extra_params: &HashMap<String, String>,
+) -> (String, Option<String>) {
+    // Generate PKCE verifier and challenge
+    let (code_verifier, code_challenge) = if use_pkce {
+        let mut verifier_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut verifier_bytes);
+        let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+
+        (Some(verifier), Some(challenge))
+    } else {
+        (None, None)
+    };
+
+    // Build authorization URL
+    let mut auth_url = format!(
+        "{}?client_id={}&response_type=code&redirect_uri={}",
+        authorization_url,
+        urlencoding::encode(client_id),
+        urlencoding::encode(redirect_uri)
+    );
+
+    if !scopes.is_empty() {
+        auth_url.push_str(&format!(
+            "&scope={}",
+            urlencoding::encode(&scopes.join(" "))
+        ));
+    }
+
+    if let Some(ref challenge) = code_challenge {
+        auth_url.push_str(&format!(
+            "&code_challenge={}&code_challenge_method=S256",
+            challenge
+        ));
+    }
+
+    for (key, value) in extra_params {
+        auth_url.push_str(&format!(
+            "&{}={}",
+            urlencoding::encode(key),
+            urlencoding::encode(value)
+        ));
+    }
+
+    (auth_url, code_verifier)
+}
+
+/// Exchange an OAuth authorization code for tokens.
+///
+/// POSTs to `token_url` with the authorization code and optional PKCE verifier.
+/// If `client_secret` is provided, uses HTTP Basic auth; otherwise includes
+/// `client_id` in the form body (for public clients).
+pub async fn exchange_oauth_code(
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: Option<&str>,
+    access_token_field: &str,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    let client = reqwest::Client::new();
+    let mut token_params = vec![
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+    ];
+
+    if let Some(verifier) = code_verifier {
+        token_params.push(("code_verifier", verifier.to_string()));
+    }
+
+    let mut request = client.post(token_url);
+
+    if let Some(secret) = client_secret {
+        request = request.basic_auth(client_id, Some(secret));
+    } else {
+        token_params.push(("client_id", client_id.to_string()));
+    }
+
+    let token_response = request
+        .form(&token_params)
+        .send()
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Token exchange request failed: {}", e)))?;
+
+    if !token_response.status().is_success() {
+        let status = token_response.status();
+        let body = token_response.text().await.unwrap_or_default();
+        return Err(OAuthCallbackError::Io(format!(
+            "Token exchange failed: {} - {}",
+            status, body
+        )));
+    }
+
+    let token_data: serde_json::Value = token_response
+        .json()
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to parse token response: {}", e)))?;
+
+    let access_token = token_data
+        .get(access_token_field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            // Log only the field names present, not values (which may contain tokens)
+            let fields: Vec<&str> = token_data
+                .as_object()
+                .map(|o| o.keys().map(|k| k.as_str()).collect())
+                .unwrap_or_default();
+            OAuthCallbackError::Io(format!(
+                "No '{}' field in token response (fields present: {:?})",
+                access_token_field, fields
+            ))
+        })?
+        .to_string();
+
+    let refresh_token = token_data
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
+
+    Ok(OAuthTokenResponse {
+        access_token,
+        refresh_token,
+        expires_in,
+    })
+}
+
+/// Store OAuth tokens (access + refresh) in the secrets store.
+///
+/// Also stores the granted scopes as `{secret_name}_scopes` so that scope
+/// expansion can be detected on subsequent activations.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_oauth_tokens(
+    store: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+    secret_name: &str,
+    provider: Option<&str>,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    expires_in: Option<u64>,
+    scopes: &[String],
+) -> Result<(), OAuthCallbackError> {
+    let mut params = CreateSecretParams::new(secret_name, access_token);
+
+    if let Some(prov) = provider {
+        params = params.with_provider(prov);
+    }
+
+    if let Some(secs) = expires_in {
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        params = params.with_expiry(expires_at);
+    }
+
+    store
+        .create(user_id, params)
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to save token: {}", e)))?;
+
+    // Store refresh token separately (no expiry, it's long-lived)
+    if let Some(rt) = refresh_token {
+        let refresh_name = format!("{}_refresh_token", secret_name);
+        let mut refresh_params = CreateSecretParams::new(&refresh_name, rt);
+        if let Some(prov) = provider {
+            refresh_params = refresh_params.with_provider(prov);
+        }
+        store
+            .create(user_id, refresh_params)
+            .await
+            .map_err(|e| OAuthCallbackError::Io(format!("Failed to save refresh token: {}", e)))?;
+    }
+
+    // Store granted scopes for scope expansion detection
+    if !scopes.is_empty() {
+        let scopes_name = format!("{}_scopes", secret_name);
+        let scopes_value = scopes.join(" ");
+        let scopes_params = CreateSecretParams::new(&scopes_name, &scopes_value);
+        // Best-effort: scope tracking failure shouldn't block auth
+        let _ = store.create(user_id, scopes_params).await;
+    }
+
+    Ok(())
+}
+
+/// Validate an OAuth token against a tool's validation endpoint.
+///
+/// Sends a request to the configured endpoint with the token as a Bearer header.
+/// Returns `Ok(())` if the response status matches the expected success status,
+/// or an error with details if validation fails (wrong account, expired token, etc.).
+pub async fn validate_oauth_token(
+    token: &str,
+    validation: &crate::tools::wasm::ValidationEndpointSchema,
+) -> Result<(), OAuthCallbackError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
+
+    let request = match validation.method.to_uppercase().as_str() {
+        "POST" => client.post(&validation.url),
+        _ => client.get(&validation.url),
+    };
+
+    let response = request
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Validation request failed: {}", e)))?;
+
+    if response.status().as_u16() == validation.success_status {
+        Ok(())
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let truncated: String = if body.len() > 200 {
+            let mut end = 200;
+            while end < body.len() && !body.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &body[..end])
+        } else {
+            body
+        };
+        Err(OAuthCallbackError::Io(format!(
+            "Token validation failed: HTTP {} (expected {}): {}",
+            status, validation.success_status, truncated
+        )))
+    }
+}
+
+// ── Landing pages ───────────────────────────────────────────────────
+
 pub fn landing_html(provider_name: &str, success: bool) -> String {
     let safe_name = html_escape(provider_name);
     let (icon, heading, subtitle, accent) = if success {

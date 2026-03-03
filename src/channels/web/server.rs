@@ -1313,7 +1313,35 @@ async fn extensions_install_handler(
         .install(&req.name, req.url.as_deref(), kind_hint)
         .await
     {
-        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
+        Ok(result) => {
+            let mut resp = ActionResponse::ok(result.message);
+
+            // Auto-activate WASM tools after install (install = active).
+            if result.kind == crate::extensions::ExtensionKind::WasmTool {
+                if let Err(e) = ext_mgr.activate(&req.name).await {
+                    tracing::debug!(
+                        extension = %req.name,
+                        error = %e,
+                        "Auto-activation after install failed"
+                    );
+                }
+
+                // Check auth — but only act on scope expansion (token already exists).
+                // First-time auth requires Configure first.
+                match ext_mgr.auth(&req.name, None).await {
+                    Ok(auth_result)
+                        if auth_result.auth_url.is_some()
+                            && auth_result.status == "awaiting_authorization" =>
+                    {
+                        // Scope expansion: existing token needs more scopes
+                        resp.auth_url = auth_result.auth_url;
+                    }
+                    _ => {}
+                }
+            }
+
+            Ok(Json(resp))
+        }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
 }
@@ -1328,7 +1356,19 @@ async fn extensions_activate_handler(
     ))?;
 
     match ext_mgr.activate(&name).await {
-        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
+        Ok(result) => {
+            // Activation loaded the WASM module. Check if the tool needs
+            // OAuth scope expansion (e.g., adding google-docs when gmail
+            // already has a token but missing the documents scope).
+            // Initial OAuth setup is triggered via save_setup_secrets.
+            let mut resp = ActionResponse::ok(result.message);
+            if let Ok(auth_result) = ext_mgr.auth(&name, None).await
+                && auth_result.auth_url.is_some()
+            {
+                resp.auth_url = auth_result.auth_url;
+            }
+            Ok(Json(resp))
+        }
         Err(activate_err) => {
             let err_str = activate_err.to_string();
             let needs_auth = err_str.contains("authentication")
@@ -1550,6 +1590,10 @@ async fn extensions_setup_submit_handler(
         Ok(result) => {
             let mut resp = ActionResponse::ok(result.message);
             resp.activated = Some(result.activated);
+            resp.auth_url = result.auth_url;
+            if !result.activated {
+                resp.needs_restart = Some(true);
+            }
             Ok(Json(resp))
         }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
