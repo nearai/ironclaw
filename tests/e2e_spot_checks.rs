@@ -96,6 +96,9 @@ mod spot_tests {
         assert_tools_used(&started, &["echo"]);
         assert_response_contains(&responses[0].content, &["Spot check passed"]);
 
+        let completed = rig.tool_calls_completed();
+        assert_all_tools_succeeded(&completed);
+
         rig.shutdown();
     }
 
@@ -115,6 +118,22 @@ mod spot_tests {
         let started = rig.tool_calls_started();
         assert_tools_used(&started, &["time"]);
         assert_response_matches(&responses[0].content, r"20\d{2}");
+
+        let completed = rig.tool_calls_completed();
+        assert_all_tools_succeeded(&completed);
+
+        let results = rig.tool_results();
+        let time_result = results.iter().find(|(n, _)| n == "time");
+        assert!(
+            time_result.is_some(),
+            "Expected ToolResult for time, got: {results:?}"
+        );
+        assert!(
+            regex::Regex::new(r"20\d{2}")
+                .unwrap()
+                .is_match(&time_result.unwrap().1),
+            "Expected year in time result preview"
+        );
 
         rig.shutdown();
     }
@@ -149,6 +168,16 @@ mod spot_tests {
         let started = rig.tool_calls_started();
         assert_tools_used(&started, &["write_file", "read_file"]);
         assert_response_contains(&responses[0].content, &["ironclaw spot check"]);
+
+        let completed = rig.tool_calls_completed();
+        assert_all_tools_succeeded(&completed);
+
+        let results = rig.tool_results();
+        let read_result = results.iter().find(|(n, _)| n == "read_file");
+        assert!(
+            read_result.is_some() && read_result.unwrap().1.contains("ironclaw spot check"),
+            "Expected read_file result to contain 'ironclaw spot check'"
+        );
 
         // Verify file on disk.
         let content =
@@ -199,6 +228,9 @@ mod spot_tests {
         assert_tools_used(&started, &["time"]);
         assert_tools_not_used(&started, &["shell", "echo"]);
 
+        let completed = rig.tool_calls_completed();
+        assert_all_tools_succeeded(&completed);
+
         rig.shutdown();
     }
 
@@ -234,6 +266,9 @@ mod spot_tests {
         let started = rig.tool_calls_started();
         assert_tools_used(&started, &["write_file", "read_file"]);
         assert_response_contains(&responses[0].content, &["Bob", "frontend", "April 15"]);
+
+        let completed = rig.tool_calls_completed();
+        assert_all_tools_succeeded(&completed);
 
         // Cleanup.
         let _ = std::fs::remove_file("/tmp/bench-meeting.md");
