@@ -147,6 +147,10 @@ pub async fn routines_trigger_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    if routine.user_id != state.user_id {
+        return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+    }
+
     // Send the routine prompt through the message pipeline as a manual trigger.
     let prompt = match &routine.action {
         crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
