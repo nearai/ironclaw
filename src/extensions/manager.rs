@@ -2345,7 +2345,7 @@ impl ExtensionManager {
 
     async fn is_tool_setup_field_provided(
         &self,
-        field: &crate::tools::wasm::capabilities_schema::ToolFieldSetupSchema,
+        field: &crate::tools::wasm::ToolFieldSetupSchema,
         saved_fields: &HashMap<String, String>,
     ) -> bool {
         if saved_fields
@@ -2452,10 +2452,10 @@ impl ExtensionManager {
                             optional: field.optional,
                             provided,
                             input_type: match field.input_type {
-                                crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Text => {
+                                crate::tools::wasm::ToolSetupFieldInputType::Text => {
                                     "text".to_string()
                                 }
-                                crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Password => {
+                                crate::tools::wasm::ToolSetupFieldInputType::Password => {
                                     "password".to_string()
                                 }
                             },
@@ -2484,7 +2484,7 @@ impl ExtensionManager {
 
         let (allowed_secrets, setup_fields): (
             std::collections::HashSet<String>,
-            Vec<crate::tools::wasm::capabilities_schema::ToolFieldSetupSchema>,
+            Vec<crate::tools::wasm::ToolFieldSetupSchema>,
         ) = match kind {
             ExtensionKind::WasmChannel => {
                 let cap_path = self
@@ -2540,7 +2540,7 @@ impl ExtensionManager {
             setup_fields.iter().map(|f| f.name.clone()).collect();
         let setup_field_defs: std::collections::HashMap<
             String,
-            crate::tools::wasm::capabilities_schema::ToolFieldSetupSchema,
+            crate::tools::wasm::ToolFieldSetupSchema,
         > = setup_fields
             .into_iter()
             .map(|f| (f.name.clone(), f))
