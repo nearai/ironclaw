@@ -3559,7 +3559,7 @@ function formatTimeAgo(epochMs) {
 }
 
 function installSkill(nameOrSlug, url, btn) {
-  var body = { name: nameOrSlug };
+  var body = { name: nameOrSlug, slug: nameOrSlug };
   if (url) body.url = url;
 
   apiFetch('/api/skills/install', {

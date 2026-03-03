@@ -148,7 +148,10 @@ pub async fn skills_install_handler(
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     } else if let Some(ref catalog) = state.skill_catalog {
-        let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), &req.name);
+        // Prefer slug (e.g. "owner/skill-name") over display name for the
+        // download URL, since the registry endpoint expects a slug.
+        let download_key = req.slug.as_deref().unwrap_or(&req.name);
+        let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), download_key);
         crate::tools::builtin::skill_tools::fetch_skill_content(&url)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?

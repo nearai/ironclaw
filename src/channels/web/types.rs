@@ -566,6 +566,9 @@ pub struct SkillSearchResponse {
 #[derive(Debug, Deserialize)]
 pub struct SkillInstallRequest {
     pub name: String,
+    /// Registry slug (e.g. "owner/skill-name"). Preferred over `name` for
+    /// constructing the download URL when fetching from ClawHub.
+    pub slug: Option<String>,
     pub url: Option<String>,
     pub content: Option<String>,
 }
