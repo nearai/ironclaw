@@ -2225,7 +2225,7 @@ function approvePairing(channel, code, container) {
   }).then(res => {
     if (res.success) {
       showToast('Pairing approved', 'success');
-      loadPairingRequests(channel, container);
+      loadExtensions();
     } else {
       showToast(res.message || 'Approve failed', 'error');
     }
