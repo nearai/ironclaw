@@ -1096,9 +1096,7 @@ fn coerce_params_to_schema(
     mut params: serde_json::Value,
     schema: &serde_json::Value,
 ) -> serde_json::Value {
-    let properties = schema
-        .get("properties")
-        .and_then(|p| p.as_object());
+    let properties = schema.get("properties").and_then(|p| p.as_object());
 
     let properties = match properties {
         Some(p) => p,
