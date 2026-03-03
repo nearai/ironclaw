@@ -1,9 +1,9 @@
 {
-  "name": "telegram",
-  "display_name": "Telegram",
+  "name": "telegram-mtproto",
+  "display_name": "Telegram Tool",
   "kind": "tool",
   "version": "0.1.0",
-  "description": "Telegram user-mode integration via MTProto for messages and contacts",
+  "description": "Your agent uses your Telegram account to read and send messages",
   "keywords": ["messaging", "chat", "telegram", "mtproto"],
 
   "source": {
@@ -14,7 +14,7 @@
 
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/latest/download/telegram-wasm32-wasip2.tar.gz",
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/telegram-mtproto-wasm32-wasip2.tar.gz",
       "sha256": null
     }
   },

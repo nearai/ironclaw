@@ -402,19 +402,17 @@ impl AppBuilder {
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
 
-        // Create WASM tool runtime
-        let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> =
-            if self.config.wasm.enabled && self.config.wasm.tools_dir.exists() {
-                match WasmToolRuntime::new(self.config.wasm.to_runtime_config()) {
-                    Ok(runtime) => Some(Arc::new(runtime)),
-                    Err(e) => {
-                        tracing::warn!("Failed to initialize WASM runtime: {}", e);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+        // Create WASM tool runtime eagerly so extensions installed after startup
+        // (e.g. via the web UI) can still be activated. The tools directory is only
+        // needed when loading modules, not for engine initialisation.
+        let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> = if self.config.wasm.enabled {
+            WasmToolRuntime::new(self.config.wasm.to_runtime_config())
+                .map(Arc::new)
+                .map_err(|e| tracing::warn!("Failed to initialize WASM runtime: {}", e))
+                .ok()
+        } else {
+            None
+        };
 
         // Load WASM tools and MCP servers concurrently
         let wasm_tools_future = {
@@ -667,6 +665,31 @@ impl AppBuilder {
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
+            // Import workspace files from disk FIRST if WORKSPACE_IMPORT_DIR is set.
+            // This lets Docker images / deployment scripts ship customized
+            // workspace templates (e.g., AGENTS.md, TOOLS.md) that override
+            // the generic seeds. Only imports files that don't already exist
+            // in the database — never overwrites user edits.
+            //
+            // Runs before seed_if_empty() so that custom templates take priority
+            // over generic seeds. seed_if_empty() then fills any remaining gaps.
+            if let Ok(import_dir) = std::env::var("WORKSPACE_IMPORT_DIR") {
+                let import_path = std::path::Path::new(&import_dir);
+                match ws.import_from_directory(import_path).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("Imported {} workspace file(s) from {}", count, import_dir);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to import workspace files from {}: {}",
+                            import_dir,
+                            e
+                        );
+                    }
+                }
+            }
+
             match ws.seed_if_empty().await {
                 Ok(_) => {}
                 Err(e) => {

@@ -1,9 +1,9 @@
 {
   "name": "telegram",
-  "display_name": "Telegram",
+  "display_name": "Telegram Channel",
   "kind": "channel",
   "version": "0.1.0",
-  "description": "Telegram Bot API channel for receiving and responding to messages",
+  "description": "Talk to your agent through a Telegram bot",
   "keywords": ["messaging", "bot", "chat", "telegram"],
 
   "source": {

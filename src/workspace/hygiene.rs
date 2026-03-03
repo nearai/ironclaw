@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::workspace::Workspace;
 
 /// Configuration for workspace hygiene.
@@ -37,15 +38,11 @@ pub struct HygieneConfig {
 
 impl Default for HygieneConfig {
     fn default() -> Self {
-        let state_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw");
-
         Self {
             enabled: true,
             retention_days: 30,
             cadence_hours: 12,
-            state_dir,
+            state_dir: ironclaw_base_dir(),
         }
     }
 }

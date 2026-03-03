@@ -11,26 +11,43 @@ use std::sync::Arc;
 
 use tokio::fs;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::runtime::WasmChannelRuntime;
 use crate::channels::wasm::schema::ChannelCapabilitiesFile;
 use crate::channels::wasm::wrapper::WasmChannel;
+use crate::db::SettingsStore;
 use crate::pairing::PairingStore;
+use crate::secrets::SecretsStore;
 
 /// Loads WASM channels from the filesystem.
 pub struct WasmChannelLoader {
     runtime: Arc<WasmChannelRuntime>,
     pairing_store: Arc<PairingStore>,
+    settings_store: Option<Arc<dyn SettingsStore>>,
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 impl WasmChannelLoader {
     /// Create a new loader with the given runtime and pairing store.
-    pub fn new(runtime: Arc<WasmChannelRuntime>, pairing_store: Arc<PairingStore>) -> Self {
+    pub fn new(
+        runtime: Arc<WasmChannelRuntime>,
+        pairing_store: Arc<PairingStore>,
+        settings_store: Option<Arc<dyn SettingsStore>>,
+    ) -> Self {
         Self {
             runtime,
             pairing_store,
+            settings_store,
+            secrets_store: None,
         }
+    }
+
+    /// Set the secrets store for host-based credential injection in WASM channels.
+    pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
+        self.secrets_store = Some(store);
+        self
     }
 
     /// Load a single WASM channel from a file pair.
@@ -119,13 +136,17 @@ impl WasmChannelLoader {
             .await?;
 
         // Create the channel
-        let channel = WasmChannel::new(
+        let mut channel = WasmChannel::new(
             self.runtime.clone(),
             prepared,
             capabilities,
             config_json,
             self.pairing_store.clone(),
+            self.settings_store.clone(),
         );
+        if let Some(ref secrets) = self.secrets_store {
+            channel = channel.with_secrets_store(Arc::clone(secrets));
+        }
 
         tracing::info!(
             name = name,
@@ -248,6 +269,13 @@ impl LoadedChannel {
             .and_then(|f| f.webhook_secret_header())
     }
 
+    /// Get the signature verification key secret name from capabilities.
+    pub fn signature_key_secret_name(&self) -> Option<String> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()))
+    }
+
     /// Get the webhook secret name from capabilities.
     pub fn webhook_secret_name(&self) -> String {
         self.capabilities_file
@@ -349,10 +377,7 @@ pub struct DiscoveredChannel {
 /// Returns ~/.ironclaw/channels/
 #[allow(dead_code)]
 pub fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("channels")
+    ironclaw_base_dir().join("channels")
 }
 
 #[cfg(test)]
@@ -416,11 +441,23 @@ mod tests {
         assert!(channels.contains_key("channel"));
     }
 
+    #[test]
+    fn test_loaded_channel_signature_key_none_without_caps() {
+        // We can't easily construct a WasmChannel without a runtime, so test
+        // the delegation logic directly: when capabilities_file is None, the
+        // chain returns None (same logic as LoadedChannel::signature_key_secret_name).
+        let cap_file: Option<crate::channels::wasm::schema::ChannelCapabilitiesFile> = None;
+        let result = cap_file
+            .as_ref()
+            .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()));
+        assert_eq!(result, None);
+    }
+
     #[tokio::test]
     async fn test_loader_invalid_name() {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
-        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()));
+        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None);
 
         let dir = TempDir::new().unwrap();
         let wasm_path = dir.path().join("test.wasm");

@@ -86,6 +86,7 @@ mod loader;
 mod router;
 mod runtime;
 mod schema;
+pub(crate) mod signature;
 mod wrapper;
 
 // Core types

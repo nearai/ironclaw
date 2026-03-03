@@ -141,6 +141,27 @@ impl RoutineStore for LibSqlBackend {
         Ok(routines)
     }
 
+    async fn list_all_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!("SELECT {} FROM routines ORDER BY name", ROUTINE_COLUMNS),
+                (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut routines = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            routines.push(row_to_routine_libsql(&row)?);
+        }
+        Ok(routines)
+    }
+
     async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn

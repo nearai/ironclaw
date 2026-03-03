@@ -1,5 +1,6 @@
 //! Channel trait and message types.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -78,6 +79,8 @@ pub struct OutgoingResponse {
     pub content: String,
     /// Optional thread ID to reply in.
     pub thread_id: Option<String>,
+    /// Optional file paths to attach.
+    pub attachments: Vec<String>,
     /// Channel-specific metadata for the response.
     pub metadata: serde_json::Value,
 }
@@ -88,6 +91,7 @@ impl OutgoingResponse {
         Self {
             content: content.into(),
             thread_id: None,
+            attachments: Vec::new(),
             metadata: serde_json::Value::Null,
         }
     }
@@ -95,6 +99,12 @@ impl OutgoingResponse {
     /// Set the thread ID for the response.
     pub fn in_thread(mut self, thread_id: impl Into<String>) -> Self {
         self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    /// Add attachments to the response.
+    pub fn with_attachments(mut self, paths: Vec<String>) -> Self {
+        self.attachments = paths;
         self
     }
 }
@@ -197,6 +207,16 @@ pub trait Channel: Send + Sync {
 
     /// Check if the channel is healthy.
     async fn health_check(&self) -> Result<(), ChannelError>;
+
+    /// Get conversation context from message metadata for system prompt.
+    ///
+    /// Returns key-value pairs like "sender", "sender_uuid", "group" that
+    /// help the LLM understand who it's talking to.
+    ///
+    /// Default implementation returns empty map.
+    fn conversation_context(&self, _metadata: &serde_json::Value) -> HashMap<String, String> {
+        HashMap::new()
+    }
 
     /// Gracefully shut down the channel.
     async fn shutdown(&self) -> Result<(), ChannelError> {

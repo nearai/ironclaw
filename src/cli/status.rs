@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::settings::Settings;
 
 /// Run the status command, printing system health info.
@@ -168,11 +169,7 @@ async fn check_database() -> anyhow::Result<()> {
         url: Some(url),
         ..Default::default()
     };
-    let pool = config
-        .create_pool(
-            Some(deadpool_postgres::Runtime::Tokio1),
-            tokio_postgres::NoTls,
-        )
+    let pool = crate::db::tls::create_pool(&config, crate::config::SslMode::from_env())
         .map_err(|e| anyhow::anyhow!("pool error: {}", e))?;
 
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), pool.get())
@@ -206,15 +203,9 @@ fn count_wasm_files(dir: &std::path::Path) -> usize {
 }
 
 fn default_tools_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("tools")
+    ironclaw_base_dir().join("tools")
 }
 
 fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("channels")
+    ironclaw_base_dir().join("channels")
 }

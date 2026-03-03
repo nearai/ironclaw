@@ -1,9 +1,9 @@
 {
   "name": "slack",
-  "display_name": "Slack",
+  "display_name": "Slack Channel",
   "kind": "channel",
   "version": "0.1.0",
-  "description": "Slack Events API channel for receiving and responding to Slack messages",
+  "description": "Talk to your agent in Slack",
   "keywords": ["messaging", "chat", "workspace", "slack"],
 
   "source": {

@@ -24,5 +24,17 @@
     "display_name": "Telegram",
     "instructions": "1. Go to https://my.telegram.org/apps and create an app\n2. Store your API ID and hash in the workspace:\n   - Write your numeric API ID to telegram/api_id\n   - Write your API hash string to telegram/api_hash\n3. Use the 'login' action with your phone number\n4. Use 'submit_auth_code' with the code you receive\n5. Use 'submit_2fa_password' if you have 2FA enabled\n6. Save the returned session JSON to telegram/session.json",
     "setup_url": "https://my.telegram.org/apps"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "telegram_api_id",
+        "prompt": "Telegram API ID (from my.telegram.org/apps)"
+      },
+      {
+        "name": "telegram_api_hash",
+        "prompt": "Telegram API Hash"
+      }
+    ]
   }
 }

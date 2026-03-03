@@ -55,6 +55,10 @@ pub struct ToolCallInfo {
     pub name: String,
     pub has_result: bool,
     pub has_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +71,21 @@ pub struct HistoryResponse {
     /// Cursor for the next page (ISO8601 timestamp of the oldest message returned).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_timestamp: Option<String>,
+    /// Pending tool approval that needs user action (re-rendered on thread switch).
+    ///
+    /// Only populated from in-memory state; not persisted to DB.
+    /// Server restart clears pending approvals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_approval: Option<PendingApprovalInfo>,
+}
+
+/// Lightweight DTO for a pending tool approval (excludes context_messages).
+#[derive(Debug, Serialize)]
+pub struct PendingApprovalInfo {
+    pub request_id: String,
+    pub tool_name: String,
+    pub description: String,
+    pub parameters: String,
 }
 
 // --- Approval ---
@@ -193,6 +212,15 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
+
+    /// Extension activation status change (WASM channels).
+    #[serde(rename = "extension_status")]
+    ExtensionStatus {
+        extension_name: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
 // --- Memory ---
@@ -304,6 +332,15 @@ pub struct JobDetailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_mode: Option<String>,
     pub transitions: Vec<TransitionInfo>,
+    /// Whether this job can be restarted from the UI.
+    #[serde(default)]
+    pub can_restart: bool,
+    /// Whether follow-up prompts can be sent to this job.
+    #[serde(default)]
+    pub can_prompt: bool,
+    /// The kind of job: "sandbox" or "agent".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_kind: Option<String>,
 }
 
 // --- Project Files ---
@@ -339,6 +376,8 @@ pub struct TransitionInfo {
 #[derive(Debug, Serialize)]
 pub struct ExtensionInfo {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub kind: String,
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -349,6 +388,15 @@ pub struct ExtensionInfo {
     /// Whether this extension has configurable secrets (setup schema).
     #[serde(default)]
     pub needs_setup: bool,
+    /// Whether this extension has an auth configuration (OAuth or manual token).
+    #[serde(default)]
+    pub has_auth: bool,
+    /// WASM channel activation status: "installed", "configured", "active", "failed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_status: Option<String>,
+    /// Human-readable error when activation_status is "failed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -412,6 +460,9 @@ pub struct ActionResponse {
     /// Instructions for manual token entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Whether the channel was successfully activated after setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activated: Option<bool>,
 }
 
 impl ActionResponse {
@@ -422,6 +473,7 @@ impl ActionResponse {
             auth_url: None,
             awaiting_token: None,
             instructions: None,
+            activated: None,
         }
     }
 
@@ -432,6 +484,7 @@ impl ActionResponse {
             auth_url: None,
             awaiting_token: None,
             instructions: None,
+            activated: None,
         }
     }
 }
@@ -612,6 +665,7 @@ impl WsServerMessage {
             SseEvent::JobToolResult { .. } => "job_tool_result",
             SseEvent::JobStatus { .. } => "job_status",
             SseEvent::JobResult { .. } => "job_result",
+            SseEvent::ExtensionStatus { .. } => "extension_status",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         WsServerMessage::Event {

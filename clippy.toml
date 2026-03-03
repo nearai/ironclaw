@@ -1,0 +1,8 @@
+# Complexity guardrails for AI-assisted development quality.
+# These thresholds prevent new violations while preserving existing code.
+# See: https://github.com/nearai/ironclaw/issues/338
+
+cognitive-complexity-threshold = 15  # default: 25 (only active when lint is enabled)
+too-many-lines-threshold = 100      # default: 100 (only active when lint is enabled)
+too-many-arguments-threshold = 7    # default: 7 (keep default, avoids new violations)
+type-complexity-threshold = 250     # default: 250 (keep default, avoids new violations)
