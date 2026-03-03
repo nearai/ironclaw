@@ -16,12 +16,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rust_decimal::Decimal;
 use tokio::sync::Mutex;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 
@@ -237,13 +236,7 @@ fn is_transient(err: &LlmError) -> bool {
 
 #[async_trait]
 impl LlmProvider for CircuitBreakerProvider {
-    fn model_name(&self) -> &str {
-        self.inner.model_name()
-    }
-
-    fn cost_per_token(&self) -> (Decimal, Decimal) {
-        self.inner.cost_per_token()
-    }
+    crate::delegate_llm_provider!(self.inner);
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.check_allowed().await?;
@@ -275,35 +268,13 @@ impl LlmProvider for CircuitBreakerProvider {
             }
         }
     }
-
-    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
-        self.inner.list_models().await
-    }
-
-    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        self.inner.model_metadata().await
-    }
-
-    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
-        self.inner.effective_model_name(requested_model)
-    }
-
-    fn active_model_name(&self) -> String {
-        self.inner.active_model_name()
-    }
-
-    fn set_model(&self, model: &str) -> Result<(), LlmError> {
-        self.inner.set_model(model)
-    }
-
-    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
-        self.inner.calculate_cost(input_tokens, output_tokens)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use rust_decimal::Decimal;
 
     use crate::testing::StubLlm;
 

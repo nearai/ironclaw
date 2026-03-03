@@ -120,7 +120,7 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
     .completions_api();
 
     let model = client.completion_model(&oai.model);
-    Ok(Arc::new(RigAdapter::new(model, &oai.model)))
+    Ok(Arc::new(RigAdapter::new(model, &oai.model, "openai")))
 }
 
 fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -152,7 +152,7 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
         anth.model,
         anth.base_url.as_deref().unwrap_or("default"),
     );
-    Ok(Arc::new(RigAdapter::new(model, &anth.model)))
+    Ok(Arc::new(RigAdapter::new(model, &anth.model, "anthropic")))
 }
 
 fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -178,7 +178,7 @@ fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         oll.base_url,
         oll.model
     );
-    Ok(Arc::new(RigAdapter::new(model, &oll.model)))
+    Ok(Arc::new(RigAdapter::new(model, &oll.model, "ollama")))
 }
 
 const TINFOIL_BASE_URL: &str = "https://inference.tinfoil.sh/v1";
@@ -207,7 +207,7 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
     let client = client.completions_api();
     let model = client.completion_model(&tf.model);
     tracing::info!("Using Tinfoil private inference (model: {})", tf.model);
-    Ok(Arc::new(RigAdapter::new(model, &tf.model)))
+    Ok(Arc::new(RigAdapter::new(model, &tf.model, "tinfoil")))
 }
 
 fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -262,7 +262,11 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
         compat.base_url,
         compat.model
     );
-    Ok(Arc::new(RigAdapter::new(model, &compat.model)))
+    Ok(Arc::new(RigAdapter::new(
+        model,
+        &compat.model,
+        "openai_compatible",
+    )))
 }
 
 /// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).

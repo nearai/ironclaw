@@ -1,0 +1,13 @@
+services:
+  jaeger:
+    image: jaegertracing/jaeger:2.15.1
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "16686:16686"  # Jaeger UI
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:16686/"]
+      interval: 2s
+      timeout: 5s
+      retries: 15

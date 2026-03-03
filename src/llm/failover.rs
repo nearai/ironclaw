@@ -123,10 +123,22 @@ pub struct FailoverProvider {
     /// This allows `effective_model_name()` to report the provider that handled
     /// the *current* request, even when other concurrent requests update
     /// `last_used`.
+    ///
+    /// Entries are inserted on `complete()`/`complete_with_tools()` and removed
+    /// on `effective_model_name()`. If a task panics or is cancelled between
+    /// insert and remove, entries leak. A capacity guard evicts all entries when
+    /// the map exceeds [`Self::TASK_MAP_CAPACITY`] to prevent unbounded growth.
     provider_for_task: Mutex<HashMap<tokio::task::Id, usize>>,
 }
 
 impl FailoverProvider {
+    /// Maximum number of entries in `provider_for_task` before eviction.
+    /// Each entry corresponds to a Tokio task that called `complete()` but
+    /// hasn't yet called `effective_model_name()`. Under normal operation
+    /// this map stays small (bounded by concurrency). A large map indicates
+    /// leaked entries from cancelled or panicked tasks.
+    const TASK_MAP_CAPACITY: usize = 1000;
+
     /// Create a new failover provider with default cooldown settings.
     ///
     /// Returns an error if `providers` is empty.
@@ -174,11 +186,24 @@ impl FailoverProvider {
     }
 
     /// Bind the selected provider index to the current task.
+    ///
+    /// If the map exceeds [`Self::TASK_MAP_CAPACITY`], all entries are evicted
+    /// (with a warning log) before inserting the new entry. This prevents
+    /// unbounded growth from leaked entries when tasks panic or are cancelled
+    /// between `complete()` and `effective_model_name()`.
     fn bind_provider_to_current_task(&self, provider_idx: usize) {
         let Some(task_id) = Self::current_task_id() else {
             return;
         };
         if let Ok(mut guard) = self.provider_for_task.lock() {
+            if guard.len() >= Self::TASK_MAP_CAPACITY {
+                tracing::warn!(
+                    entries = guard.len(),
+                    capacity = Self::TASK_MAP_CAPACITY,
+                    "provider_for_task map exceeded capacity, evicting stale entries"
+                );
+                guard.clear();
+            }
             guard.insert(task_id, provider_idx);
         }
     }
@@ -288,6 +313,10 @@ impl FailoverProvider {
 
 #[async_trait]
 impl LlmProvider for FailoverProvider {
+    fn provider_name(&self) -> &str {
+        self.providers[self.last_used.load(Ordering::Relaxed)].provider_name()
+    }
+
     fn model_name(&self) -> &str {
         self.providers[self.last_used.load(Ordering::Relaxed)].model_name()
     }
@@ -404,6 +433,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    cached: false,
                 }))),
                 tool_complete_result: Mutex::new(Some(Ok(ToolCompletionResponse {
                     content: Some(content.to_string()),
@@ -792,6 +822,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                cached: false,
             })
         }
 
@@ -1155,6 +1186,64 @@ mod tests {
         assert_eq!(failover.active_model_name(), "new-model");
     }
 
+    // L2: provider_for_task capacity guard evicts stale entries when map exceeds threshold.
+    #[test]
+    fn provider_for_task_evicts_when_capacity_exceeded() {
+        let p1 = Arc::new(MockProvider::succeeding("model-a", "ok"));
+        let failover = FailoverProvider::new(vec![p1]).unwrap();
+
+        // Simulate leaked entries by directly inserting fake task IDs.
+        // We can't create real tokio::task::Id values directly, so we
+        // verify the capacity guard logic by filling the map to capacity
+        // and then calling bind_provider_to_current_task which should evict.
+        // Verify map starts empty.
+        assert_eq!(failover.provider_for_task.lock().unwrap().len(), 0);
+
+        // Spawn TASK_MAP_CAPACITY tasks that each insert into the map but never
+        // call effective_model_name (simulating leaked entries).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let failover = Arc::new(failover);
+
+            // Spawn tasks that insert but never remove (simulating leak).
+            let mut handles = Vec::new();
+            for _ in 0..FailoverProvider::TASK_MAP_CAPACITY {
+                let f = Arc::clone(&failover);
+                handles.push(tokio::spawn(async move {
+                    f.bind_provider_to_current_task(0);
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+
+            // Map should be at or near capacity (some tasks may share IDs in theory,
+            // but in practice each spawned task gets a unique ID).
+            let len_before = failover.provider_for_task.lock().unwrap().len();
+            assert!(len_before > 0, "Expected entries in map, got 0");
+
+            // Now one more insert should trigger eviction.
+            let f = Arc::clone(&failover);
+            tokio::spawn(async move {
+                f.bind_provider_to_current_task(0);
+            })
+            .await
+            .unwrap();
+
+            // After eviction, map should have just the one new entry (the task
+            // that triggered the eviction), not CAPACITY + 1.
+            let len_after = failover.provider_for_task.lock().unwrap().len();
+            assert!(
+                len_after <= 1,
+                "Expected map to be evicted to at most 1 entry, got {len_after}"
+            );
+        });
+    }
+
     // === QA Plan P2 - 4.1: Provider chaos tests ===
 
     #[tokio::test]
@@ -1184,18 +1273,10 @@ mod tests {
         assert_eq!(p1.call_count(), prev_p1, "p1 should be skipped in cooldown");
     }
 
-    #[tokio::test]
-    async fn all_providers_fail_returns_error_not_panic() {
-        let p1 = Arc::new(MultiCallMockProvider::always_fail("p1"));
-        let p2 = Arc::new(MultiCallMockProvider::always_fail("p2"));
-        let p3 = Arc::new(MultiCallMockProvider::always_fail("p3"));
-
-        let failover = FailoverProvider::new(vec![p1 as Arc<dyn LlmProvider>, p2, p3]).unwrap();
-
-        // Should return an error, not panic.
-        let result = failover.complete(make_request()).await;
-        assert!(result.is_err());
-    }
+    // NOTE: all_providers_fail_returns_error_not_panic was removed because
+    // it was fully superseded by test_failover_all_providers_fail_no_panic
+    // (below), which asserts the same invariant plus verifies the error
+    // provider identity and also tests complete_with_tools.
 
     #[tokio::test]
     async fn failover_with_tools_follows_same_path() {

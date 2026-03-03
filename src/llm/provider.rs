@@ -153,6 +153,10 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Whether this response was served from the response cache.
+    /// When `true`, `input_tokens` / `output_tokens` reflect the original
+    /// call's usage — no real LLM work was done and no cost was incurred.
+    pub cached: bool,
 }
 
 /// Why the completion finished.
@@ -267,6 +271,12 @@ pub struct ModelMetadata {
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
+    /// Provider name (e.g. "openai", "anthropic", "nearai").
+    /// Used for `gen_ai.provider.name` OTEL attribute.
+    fn provider_name(&self) -> &str {
+        "unknown"
+    }
+
     /// Get the model name.
     fn model_name(&self) -> &str;
 
@@ -328,6 +338,108 @@ pub trait LlmProvider: Send + Sync {
         let (input_cost, output_cost) = self.cost_per_token();
         input_cost * Decimal::from(input_tokens) + output_cost * Decimal::from(output_tokens)
     }
+}
+
+/// Generate passthrough `LlmProvider` implementations that delegate to an inner provider.
+///
+/// Use inside an `#[async_trait] impl LlmProvider for ...` block. Generates all
+/// methods except `complete` and `complete_with_tools`, which decorators override.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[async_trait]
+/// impl LlmProvider for MyDecorator {
+///     crate::delegate_llm_provider!(self.inner);
+///
+///     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+///         // custom logic
+///     }
+///     async fn complete_with_tools(&self, request: ToolCompletionRequest) -> Result<ToolCompletionResponse, LlmError> {
+///         // custom logic
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! delegate_llm_provider {
+    ($self:ident . $field:ident) => {
+        $crate::delegate_llm_provider!($self.$field, skip_effective_model_name);
+
+        fn effective_model_name(&$self, requested_model: Option<&str>) -> String {
+            $self.$field.effective_model_name(requested_model)
+        }
+    };
+
+    // Variant that omits `effective_model_name` so the impl can provide
+    // its own (e.g. SmartRoutingProvider with request-scoped routing).
+    ($self:ident . $field:ident, skip_effective_model_name) => {
+        fn provider_name(&$self) -> &str {
+            $self.$field.provider_name()
+        }
+
+        fn model_name(&$self) -> &str {
+            $self.$field.model_name()
+        }
+
+        fn cost_per_token(&$self) -> (::rust_decimal::Decimal, ::rust_decimal::Decimal) {
+            $self.$field.cost_per_token()
+        }
+
+        // Async methods use the desugared form directly because
+        // `#[async_trait]` cannot process `async fn` from macro expansions.
+        fn list_models<'life0, 'async_trait>(
+            &'life0 $self,
+        ) -> ::std::pin::Pin<
+            Box<
+                dyn ::std::future::Future<
+                        Output = Result<Vec<String>, $crate::error::LlmError>,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { $self.$field.list_models().await })
+        }
+
+        fn model_metadata<'life0, 'async_trait>(
+            &'life0 $self,
+        ) -> ::std::pin::Pin<
+            Box<
+                dyn ::std::future::Future<
+                        Output = Result<
+                            $crate::llm::provider::ModelMetadata,
+                            $crate::error::LlmError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move { $self.$field.model_metadata().await })
+        }
+
+        fn active_model_name(&$self) -> String {
+            $self.$field.active_model_name()
+        }
+
+        fn set_model(&$self, model: &str) -> Result<(), $crate::error::LlmError> {
+            $self.$field.set_model(model)
+        }
+
+        fn calculate_cost(
+            &$self,
+            input_tokens: u32,
+            output_tokens: u32,
+        ) -> ::rust_decimal::Decimal {
+            $self.$field.calculate_cost(input_tokens, output_tokens)
+        }
+    };
 }
 
 /// Sanitize a message list to ensure tool_use / tool_result integrity.

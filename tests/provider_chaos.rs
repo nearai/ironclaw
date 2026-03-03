@@ -88,6 +88,7 @@ impl LlmProvider for FlakeyProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            cached: false,
         })
     }
 
@@ -192,6 +193,7 @@ impl LlmProvider for GarbageProvider {
             input_tokens: 0,
             output_tokens: 0,
             finish_reason: FinishReason::Unknown,
+            cached: false,
         })
     }
 
@@ -248,6 +250,7 @@ impl LlmProvider for ReliableProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            cached: false,
         })
     }
 

@@ -32,6 +32,7 @@ pub struct WorkerDeps {
     pub tools: Arc<ToolRegistry>,
     pub store: Option<Arc<dyn Database>>,
     pub hooks: Arc<HookRegistry>,
+    pub observer: Arc<dyn crate::observability::Observer>,
     pub timeout: Duration,
     pub use_planning: bool,
 }
@@ -1101,6 +1102,7 @@ mod tests {
             tools: Arc::new(registry),
             store: None,
             hooks: Arc::new(crate::hooks::HookRegistry::new()),
+            observer: Arc::new(crate::observability::NoopObserver),
             timeout: Duration::from_secs(30),
             use_planning: false,
         };

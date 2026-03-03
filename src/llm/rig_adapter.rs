@@ -32,19 +32,21 @@ use crate::llm::provider::{
 pub struct RigAdapter<M: CompletionModel> {
     model: M,
     model_name: String,
+    provider: String,
     input_cost: Decimal,
     output_cost: Decimal,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
     /// Create a new adapter wrapping the given rig-core model.
-    pub fn new(model: M, model_name: impl Into<String>) -> Self {
+    pub fn new(model: M, model_name: impl Into<String>, provider: impl Into<String>) -> Self {
         let name = model_name.into();
         let (input_cost, output_cost) =
             costs::model_cost(&name).unwrap_or_else(costs::default_cost);
         Self {
             model,
             model_name: name,
+            provider: provider.into(),
             input_cost,
             output_cost,
         }
@@ -397,6 +399,10 @@ where
     M: CompletionModel + Send + Sync + 'static,
     M::Response: Send + Sync + Serialize + DeserializeOwned,
 {
+    fn provider_name(&self) -> &str {
+        &self.provider
+    }
+
     fn model_name(&self) -> &str {
         &self.model_name
     }
@@ -418,7 +424,9 @@ where
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let msg_count = messages.len();
         let (preamble, history) = convert_messages(&messages);
+        let preamble_len = preamble.as_ref().map(|p| p.len()).unwrap_or(0);
 
         let rig_req = build_rig_request(
             preamble,
@@ -429,14 +437,19 @@ where
             request.max_tokens,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+        let response = self.model.completion(rig_req).await.map_err(|e| {
+            tracing::warn!(
+                provider = %self.model_name,
+                error = %e,
+                messages = msg_count,
+                preamble_chars = preamble_len,
+                "LLM completion failed"
+            );
+            LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: e.to_string(),
+            }
+        })?;
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
@@ -445,6 +458,7 @@ where
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
+            cached: false,
         })
     }
 
@@ -467,7 +481,10 @@ where
 
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let msg_count = messages.len();
+        let tool_count = request.tools.len();
         let (preamble, history) = convert_messages(&messages);
+        let preamble_len = preamble.as_ref().map(|p| p.len()).unwrap_or(0);
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
@@ -480,14 +497,20 @@ where
             request.max_tokens,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+        let response = self.model.completion(rig_req).await.map_err(|e| {
+            tracing::warn!(
+                provider = %self.model_name,
+                error = %e,
+                messages = msg_count,
+                tools = tool_count,
+                preamble_chars = preamble_len,
+                "LLM tool completion failed"
+            );
+            LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: e.to_string(),
+            }
+        })?;
 
         let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
 

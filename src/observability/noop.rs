@@ -36,7 +36,11 @@ mod tests {
     #[test]
     fn record_event_does_not_panic() {
         let obs = NoopObserver;
-        obs.record_event(&ObserverEvent::TurnComplete);
+        obs.record_event(&ObserverEvent::TurnComplete {
+            thread_id: None,
+            iteration: 1,
+            tool_calls_in_turn: 0,
+        });
         obs.record_event(&ObserverEvent::HeartbeatTick);
         obs.record_event(&ObserverEvent::AgentStart {
             provider: "x".into(),

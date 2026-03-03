@@ -36,6 +36,12 @@ impl Observer for MultiObserver {
         }
     }
 
+    fn shutdown(&self) {
+        for obs in &self.observers {
+            obs.shutdown();
+        }
+    }
+
     fn name(&self) -> &str {
         "multi"
     }
@@ -99,7 +105,11 @@ mod tests {
     #[test]
     fn empty_multi_does_not_panic() {
         let multi = MultiObserver::new(vec![]);
-        multi.record_event(&ObserverEvent::TurnComplete);
+        multi.record_event(&ObserverEvent::TurnComplete {
+            thread_id: None,
+            iteration: 1,
+            tool_calls_in_turn: 0,
+        });
         multi.record_metric(&ObserverMetric::TokensUsed(100));
         multi.flush();
     }
@@ -111,7 +121,11 @@ mod tests {
 
         let multi = MultiObserver::new(vec![Box::new(a), Box::new(b)]);
 
-        multi.record_event(&ObserverEvent::TurnComplete);
+        multi.record_event(&ObserverEvent::TurnComplete {
+            thread_id: None,
+            iteration: 1,
+            tool_calls_in_turn: 0,
+        });
         multi.record_event(&ObserverEvent::HeartbeatTick);
         multi.record_metric(&ObserverMetric::TokensUsed(50));
         multi.flush();
@@ -132,6 +146,7 @@ mod tests {
         multi.record_event(&ObserverEvent::AgentEnd {
             duration: Duration::from_secs(1),
             tokens_used: None,
+            total_cost_usd: None,
         });
 
         assert_eq!(events.load(Ordering::Relaxed), 1);

@@ -32,6 +32,10 @@ impl ProxyLlmProvider {
 
 #[async_trait]
 impl LlmProvider for ProxyLlmProvider {
+    fn provider_name(&self) -> &str {
+        "proxy"
+    }
+
     fn model_name(&self) -> &str {
         &self.model_name
     }
