@@ -637,7 +637,10 @@ impl Agent {
                     // Drain any flushed messages before shutdown
                     while let Ok(msg) = batched_rx.try_recv() {
                         if let Err(e) = self.handle_message(&msg).await {
-                            tracing::error!("Error handling flushed message during shutdown: {}", e);
+                            tracing::error!(
+                                "Error handling flushed message during shutdown: {}",
+                                e
+                            );
                         }
                     }
                     break;
@@ -731,8 +734,30 @@ impl Agent {
         }
 
         // Hydrate thread from DB if it's a historical thread not in memory
-        if let Some(ref external_thread_id) = message.thread_id {
-            self.maybe_hydrate_thread(message, external_thread_id).await;
+        if let Some(ref external_thread_id) = message.thread_id
+            && let Err(e) = self.maybe_hydrate_thread(message, external_thread_id).await
+        {
+            match e {
+                crate::agent::thread_ops::HydrationError::AccessDenied {
+                    conversation_id,
+                    user_id,
+                } => {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        conversation_id = %conversation_id,
+                        "Denied thread hydration - user doesn't own conversation"
+                    );
+                    // Send error response to user
+                    let _ = self
+                        .channels
+                        .respond(
+                            message,
+                            OutgoingResponse::text("Thread not found or access denied."),
+                        )
+                        .await;
+                    return Ok(None);
+                }
+            }
         }
 
         // Resolve session and thread
