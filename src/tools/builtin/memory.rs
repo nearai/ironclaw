@@ -100,6 +100,7 @@ impl Tool for MemorySearchTool {
             "results": results.iter().map(|r| serde_json::json!({
                 "content": r.content,
                 "score": r.score,
+                "path": r.document_path,
                 "document_id": r.document_id.to_string(),
                 "is_hybrid_match": r.is_hybrid(),
             })).collect::<Vec<_>>(),

@@ -161,7 +161,7 @@ pub async fn memory_search_handler(
     let hits: Vec<SearchHit> = results
         .iter()
         .map(|r| SearchHit {
-            path: r.document_id.to_string(),
+            path: r.document_path.clone(),
             content: r.content.clone(),
             score: r.score as f64,
         })
