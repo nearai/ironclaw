@@ -121,6 +121,7 @@ impl Agent {
             deps.tools.clone(),
             deps.store.clone(),
             deps.hooks.clone(),
+            deps.observer.clone(),
         ));
 
         Self {

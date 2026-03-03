@@ -1576,20 +1576,9 @@ mod tests {
         assert_eq!(compacted[4].content, "Current question");
     }
 
-    #[test]
-    fn test_compact_single_user_message_keeps_everything() {
-        let messages = vec![
-            ChatMessage::system("System prompt"),
-            ChatMessage::user("Only question"),
-        ];
-
-        let compacted = compact_messages_for_retry(&messages);
-
-        // system + user (no compaction note — nothing was dropped)
-        assert_eq!(compacted.len(), 2);
-        assert_eq!(compacted[0].content, "System prompt");
-        assert_eq!(compacted[1].content, "Only question");
-    }
+    // NOTE: test_compact_single_user_message_keeps_everything was removed
+    // because it was a strict subset of the I3 regression test
+    // no_false_compaction_note_when_only_system_precedes_user (below).
 
     #[test]
     fn test_compact_no_user_messages_keeps_non_system() {

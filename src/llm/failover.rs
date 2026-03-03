@@ -1273,18 +1273,10 @@ mod tests {
         assert_eq!(p1.call_count(), prev_p1, "p1 should be skipped in cooldown");
     }
 
-    #[tokio::test]
-    async fn all_providers_fail_returns_error_not_panic() {
-        let p1 = Arc::new(MultiCallMockProvider::always_fail("p1"));
-        let p2 = Arc::new(MultiCallMockProvider::always_fail("p2"));
-        let p3 = Arc::new(MultiCallMockProvider::always_fail("p3"));
-
-        let failover = FailoverProvider::new(vec![p1 as Arc<dyn LlmProvider>, p2, p3]).unwrap();
-
-        // Should return an error, not panic.
-        let result = failover.complete(make_request()).await;
-        assert!(result.is_err());
-    }
+    // NOTE: all_providers_fail_returns_error_not_panic was removed because
+    // it was fully superseded by test_failover_all_providers_fail_no_panic
+    // (below), which asserts the same invariant plus verifies the error
+    // provider identity and also tests complete_with_tools.
 
     #[tokio::test]
     async fn failover_with_tools_follows_same_path() {
