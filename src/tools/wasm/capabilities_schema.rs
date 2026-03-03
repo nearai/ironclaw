@@ -528,6 +528,9 @@ pub struct ToolSetupSchema {
     /// Secrets the user must provide before the tool can be used.
     #[serde(default)]
     pub required_secrets: Vec<ToolSecretSetupSchema>,
+    /// Non-secret fields the user can configure in the setup modal.
+    #[serde(default)]
+    pub required_fields: Vec<ToolFieldSetupSchema>,
 }
 
 /// A single secret required during tool setup.
@@ -540,6 +543,47 @@ pub struct ToolSecretSetupSchema {
     /// If true, the user may skip this secret.
     #[serde(default)]
     pub optional: bool,
+}
+
+/// A non-secret field required during tool setup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolFieldSetupSchema {
+    /// Field name in setup payload.
+    pub name: String,
+    /// User-facing prompt shown in the setup modal.
+    pub prompt: String,
+    /// If true, the user may skip this field.
+    #[serde(default)]
+    pub optional: bool,
+    /// Input type used in the setup modal.
+    #[serde(default = "default_tool_setup_field_input_type")]
+    pub input_type: ToolSetupFieldInputType,
+    /// Optional dotted setting path to persist this value to.
+    ///
+    /// Example: `llm_backend` or `selected_model`.
+    #[serde(default)]
+    pub setting_path: Option<String>,
+    /// Whether changing this field requires a restart to fully apply.
+    #[serde(default)]
+    pub restart_required: bool,
+}
+
+/// Input widget type for a setup field.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSetupFieldInputType {
+    Text,
+    Password,
+}
+
+impl Default for ToolSetupFieldInputType {
+    fn default() -> Self {
+        Self::Text
+    }
+}
+
+fn default_tool_setup_field_input_type() -> ToolSetupFieldInputType {
+    ToolSetupFieldInputType::Text
 }
 
 #[cfg(test)]
@@ -1016,6 +1060,20 @@ mod tests {
                         "prompt": "Google OAuth Client Secret",
                         "optional": true
                     }
+                ],
+                "required_fields": [
+                    {
+                        "name": "llm_backend",
+                        "prompt": "LLM Provider",
+                        "setting_path": "llm_backend",
+                        "restart_required": true
+                    },
+                    {
+                        "name": "selected_model",
+                        "prompt": "Model Name",
+                        "input_type": "text",
+                        "setting_path": "selected_model"
+                    }
                 ]
             }
         }"#;
@@ -1028,6 +1086,48 @@ mod tests {
         assert!(!setup.required_secrets[0].optional);
         assert_eq!(setup.required_secrets[1].name, "google_oauth_client_secret");
         assert!(setup.required_secrets[1].optional);
+        assert_eq!(setup.required_fields.len(), 2);
+        assert_eq!(setup.required_fields[0].name, "llm_backend");
+        assert_eq!(
+            setup.required_fields[0].setting_path.as_deref(),
+            Some("llm_backend")
+        );
+        assert!(setup.required_fields[0].restart_required);
+        assert_eq!(
+            setup.required_fields[0].input_type,
+            crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Text
+        );
+        assert_eq!(setup.required_fields[1].name, "selected_model");
+    }
+
+    #[test]
+    fn test_tool_setup_field_input_type_defaults_to_text() {
+        let json = r#"{
+            "setup": {
+                "required_fields": [
+                    {
+                        "name": "provider",
+                        "prompt": "Provider"
+                    },
+                    {
+                        "name": "token_hint",
+                        "prompt": "Token Hint",
+                        "input_type": "password"
+                    }
+                ]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let setup = caps.setup.unwrap();
+        assert_eq!(
+            setup.required_fields[0].input_type,
+            crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Text
+        );
+        assert_eq!(
+            setup.required_fields[1].input_type,
+            crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Password
+        );
     }
 
     #[test]

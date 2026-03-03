@@ -417,6 +417,7 @@ pub struct ExtensionSetupResponse {
     pub name: String,
     pub kind: String,
     pub secrets: Vec<SecretFieldInfo>,
+    pub fields: Vec<SetupFieldInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -430,9 +431,23 @@ pub struct SecretFieldInfo {
     pub auto_generate: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SetupFieldInfo {
+    pub name: String,
+    pub prompt: String,
+    pub optional: bool,
+    /// Whether this field already has a stored value.
+    pub provided: bool,
+    /// Input type for web UI rendering ("text" or "password").
+    pub input_type: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ExtensionSetupRequest {
+    #[serde(default)]
     pub secrets: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub fields: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1043,5 +1058,25 @@ mod tests {
         let json = r#"{"extension_name":"telegram"}"#;
         let req: AuthCancelRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.extension_name, "telegram");
+    }
+
+    #[test]
+    fn test_extension_setup_request_defaults() {
+        let json = r#"{}"#;
+        let req: ExtensionSetupRequest = serde_json::from_str(json).unwrap();
+        assert!(req.secrets.is_empty());
+        assert!(req.fields.is_empty());
+    }
+
+    #[test]
+    fn test_extension_setup_request_deserialize_with_fields() {
+        let json = r#"{
+            "secrets": { "api_key": "sk-123" },
+            "fields": { "llm_backend": "openai", "selected_model": "gpt-4o" }
+        }"#;
+        let req: ExtensionSetupRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.secrets.get("api_key").unwrap(), "sk-123");
+        assert_eq!(req.fields.get("llm_backend").unwrap(), "openai");
+        assert_eq!(req.fields.get("selected_model").unwrap(), "gpt-4o");
     }
 }

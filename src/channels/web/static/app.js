@@ -2050,16 +2050,18 @@ function removeExtension(name) {
 function showConfigureModal(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
-      if (!setup.secrets || setup.secrets.length === 0) {
+      const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
+      const fields = Array.isArray(setup.fields) ? setup.fields : [];
+      if (secrets.length === 0 && fields.length === 0) {
         showToast('No configuration needed for ' + name, 'info');
         return;
       }
-      renderConfigureModal(name, setup.secrets);
+      renderConfigureModal(name, secrets, fields);
     })
     .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
 }
 
-function renderConfigureModal(name, secrets) {
+function renderConfigureModal(name, secrets, setupFields) {
   closeConfigureModal();
   const overlay = document.createElement('div');
   overlay.className = 'configure-overlay';
@@ -2120,7 +2122,46 @@ function renderConfigureModal(name, secrets) {
 
     field.appendChild(inputRow);
     form.appendChild(field);
-    fields.push({ name: secret.name, input: input });
+    fields.push({ kind: 'secret', name: secret.name, input: input });
+  }
+
+  for (const setupField of setupFields) {
+    const field = document.createElement('div');
+    field.className = 'configure-field';
+
+    const label = document.createElement('label');
+    label.textContent = setupField.prompt;
+    if (setupField.optional) {
+      const opt = document.createElement('span');
+      opt.className = 'field-optional';
+      opt.textContent = ' (optional)';
+      label.appendChild(opt);
+    }
+    field.appendChild(label);
+
+    const inputRow = document.createElement('div');
+    inputRow.className = 'configure-input-row';
+
+    const input = document.createElement('input');
+    input.type = setupField.input_type === 'password' ? 'password' : 'text';
+    input.name = setupField.name;
+    input.placeholder = setupField.provided ? '(already set — leave empty to keep)' : '';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitConfigureModal(name, fields);
+    });
+    inputRow.appendChild(input);
+
+    if (setupField.provided) {
+      const badge = document.createElement('span');
+      badge.className = 'field-provided';
+      badge.textContent = '\u2713';
+      badge.title = 'Already configured';
+      inputRow.appendChild(badge);
+    }
+
+    field.appendChild(inputRow);
+    form.appendChild(field);
+    fields.push({ kind: 'field', name: setupField.name, input: input });
   }
 
   modal.appendChild(form);
@@ -2149,9 +2190,16 @@ function renderConfigureModal(name, secrets) {
 
 function submitConfigureModal(name, fields) {
   const secrets = {};
+  const setupFields = {};
   for (const f of fields) {
-    if (f.input.value.trim()) {
-      secrets[f.name] = f.input.value.trim();
+    const value = f.input.value.trim();
+    if (!value) {
+      continue;
+    }
+    if (f.kind === 'secret') {
+      secrets[f.name] = value;
+    } else {
+      setupFields[f.name] = value;
     }
   }
 
@@ -2161,15 +2209,15 @@ function submitConfigureModal(name, fields) {
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
-    body: { secrets },
+    body: { secrets, fields: setupFields },
   })
     .then((res) => {
       closeConfigureModal();
       if (res.success) {
-        if (res.activated) {
+        if (res.needs_restart) {
+          showToast('Configured ' + name + '. Restart IronClaw to apply all changes.', 'info');
+        } else if (res.activated) {
           showToast('Configured and activated ' + name, 'success');
-        } else if (res.needs_restart) {
-          showToast('Configured ' + name + '. Use Reconfigure to re-enter credentials and activate.', 'info');
         } else {
           showToast(res.message, 'success');
         }
