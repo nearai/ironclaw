@@ -228,7 +228,13 @@ function connectSSE() {
   eventSource.addEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
     removeAuthCard(data.extension_name);
-    showToast(data.message, 'success');
+    if (data.success) {
+      showToast(data.message, 'success');
+    } else {
+      showToast(data.message, 'error');
+    }
+    // Refresh extensions list so status indicators update
+    if (currentTab === 'extensions') loadExtensions();
     enableChatInput();
   });
 
@@ -1760,6 +1766,11 @@ function renderAvailableExtensionCard(entry) {
     }).then(function(res) {
       if (res.success) {
         showToast('Installed ' + entry.display_name, 'success');
+        // OAuth popup if auth started during install (builtin creds)
+        if (res.auth_url) {
+          showToast('Opening authentication for ' + entry.display_name, 'info');
+          window.open(res.auth_url, '_blank', 'width=600,height=700');
+        }
         loadExtensions();
         // Auto-open configure for WASM channels
         if (entry.kind === 'wasm_channel') {
@@ -1961,24 +1972,25 @@ function renderExtensionCard(ext) {
       actions.appendChild(setupBtn);
     }
   } else {
-    // Non-WASM-channel extensions: original behavior
-    if (!ext.active) {
+    // WASM tools / MCP servers
+    const activeLabel = document.createElement('span');
+    activeLabel.className = 'ext-active-label';
+    activeLabel.textContent = ext.active ? 'Active' : 'Installed';
+    actions.appendChild(activeLabel);
+
+    // MCP servers may be installed but inactive — show Activate button
+    if (ext.kind === 'mcp_server' && !ext.active) {
       const activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
       activateBtn.textContent = 'Activate';
       activateBtn.addEventListener('click', () => activateExtension(ext.name));
       actions.appendChild(activateBtn);
-    } else {
-      const activeLabel = document.createElement('span');
-      activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
-      actions.appendChild(activeLabel);
     }
 
-    if (ext.needs_setup) {
+    if (ext.needs_setup || ext.has_auth) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
-      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Setup';
+      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
       configBtn.addEventListener('click', () => showConfigureModal(ext.name));
       actions.appendChild(configBtn);
     }
@@ -2008,6 +2020,11 @@ function activateExtension(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/activate', { method: 'POST' })
     .then((res) => {
       if (res.success) {
+        // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
+        if (res.auth_url) {
+          showToast('Opening authentication for ' + name, 'info');
+          window.open(res.auth_url, '_blank', 'width=600,height=700');
+        }
         loadExtensions();
         return;
       }
@@ -2158,7 +2175,11 @@ function submitConfigureModal(name, fields) {
     .then((res) => {
       closeConfigureModal();
       if (res.success) {
-        if (res.activated) {
+        if (res.auth_url) {
+          // OAuth flow started — open consent popup
+          showToast('Opening OAuth authorization for ' + name, 'info');
+          window.open(res.auth_url, '_blank', 'width=600,height=700');
+        } else if (res.activated) {
           showToast('Configured and activated ' + name, 'success');
         } else {
           showToast(res.message || 'Configuration saved but activation failed', 'warning');

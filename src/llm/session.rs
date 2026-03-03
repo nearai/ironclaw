@@ -347,7 +347,7 @@ impl SessionManager {
 
         // The NEAR AI API redirects to: {frontend_callback}/auth/callback?token=X&...
         let session_token =
-            oauth_defaults::wait_for_callback(listener, "/auth/callback", "token", "NEAR AI")
+            oauth_defaults::wait_for_callback(listener, "/auth/callback", "token", "NEAR AI", None)
                 .await
                 .map_err(|e| LlmError::SessionRenewalFailed {
                     provider: "nearai".to_string(),
