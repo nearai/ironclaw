@@ -49,6 +49,7 @@ async fn start_test_server() -> (
         store: None,
         job_manager: None,
         prompt_queue: None,
+        scheduler: None,
         user_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
