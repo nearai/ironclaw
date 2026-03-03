@@ -20,7 +20,7 @@ use crate::llm::{
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::rate_limiter::RateLimitResult;
-use crate::tools::retry::{effective_retry_config, retry_tool_execute};
+use crate::tools::retry::execute_with_retry;
 
 /// Shared dependencies for worker execution.
 ///
@@ -766,50 +766,34 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             "Tool call started"
         );
 
-        // Execute with per-tool timeout, retry, and timing
+        // Execute with per-tool timeout, retry, and timing.
+        // Budget == timeout is intentional: budget is the cooperative graceful exit,
+        // tokio timeout is the hard cancellation backstop.
         let tool_timeout = tool.execution_timeout();
-        let retry_config = effective_retry_config(tool.as_ref());
-        let retry_counter = std::sync::atomic::AtomicU32::new(0);
-        let start = std::time::Instant::now();
-        let timeout_result = tokio::time::timeout(tool_timeout, async {
-            retry_tool_execute(
-                tool.as_ref(),
-                &params,
-                &job_ctx,
-                &retry_config,
-                tool_timeout,
-                &retry_counter,
-            )
-            .await
-        })
-        .await;
-        let elapsed = start.elapsed();
+        let (timeout_result, retry_attempts, elapsed) =
+            execute_with_retry(tool.as_ref(), &params, &job_ctx).await;
 
         // Unpack the timeout + retry layers.
-        // On timeout, read retry_counter to capture retries that occurred
-        // before the cancellation — without this, the count would be lost.
-        let (result, retry_attempts) = match timeout_result {
+        let result = match timeout_result {
             Ok(outcome) => {
-                let attempts = outcome.retry_attempts;
-                if attempts > 0 {
+                if retry_attempts > 0 {
                     tracing::debug!(
                         tool = %tool_name,
-                        retry_attempts = attempts,
+                        retry_attempts,
                         "Tool call completed after retries"
                     );
                 }
-                (Ok(outcome.result), attempts)
+                Ok(outcome.result)
             }
             Err(_) => {
-                let attempts = retry_counter.load(std::sync::atomic::Ordering::Relaxed);
-                if attempts > 0 {
+                if retry_attempts > 0 {
                     tracing::warn!(
                         tool = %tool_name,
-                        retry_attempts = attempts,
+                        retry_attempts,
                         "Tool call timed out after retries"
                     );
                 }
-                (Err(()), attempts)
+                Err(())
             }
         };
 

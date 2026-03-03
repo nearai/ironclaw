@@ -88,12 +88,12 @@ pub enum ToolError {
     #[error("Invalid parameters: {0}")]
     InvalidParameters(String),
 
-    /// A permanent execution failure — retrying the same call will not help.
+    /// General execution failure — classified as transient for retry purposes.
     ///
-    /// Use this for logic errors, assertion failures, or any condition that
-    /// the tool knows will persist. For transient failures (network hiccups,
-    /// temporary unavailability) use [`ExternalService`](Self::ExternalService)
-    /// or [`Sandbox`](Self::Sandbox) instead so the retry layer can help.
+    /// Many real-world uses wrap conditions that are genuinely transient (DB
+    /// errors, shell spawn failures from resource exhaustion). The retry budget
+    /// and `max_retries` prevent runaway retries when the failure is permanent.
+    /// For clearly transient network errors, prefer [`ExternalService`](Self::ExternalService).
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
@@ -115,15 +115,19 @@ pub enum ToolError {
 
 impl ToolError {
     /// Classify this error as transient or permanent.
+    ///
+    /// `ExecutionFailed` is classified as transient because many real-world uses
+    /// wrap genuinely transient conditions (DB errors, shell spawn failures due
+    /// to resource exhaustion). For tools with truly permanent `ExecutionFailed`
+    /// errors, the retry budget and `max_retries` prevent runaway retries.
     pub fn kind(&self) -> ToolErrorKind {
         match self {
             Self::RateLimited(_)
             | Self::ExternalService(_)
             | Self::Timeout(_)
-            | Self::Sandbox(_) => ToolErrorKind::Transient,
-            Self::InvalidParameters(_) | Self::ExecutionFailed(_) | Self::NotAuthorized(_) => {
-                ToolErrorKind::Permanent
-            }
+            | Self::Sandbox(_)
+            | Self::ExecutionFailed(_) => ToolErrorKind::Transient,
+            Self::InvalidParameters(_) | Self::NotAuthorized(_) => ToolErrorKind::Permanent,
         }
     }
 
@@ -150,11 +154,14 @@ pub struct ToolRetryConfig {
 }
 
 impl Default for ToolRetryConfig {
-    /// Default: 5 retries, 2s base delay, 30s max delay.
+    /// Default: 3 retries, 1s base delay, 30s max delay.
+    ///
+    /// Total worst-case backoff sleep: ~7s (1s + 2s + 4s), well within the
+    /// 60s default `execution_timeout()`.
     fn default() -> Self {
         Self {
-            max_retries: 5,
-            base_delay: Duration::from_secs(2),
+            max_retries: 3,
+            base_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(30),
         }
     }
@@ -331,6 +338,10 @@ pub trait Tool: Send + Sync {
     ///
     /// Return `Some(config)` to customize retry behavior (max retries, delays).
     /// Return `None` to use the default configuration based on `domain()`.
+    ///
+    /// **CPU-bound tools** that predictably timeout on the same input (e.g.
+    /// heavy computation, infinite loops) should override this to return
+    /// `max_retries: 0` — retrying will waste time without changing the outcome.
     ///
     /// Default: `None` (uses `ToolRetryConfig::default()` for orchestrator tools,
     /// `ToolRetryConfig::sandbox()` for container tools).
@@ -605,16 +616,16 @@ mod tests {
             ToolError::Sandbox("container crashed".into()).kind(),
             ToolErrorKind::Transient
         );
+        assert_eq!(
+            ToolError::ExecutionFailed("db error".into()).kind(),
+            ToolErrorKind::Transient
+        );
     }
 
     #[test]
     fn test_tool_error_kind_permanent() {
         assert_eq!(
             ToolError::InvalidParameters("bad".into()).kind(),
-            ToolErrorKind::Permanent
-        );
-        assert_eq!(
-            ToolError::ExecutionFailed("logic error".into()).kind(),
             ToolErrorKind::Permanent
         );
         assert_eq!(
@@ -638,8 +649,8 @@ mod tests {
     #[test]
     fn test_tool_retry_config_defaults() {
         let cfg = ToolRetryConfig::default();
-        assert_eq!(cfg.max_retries, 5);
-        assert_eq!(cfg.base_delay, Duration::from_secs(2));
+        assert_eq!(cfg.max_retries, 3);
+        assert_eq!(cfg.base_delay, Duration::from_secs(1));
         assert_eq!(cfg.max_delay, Duration::from_secs(30));
     }
 
@@ -647,7 +658,7 @@ mod tests {
     fn test_tool_retry_config_sandbox() {
         let cfg = ToolRetryConfig::sandbox();
         assert_eq!(cfg.max_retries, 2);
-        assert_eq!(cfg.base_delay, Duration::from_secs(2));
+        assert_eq!(cfg.base_delay, Duration::from_secs(1));
         assert_eq!(cfg.max_delay, Duration::from_secs(30));
     }
 

@@ -419,29 +419,18 @@ Work independently to complete this job. Report when done."#,
             return Err(format!("invalid parameters: {}", details));
         }
 
-        // Execute with per-tool timeout and retry on transient errors
-        let tool_timeout = tool.execution_timeout();
-        let retry_config = crate::tools::retry::effective_retry_config(tool.as_ref());
-        let retry_counter = std::sync::atomic::AtomicU32::new(0);
-        let result = tokio::time::timeout(tool_timeout, async {
-            crate::tools::retry::retry_tool_execute(
-                tool.as_ref(),
-                params,
-                &ctx,
-                &retry_config,
-                tool_timeout,
-                &retry_counter,
-            )
-            .await
-        })
-        .await;
+        // Execute with per-tool timeout and retry on transient errors.
+        // Budget == timeout is intentional: budget is the cooperative graceful exit,
+        // tokio timeout is the hard cancellation backstop.
+        let (timeout_result, retry_attempts, _elapsed) =
+            crate::tools::retry::execute_with_retry(tool.as_ref(), params, &ctx).await;
 
-        match result {
+        match timeout_result {
             Ok(outcome) => {
-                if outcome.retry_attempts > 0 {
+                if retry_attempts > 0 {
                     tracing::debug!(
                         tool = %tool_name,
-                        retry_attempts = outcome.retry_attempts,
+                        retry_attempts,
                         "Worker tool call completed after retries"
                     );
                 }
@@ -452,11 +441,10 @@ Work independently to complete this job. Report when done."#,
                 }
             }
             Err(_) => {
-                let attempts = retry_counter.load(std::sync::atomic::Ordering::Relaxed);
-                if attempts > 0 {
+                if retry_attempts > 0 {
                     tracing::warn!(
                         tool = %tool_name,
-                        retry_attempts = attempts,
+                        retry_attempts,
                         "Worker tool call timed out after retries"
                     );
                 }

@@ -1,14 +1,12 @@
 //! Tool-level retry with exponential backoff for transient errors.
 //!
 //! Wraps only `tool.execute()` — hooks, validation, rate limits, and approval
-//! checks are NOT retried. Permanent errors (`InvalidParameters`, `ExecutionFailed`,
-//! `NotAuthorized`) fail immediately; transient errors (`RateLimited`,
-//! `ExternalService`, `Timeout`, `Sandbox`) are retried with backoff.
+//! checks are NOT retried. Permanent errors (`InvalidParameters`, `NotAuthorized`)
+//! fail immediately; transient errors (`RateLimited`, `ExternalService`,
+//! `Timeout`, `Sandbox`, `ExecutionFailed`) are retried with backoff.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
-
-use rand::Rng;
 
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolErrorKind, ToolOutput, ToolRetryConfig};
@@ -24,22 +22,14 @@ pub struct ToolRetryOutcome {
 
 /// Calculate exponential backoff delay with 25% jitter, capped at `max_delay`.
 ///
-/// Formula: `base_delay * 2^attempt`, then add uniform jitter in [-25%, +25%].
-/// A hard floor of 100ms prevents degenerate tight-loop retries.
+/// Delegates to [`crate::retry_backoff::exponential_backoff`] with the config's
+/// base and max delay parameters.
 fn backoff_delay(config: &ToolRetryConfig, attempt: u32) -> Duration {
-    let base_ms = config.base_delay.as_millis() as u64;
-    let exp_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt));
-    let capped_ms = exp_ms.min(config.max_delay.as_millis() as u64);
-
-    let jitter_range = capped_ms / 4; // 25%
-    let jitter = if jitter_range > 0 {
-        let offset = rand::thread_rng().gen_range(0..=jitter_range.saturating_mul(2));
-        offset as i64 - jitter_range as i64
-    } else {
-        0
-    };
-    let delay_ms = (capped_ms as i64 + jitter).max(100) as u64;
-    Duration::from_millis(delay_ms)
+    crate::retry_backoff::exponential_backoff(
+        config.base_delay.as_millis() as u64,
+        attempt,
+        Some(config.max_delay.as_millis() as u64),
+    )
 }
 
 /// Execute a tool with automatic retry on transient errors.
@@ -164,7 +154,7 @@ pub async fn retry_tool_execute(
 /// Priority:
 /// 1. Tool's own `retry_config()` override
 /// 2. Container-domain tools get `ToolRetryConfig::sandbox()` (2 retries)
-/// 3. Default (5 retries)
+/// 3. Default (3 retries)
 pub fn effective_retry_config(tool: &dyn Tool) -> ToolRetryConfig {
     if let Some(config) = tool.retry_config() {
         return config;
@@ -173,6 +163,42 @@ pub fn effective_retry_config(tool: &dyn Tool) -> ToolRetryConfig {
         ToolDomain::Container => ToolRetryConfig::sandbox(),
         ToolDomain::Orchestrator => ToolRetryConfig::default(),
     }
+}
+
+/// Execute a tool with timeout, retry, and elapsed-time tracking.
+///
+/// Encapsulates the boilerplate shared by all call sites:
+/// 1. Reads `execution_timeout()` and `effective_retry_config()`
+/// 2. Wraps `retry_tool_execute` inside `tokio::time::timeout`
+/// 3. Returns the raw timeout result, retry attempt count, and wall-clock elapsed
+///
+/// The caller is responsible for logging, error mapping, and `ActionRecord` creation —
+/// those differ per call site and belong outside this helper.
+pub async fn execute_with_retry(
+    tool: &dyn Tool,
+    params: &serde_json::Value,
+    ctx: &JobContext,
+) -> (
+    Result<ToolRetryOutcome, tokio::time::error::Elapsed>,
+    u32,
+    Duration,
+) {
+    let timeout = tool.execution_timeout();
+    let config = effective_retry_config(tool);
+    let counter = AtomicU32::new(0);
+    let start = Instant::now();
+
+    let timeout_result = tokio::time::timeout(timeout, async {
+        retry_tool_execute(tool, params, ctx, &config, timeout, &counter).await
+    })
+    .await;
+
+    let attempts = match &timeout_result {
+        Ok(outcome) => outcome.retry_attempts,
+        Err(_) => counter.load(Ordering::Relaxed),
+    };
+
+    (timeout_result, attempts, start.elapsed())
 }
 
 #[cfg(test)]
@@ -444,7 +470,7 @@ mod tests {
         let tool = FailNThenSucceedTool::new(0, ToolError::ExternalService("x".into()))
             .with_domain(ToolDomain::Orchestrator);
         let config = effective_retry_config(&tool);
-        assert_eq!(config.max_retries, 5); // default
+        assert_eq!(config.max_retries, 3); // default
     }
 
     #[test]
@@ -485,6 +511,72 @@ mod tests {
 
         assert!(outcome.result.is_ok());
         assert_eq!(outcome.retry_attempts, 1);
+    }
+
+    // --- ToolError::Timeout is retried (not permanent) ---
+
+    #[tokio::test]
+    async fn test_timeout_error_is_retried() {
+        let tool = FailNThenSucceedTool::new(2, ToolError::Timeout(Duration::from_secs(30)));
+        let ctx = JobContext::default();
+        let config = fast_config(5);
+        let counter = AtomicU32::new(0);
+
+        let outcome = retry_tool_execute(
+            &tool,
+            &serde_json::json!({}),
+            &ctx,
+            &config,
+            Duration::from_secs(60),
+            &counter,
+        )
+        .await;
+
+        assert!(outcome.result.is_ok());
+        assert_eq!(outcome.retry_attempts, 2);
+        assert_eq!(tool.call_count(), 3); // 2 Timeout failures + 1 success
+    }
+
+    // --- ExecutionFailed is now retried (transient) ---
+
+    #[tokio::test]
+    async fn test_execution_failed_is_retried() {
+        let tool = FailNThenSucceedTool::new(1, ToolError::ExecutionFailed("db gone".into()));
+        let ctx = JobContext::default();
+        let config = fast_config(3);
+        let counter = AtomicU32::new(0);
+
+        let outcome = retry_tool_execute(
+            &tool,
+            &serde_json::json!({}),
+            &ctx,
+            &config,
+            Duration::from_secs(60),
+            &counter,
+        )
+        .await;
+
+        assert!(outcome.result.is_ok());
+        assert_eq!(outcome.retry_attempts, 1);
+        assert_eq!(tool.call_count(), 2); // 1 ExecutionFailed + 1 success
+    }
+
+    // --- execute_with_retry() helper ---
+
+    #[tokio::test]
+    async fn test_execute_with_retry_helper() {
+        let tool = FailNThenSucceedTool::new(1, ToolError::ExternalService("503".into()))
+            .with_retry_config(fast_config(3));
+        let ctx = JobContext::default();
+
+        let (result, attempts, elapsed) =
+            execute_with_retry(&tool, &serde_json::json!({}), &ctx).await;
+
+        assert!(result.is_ok());
+        let outcome = result.unwrap();
+        assert!(outcome.result.is_ok());
+        assert_eq!(attempts, 1);
+        assert!(elapsed.as_millis() > 0);
     }
 
     // --- F-8: Timeout cancellation preserves retry counter ---
