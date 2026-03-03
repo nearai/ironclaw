@@ -2374,6 +2374,7 @@ impl ExtensionManager {
         &self,
         name: &str,
     ) -> Result<ExtensionSetupSchema, ExtensionError> {
+        Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
         match kind {
             ExtensionKind::WasmChannel => {
@@ -2480,6 +2481,7 @@ impl ExtensionManager {
         secrets: &std::collections::HashMap<String, String>,
         fields: &std::collections::HashMap<String, String>,
     ) -> Result<SetupResult, ExtensionError> {
+        Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
 
         let (allowed_secrets, setup_fields): (
