@@ -1,0 +1,12 @@
+{
+  "name": "camoufox-tool",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "camoufox-js": "^0.9.1",
+    "fastify": "^5.1.0",
+    "playwright": "^1.49.1",
+    "zod": "^3.23.8"
+  }
+}

@@ -19,3 +19,8 @@ bench-results/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+# MCP server dependencies
+mentor-mcp/node_modules/
+camoufox-mcp/node_modules/
+camoufox-tool/node_modules/
+

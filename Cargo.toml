@@ -15,6 +15,9 @@ exclude = [
     "tools-src/okta",
     "tools-src/slack",
     "tools-src/telegram",
+    "mentor-mcp",
+    "camoufox-mcp",
+    "camoufox-tool",
 ]
 
 [package]

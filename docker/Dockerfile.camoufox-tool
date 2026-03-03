@@ -1,0 +1,16 @@
+FROM mcr.microsoft.com/playwright:v1.49.1-jammy
+
+WORKDIR /app
+
+COPY camoufox-tool/package.json ./
+RUN npm install --omit=dev \
+  && npx camoufox-js fetch
+
+COPY camoufox-tool/server.mjs ./server.mjs
+
+RUN mkdir -p /data/artifacts/camoufox \
+  && chown -R pwuser:pwuser /data /app
+
+USER pwuser
+EXPOSE 8788
+CMD ["node", "server.mjs"]

@@ -1,0 +1,12 @@
+FROM node:20-bookworm-slim
+
+WORKDIR /app
+
+COPY camoufox-mcp/package.json ./
+RUN npm install --omit=dev
+
+COPY camoufox-mcp/server.mjs ./server.mjs
+
+EXPOSE 8790
+
+CMD ["node", "server.mjs"]
