@@ -33,7 +33,7 @@ pub async fn extensions_list_handler(
                     "failed".to_string()
                 } else if !ext.authenticated {
                     "installed".to_string()
-                } else if ext.active && ext.name == "telegram" {
+                } else if ext.active {
                     let has_paired = pairing_store
                         .read_allow_from(&ext.name)
                         .map(|list| !list.is_empty())

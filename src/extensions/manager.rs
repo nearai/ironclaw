@@ -49,7 +49,7 @@ struct ChannelRuntimeState {
     wasm_channel_runtime: Arc<WasmChannelRuntime>,
     pairing_store: Arc<PairingStore>,
     wasm_channel_router: Arc<WasmChannelRouter>,
-    telegram_owner_id: Option<i64>,
+    wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 }
 
 /// Result of saving setup secrets and attempting activation.
@@ -150,14 +150,14 @@ impl ExtensionManager {
         wasm_channel_runtime: Arc<WasmChannelRuntime>,
         pairing_store: Arc<PairingStore>,
         wasm_channel_router: Arc<WasmChannelRouter>,
-        telegram_owner_id: Option<i64>,
+        wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
     ) {
         *self.channel_runtime.write().await = Some(ChannelRuntimeState {
             channel_manager,
             wasm_channel_runtime,
             pairing_store,
             wasm_channel_router,
-            telegram_owner_id,
+            wasm_channel_owner_ids,
         });
     }
 
@@ -1871,21 +1871,18 @@ impl ExtensionManager {
             channel_manager,
             pairing_store,
             wasm_channel_router,
-            telegram_owner_id,
+            wasm_channel_owner_ids,
         ) = {
             let rt_guard = self.channel_runtime.read().await;
             let rt = rt_guard.as_ref().ok_or_else(|| {
-                ExtensionError::ActivationFailed(
-                    "WASM channel runtime not configured. Restart IronClaw to activate."
-                        .to_string(),
-                )
+                ExtensionError::ActivationFailed("WASM channel runtime not configured".to_string())
             })?;
             (
                 Arc::clone(&rt.wasm_channel_runtime),
                 Arc::clone(&rt.channel_manager),
                 Arc::clone(&rt.pairing_store),
                 Arc::clone(&rt.wasm_channel_router),
-                rt.telegram_owner_id,
+                rt.wasm_channel_owner_ids.clone(),
             )
         };
 
@@ -1954,9 +1951,7 @@ impl ExtensionManager {
                 );
             }
 
-            if channel_name == "telegram"
-                && let Some(owner_id) = telegram_owner_id
-            {
+            if let Some(&owner_id) = wasm_channel_owner_ids.get(channel_name.as_str()) {
                 config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
             }
 
@@ -2525,7 +2520,7 @@ impl ExtensionManager {
                 tracing::warn!(
                     channel = name,
                     error = %e,
-                    "Saved configuration but hot-activation failed, restart may be needed"
+                    "Saved configuration but hot-activation failed"
                 );
                 self.activation_errors
                     .write()
@@ -2535,8 +2530,7 @@ impl ExtensionManager {
                     .await;
                 Ok(SetupResult {
                     message: format!(
-                        "Configuration saved for '{}'. \
-                         Automatic activation failed ({}), restart IronClaw to activate.",
+                        "Configuration saved for '{}'. Activation failed: {}",
                         name, e
                     ),
                     activated: false,
