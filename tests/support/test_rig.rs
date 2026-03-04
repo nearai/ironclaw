@@ -139,6 +139,11 @@ impl TestRig {
         self.channel.tool_results()
     }
 
+    /// Return `(name, duration_ms)` for all completed tools with timing data.
+    pub fn tool_timings(&self) -> Vec<(String, u64)> {
+        self.channel.tool_timings()
+    }
+
     /// Return a snapshot of all captured status events.
     pub fn captured_status_events(&self) -> Vec<StatusUpdate> {
         self.channel.captured_status_events()
@@ -182,15 +187,36 @@ impl TestRig {
         let completed = self.tool_calls_completed();
         let status_events = self.captured_status_events();
 
-        // Build ToolInvocation records from ToolStarted/ToolCompleted pairs.
-        // We don't have per-tool timing from the channel, so we use the
-        // InstrumentedLlm records for approximate timing where possible.
+        // Build ToolInvocation records from ToolStarted/ToolCompleted pairs,
+        // matching each completion with its captured timing data.
+        let timings = self.tool_timings();
+        let mut timing_iter_by_name: std::collections::HashMap<&str, Vec<u64>> =
+            std::collections::HashMap::new();
+        for (name, ms) in &timings {
+            timing_iter_by_name
+                .entry(name.as_str())
+                .or_default()
+                .push(*ms);
+        }
+
         let tool_invocations: Vec<ToolInvocation> = completed
             .iter()
-            .map(|(name, success)| ToolInvocation {
-                name: name.clone(),
-                duration_ms: 0, // Channel doesn't capture per-tool timing.
-                success: *success,
+            .map(|(name, success)| {
+                let duration_ms = timing_iter_by_name
+                    .get_mut(name.as_str())
+                    .and_then(|v| {
+                        if v.is_empty() {
+                            None
+                        } else {
+                            Some(v.remove(0))
+                        }
+                    })
+                    .unwrap_or(0);
+                ToolInvocation {
+                    name: name.clone(),
+                    duration_ms,
+                    success: *success,
+                }
             })
             .collect();
 

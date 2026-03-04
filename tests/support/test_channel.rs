@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -32,6 +32,11 @@ pub struct TestChannel {
     responses: Arc<Mutex<Vec<OutgoingResponse>>>,
     /// Captured status events.
     status_events: Arc<Mutex<Vec<StatusUpdate>>>,
+    /// Tracks when each tool started (by name). Supports nested/overlapping tools
+    /// by using a Vec of start times per tool name.
+    tool_start_times: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
+    /// Completed tool timings: (name, duration_ms).
+    tool_timings: Arc<Mutex<Vec<(String, u64)>>>,
     /// Default user ID for injected messages.
     user_id: String,
 }
@@ -50,6 +55,8 @@ impl TestChannel {
             rx: Mutex::new(Some(rx)),
             responses: Arc::new(Mutex::new(Vec::new())),
             status_events: Arc::new(Mutex::new(Vec::new())),
+            tool_start_times: Arc::new(Mutex::new(HashMap::new())),
+            tool_timings: Arc::new(Mutex::new(Vec::new())),
             user_id: user_id.into(),
         }
     }
@@ -139,10 +146,22 @@ impl TestChannel {
             .collect()
     }
 
+    /// Return `(name, duration_ms)` for all completed tools with timing data.
+    ///
+    /// Uses `try_lock` so it can be called from sync contexts in tests.
+    pub fn tool_timings(&self) -> Vec<(String, u64)> {
+        self.tool_timings
+            .try_lock()
+            .expect("tool_timings lock contention")
+            .clone()
+    }
+
     /// Clear all captured responses and status events.
     pub async fn clear(&self) {
         self.responses.lock().await.clear();
         self.status_events.lock().await.clear();
+        self.tool_start_times.lock().await.clear();
+        self.tool_timings.lock().await.clear();
     }
 }
 
@@ -185,6 +204,28 @@ impl Channel for TestChannel {
         status: StatusUpdate,
         _metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
+        // Capture timing before pushing to events.
+        match &status {
+            StatusUpdate::ToolStarted { name } => {
+                self.tool_start_times
+                    .lock()
+                    .await
+                    .entry(name.clone())
+                    .or_default()
+                    .push(Instant::now());
+            }
+            StatusUpdate::ToolCompleted { name, .. } => {
+                if let Some(starts) = self.tool_start_times.lock().await.get_mut(name)
+                    && let Some(start) = starts.pop()
+                {
+                    self.tool_timings
+                        .lock()
+                        .await
+                        .push((name.clone(), start.elapsed().as_millis() as u64));
+                }
+            }
+            _ => {}
+        }
         self.status_events.lock().await.push(status);
         Ok(())
     }
@@ -368,5 +409,41 @@ mod tests {
         let collected = channel.wait_for_responses(1, Duration::from_secs(2)).await;
         assert_eq!(collected.len(), 1);
         assert_eq!(collected[0].content, "delayed reply");
+    }
+
+    // 7. tool_timings() captures real elapsed time between ToolStarted and ToolCompleted.
+    #[tokio::test]
+    async fn test_channel_tool_timings() {
+        let channel = TestChannel::new();
+        channel
+            .send_status(
+                StatusUpdate::ToolStarted {
+                    name: "echo".to_string(),
+                },
+                &serde_json::Value::Null,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        channel
+            .send_status(
+                StatusUpdate::ToolCompleted {
+                    name: "echo".to_string(),
+                    success: true,
+                },
+                &serde_json::Value::Null,
+            )
+            .await
+            .unwrap();
+
+        let timings = channel.tool_timings();
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[0].0, "echo");
+        // Should be >= 40ms (50ms sleep minus some scheduling variance).
+        assert!(
+            timings[0].1 >= 40,
+            "Expected >= 40ms, got {}ms",
+            timings[0].1
+        );
     }
 }
