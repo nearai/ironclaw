@@ -10,7 +10,7 @@ MSG_FILE="$1"
 FIRST_LINE=$(head -1 "$MSG_FILE")
 
 # --- 1. Is this a fix commit? ---
-if ! echo "$FIRST_LINE" | grep -qiE '^(fix(\(.*\))?|hotfix|bugfix):'; then
+if ! grep -qiE '^(fix(\(.*\))?|hotfix|bugfix):' <<< "$FIRST_LINE"; then
   exit 0
 fi
 
@@ -41,14 +41,27 @@ if [ "$ALL_EXEMPT" = true ]; then
 fi
 
 # --- 4. Look for test changes in staged .rs files ---
-RS_DIFF=$(git diff --cached -U0 -- '*.rs')
 
-if echo "$RS_DIFF" | grep -qE '^\+.*(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|mod tests)'; then
+# Fast path: new test attributes or test modules in added lines.
+if git diff --cached -U0 -- '*.rs' | grep -qE '^\+.*(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|mod tests)'; then
+  exit 0
+fi
+
+# Whole-function context: detect edits inside existing test functions.
+# -W shows the full enclosing function, so #[test] appears in context
+# lines when changes are inside a test function.
+if git diff --cached -W -- '*.rs' | awk '
+  /^@@/           { if (has_test && has_add) { found=1; exit } has_test=0; has_add=0 }
+  /^ .*#\[test\]/ || /^ .*#\[tokio::test\]/ || /^ .*#\[cfg\(test\)\]/ || /^ .*mod tests/ { has_test=1 }
+  /^\+.*#\[test\]/ || /^\+.*#\[tokio::test\]/ || /^\+.*#\[cfg\(test\)\]/ || /^\+.*mod tests/ { has_test=1 }
+  /^\+[^+]/       { has_add=1 }
+  END             { if (has_test && has_add) found=1; exit !found }
+'; then
   exit 0
 fi
 
 # Also check for new/modified files under tests/
-if echo "$STAGED_FILES" | grep -qE '^tests/'; then
+if grep -qE '^tests/' <<< "$STAGED_FILES"; then
   exit 0
 fi
 

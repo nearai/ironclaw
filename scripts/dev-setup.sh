@@ -48,8 +48,11 @@ cargo test
 
 # 6. Install git hooks
 echo "[6/6] Installing git hooks..."
-if [ -d .git ]; then
-    ln -sf ../../scripts/commit-msg-regression.sh .git/hooks/commit-msg
+HOOKS_DIR=$(git rev-parse --git-path hooks 2>/dev/null) || true
+if [ -n "$HOOKS_DIR" ]; then
+    mkdir -p "$HOOKS_DIR"
+    SCRIPT_ABS="$(cd "$(dirname "$0")" && pwd)/commit-msg-regression.sh"
+    ln -sf "$SCRIPT_ABS" "$HOOKS_DIR/commit-msg"
     echo "  commit-msg hook installed (regression test enforcement)"
 else
     echo "  Skipped: not a git repository"
