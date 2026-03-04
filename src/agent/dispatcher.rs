@@ -683,6 +683,31 @@ impl Agent {
 
                         return Ok(AgenticLoopResult::NeedApproval { pending });
                     }
+
+                    // Check if all tool calls failed - if so, generate a proper error
+                    // message instead of showing raw internal representation like
+                    // "[Called tool `X` with arguments: ...]"
+                    let all_tools_failed = exec_results
+                        .iter()
+                        .all(|r| r.as_ref().map(|res| res.is_err()).unwrap_or(false));
+                    if all_tools_failed {
+                        // Collect error details for a user-friendly message
+                        let mut error_details: Vec<String> = Vec::new();
+                        for (tc, result) in tool_calls.iter().zip(exec_results.iter()) {
+                            if let Some(Err(e)) = result {
+                                error_details.push(format!("- {}: {}", tc.name, e));
+                            }
+                        }
+                        let error_msg = if error_details.is_empty() {
+                            "All tool calls failed".to_string()
+                        } else {
+                            format!(
+                                "I encountered errors while trying to use the following tools:\n{}\n\nYou may need to check that these tools are correctly configured or try a different approach.",
+                                error_details.join("\n")
+                            )
+                        };
+                        return Ok(AgenticLoopResult::Response(error_msg));
+                    }
                 }
             }
         }
