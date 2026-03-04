@@ -1,7 +1,7 @@
 //! HTTP request tool.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,8 +26,13 @@ use crate::tools::builtin::convert_html_to_markdown;
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 
 /// Tool for making HTTP requests.
+///
+/// Each request builds a per-request [`Client`] with DNS pinning to prevent
+/// TOCTOU DNS rebinding attacks.  The hostname is resolved once, validated
+/// against the SSRF blocklist, and then pinned via
+/// [`reqwest::ClientBuilder::resolve`] so that reqwest connects directly to
+/// the pre-validated IP without a second DNS lookup.
 pub struct HttpTool {
-    client: Client,
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
@@ -35,14 +40,7 @@ pub struct HttpTool {
 impl HttpTool {
     /// Create a new HTTP tool.
     pub fn new() -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("Failed to create HTTP client");
-
         Self {
-            client,
             credential_registry: None,
             secrets_store: None,
         }
@@ -60,6 +58,11 @@ impl HttpTool {
     }
 }
 
+/// Parse and validate a URL without DNS resolution.
+///
+/// Checks scheme (HTTPS only), rejects localhost and private/link-local IP
+/// literals.  Does **not** resolve hostnames -- use [`validate_and_resolve_url`]
+/// for the full DNS-pinning flow that eliminates the TOCTOU rebinding window.
 pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
@@ -90,23 +93,71 @@ pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
         ));
     }
 
-    // Resolve hostname and check all resolved IPs against the blocklist.
-    // This prevents DNS rebinding where a hostname resolves to a private IP.
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let socket_addr = format!("{}:{}", host, port);
-    if let Ok(addrs) = socket_addr.to_socket_addrs() {
-        for addr in addrs {
-            if is_disallowed_ip(&addr.ip()) {
-                return Err(ToolError::NotAuthorized(format!(
-                    "hostname '{}' resolves to disallowed IP {}",
-                    host,
-                    addr.ip()
-                )));
-            }
+    Ok(parsed)
+}
+
+/// Resolve DNS for a validated URL and check every resolved address against
+/// the SSRF blocklist.
+///
+/// Returns the resolved [`SocketAddr`]s so that callers can pin the hostname
+/// via [`reqwest::ClientBuilder::resolve`], preventing a DNS rebinding attack
+/// where a second, independent resolution (inside reqwest) returns a different
+/// -- potentially private -- IP after our validation pass.
+pub(crate) async fn validate_and_resolve_url(
+    url: &reqwest::Url,
+) -> Result<Vec<SocketAddr>, ToolError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| ToolError::InvalidParameters("URL missing host".to_string()))?;
+
+    let port = url.port_or_known_default().unwrap_or(443);
+
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
+        .await
+        .map_err(|e| {
+            ToolError::ExternalService(format!("DNS resolution failed for '{}': {}", host, e))
+        })?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(ToolError::ExternalService(format!(
+            "DNS resolution for '{}' returned no addresses",
+            host
+        )));
+    }
+
+    for addr in &addrs {
+        if is_disallowed_ip(&addr.ip()) {
+            return Err(ToolError::NotAuthorized(format!(
+                "hostname '{}' resolves to disallowed IP {}",
+                host,
+                addr.ip()
+            )));
         }
     }
 
-    Ok(parsed)
+    Ok(addrs)
+}
+
+/// Build a reqwest [`Client`] that pins the given hostname to the
+/// pre-validated resolved addresses, preventing any second DNS lookup.
+pub(crate) fn build_pinned_client(
+    host: &str,
+    resolved_addrs: &[SocketAddr],
+    timeout: Duration,
+    redirect_policy: reqwest::redirect::Policy,
+) -> Result<Client, ToolError> {
+    let mut builder = Client::builder()
+        .timeout(timeout)
+        .redirect(redirect_policy);
+
+    for addr in resolved_addrs {
+        builder = builder.resolve(host, *addr);
+    }
+
+    builder
+        .build()
+        .map_err(|e| ToolError::ExternalService(format!("failed to build HTTP client: {}", e)))
 }
 
 fn is_disallowed_ip(ip: &IpAddr) -> bool {
@@ -254,16 +305,31 @@ impl Tool for HttpTool {
         let url = require_str(&params, "url")?;
         let mut parsed_url = validate_url(url)?;
 
+        // Resolve DNS once, validate against SSRF blocklist, then pin the
+        // resolved addresses into the reqwest client so it cannot re-resolve
+        // to a different (potentially private) IP.
+        let resolved_addrs = validate_and_resolve_url(&parsed_url).await?;
+        let host = parsed_url
+            .host_str()
+            .unwrap_or_default()
+            .to_string();
+        let client = build_pinned_client(
+            &host,
+            &resolved_addrs,
+            Duration::from_secs(30),
+            reqwest::redirect::Policy::none(),
+        )?;
+
         // Parse headers
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
 
         // Build request
         let mut request = match method.to_uppercase().as_str() {
-            "GET" => self.client.get(parsed_url.clone()),
-            "POST" => self.client.post(parsed_url.clone()),
-            "PUT" => self.client.put(parsed_url.clone()),
-            "DELETE" => self.client.delete(parsed_url.clone()),
-            "PATCH" => self.client.patch(parsed_url.clone()),
+            "GET" => client.get(parsed_url.clone()),
+            "POST" => client.post(parsed_url.clone()),
+            "PUT" => client.put(parsed_url.clone()),
+            "DELETE" => client.delete(parsed_url.clone()),
+            "PATCH" => client.patch(parsed_url.clone()),
             _ => {
                 return Err(ToolError::InvalidParameters(format!(
                     "unsupported method: {}",
@@ -802,5 +868,52 @@ mod tests {
     fn test_extract_host_from_params_missing_url() {
         let params = serde_json::json!({"method": "GET"});
         assert_eq!(extract_host_from_params(&params), None);
+    }
+
+    // ── DNS pinning tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_validate_and_resolve_rejects_loopback_hostname() {
+        // "localhost" is blocked at the URL validation level, but verify
+        // that validate_and_resolve_url also catches loopback IPs returned
+        // by DNS for any hostname that resolves to 127.0.0.1.
+        let url = reqwest::Url::parse("https://127.0.0.1/test").unwrap();
+        // 127.0.0.1 is an IP literal -- validate_url blocks it before
+        // we ever reach validate_and_resolve_url, but the function should
+        // still reject if called directly.
+        let err = validate_and_resolve_url(&url).await.unwrap_err();
+        assert!(
+            err.to_string().contains("disallowed"),
+            "expected disallowed IP error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_and_resolve_accepts_public_host() {
+        // example.com resolves to public IPs.
+        let url = reqwest::Url::parse("https://example.com").unwrap();
+        let addrs = validate_and_resolve_url(&url).await.unwrap();
+        assert!(!addrs.is_empty(), "should resolve to at least one address");
+        for addr in &addrs {
+            assert!(
+                !is_disallowed_ip(&addr.ip()),
+                "example.com resolved to disallowed IP: {}",
+                addr.ip()
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_pinned_client_succeeds() {
+        use std::net::{Ipv4Addr, SocketAddr};
+        let addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443)];
+        let client = build_pinned_client(
+            "example.com",
+            &addrs,
+            Duration::from_secs(10),
+            reqwest::redirect::Policy::none(),
+        );
+        assert!(client.is_ok(), "should build client successfully");
     }
 }
