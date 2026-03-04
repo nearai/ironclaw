@@ -1,0 +1,63 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios_dir:
+        description: 'Scenarios directory'
+        default: 'benchmarks/trajectories'
+      tags:
+        description: 'Tag filter (comma-separated)'
+        required: false
+      parallel:
+        description: 'Parallel scenario count'
+        default: '1'
+      max_cost:
+        description: 'Maximum total cost in USD'
+        default: '1.00'
+
+jobs:
+  benchmark:
+    name: Run Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: benchmark
+
+      - name: Build benchmark binary
+        run: cargo build --release --features "libsql,benchmark"
+
+      - name: Run benchmarks
+        env:
+          LLM_BACKEND: ${{ secrets.LLM_BACKEND || 'openai' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY }}
+          NEARAI_SESSION_TOKEN: ${{ secrets.NEARAI_SESSION_TOKEN }}
+        run: |
+          ARGS="--scenarios-dir ${{ inputs.scenarios_dir || 'benchmarks/trajectories' }}"
+          ARGS="$ARGS --parallel ${{ inputs.parallel || '1' }}"
+          ARGS="$ARGS --json"
+
+          if [ -n "${{ inputs.tags }}" ]; then
+            ARGS="$ARGS --tags ${{ inputs.tags }}"
+          fi
+          if [ -n "${{ inputs.max_cost }}" ]; then
+            ARGS="$ARGS --max-cost ${{ inputs.max_cost }}"
+          fi
+
+          ./target/release/ironclaw benchmark $ARGS | tee benchmark-results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: |
+            benchmark-results.json
+            benchmarks/results/
