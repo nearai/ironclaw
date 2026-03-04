@@ -1,0 +1,684 @@
+//! TraceLlm -- a replay-based LLM provider for E2E testing.
+//!
+//! Replays canned responses from a JSON trace, advancing through steps
+//! sequentially. Supports both text and tool-call responses with optional
+//! request-hint validation.
+
+use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use async_trait::async_trait;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+
+use ironclaw::error::LlmError;
+use ironclaw::llm::{
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse,
+};
+
+// ---------------------------------------------------------------------------
+// Trace types
+// ---------------------------------------------------------------------------
+
+/// A single turn in a trace: one user message and the LLM response steps that follow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceTurn {
+    pub user_input: String,
+    pub steps: Vec<TraceStep>,
+}
+
+/// A complete LLM trace: a model name and an ordered list of turns.
+///
+/// Each turn pairs a user message with the LLM response steps that follow it.
+/// For JSON backward compatibility, traces with a flat top-level `"steps"` array
+/// (no `"turns"`) are deserialized as a single turn with a placeholder user message.
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmTrace {
+    pub model_name: String,
+    pub turns: Vec<TraceTurn>,
+}
+
+/// Raw deserialization helper -- accepts either `turns` or flat `steps`.
+#[derive(Deserialize)]
+struct RawLlmTrace {
+    model_name: String,
+    #[serde(default)]
+    steps: Vec<TraceStep>,
+    #[serde(default)]
+    turns: Vec<TraceTurn>,
+}
+
+impl<'de> Deserialize<'de> for LlmTrace {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawLlmTrace::deserialize(deserializer)?;
+        let turns = if !raw.turns.is_empty() {
+            raw.turns
+        } else if !raw.steps.is_empty() {
+            vec![TraceTurn {
+                user_input: "(test input)".to_string(),
+                steps: raw.steps,
+            }]
+        } else {
+            vec![]
+        };
+        Ok(LlmTrace {
+            model_name: raw.model_name,
+            turns,
+        })
+    }
+}
+
+impl LlmTrace {
+    /// Create a trace from turns.
+    pub fn new(model_name: impl Into<String>, turns: Vec<TraceTurn>) -> Self {
+        Self {
+            model_name: model_name.into(),
+            turns,
+        }
+    }
+
+    /// Convenience: create a single-turn trace (for simple tests).
+    pub fn single_turn(
+        model_name: impl Into<String>,
+        user_input: impl Into<String>,
+        steps: Vec<TraceStep>,
+    ) -> Self {
+        Self {
+            model_name: model_name.into(),
+            turns: vec![TraceTurn {
+                user_input: user_input.into(),
+                steps,
+            }],
+        }
+    }
+
+    /// Load a trace from a JSON file.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = std::fs::read_to_string(path)?;
+        let trace: Self = serde_json::from_str(&contents)?;
+        Ok(trace)
+    }
+}
+
+/// A single step in a trace, pairing an optional request hint with a response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceStep {
+    /// Optional hint for soft-validating the incoming request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_hint: Option<RequestHint>,
+    /// The canned response to return for this step.
+    pub response: TraceResponse,
+}
+
+/// Hints for soft-validating a request against expectations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestHint {
+    /// If set, the last user message should contain this substring.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_user_message_contains: Option<String>,
+    /// If set, the message list should have at least this many messages.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_message_count: Option<usize>,
+}
+
+/// A canned response -- either plain text or tool calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TraceResponse {
+    Text {
+        content: String,
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+    ToolCalls {
+        tool_calls: Vec<TraceToolCall>,
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+}
+
+/// A single tool call in a trace response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// TraceLlm provider
+// ---------------------------------------------------------------------------
+
+/// An `LlmProvider` that replays canned responses from a trace.
+///
+/// Steps from all turns are flattened into a single sequence at construction
+/// time. The provider advances through them linearly regardless of turn
+/// boundaries.
+pub struct TraceLlm {
+    model_name: String,
+    steps: Vec<TraceStep>,
+    index: AtomicUsize,
+    hint_mismatches: AtomicUsize,
+    captured_requests: Mutex<Vec<Vec<ChatMessage>>>,
+}
+
+impl TraceLlm {
+    /// Create from an in-memory trace.
+    pub fn from_trace(trace: LlmTrace) -> Self {
+        let steps: Vec<TraceStep> = trace.turns.into_iter().flat_map(|t| t.steps).collect();
+        Self {
+            model_name: trace.model_name,
+            steps,
+            index: AtomicUsize::new(0),
+            hint_mismatches: AtomicUsize::new(0),
+            captured_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Load from a JSON file and create the provider.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        let trace = LlmTrace::from_file(path)?;
+        Ok(Self::from_trace(trace))
+    }
+
+    /// Number of calls made so far.
+    pub fn calls(&self) -> usize {
+        self.index.load(Ordering::Relaxed)
+    }
+
+    /// Number of request-hint mismatches observed (warnings only).
+    pub fn hint_mismatches(&self) -> usize {
+        self.hint_mismatches.load(Ordering::Relaxed)
+    }
+
+    /// Clone of all captured request message lists.
+    pub fn captured_requests(&self) -> Vec<Vec<ChatMessage>> {
+        self.captured_requests.lock().unwrap().clone()
+    }
+
+    // -- internal helpers ---------------------------------------------------
+
+    /// Advance the step index and return the current step, or an error if exhausted.
+    fn next_step(&self, messages: &[ChatMessage]) -> Result<TraceStep, LlmError> {
+        // Capture the request messages.
+        self.captured_requests
+            .lock()
+            .unwrap()
+            .push(messages.to_vec());
+
+        let idx = self.index.fetch_add(1, Ordering::Relaxed);
+        let step = self
+            .steps
+            .get(idx)
+            .ok_or_else(|| LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: format!(
+                    "TraceLlm exhausted: called {} times but only {} steps",
+                    idx + 1,
+                    self.steps.len()
+                ),
+            })?
+            .clone();
+
+        // Soft-validate request hints.
+        if let Some(ref hint) = step.request_hint {
+            self.validate_hint(hint, messages);
+        }
+
+        Ok(step)
+    }
+
+    fn validate_hint(&self, hint: &RequestHint, messages: &[ChatMessage]) {
+        if let Some(ref expected_substr) = hint.last_user_message_contains {
+            let last_user = messages.iter().rev().find(|m| matches!(m.role, Role::User));
+            let matched = last_user
+                .map(|m| m.content.contains(expected_substr.as_str()))
+                .unwrap_or(false);
+            if !matched {
+                self.hint_mismatches.fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "[TraceLlm WARN] Request hint mismatch: expected last user message to contain {:?}, \
+                     got {:?}",
+                    expected_substr,
+                    last_user.map(|m| &m.content),
+                );
+            }
+        }
+
+        if let Some(min_count) = hint.min_message_count
+            && messages.len() < min_count
+        {
+            self.hint_mismatches.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "[TraceLlm WARN] Request hint mismatch: expected >= {} messages, got {}",
+                min_count,
+                messages.len(),
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for TraceLlm {
+    fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let step = self.next_step(&request.messages)?;
+        match step.response {
+            TraceResponse::Text {
+                content,
+                input_tokens,
+                output_tokens,
+            } => Ok(CompletionResponse {
+                content,
+                input_tokens,
+                output_tokens,
+                finish_reason: FinishReason::Stop,
+            }),
+            TraceResponse::ToolCalls { .. } => Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: "TraceLlm::complete() called but current step is a tool_calls response; \
+                         use complete_with_tools() instead"
+                    .to_string(),
+            }),
+        }
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let step = self.next_step(&request.messages)?;
+        match step.response {
+            TraceResponse::Text {
+                content,
+                input_tokens,
+                output_tokens,
+            } => Ok(ToolCompletionResponse {
+                content: Some(content),
+                tool_calls: Vec::new(),
+                input_tokens,
+                output_tokens,
+                finish_reason: FinishReason::Stop,
+            }),
+            TraceResponse::ToolCalls {
+                tool_calls,
+                input_tokens,
+                output_tokens,
+            } => {
+                let calls: Vec<ToolCall> = tool_calls
+                    .into_iter()
+                    .map(|tc| ToolCall {
+                        id: tc.id,
+                        name: tc.name,
+                        arguments: tc.arguments,
+                    })
+                    .collect();
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    tool_calls: calls,
+                    input_tokens,
+                    output_tokens,
+                    finish_reason: FinishReason::ToolUse,
+                })
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_step(content: &str, input_tokens: u32, output_tokens: u32) -> TraceStep {
+        TraceStep {
+            request_hint: None,
+            response: TraceResponse::Text {
+                content: content.to_string(),
+                input_tokens,
+                output_tokens,
+            },
+        }
+    }
+
+    fn tool_calls_step(calls: Vec<TraceToolCall>, input: u32, output: u32) -> TraceStep {
+        TraceStep {
+            request_hint: None,
+            response: TraceResponse::ToolCalls {
+                tool_calls: calls,
+                input_tokens: input,
+                output_tokens: output,
+            },
+        }
+    }
+
+    fn simple_tool_call(name: &str) -> TraceToolCall {
+        TraceToolCall {
+            id: format!("call_{name}"),
+            name: name.to_string(),
+            arguments: serde_json::json!({"key": "value"}),
+        }
+    }
+
+    fn make_request(user_msg: &str) -> ToolCompletionRequest {
+        ToolCompletionRequest::new(vec![ChatMessage::user(user_msg)], vec![])
+    }
+
+    fn make_completion_request(user_msg: &str) -> CompletionRequest {
+        CompletionRequest::new(vec![ChatMessage::user(user_msg)])
+    }
+
+    // 1. Single text step -- verify content and tokens.
+    #[tokio::test]
+    async fn test_trace_llm_replays_text_response() {
+        let trace =
+            LlmTrace::single_turn("test-model", "hi", vec![text_step("Hello world", 100, 20)]);
+        let llm = TraceLlm::from_trace(trace);
+
+        let resp = llm.complete_with_tools(make_request("hi")).await.unwrap();
+
+        assert_eq!(resp.content.as_deref(), Some("Hello world"));
+        assert!(resp.tool_calls.is_empty());
+        assert_eq!(resp.input_tokens, 100);
+        assert_eq!(resp.output_tokens, 20);
+        assert_eq!(resp.finish_reason, FinishReason::Stop);
+        assert_eq!(llm.calls(), 1);
+    }
+
+    // 2. Single tool_calls step -- verify tool call name/args.
+    #[tokio::test]
+    async fn test_trace_llm_replays_tool_calls() {
+        let trace = LlmTrace::single_turn(
+            "test-model",
+            "search memory",
+            vec![tool_calls_step(
+                vec![simple_tool_call("memory_search")],
+                80,
+                15,
+            )],
+        );
+        let llm = TraceLlm::from_trace(trace);
+
+        let resp = llm
+            .complete_with_tools(make_request("search memory"))
+            .await
+            .unwrap();
+
+        assert!(resp.content.is_none());
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "memory_search");
+        assert_eq!(resp.tool_calls[0].id, "call_memory_search");
+        assert_eq!(
+            resp.tool_calls[0].arguments,
+            serde_json::json!({"key": "value"})
+        );
+        assert_eq!(resp.input_tokens, 80);
+        assert_eq!(resp.output_tokens, 15);
+        assert_eq!(resp.finish_reason, FinishReason::ToolUse);
+    }
+
+    // 3. Two steps in one turn -- tool_calls then text -- verify both.
+    #[tokio::test]
+    async fn test_trace_llm_advances_through_steps() {
+        let trace = LlmTrace::single_turn(
+            "test-model",
+            "do something",
+            vec![
+                tool_calls_step(vec![simple_tool_call("echo")], 50, 10),
+                text_step("Done!", 60, 5),
+            ],
+        );
+        let llm = TraceLlm::from_trace(trace);
+
+        let resp1 = llm
+            .complete_with_tools(make_request("do something"))
+            .await
+            .unwrap();
+        assert_eq!(resp1.tool_calls.len(), 1);
+        assert_eq!(resp1.tool_calls[0].name, "echo");
+        assert_eq!(llm.calls(), 1);
+
+        let resp2 = llm
+            .complete_with_tools(make_request("continue"))
+            .await
+            .unwrap();
+        assert_eq!(resp2.content.as_deref(), Some("Done!"));
+        assert!(resp2.tool_calls.is_empty());
+        assert_eq!(llm.calls(), 2);
+    }
+
+    // 4. One step, call twice -- second call errors.
+    #[tokio::test]
+    async fn test_trace_llm_errors_when_exhausted() {
+        let trace =
+            LlmTrace::single_turn("test-model", "first", vec![text_step("only once", 10, 5)]);
+        let llm = TraceLlm::from_trace(trace);
+
+        let resp1 = llm.complete_with_tools(make_request("first")).await;
+        assert!(resp1.is_ok());
+
+        let resp2 = llm.complete_with_tools(make_request("second")).await;
+        assert!(resp2.is_err());
+        let err = resp2.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("exhausted"),
+            "Expected 'exhausted' in error: {err_msg}"
+        );
+    }
+
+    // 5. Matching hint passes (no mismatch counted).
+    #[tokio::test]
+    async fn test_trace_llm_validates_request_hints() {
+        let trace = LlmTrace::single_turn(
+            "test-model",
+            "say hello please",
+            vec![TraceStep {
+                request_hint: Some(RequestHint {
+                    last_user_message_contains: Some("hello".to_string()),
+                    min_message_count: Some(1),
+                }),
+                response: TraceResponse::Text {
+                    content: "matched".to_string(),
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+            }],
+        );
+        let llm = TraceLlm::from_trace(trace);
+
+        let resp = llm
+            .complete_with_tools(make_request("say hello please"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.content.as_deref(), Some("matched"));
+        assert_eq!(llm.hint_mismatches(), 0);
+    }
+
+    // 6. Mismatching hint still returns a response but increments mismatch counter.
+    #[tokio::test]
+    async fn test_trace_llm_hint_mismatch_warns_but_continues() {
+        let trace = LlmTrace::single_turn(
+            "test-model",
+            "apple",
+            vec![TraceStep {
+                request_hint: Some(RequestHint {
+                    last_user_message_contains: Some("banana".to_string()),
+                    min_message_count: Some(5),
+                }),
+                response: TraceResponse::Text {
+                    content: "still works".to_string(),
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+            }],
+        );
+        let llm = TraceLlm::from_trace(trace);
+
+        let resp = llm
+            .complete_with_tools(make_request("apple"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.content.as_deref(), Some("still works"));
+        // Two mismatches: one for the substring, one for min_message_count
+        assert_eq!(llm.hint_mismatches(), 2);
+    }
+
+    // 7. Load from JSON fixture file (uses legacy flat "steps" format).
+    #[tokio::test]
+    async fn test_trace_llm_from_json_file() {
+        let fixture_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/simple_text.json"
+        );
+        let llm = TraceLlm::from_file(fixture_path).unwrap();
+
+        assert_eq!(llm.model_name(), "test-model");
+
+        let resp = llm
+            .complete_with_tools(make_request("anything"))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.content.as_deref(), Some("Hello from fixture file!"));
+        assert_eq!(resp.input_tokens, 50);
+        assert_eq!(resp.output_tokens, 10);
+    }
+
+    // Verify complete() works for text steps.
+    #[tokio::test]
+    async fn test_trace_llm_complete_text_step() {
+        let trace = LlmTrace::single_turn("test-model", "hi", vec![text_step("plain text", 30, 8)]);
+        let llm = TraceLlm::from_trace(trace);
+
+        let resp = llm.complete(make_completion_request("hi")).await.unwrap();
+
+        assert_eq!(resp.content, "plain text");
+        assert_eq!(resp.input_tokens, 30);
+        assert_eq!(resp.output_tokens, 8);
+        assert_eq!(resp.finish_reason, FinishReason::Stop);
+    }
+
+    // Verify complete() errors on tool_calls step.
+    #[tokio::test]
+    async fn test_trace_llm_complete_errors_on_tool_calls_step() {
+        let trace = LlmTrace::single_turn(
+            "test-model",
+            "hi",
+            vec![tool_calls_step(vec![simple_tool_call("echo")], 10, 5)],
+        );
+        let llm = TraceLlm::from_trace(trace);
+
+        let result = llm.complete(make_completion_request("hi")).await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("tool_calls"),
+            "Expected 'tool_calls' in error: {err_msg}"
+        );
+    }
+
+    // Verify captured_requests works.
+    #[tokio::test]
+    async fn test_trace_llm_captured_requests() {
+        let trace = LlmTrace::single_turn(
+            "test-model",
+            "test",
+            vec![text_step("resp1", 10, 5), text_step("resp2", 10, 5)],
+        );
+        let llm = TraceLlm::from_trace(trace);
+
+        llm.complete_with_tools(make_request("first message"))
+            .await
+            .unwrap();
+        llm.complete_with_tools(make_request("second message"))
+            .await
+            .unwrap();
+
+        let captured = llm.captured_requests();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].len(), 1);
+        assert_eq!(captured[0][0].content, "first message");
+        assert_eq!(captured[1][0].content, "second message");
+    }
+
+    // Legacy flat "steps" JSON deserializes into a single turn.
+    #[test]
+    fn test_deserialize_flat_steps_as_single_turn() {
+        let json = r#"{"model_name": "m", "steps": [
+            {"response": {"type": "text", "content": "hi", "input_tokens": 1, "output_tokens": 1}}
+        ]}"#;
+        let trace: LlmTrace = serde_json::from_str(json).unwrap();
+        assert_eq!(trace.turns.len(), 1);
+        assert_eq!(trace.turns[0].user_input, "(test input)");
+        assert_eq!(trace.turns[0].steps.len(), 1);
+    }
+
+    // "turns" JSON deserializes directly.
+    #[test]
+    fn test_deserialize_turns_format() {
+        let json = r#"{"model_name": "m", "turns": [
+            {"user_input": "hello", "steps": [
+                {"response": {"type": "text", "content": "hi", "input_tokens": 1, "output_tokens": 1}}
+            ]},
+            {"user_input": "bye", "steps": [
+                {"response": {"type": "text", "content": "bye", "input_tokens": 1, "output_tokens": 1}}
+            ]}
+        ]}"#;
+        let trace: LlmTrace = serde_json::from_str(json).unwrap();
+        assert_eq!(trace.turns.len(), 2);
+        assert_eq!(trace.turns[0].user_input, "hello");
+        assert_eq!(trace.turns[1].user_input, "bye");
+    }
+
+    // Multi-turn trace works end-to-end with TraceLlm.
+    #[tokio::test]
+    async fn test_trace_llm_with_multi_turn() {
+        let trace = LlmTrace::new(
+            "turns-model",
+            vec![
+                TraceTurn {
+                    user_input: "first".to_string(),
+                    steps: vec![text_step("turn 1 response", 10, 5)],
+                },
+                TraceTurn {
+                    user_input: "second".to_string(),
+                    steps: vec![text_step("turn 2 response", 20, 10)],
+                },
+            ],
+        );
+        let llm = TraceLlm::from_trace(trace);
+
+        let resp1 = llm
+            .complete_with_tools(make_request("first"))
+            .await
+            .unwrap();
+        assert_eq!(resp1.content.as_deref(), Some("turn 1 response"));
+
+        let resp2 = llm
+            .complete_with_tools(make_request("second"))
+            .await
+            .unwrap();
+        assert_eq!(resp2.content.as_deref(), Some("turn 2 response"));
+
+        assert_eq!(llm.calls(), 2);
+    }
+}

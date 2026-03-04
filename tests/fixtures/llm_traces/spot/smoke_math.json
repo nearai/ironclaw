@@ -1,0 +1,16 @@
+{
+  "model_name": "spot-smoke-math",
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "47"
+      },
+      "response": {
+        "type": "text",
+        "content": "1081",
+        "input_tokens": 40,
+        "output_tokens": 5
+      }
+    }
+  ]
+}

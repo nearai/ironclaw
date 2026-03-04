@@ -1,0 +1,49 @@
+{
+  "model_name": "spot-memory-save-recall",
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "meeting notes"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_write_1",
+            "name": "write_file",
+            "arguments": {
+              "path": "/tmp/bench-meeting.md",
+              "content": "Meeting: Project Phoenix sync\nAttendees: Alice, Bob, Carol\nDecisions:\n- Launch date: April 15th\n- Budget: $50k approved\n- Bob owns frontend, Carol owns backend"
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 40
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_read_1",
+            "name": "read_file",
+            "arguments": {
+              "path": "/tmp/bench-meeting.md"
+            }
+          }
+        ],
+        "input_tokens": 180,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I saved the meeting notes. Based on the notes: Bob owns the frontend and the launch date is April 15th.",
+        "input_tokens": 250,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

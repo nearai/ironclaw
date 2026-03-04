@@ -1,0 +1,30 @@
+{
+  "model_name": "test-shell",
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "shell" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_shell_echo",
+            "name": "shell",
+            "arguments": {
+              "command": "echo 'hello from ironclaw shell test'"
+            }
+          }
+        ],
+        "input_tokens": 60,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The shell command executed successfully and printed: hello from ironclaw shell test",
+        "input_tokens": 100,
+        "output_tokens": 20
+      }
+    }
+  ]
+}

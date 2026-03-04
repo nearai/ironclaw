@@ -1,17 +1,17 @@
 {
-  "model_name": "spot-tool-time",
+  "model_name": "spot-tool-json",
   "steps": [
     {
       "request_hint": {
-        "last_user_message_contains": "time"
+        "last_user_message_contains": "json"
       },
       "response": {
         "type": "tool_calls",
         "tool_calls": [
           {
-            "id": "call_time_1",
-            "name": "time",
-            "arguments": { "operation": "now" }
+            "id": "call_json_1",
+            "name": "json",
+            "arguments": { "operation": "parse", "input": "{\"key\": \"value\"}" }
           }
         ],
         "input_tokens": 50,
@@ -21,7 +21,7 @@
     {
       "response": {
         "type": "text",
-        "content": "The current date and time is 2026-03-03T10:30:00-08:00 (PST).",
+        "content": "The JSON was parsed successfully. It contains a single key 'key' with value 'value'.",
         "input_tokens": 90,
         "output_tokens": 20
       }

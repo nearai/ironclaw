@@ -17,7 +17,7 @@ mod tests {
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
-    /// For a 3-tool chain (echo -> time -> echo), verify that:
+    /// For a 3-tool chain (echo -> echo -> echo), verify that:
     /// 1. ToolStarted fires before ToolCompleted for each tool.
     /// 2. The total number of ToolStarted equals ToolCompleted.
     /// 3. No ToolCompleted appears without a preceding ToolStarted for that name.

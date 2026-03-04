@@ -1,0 +1,31 @@
+{
+  "model_name": "test-list-dir",
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "list" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_list_dir",
+            "name": "list_dir",
+            "arguments": {
+              "path": "/tmp/ironclaw_coverage_test_list_dir",
+              "recursive": false
+            }
+          }
+        ],
+        "input_tokens": 60,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The directory contains the expected test files.",
+        "input_tokens": 120,
+        "output_tokens": 15
+      }
+    }
+  ]
+}

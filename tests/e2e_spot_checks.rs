@@ -103,38 +103,25 @@ mod spot_tests {
         rig.shutdown();
     }
 
-    /// Spot: tool-time
-    /// Prompt: "What is the current date and time? Use the time tool."
-    /// Assertions: tools_used: [time], response_matches: 20\d{2}
+    /// Spot: tool-json
+    /// Prompt: "Parse this JSON for me: {\"key\": \"value\"}"
+    /// Assertions: tools_used: [json], response_contains: ["key", "value"]
     #[tokio::test]
-    async fn spot_tool_time() {
-        let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_time.json")).unwrap();
+    async fn spot_tool_json() {
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_json.json")).unwrap();
         let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
-        rig.send_message("What is the current date and time? Use the time tool.")
+        rig.send_message("Parse this json for me: {\"key\": \"value\"}")
             .await;
         let responses = rig.wait_for_responses(1, TIMEOUT).await;
 
         assert!(!responses.is_empty(), "no response");
         let started = rig.tool_calls_started();
-        assert_tools_used(&started, &["time"]);
-        assert_response_matches(&responses[0].content, r"20\d{2}");
+        assert_tools_used(&started, &["json"]);
+        assert_response_contains(&responses[0].content, &["key", "value"]);
 
         let completed = rig.tool_calls_completed();
         assert_all_tools_succeeded(&completed);
-
-        let results = rig.tool_results();
-        let time_result = results.iter().find(|(n, _)| n == "time");
-        assert!(
-            time_result.is_some(),
-            "Expected ToolResult for time, got: {results:?}"
-        );
-        assert!(
-            regex::Regex::new(r"20\d{2}")
-                .unwrap()
-                .is_match(&time_result.unwrap().1),
-            "Expected year in time result preview"
-        );
 
         rig.shutdown();
     }
@@ -213,20 +200,21 @@ mod spot_tests {
     }
 
     /// Spot: robust-correct-tool
-    /// Prompt: "What time is it right now?"
-    /// Assertions: tools_used: [time], tools_not_used: [shell, echo]
+    /// Prompt: "Please echo the word 'deterministic output'"
+    /// Assertions: tools_used: [echo], tools_not_used: [shell, time]
     #[tokio::test]
     async fn spot_robust_correct_tool() {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/robust_correct_tool.json")).unwrap();
         let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
-        rig.send_message("What time is it right now?").await;
+        rig.send_message("Please echo the word 'deterministic output'")
+            .await;
         let responses = rig.wait_for_responses(1, TIMEOUT).await;
 
         assert!(!responses.is_empty(), "no response");
         let started = rig.tool_calls_started();
-        assert_tools_used(&started, &["time"]);
-        assert_tools_not_used(&started, &["shell", "echo"]);
+        assert_tools_used(&started, &["echo"]);
+        assert_tools_not_used(&started, &["shell", "time"]);
 
         let completed = rig.tool_calls_completed();
         assert_all_tools_succeeded(&completed);

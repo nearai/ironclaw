@@ -242,6 +242,31 @@ impl TestRig {
         }
     }
 
+    /// Run a complete multi-turn trace, injecting user messages from the trace
+    /// and waiting for responses after each turn.
+    ///
+    /// Returns a `Vec` of response lists, one per turn. Status events and tool
+    /// call data accumulate across all turns (no clearing between turns), so
+    /// post-run assertions like `tool_calls_started()` reflect the whole trace.
+    pub async fn run_trace(
+        &self,
+        trace: &LlmTrace,
+        timeout: Duration,
+    ) -> Vec<Vec<OutgoingResponse>> {
+        let mut all_responses: Vec<Vec<OutgoingResponse>> = Vec::new();
+        let mut total_responses = 0usize;
+        for turn in &trace.turns {
+            self.send_message(&turn.user_input).await;
+            let responses = self.wait_for_responses(total_responses + 1, timeout).await;
+            // Extract only the new responses from this turn.
+            let turn_responses: Vec<OutgoingResponse> =
+                responses.into_iter().skip(total_responses).collect();
+            total_responses += turn_responses.len();
+            all_responses.push(turn_responses);
+        }
+        all_responses
+    }
+
     /// Signal the channel to shut down and abort the background agent task.
     pub fn shutdown(mut self) {
         self.channel.signal_shutdown();
@@ -359,9 +384,10 @@ impl TestRigBuilder {
             Arc::new(TraceLlm::from_trace(trace))
         } else {
             // Default: single-step text trace.
-            let trace = LlmTrace {
-                model_name: "test-rig-default".to_string(),
-                steps: vec![crate::support::trace_llm::TraceStep {
+            let trace = LlmTrace::single_turn(
+                "test-rig-default",
+                "(default)",
+                vec![crate::support::trace_llm::TraceStep {
                     request_hint: None,
                     response: crate::support::trace_llm::TraceResponse::Text {
                         content: "Hello from test rig!".to_string(),
@@ -369,7 +395,7 @@ impl TestRigBuilder {
                         output_tokens: 5,
                     },
                 }],
-            };
+            );
             Arc::new(TraceLlm::from_trace(trace))
         };
         let instrumented = Arc::new(InstrumentedLlm::new(base_llm));
@@ -421,6 +447,7 @@ impl TestRigBuilder {
             skills_config: SkillsConfig::default(),
             hooks,
             cost_guard,
+            sse_tx: None,
         };
 
         // 6. Create TestChannel (Arc) and TestChannelHandle.
@@ -509,9 +536,10 @@ mod tests {
     #[tokio::test]
     async fn test_rig_builds_and_runs() {
         // Create a simple 1-step text trace.
-        let trace = LlmTrace {
-            model_name: "test-model".to_string(),
-            steps: vec![TraceStep {
+        let trace = LlmTrace::single_turn(
+            "test-model",
+            "Hello test rig",
+            vec![TraceStep {
                 request_hint: None,
                 response: TraceResponse::Text {
                     content: "I am the test rig response.".to_string(),
@@ -519,7 +547,7 @@ mod tests {
                     output_tokens: 15,
                 },
             }],
-        };
+        );
 
         // Build the rig.
         let rig = TestRigBuilder::new().with_trace(trace).build().await;

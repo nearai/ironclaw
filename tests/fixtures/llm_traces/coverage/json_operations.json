@@ -1,0 +1,66 @@
+{
+  "model_name": "test-json-ops",
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "json" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_json_parse",
+            "name": "json",
+            "arguments": {
+              "operation": "parse",
+              "data": "{\"name\": \"ironclaw\", \"version\": 2, \"features\": [\"tools\", \"memory\"]}"
+            }
+          }
+        ],
+        "input_tokens": 80,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_json_query",
+            "name": "json",
+            "arguments": {
+              "operation": "query",
+              "data": "{\"name\": \"ironclaw\", \"version\": 2, \"features\": [\"tools\", \"memory\"]}",
+              "path": "features[0]"
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_json_validate",
+            "name": "json",
+            "arguments": {
+              "operation": "validate",
+              "data": "{\"valid\": true}"
+            }
+          }
+        ],
+        "input_tokens": 140,
+        "output_tokens": 15
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I parsed the JSON, queried the first feature ('tools'), and validated the structure. Everything looks good.",
+        "input_tokens": 160,
+        "output_tokens": 25
+      }
+    }
+  ]
+}

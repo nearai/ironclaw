@@ -1,0 +1,27 @@
+{
+  "model_name": "test-error-path",
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_read_file_missing_path",
+            "name": "read_file",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 80,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I encountered an error trying to read the file. The path parameter was missing.",
+        "input_tokens": 120,
+        "output_tokens": 25
+      }
+    }
+  ]
+}

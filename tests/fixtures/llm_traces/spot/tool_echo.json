@@ -1,5 +1,5 @@
 {
-  "model_name": "spot-robust-correct-tool",
+  "model_name": "spot-tool-echo",
   "steps": [
     {
       "request_hint": {
@@ -11,17 +11,19 @@
           {
             "id": "call_echo_1",
             "name": "echo",
-            "arguments": { "message": "deterministic output" }
+            "arguments": {
+              "message": "Spot check passed"
+            }
           }
         ],
-        "input_tokens": 40,
-        "output_tokens": 15
+        "input_tokens": 60,
+        "output_tokens": 20
       }
     },
     {
       "response": {
         "type": "text",
-        "content": "The echo tool returned: deterministic output",
+        "content": "The echo tool returned: Spot check passed",
         "input_tokens": 80,
         "output_tokens": 15
       }

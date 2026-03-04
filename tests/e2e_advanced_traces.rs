@@ -44,52 +44,85 @@ mod advanced {
     async fn multi_turn_memory_coherence() {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/multi_turn_memory.json")).unwrap();
         let rig = TestRigBuilder::new()
-            .with_trace(trace)
+            .with_trace(trace.clone())
             .with_workspace(true)
             .build()
             .await;
 
-        // -- Turn 1: save to memory --
-        rig.send_message(
-            "Please remember: Project Zenith deadline is June 1st, 2026. \
-             Lead is Dana. Stack is Rust + WASM.",
-        )
-        .await;
-        let r1 = rig.wait_for_responses(1, TIMEOUT).await;
-        assert!(!r1.is_empty(), "Turn 1: no response");
+        // Drive the full multi-turn trace from the fixture.
+        let all_responses = rig.run_trace(&trace, TIMEOUT).await;
+
+        // Turn 1: save to memory -- should have a response.
+        assert!(!all_responses[0].is_empty(), "Turn 1: no response");
+
+        // Turn 2: unrelated question -- should have a response.
+        assert!(!all_responses[1].is_empty(), "Turn 2: no response");
+
+        // Turn 3: recall from memory -- verify content.
+        assert!(!all_responses[2].is_empty(), "Turn 3: no response");
+        let text = all_responses[2][0].content.to_lowercase();
+        assert!(text.contains("june"), "Turn 3: missing 'June' in: {text}");
+        assert!(text.contains("dana"), "Turn 3: missing 'Dana' in: {text}");
+        assert!(text.contains("rust"), "Turn 3: missing 'Rust' in: {text}");
+
+        // Verify tools were called across the whole conversation.
         let started = rig.tool_calls_started();
         assert!(
             started.contains(&"memory_write".to_string()),
-            "Turn 1: expected memory_write, got {started:?}"
+            "expected memory_write, got {started:?}"
+        );
+        assert!(
+            started.contains(&"memory_search".to_string()),
+            "expected memory_search, got {started:?}"
         );
 
         let completed = rig.tool_calls_completed();
         assert_all_tools_succeeded(&completed);
 
-        rig.clear().await;
+        rig.shutdown();
+    }
 
-        // -- Turn 2: unrelated question (no tools) --
-        rig.send_message("What's the weather like today?").await;
-        let r2 = rig.wait_for_responses(1, TIMEOUT).await;
-        assert!(!r2.is_empty(), "Turn 2: no response");
+    // -----------------------------------------------------------------------
+    // 1b. User steering (multi-turn correction)
+    //
+    // Turn 1: "Write hello to file" -> write_file -> confirmation
+    // Turn 2: "Actually, change it to goodbye" -> write_file -> confirmation
+    //
+    // Exercises: multi-turn steering, file overwrite, self-contained trajectory
+    // -----------------------------------------------------------------------
 
-        rig.clear().await;
+    #[tokio::test]
+    async fn user_steering() {
+        let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_steer_test.txt");
+        let _ = std::fs::remove_file("/tmp/ironclaw_steer_test.txt");
 
-        // -- Turn 3: recall from memory --
-        rig.send_message("What do you know about Project Zenith?")
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/steering.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_tools(tools_with_file_support())
+            .build()
             .await;
-        let r3 = rig.wait_for_responses(1, TIMEOUT).await;
-        assert!(!r3.is_empty(), "Turn 3: no response");
 
-        let text = r3[0].content.to_lowercase();
-        assert!(text.contains("june"), "Turn 3: missing 'June' in: {text}");
-        assert!(text.contains("dana"), "Turn 3: missing 'Dana' in: {text}");
-        assert!(text.contains("rust"), "Turn 3: missing 'Rust' in: {text}");
+        let all_responses = rig.run_trace(&trace, TIMEOUT).await;
 
+        // Both turns should have responses.
+        assert!(!all_responses[0].is_empty(), "Turn 1: no response");
+        assert!(!all_responses[1].is_empty(), "Turn 2: no response");
+
+        // After steering, the file should contain "goodbye", not "hello".
+        let content = std::fs::read_to_string("/tmp/ironclaw_steer_test.txt")
+            .expect("steer test file should exist");
+        assert_eq!(
+            content, "goodbye",
+            "File should contain 'goodbye' after steering"
+        );
+
+        // Should have called write_file twice.
         let started = rig.tool_calls_started();
-        assert!(
-            started.contains(&"memory_search".to_string()),
-            "Turn 3: expected memory_search, got {started:?}"
+        let write_count = started.iter().filter(|s| *s == "write_file").count();
+        assert_eq!(
+            write_count, 2,
+            "expected 2 write_file calls, got {write_count}"
         );
 
         let completed = rig.tool_calls_completed();

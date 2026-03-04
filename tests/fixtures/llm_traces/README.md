@@ -4,17 +4,65 @@ Trace fixtures are JSON files that script LLM behavior for deterministic E2E tes
 
 ## Trace Format
 
+A trace is a model name and a list of **turns**. Each turn pairs a user message with the LLM response steps that follow it.
+
+```json
+{
+  "model_name": "descriptive-name",
+  "turns": [
+    {
+      "user_input": "Write hello to /tmp/test.txt",
+      "steps": [
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [{ "id": "c1", "name": "write_file", "arguments": {"path": "/tmp/test.txt", "content": "hello"} }],
+            "input_tokens": 60, "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Done, wrote hello to the file.",
+            "input_tokens": 80, "output_tokens": 15
+          }
+        }
+      ]
+    },
+    {
+      "user_input": "Actually, change it to goodbye instead",
+      "steps": [
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [{ "id": "c2", "name": "write_file", "arguments": {"path": "/tmp/test.txt", "content": "goodbye"} }],
+            "input_tokens": 100, "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Updated the file to say goodbye.",
+            "input_tokens": 120, "output_tokens": 15
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+`TestRig::run_trace()` drives the entire conversation automatically -- no test code needed to send user messages.
+
+### Legacy flat format
+
+For backward compatibility, traces with a top-level `"steps"` array (no `"turns"`) are accepted. They are deserialized as a single turn with a placeholder user message. Existing fixtures work unchanged; test code provides the user message via `rig.send_message()`.
+
 ```json
 {
   "model_name": "descriptive-name",
   "steps": [
-    {
-      "request_hint": {
-        "last_user_message_contains": "optional substring",
-        "min_message_count": 1
-      },
-      "response": { "..." }
-    }
+    { "response": { "type": "text", "content": "Hello", "input_tokens": 10, "output_tokens": 5 } }
   ]
 }
 ```
@@ -23,14 +71,23 @@ Trace fixtures are JSON files that script LLM behavior for deterministic E2E tes
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `model_name` | string | yes | Identifier returned by `LlmProvider::model_name()`. Convention: `{category}-{scenario}` (e.g. `spot-smoke-greeting`, `advanced-tool-error-recovery`). |
-| `steps` | array | yes | Ordered list of steps. Each `complete()` or `complete_with_tools()` call consumes the next step. If calls exceed the number of steps, `TraceLlm` returns an error. |
+| `model_name` | string | yes | Identifier returned by `LlmProvider::model_name()`. Convention: `{category}-{scenario}`. |
+| `turns` | array | yes* | List of turns. Each turn has `user_input` (string) and `steps` (array of response steps). |
+
+*Or `steps` for the legacy flat format (deserialized as a single turn).
+
+### Turn fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `user_input` | string | yes | The user message that starts this turn. |
+| `steps` | array | yes | Ordered list of LLM response steps for this turn. |
 
 ### Step fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `request_hint` | object | no | Soft validation against the incoming request. Mismatches log a warning and increment a counter but do **not** fail the call -- the canned response is still returned. |
+| `request_hint` | object | no | Soft validation against the incoming request. Mismatches log a warning but do **not** fail the call. |
 | `response` | object | yes | The canned response for this step. |
 
 ### Request hints
@@ -38,9 +95,29 @@ Trace fixtures are JSON files that script LLM behavior for deterministic E2E tes
 | Field | Type | Description |
 |-------|------|-------------|
 | `last_user_message_contains` | string | Asserts the last `Role::User` message contains this substring. |
-| `min_message_count` | integer | Asserts the message list has at least this many entries. Useful for verifying context accumulation across turns. |
+| `min_message_count` | integer | Asserts the message list has at least this many entries. |
 
 Hints are intentionally soft -- they help catch wiring mistakes during test development without making traces brittle.
+
+### Determinism requirement
+
+Trace fixtures must produce deterministic results across runs. **Do not use tools whose output varies by time or environment state.** Specifically:
+
+**Avoid:**
+- `time` -- output changes every run
+- `list_dir` on directories not created by the trace itself
+- `shell` with commands that depend on system state (e.g. `date`, `ps`, `ls /var`)
+- `http` -- external endpoints may change or be unavailable
+- `memory_search` unless the trace writes the memory entry first
+
+**Prefer:**
+- `echo` -- always returns its input
+- `json` -- deterministic parsing/formatting
+- `write_file` + `read_file` -- self-contained if the trace writes first
+- `memory_write` + `memory_read` -- deterministic if the trace writes first
+- `shell` with deterministic commands (e.g. `echo "hello"`, `printf`)
+
+When a trace needs to exercise a stateful tool (like `list_dir`), have an earlier step create the expected state (e.g. `write_file` to create the directory contents first).
 
 ### Response types
 
@@ -113,7 +190,7 @@ llm_traces/
     smoke_math.json         # Math question, no tools
     robust_no_tool.json     # Factual question, no tools
     tool_echo.json          # Single echo tool call + confirmation
-    tool_time.json          # Single time tool call + confirmation
+    tool_json.json          # JSON parse tool call + confirmation
     chain_write_read.json   # Write file -> read file -> confirm
     memory_save_recall.json # Memory write -> memory search -> confirm
     robust_correct_tool.json
@@ -128,7 +205,8 @@ llm_traces/
   advanced/                 # Multi-step and edge-case scenarios
     long_tool_chain.json    # Many sequential tool calls
     tool_error_recovery.json # Failed tool call -> retry with valid path
-    multi_turn_memory.json  # Memory across multiple conversation turns
+    multi_turn_memory.json  # Memory across multiple turns
+    steering.json           # User steering: correct agent mid-conversation
     workspace_search.json   # Workspace search workflows
     prompt_injection_resilience.json
     iteration_limit.json    # Tests agent loop iteration bounds
@@ -142,34 +220,71 @@ llm_traces/
 
 3. **Script the conversation**: Think through the turn sequence. Each LLM call is one step. After a `tool_calls` step, the agent executes the tools and calls the LLM again with the results -- that's the next step.
 
-4. **Add request hints** on the first step (at minimum) to catch wiring issues. Later steps often omit hints since the message content depends on tool output.
+4. **Add request hints** on the first step of each turn (at minimum) to catch wiring issues. Later steps often omit hints since the message content depends on tool output.
 
-5. **End with a `text` step** so the agent has a final response to return.
+5. **End each turn with a `text` step** so the agent has a final response to return.
 
-Example -- a two-turn echo test:
+Example -- single-turn trace:
 
 ```json
 {
   "model_name": "spot-tool-echo",
-  "steps": [
+  "turns": [
     {
-      "request_hint": { "last_user_message_contains": "echo" },
-      "response": {
-        "type": "tool_calls",
-        "tool_calls": [
-          { "id": "call_echo_1", "name": "echo", "arguments": { "message": "hello" } }
-        ],
-        "input_tokens": 60,
-        "output_tokens": 20
-      }
+      "user_input": "Please echo hello for me",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "echo" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [{ "id": "call_echo_1", "name": "echo", "arguments": { "message": "hello" } }],
+            "input_tokens": 60, "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "The echo tool returned: hello",
+            "input_tokens": 80, "output_tokens": 15
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Example -- multi-turn steering:
+
+```json
+{
+  "model_name": "advanced-steering",
+  "turns": [
+    {
+      "user_input": "Write hello to /tmp/test.txt",
+      "steps": [
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [{ "id": "c1", "name": "write_file", "arguments": {"path": "/tmp/test.txt", "content": "hello"} }],
+            "input_tokens": 60, "output_tokens": 20
+          }
+        },
+        { "response": { "type": "text", "content": "Done.", "input_tokens": 80, "output_tokens": 5 } }
+      ]
     },
     {
-      "response": {
-        "type": "text",
-        "content": "The echo tool returned: hello",
-        "input_tokens": 80,
-        "output_tokens": 15
-      }
+      "user_input": "Actually, change it to goodbye",
+      "steps": [
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [{ "id": "c2", "name": "write_file", "arguments": {"path": "/tmp/test.txt", "content": "goodbye"} }],
+            "input_tokens": 100, "output_tokens": 20
+          }
+        },
+        { "response": { "type": "text", "content": "Updated.", "input_tokens": 120, "output_tokens": 5 } }
+      ]
     }
   ]
 }
@@ -188,3 +303,24 @@ assert_eq!(llm.calls(), 2);              // Total LLM calls made
 assert_eq!(llm.hint_mismatches(), 0);     // Request hint failures
 let reqs = llm.captured_requests();       // Vec<Vec<ChatMessage>> of all requests
 ```
+
+## TestRig::run_trace()
+
+For traces with multiple turns, `run_trace()` drives the entire conversation automatically:
+
+```rust
+let trace = LlmTrace::from_file("tests/fixtures/llm_traces/advanced/steering.json")?;
+let rig = TestRigBuilder::new()
+    .with_trace(trace.clone())
+    .with_tools(tools_with_file_support())
+    .build()
+    .await;
+
+// Sends each turn's user_input, waits for response, accumulates results.
+let all_responses = rig.run_trace(&trace, Duration::from_secs(15)).await;
+
+assert!(!all_responses[0].is_empty(), "Turn 1: no response");
+assert!(!all_responses[1].is_empty(), "Turn 2: no response");
+```
+
+For legacy flat traces or when you need fine-grained control, use `send_message()` + `wait_for_responses()` directly.
