@@ -13,6 +13,7 @@ mod advanced {
     use ironclaw::tools::ToolRegistry;
 
     use crate::support::assertions::assert_all_tools_succeeded;
+    use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -109,6 +110,7 @@ mod advanced {
 
     #[tokio::test]
     async fn tool_error_recovery() {
+        let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_recovery_test.txt");
         let _ = std::fs::remove_file("/tmp/ironclaw_recovery_test.txt");
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_error_recovery.json")).unwrap();
@@ -144,7 +146,6 @@ mod advanced {
             .any(|(name, success)| name == "write_file" && *success);
         assert!(any_success, "no successful write_file, got: {completed:?}");
 
-        let _ = std::fs::remove_file("/tmp/ironclaw_recovery_test.txt");
         rig.shutdown();
     }
 
@@ -159,6 +160,7 @@ mod advanced {
     #[tokio::test]
     async fn long_tool_chain() {
         let test_dir = "/tmp/ironclaw_chain_test";
+        let _cleanup = CleanupGuard::new().dir(test_dir);
         let _ = std::fs::remove_dir_all(test_dir);
         std::fs::create_dir_all(test_dir).unwrap();
 
@@ -213,7 +215,6 @@ mod advanced {
         let completed = rig.tool_calls_completed();
         assert_all_tools_succeeded(&completed);
 
-        let _ = std::fs::remove_dir_all(test_dir);
         rig.shutdown();
     }
 

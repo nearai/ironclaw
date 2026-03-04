@@ -12,6 +12,7 @@ mod tests {
     use ironclaw::tools::ToolRegistry;
 
     use crate::support::assertions::assert_all_tools_succeeded;
+    use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -23,11 +24,6 @@ mod tests {
     fn setup_test_dir() {
         let _ = std::fs::remove_dir_all(TEST_DIR);
         std::fs::create_dir_all(TEST_DIR).expect("failed to create test directory");
-    }
-
-    /// Remove the temp directory.
-    fn cleanup_test_dir() {
-        let _ = std::fs::remove_dir_all(TEST_DIR);
     }
 
     /// Build a `ToolRegistry` that includes both built-in and dev (file) tools.
@@ -42,6 +38,7 @@ mod tests {
     async fn test_file_write_and_read_flow() {
         // 1. Prepare a clean temp directory.
         setup_test_dir();
+        let _cleanup = CleanupGuard::new().dir(TEST_DIR);
 
         // 2. Load the LLM trace fixture.
         let fixture_path = concat!(
@@ -101,10 +98,7 @@ mod tests {
         let completed = rig.tool_calls_completed();
         assert_all_tools_succeeded(&completed);
 
-        // 9. Clean up.
-        cleanup_test_dir();
-
-        // 10. Shutdown the agent.
+        // 9. Shutdown the agent.
         rig.shutdown();
     }
 }

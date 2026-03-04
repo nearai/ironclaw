@@ -14,6 +14,7 @@ mod tests {
     use ironclaw::tools::ToolRegistry;
 
     use crate::support::assertions::{assert_all_tools_succeeded, assert_tool_succeeded};
+    use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -24,10 +25,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("failed to create test directory");
         dir
-    }
-
-    fn cleanup_test_dir(dir: &str) {
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn all_tools() -> Arc<ToolRegistry> {
@@ -145,6 +142,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_dir() {
         let test_dir = setup_test_dir("list_dir");
+        let _cleanup = CleanupGuard::new().dir(&test_dir);
         // Create some files in the test directory so list_dir has something to show.
         std::fs::write(format!("{test_dir}/file_a.txt"), "content a").unwrap();
         std::fs::write(format!("{test_dir}/file_b.txt"), "content b").unwrap();
@@ -183,7 +181,6 @@ mod tests {
             ld_results
         );
 
-        cleanup_test_dir(&test_dir);
         rig.shutdown();
     }
 
@@ -195,6 +192,7 @@ mod tests {
     #[tokio::test]
     async fn test_apply_patch_chain() {
         let test_dir = setup_test_dir("apply_patch");
+        let _cleanup = CleanupGuard::new().dir(&test_dir);
 
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -248,7 +246,6 @@ mod tests {
         assert!(metrics.llm_calls >= 4, "Expected >= 4 LLM calls");
         assert!(metrics.total_tool_calls() >= 3, "Expected >= 3 tool calls");
 
-        cleanup_test_dir(&test_dir);
         rig.shutdown();
     }
 

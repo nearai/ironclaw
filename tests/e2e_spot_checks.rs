@@ -16,6 +16,7 @@ mod spot_tests {
     use ironclaw::tools::ToolRegistry;
 
     use crate::support::assertions::*;
+    use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -147,6 +148,7 @@ mod spot_tests {
     /// Assertions: tools_used: [write_file, read_file], response_contains: ["ironclaw spot check"]
     #[tokio::test]
     async fn spot_chain_write_read() {
+        let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_spot_test.txt");
         // Clean up from any previous run.
         let _ = std::fs::remove_file("/tmp/ironclaw_spot_test.txt");
 
@@ -184,8 +186,6 @@ mod spot_tests {
             std::fs::read_to_string("/tmp/ironclaw_spot_test.txt").expect("file should exist");
         assert_eq!(content, "ironclaw spot check");
 
-        // Cleanup.
-        let _ = std::fs::remove_file("/tmp/ironclaw_spot_test.txt");
         rig.shutdown();
     }
 
@@ -243,6 +243,7 @@ mod spot_tests {
     /// Assertions: tools_used: [write_file, read_file], response_contains: ["Bob", "frontend", "April 15"]
     #[tokio::test]
     async fn spot_memory_save_recall() {
+        let _cleanup = CleanupGuard::new().file("/tmp/bench-meeting.md");
         let _ = std::fs::remove_file("/tmp/bench-meeting.md");
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/memory_save_recall.json")).unwrap();
@@ -270,8 +271,6 @@ mod spot_tests {
         let completed = rig.tool_calls_completed();
         assert_all_tools_succeeded(&completed);
 
-        // Cleanup.
-        let _ = std::fs::remove_file("/tmp/bench-meeting.md");
         rig.shutdown();
     }
 }

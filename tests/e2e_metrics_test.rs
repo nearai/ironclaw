@@ -14,6 +14,7 @@ mod tests {
     use ironclaw::tools::ToolRegistry;
 
     use crate::support::assertions::assert_all_tools_succeeded;
+    use crate::support::cleanup::CleanupGuard;
     use crate::support::metrics::{RunResult, ScenarioResult, compare_runs};
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -23,10 +24,6 @@ mod tests {
     fn setup_test_dir() {
         let _ = std::fs::remove_dir_all(TEST_DIR);
         std::fs::create_dir_all(TEST_DIR).expect("failed to create test directory");
-    }
-
-    fn cleanup_test_dir() {
-        let _ = std::fs::remove_dir_all(TEST_DIR);
     }
 
     fn tools_with_file_support() -> Arc<ToolRegistry> {
@@ -100,6 +97,7 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_collected_from_tool_trace() {
         setup_test_dir();
+        let _cleanup = CleanupGuard::new().dir(TEST_DIR);
 
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -161,7 +159,6 @@ mod tests {
             tool_names
         );
 
-        cleanup_test_dir();
         rig.shutdown();
     }
 
