@@ -95,15 +95,18 @@ impl ChannelCapabilitiesFile {
     /// Called once at load time to catch issues early. Warnings are emitted via
     /// `tracing::warn` so they show up in startup logs without blocking loading.
     pub fn validate(&self) {
+        const MIN_PROMPT_LENGTH: usize = 30;
+
         // Check for short prompts in required_secrets
         for secret in &self.setup.required_secrets {
-            if secret.prompt.len() < 30 {
+            if secret.prompt.len() < MIN_PROMPT_LENGTH {
                 tracing::warn!(
                     channel = self.name,
                     secret = secret.name,
                     prompt = secret.prompt,
-                    "setup.required_secrets prompt is shorter than 30 chars — \
-                     consider a more descriptive prompt that tells the user where to find this value"
+                    "setup.required_secrets prompt is shorter than {} chars — \
+                     consider a more descriptive prompt that tells the user where to find this value",
+                    MIN_PROMPT_LENGTH
                 );
             }
         }

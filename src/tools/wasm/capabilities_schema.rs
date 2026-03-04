@@ -110,6 +110,8 @@ impl CapabilitiesFile {
     /// Called once at load time to catch issues early. Warnings are emitted via
     /// `tracing::warn` so they show up in startup logs without blocking loading.
     pub fn validate(&self, name: &str) {
+        const MIN_PROMPT_LENGTH: usize = 30;
+
         // setup.required_secrets present but no auth section → auth card won't display
         if let Some(setup) = &self.setup {
             if !setup.required_secrets.is_empty() && self.auth.is_none() {
@@ -122,13 +124,14 @@ impl CapabilitiesFile {
 
             // Check for short prompts
             for secret in &setup.required_secrets {
-                if secret.prompt.len() < 30 {
+                if secret.prompt.len() < MIN_PROMPT_LENGTH {
                     tracing::warn!(
                         tool = name,
                         secret = secret.name,
                         prompt = secret.prompt,
-                        "setup.required_secrets prompt is shorter than 30 chars — \
-                         consider a more descriptive prompt that tells the user where to find this value"
+                        "setup.required_secrets prompt is shorter than {} chars — \
+                         consider a more descriptive prompt that tells the user where to find this value",
+                        MIN_PROMPT_LENGTH
                     );
                 }
             }
