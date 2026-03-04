@@ -405,6 +405,7 @@ fn parse_mentor_voice_toggle(text: &str) -> Option<MentorVoiceToggle> {
     }
 
     match parts.next().map(|value| value.to_ascii_lowercase()).as_deref() {
+        None => Some(MentorVoiceToggle::On),
         Some("on") => Some(MentorVoiceToggle::On),
         Some("off") => Some(MentorVoiceToggle::Off),
         Some("status") => Some(MentorVoiceToggle::Status),
@@ -781,14 +782,9 @@ impl Guest for TelegramChannel {
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
         if !response.content.trim().is_empty() {
-            // Try sending with Markdown first; fall back to plain text if Telegram
-            // can't parse the entities (e.g. model leaked <tool_call> with underscores).
-            let result = send_message(
-                metadata.chat_id,
-                &response.content,
-                Some(metadata.message_id),
-                Some("Markdown"),
-            );
+            // Send plain text by default; Telegram Markdown parsing can break on
+            // command-like strings (e.g. /mentor_voice with underscores).
+            let result = send_message(metadata.chat_id, &response.content, Some(metadata.message_id), None);
 
             match result {
                 Ok(msg_id) => {
@@ -800,28 +796,25 @@ impl Guest for TelegramChannel {
                         ),
                     );
                 }
-                Err(SendError::ParseEntities(detail)) => {
+                Err(first_err) => {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
-                        &format!("Markdown parse failed ({}), retrying as plain text", detail),
+                        &format!(
+                            "Failed to send reply with reply context ({}), retrying without reply context",
+                            first_err
+                        ),
                     );
-                    let msg_id = send_message(
-                        metadata.chat_id,
-                        &response.content,
-                        Some(metadata.message_id),
-                        None,
-                    )
-                    .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
+                    let msg_id = send_message(metadata.chat_id, &response.content, None, None)
+                        .map_err(|e| format!("Plain-text retry without reply context failed: {}", e))?;
 
                     channel_host::log(
                         channel_host::LogLevel::Debug,
                         &format!(
-                            "Sent plain-text message to chat {}: message_id={}",
+                            "Sent message to chat {} without reply context: message_id={}",
                             metadata.chat_id, msg_id
                         ),
                     );
                 }
-                Err(e) => return Err(e.to_string()),
             }
         }
 
@@ -1858,6 +1851,10 @@ mod tests {
     #[test]
     fn test_parse_mentor_voice_toggle() {
         assert!(matches!(
+            parse_mentor_voice_toggle("/mentor_voice"),
+            Some(MentorVoiceToggle::On)
+        ));
+        assert!(matches!(
             parse_mentor_voice_toggle("/mentor_voice on"),
             Some(MentorVoiceToggle::On)
         ));
@@ -1871,6 +1868,10 @@ mod tests {
         ));
         assert!(matches!(
             parse_mentor_voice_toggle("/mentor_voice@MyBot on"),
+            Some(MentorVoiceToggle::On)
+        ));
+        assert!(matches!(
+            parse_mentor_voice_toggle("/mentor_voice@MyBot"),
             Some(MentorVoiceToggle::On)
         ));
         assert!(parse_mentor_voice_toggle("/mentor_voice hello").is_none());

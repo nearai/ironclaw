@@ -1222,6 +1222,17 @@ impl Agent {
                 )));
             }
 
+            if let Some(mode) = mentor_ctx.voice_mode_changed.as_deref() {
+                let current_mode = if mentor_ctx.voice_mode { "on" } else { "off" };
+                return Ok(SubmissionResult::response(format!(
+                    "mentor_voice mode set to {mode} (current={current_mode})"
+                )));
+            }
+
+            if mentor_ctx.voice_mode {
+                return self.mentor_voice_status(message).await;
+            }
+
             return Ok(SubmissionResult::response(
                 "Usage: /mentor_voice on|off|status|<message>",
             ));
