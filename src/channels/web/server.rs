@@ -372,6 +372,20 @@ pub async fn start_server(
             header::X_FRAME_OPTIONS,
             header::HeaderValue::from_static("DENY"),
         ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("content-security-policy"),
+            header::HeaderValue::from_static(
+                "default-src 'self'; \
+                 script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; \
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+                 font-src https://fonts.gstatic.com; \
+                 connect-src 'self'; \
+                 img-src 'self' data:; \
+                 frame-ancestors 'none'; \
+                 base-uri 'self'; \
+                 form-action 'self'",
+            ),
+        ))
         .with_state(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
