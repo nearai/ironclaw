@@ -11,6 +11,8 @@
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
+#[cfg(feature = "benchmark")]
+mod benchmark;
 mod completion;
 mod config;
 mod doctor;
@@ -23,6 +25,8 @@ mod service;
 pub mod status;
 mod tool;
 
+#[cfg(feature = "benchmark")]
+pub use benchmark::{BenchmarkCommand, run_benchmark_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
@@ -212,6 +216,14 @@ pub enum Command {
         #[arg(long, default_value = "sonnet")]
         model: String,
     },
+
+    /// Run benchmark scenarios against the agent
+    #[cfg(feature = "benchmark")]
+    #[command(
+        about = "Run benchmark scenarios",
+        long_about = "Run benchmark scenarios against the agent and compare with baseline.\nExamples:\n  ironclaw benchmark\n  ironclaw benchmark --tags tools,memory\n  ironclaw benchmark --scenario pick-time --update-baseline"
+    )]
+    Benchmark(BenchmarkCommand),
 }
 
 impl Cli {

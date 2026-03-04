@@ -118,6 +118,11 @@ async fn async_main() -> anyhow::Result<()> {
             init_worker_tracing();
             return run_claude_bridge(*job_id, orchestrator_url, *max_turns, model).await;
         }
+        #[cfg(feature = "benchmark")]
+        Some(Command::Benchmark(bench_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_benchmark_command(bench_cmd).await;
+        }
         Some(Command::Onboard {
             skip_auth,
             channels_only,
