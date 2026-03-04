@@ -1,0 +1,8 @@
+FROM python:3.11-slim
+
+# Install Docker Python SDK (for spawning worker containers via Docker API)
+RUN pip install --no-cache-dir docker
+
+COPY agent.py /usr/local/bin/agent.py
+
+ENTRYPOINT ["python3", "/usr/local/bin/agent.py"]

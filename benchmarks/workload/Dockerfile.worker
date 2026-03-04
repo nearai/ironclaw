@@ -1,0 +1,9 @@
+FROM python:3.11-slim
+
+# Match ironclaw's worker UID
+RUN useradd -m -u 1000 -s /bin/bash sandbox
+
+COPY worker.py /usr/local/bin/worker.py
+
+USER sandbox
+ENTRYPOINT ["python3", "/usr/local/bin/worker.py"]
