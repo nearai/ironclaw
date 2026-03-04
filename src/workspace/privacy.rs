@@ -1,20 +1,34 @@
-use std::sync::LazyLock;
-
 use regex::Regex;
+
+/// Result of privacy classification, including confidence level.
+///
+/// Confidence enables downstream callers to apply thresholds (e.g., only
+/// redirect above 0.8) and supports future upgrade to LLM-based classifiers
+/// that produce probabilistic scores.
+#[derive(Debug, Clone)]
+pub struct SensitivityResult {
+    pub is_sensitive: bool,
+    pub confidence: f32,
+}
 
 /// Classifies content as potentially sensitive for privacy purposes.
 ///
 /// Used to guard writes to shared memory layers -- if content is flagged
 /// as sensitive, it can be redirected to the private layer instead.
 pub trait PrivacyClassifier: Send + Sync {
-    /// Returns true if the content appears to contain private/sensitive information.
-    fn is_sensitive(&self, content: &str) -> bool;
+    /// Classify content and return sensitivity with confidence score.
+    fn classify(&self, content: &str) -> SensitivityResult;
 }
 
 /// Pattern-based privacy classifier using regex matching.
 ///
-/// Detects PII patterns (SSN, credit card, phone), health/medical terms,
-/// and personal sentiment markers.
+/// Default patterns target hard PII (SSN, credit card numbers) where silent
+/// redirect is clearly correct. Ambiguous terms (health vocabulary, contact
+/// info) are intentionally excluded — they cause false positives in household
+/// contexts and silently redirect content the user intended to share.
+///
+/// Operators who need broader coverage should use `ConfigurablePrivacyClassifier`
+/// with domain-specific patterns.
 pub struct PatternPrivacyClassifier {
     patterns: Vec<Regex>,
 }
@@ -28,18 +42,12 @@ impl Default for PatternPrivacyClassifier {
 impl PatternPrivacyClassifier {
     pub fn new() -> Self {
         let pattern_strs = [
-            // SSN
+            // SSN — always PII
             r"\b\d{3}-\d{2}-\d{4}\b",
-            // Credit card (basic)
+            // Credit card (basic) — always PII
             r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b",
-            // Email (as PII in context)
-            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-            // Phone numbers (US)
-            r"\b\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b",
-            // Health/medical terms
-            r"(?i)\b(diagnosis|prescription|medication|therapy|doctor|medical|symptom|treatment|illness|disease|mental health|anxiety|depression)\b",
-            // Highly personal markers
-            r"(?i)\b(password|secret|confession|affair|divorce|pregnant|rehab|addiction)\b",
+            // Credentials and auth tokens — high-confidence PII
+            r"(?i)\b(password|passwd|api[_-]?key|auth[_-]?token|secret[_-]?key)\b",
         ];
         let patterns = pattern_strs
             .iter()
@@ -49,16 +57,57 @@ impl PatternPrivacyClassifier {
     }
 }
 
-static GLOBAL_CLASSIFIER: LazyLock<PatternPrivacyClassifier> =
-    LazyLock::new(PatternPrivacyClassifier::new);
-
-pub fn global_classifier() -> &'static PatternPrivacyClassifier {
-    &GLOBAL_CLASSIFIER
+impl PrivacyClassifier for PatternPrivacyClassifier {
+    fn classify(&self, content: &str) -> SensitivityResult {
+        let is_sensitive = self.patterns.iter().any(|p| p.is_match(content));
+        SensitivityResult {
+            is_sensitive,
+            // Regex is binary — matched or not. Always full confidence.
+            confidence: if is_sensitive { 1.0 } else { 0.0 },
+        }
+    }
 }
 
-impl PrivacyClassifier for PatternPrivacyClassifier {
-    fn is_sensitive(&self, content: &str) -> bool {
-        self.patterns.iter().any(|p| p.is_match(content))
+/// User-configurable privacy classifier.
+///
+/// Accepts custom regex patterns at construction time, allowing operators
+/// to tune sensitivity for their use case (e.g., drop health terms that
+/// cause false positives, add domain-specific patterns).
+///
+/// ```
+/// use ironclaw::workspace::privacy::ConfigurablePrivacyClassifier;
+/// use ironclaw::workspace::privacy::PrivacyClassifier;
+///
+/// let classifier = ConfigurablePrivacyClassifier::new(vec![
+///     r"\b\d{3}-\d{2}-\d{4}\b".into(),  // SSN only
+/// ]).unwrap();
+/// assert!(classifier.classify("SSN: 123-45-6789").is_sensitive);
+/// assert!(!classifier.classify("saw the doctor today").is_sensitive);
+/// ```
+pub struct ConfigurablePrivacyClassifier {
+    patterns: Vec<Regex>,
+}
+
+impl ConfigurablePrivacyClassifier {
+    /// Create a classifier from user-supplied regex strings.
+    ///
+    /// Returns an error if any pattern fails to compile.
+    pub fn new(pattern_strs: Vec<String>) -> Result<Self, regex::Error> {
+        let patterns = pattern_strs
+            .iter()
+            .map(|p| Regex::new(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { patterns })
+    }
+}
+
+impl PrivacyClassifier for ConfigurablePrivacyClassifier {
+    fn classify(&self, content: &str) -> SensitivityResult {
+        let is_sensitive = self.patterns.iter().any(|p| p.is_match(content));
+        SensitivityResult {
+            is_sensitive,
+            confidence: if is_sensitive { 1.0 } else { 0.0 },
+        }
     }
 }
 
@@ -70,33 +119,79 @@ mod tests {
         PatternPrivacyClassifier::new()
     }
 
+    // Hard PII — must always trigger
     #[test]
     fn detects_ssn() {
-        assert!(classifier().is_sensitive("My SSN is 123-45-6789"));
+        let result = classifier().classify("My SSN is 123-45-6789");
+        assert!(result.is_sensitive);
+        assert_eq!(result.confidence, 1.0);
     }
 
     #[test]
     fn detects_credit_card() {
-        assert!(classifier().is_sensitive("Card: 4111 1111 1111 1111"));
+        let result = classifier().classify("Card: 4111 1111 1111 1111");
+        assert!(result.is_sensitive);
+        assert_eq!(result.confidence, 1.0);
     }
 
     #[test]
-    fn detects_medical_terms() {
-        assert!(classifier().is_sensitive("Started new medication for anxiety"));
+    fn detects_password() {
+        assert!(classifier().classify("my password is hunter2").is_sensitive);
     }
 
     #[test]
-    fn detects_personal_markers() {
-        assert!(classifier().is_sensitive("This is a secret I haven't told anyone"));
+    fn detects_api_key() {
+        assert!(classifier().classify("set the api_key to sk-1234").is_sensitive);
     }
 
+    // Household content — must NOT trigger (previous false positives)
     #[test]
     fn allows_normal_household_content() {
-        assert!(!classifier().is_sensitive("We need to buy groceries for dinner Saturday"));
+        let result = classifier().classify("We need to buy groceries for dinner Saturday");
+        assert!(!result.is_sensitive);
+        assert_eq!(result.confidence, 0.0);
     }
 
     #[test]
-    fn allows_normal_finance_content() {
-        assert!(!classifier().is_sensitive("Electric bill was $120 this month"));
+    fn allows_doctor_mention() {
+        assert!(!classifier().classify("the doctor's office called about Saturday").is_sensitive);
+    }
+
+    #[test]
+    fn allows_email_address() {
+        assert!(!classifier().classify("email joe@plumber.com about the leak").is_sensitive);
+    }
+
+    #[test]
+    fn allows_phone_number() {
+        assert!(!classifier().classify("call the restaurant at 555-123-4567").is_sensitive);
+    }
+
+    #[test]
+    fn allows_medical_terms_in_context() {
+        assert!(!classifier().classify("Started new medication for anxiety").is_sensitive);
+    }
+
+    #[test]
+    fn configurable_with_custom_patterns() {
+        let c = ConfigurablePrivacyClassifier::new(vec![
+            r"\b\d{3}-\d{2}-\d{4}\b".into(), // SSN only
+        ])
+        .unwrap();
+        assert!(c.classify("SSN: 123-45-6789").is_sensitive);
+        // Health terms no longer trigger with SSN-only config
+        assert!(!c.classify("saw the doctor today").is_sensitive);
+    }
+
+    #[test]
+    fn configurable_rejects_bad_regex() {
+        let result = ConfigurablePrivacyClassifier::new(vec!["[invalid".into()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn configurable_empty_patterns_allows_everything() {
+        let c = ConfigurablePrivacyClassifier::new(vec![]).unwrap();
+        assert!(!c.classify("My SSN is 123-45-6789").is_sensitive);
     }
 }

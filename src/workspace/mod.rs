@@ -351,6 +351,9 @@ pub struct Workspace {
     search_defaults: SearchConfig,
     /// Memory layers this workspace has access to.
     memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
+    /// Optional privacy classifier for shared layer writes.
+    /// When None, writes go exactly where requested — no silent redirect.
+    privacy_classifier: Option<Arc<dyn crate::workspace::privacy::PrivacyClassifier>>,
 }
 
 impl Workspace {
@@ -366,6 +369,7 @@ impl Workspace {
             embeddings: None,
             search_defaults: SearchConfig::default(),
             memory_layers,
+            privacy_classifier: None,
         }
     }
 
@@ -382,6 +386,7 @@ impl Workspace {
             embeddings: None,
             search_defaults: SearchConfig::default(),
             memory_layers,
+            privacy_classifier: None,
         }
     }
 
@@ -415,12 +420,24 @@ impl Workspace {
         self
     }
 
+    /// Set a privacy classifier for shared layer writes.
+    ///
+    /// When set, writes to shared layers are checked against the classifier
+    /// and redirected to the private layer if sensitive content is detected.
+    /// When unset (the default), writes go exactly where requested.
+    pub fn with_privacy_classifier(
+        mut self,
+        classifier: Arc<dyn crate::workspace::privacy::PrivacyClassifier>,
+    ) -> Self {
+        self.privacy_classifier = Some(classifier);
+        self
+    }
+
     /// Get the configured memory layers.
     pub fn memory_layers(&self) -> &[crate::workspace::layer::MemoryLayer] {
         &self.memory_layers
     }
 
->>>>>>> 530d902 (feat(workspace): layered memory with sensitivity-based privacy redirect)
     /// Get the user ID.
     pub fn user_id(&self) -> &str {
         &self.user_id
@@ -495,13 +512,18 @@ impl Workspace {
         Ok(())
     }
 
-    /// Resolve the target scope for a layer write, applying privacy guards.
+    /// Resolve the target scope for a layer write, optionally applying privacy guards.
     ///
-    /// Validates that the layer exists and is writable. For shared layers,
-    /// checks content sensitivity and redirects to the private layer if needed.
+    /// Validates that the layer exists and is writable. When a privacy classifier
+    /// is configured on the workspace AND `force` is false, checks shared-layer
+    /// writes for sensitive content and redirects to the private layer.
     ///
-    /// Note: privacy classification is pattern-based (regex) and can be bypassed
-    /// by obfuscated content. See `privacy::PatternPrivacyClassifier` for details.
+    /// By default no classifier is set — writes go exactly where requested.
+    /// This is intentional: the LLM chooses the correct layer via system prompt
+    /// guidance, and a regex classifier can't improve on that decision without
+    /// unacceptable false positive rates in household contexts (e.g., "doctor",
+    /// "therapy", phone numbers). Operators who want a safety net can configure
+    /// one via `with_privacy_classifier()`.
     ///
     /// # Multi-tenant safety (Issue #59)
     ///
@@ -515,9 +537,9 @@ impl Workspace {
         &self,
         layer_name: &str,
         content: &str,
+        force: bool,
     ) -> Result<(String, String, bool), WorkspaceError> {
         use crate::workspace::layer::{LayerSensitivity, MemoryLayer};
-        use crate::workspace::privacy::PrivacyClassifier;
 
         let layer = MemoryLayer::find(&self.memory_layers, layer_name).ok_or_else(|| {
             WorkspaceError::LayerNotFound {
@@ -531,20 +553,21 @@ impl Workspace {
             });
         }
 
-        if layer.sensitivity == LayerSensitivity::Shared {
-            let classifier = crate::workspace::privacy::global_classifier();
-            if classifier.is_sensitive(content) {
-                tracing::warn!(
-                    layer = layer_name,
-                    "Redirected sensitive content to private layer"
-                );
-                let private = MemoryLayer::private_layer(&self.memory_layers)
-                    .ok_or(WorkspaceError::PrivacyRedirectFailed)?;
-                if !private.writable {
-                    return Err(WorkspaceError::PrivacyRedirectFailed);
-                }
-                return Ok((private.scope.clone(), private.name.clone(), true));
+        if !force
+            && layer.sensitivity == LayerSensitivity::Shared
+            && let Some(ref classifier) = self.privacy_classifier
+            && classifier.classify(content).is_sensitive
+        {
+            tracing::warn!(
+                layer = layer_name,
+                "Redirected sensitive content to private layer"
+            );
+            let private = MemoryLayer::private_layer(&self.memory_layers)
+                .ok_or(WorkspaceError::PrivacyRedirectFailed)?;
+            if !private.writable {
+                return Err(WorkspaceError::PrivacyRedirectFailed);
             }
+            return Ok((private.scope.clone(), private.name.clone(), true));
         }
 
         Ok((layer.scope.clone(), layer_name.to_string(), false))
@@ -554,15 +577,17 @@ impl Workspace {
     ///
     /// Checks that the layer exists and is writable. Uses the layer's scope
     /// as the user_id for the database write. For shared layers, sensitive
-    /// content is automatically redirected to the private layer.
+    /// content is automatically redirected to the private layer unless
+    /// `force` is set.
     pub async fn write_to_layer(
         &self,
         layer_name: &str,
         path: &str,
         content: &str,
+        force: bool,
     ) -> Result<WriteResult, WorkspaceError> {
         let (scope, actual_layer, redirected) =
-            self.resolve_layer_target(layer_name, content)?;
+            self.resolve_layer_target(layer_name, content, force)?;
         let path = normalize_path(path);
         let doc = self
             .storage
@@ -584,9 +609,10 @@ impl Workspace {
         layer_name: &str,
         path: &str,
         content: &str,
+        force: bool,
     ) -> Result<WriteResult, WorkspaceError> {
         let (scope, actual_layer, redirected) =
-            self.resolve_layer_target(layer_name, content)?;
+            self.resolve_layer_target(layer_name, content, force)?;
         let path = normalize_path(path);
         let doc = self
             .storage

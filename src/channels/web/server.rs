@@ -1679,11 +1679,11 @@ async fn memory_write_handler(
     if let Some(ref layer_name) = req.layer {
         let result = if req.append {
             workspace
-                .append_to_layer(layer_name, &req.path, &req.content)
+                .append_to_layer(layer_name, &req.path, &req.content, req.force)
                 .await
         } else {
             workspace
-                .write_to_layer(layer_name, &req.path, &req.content)
+                .write_to_layer(layer_name, &req.path, &req.content, req.force)
                 .await
         }
         .map_err(|e| {
