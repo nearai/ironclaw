@@ -424,12 +424,16 @@ const transcribeBuffer = async (audioBuffer, mimeType, language) => {
   }
 
   if (mentorVoiceMode === "chutes_direct") {
+    const directPayload = {
+      audio_b64: audioBuffer.toString("base64"),
+    };
+    if (typeof language === "string" && language.trim()) {
+      directPayload.language = language.trim();
+    }
+
     const payload = await callChutesDirectJson(
       mentorWhisperEndpoint,
-      {
-        audio_b64: audioBuffer.toString("base64"),
-        language: language ?? null,
-      },
+      directPayload,
       "whisper",
     );
     const text = extractTextFromPayload(payload);
@@ -448,12 +452,16 @@ const transcribeBuffer = async (audioBuffer, mimeType, language) => {
     });
   } catch (error) {
     if (mentorWhisperEndpoint) {
+      const directFallbackPayload = {
+        audio_b64: audioBuffer.toString("base64"),
+      };
+      if (typeof language === "string" && language.trim()) {
+        directFallbackPayload.language = language.trim();
+      }
+
       payload = await callChutesDirectJson(
         mentorWhisperEndpoint,
-        {
-          audio_b64: audioBuffer.toString("base64"),
-          language: language ?? null,
-        },
+        directFallbackPayload,
         "whisper",
       );
     } else {
