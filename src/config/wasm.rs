@@ -22,6 +22,12 @@ pub struct WasmConfig {
     pub cache_compiled: bool,
     /// Directory for compiled module cache.
     pub cache_dir: Option<PathBuf>,
+    /// Webhook ACK timeout in seconds (default: 10).
+    /// How long to wait for message persistence before returning 500 to webhook.
+    pub webhook_ack_timeout_secs: u64,
+    /// Webhook dedup cleanup interval in hours (default: 24).
+    /// How often to clean up old dedup records. 0 disables cleanup.
+    pub webhook_dedup_cleanup_interval_hours: u64,
 }
 
 impl Default for WasmConfig {
@@ -34,6 +40,8 @@ impl Default for WasmConfig {
             default_fuel_limit: 10_000_000,
             cache_compiled: true,
             cache_dir: None,
+            webhook_ack_timeout_secs: 10,
+            webhook_dedup_cleanup_interval_hours: 168, // 7 days
         }
     }
 }
@@ -58,6 +66,11 @@ impl WasmConfig {
             default_fuel_limit: parse_optional_env("WASM_DEFAULT_FUEL_LIMIT", 10_000_000)?,
             cache_compiled: parse_bool_env("WASM_CACHE_COMPILED", true)?,
             cache_dir: optional_env("WASM_CACHE_DIR")?.map(PathBuf::from),
+            webhook_ack_timeout_secs: parse_optional_env("WEBHOOK_ACK_TIMEOUT_SECS", 10)?,
+            webhook_dedup_cleanup_interval_hours: parse_optional_env(
+                "WEBHOOK_DEDUP_CLEANUP_INTERVAL_HOURS",
+                168, // 7 days
+            )?,
         })
     }
 

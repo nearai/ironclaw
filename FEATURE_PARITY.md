@@ -65,7 +65,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | HTTP webhook | ✅ | ✅ | - | axum with secret validation |
 | REPL (simple) | ✅ | ✅ | - | For testing |
 | WASM channels | ❌ | ✅ | - | IronClaw innovation |
-| WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
+| WhatsApp | ✅ | ✅ | P1 | Cloud API (WASM), DM pairing, text messages; voice/media TODO |
 | Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
 | Discord | ✅ | ❌ | P2 | discord.js, thread parent binding inheritance |
 | Signal | ✅ | ✅ | P2 | signal-cli daemonPC, SSE listener HTTP/JSON-R, user/group allowlists, DM pairing |
@@ -526,7 +526,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 ### P1 - High Priority
 - ❌ Slack channel (real implementation)
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
-- ❌ WhatsApp channel
+- ✅ WhatsApp channel (WASM, Cloud API, HMAC webhook verification, text messages)
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)
 - ✅ Hooks system (core lifecycle hooks + bundled/plugin/workspace hooks + outbound webhooks)
 

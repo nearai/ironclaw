@@ -983,6 +983,7 @@ mod tests {
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
+            wasm_router: None,
         };
 
         Agent::new(
@@ -1000,6 +1001,9 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations: 50,
                 auto_approve_tools: false,
+                batching_enabled: true,
+                batching_window_ms: 5000,
+                batching_max_messages: 5,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -1721,6 +1725,7 @@ mod tests {
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
+            wasm_router: None,
         };
 
         Agent::new(
@@ -1738,6 +1743,9 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations,
                 auto_approve_tools: true,
+                batching_enabled: true,
+                batching_window_ms: 5000,
+                batching_max_messages: 5,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -1833,6 +1841,7 @@ mod tests {
                 hooks: Arc::new(HookRegistry::new()),
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
                 sse_tx: None,
+                wasm_router: None,
             };
 
             Agent::new(
@@ -1850,6 +1859,9 @@ mod tests {
                     max_actions_per_hour: None,
                     max_tool_iterations: max_iter,
                     auto_approve_tools: true,
+                    batching_enabled: true,
+                    batching_window_ms: 5000,
+                    batching_max_messages: 5,
                 },
                 deps,
                 Arc::new(ChannelManager::new()),

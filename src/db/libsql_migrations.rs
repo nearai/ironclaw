@@ -523,6 +523,20 @@ CREATE INDEX IF NOT EXISTS idx_routine_runs_status ON routine_runs(status);
 -- heartbeat_state
 CREATE INDEX IF NOT EXISTS idx_heartbeat_next_run ON heartbeat_state(next_run);
 
+-- ==================== Webhook Message Deduplication ====================
+
+-- Tracks which webhook messages have been processed to prevent duplicates
+-- when WhatsApp retries after a 500 response
+CREATE TABLE IF NOT EXISTS webhook_message_dedup (
+    id TEXT PRIMARY KEY,
+    channel TEXT NOT NULL,
+    external_message_id TEXT NOT NULL,
+    processed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(channel, external_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_dedup_channel_msg ON webhook_message_dedup(channel, external_message_id);
+
 -- ==================== Seed data ====================
 
 -- Pre-populate leak detection patterns (matches PostgreSQL V2 migration).

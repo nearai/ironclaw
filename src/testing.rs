@@ -294,6 +294,7 @@ impl TestHarnessBuilder {
             hooks,
             cost_guard,
             sse_tx: None,
+            wasm_router: None,
         };
 
         TestHarness {
