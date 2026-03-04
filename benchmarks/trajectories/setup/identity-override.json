@@ -1,0 +1,19 @@
+{
+    "name": "identity-override-custom-name",
+    "description": "Verify that identity overrides are injected into agent system prompt",
+    "tags": ["setup", "identity"],
+    "setup": {
+        "identity": {
+            "IDENTITY.md": "Your name is BenchBot. You always introduce yourself as BenchBot when asked your name."
+        }
+    },
+    "turns": [
+        {
+            "user": "What is your name?",
+            "assertions": {
+                "response_contains": ["BenchBot"]
+            }
+        }
+    ],
+    "timeout_secs": 60
+}

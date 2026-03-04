@@ -1142,6 +1142,44 @@ mod tests {
         assert!(config.max_total_cost_usd.is_none());
     }
 
+    #[test]
+    fn test_load_bench_scenarios_setup_directory() {
+        let config = BenchmarkConfig {
+            scenarios_dir: PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/benchmarks/trajectories"
+            )),
+            tags_filter: Some(vec!["setup".to_string()]),
+            ..BenchmarkConfig::default()
+        };
+        if !config.scenarios_dir.exists() {
+            return;
+        }
+        let scenarios =
+            load_bench_scenarios(&config).expect("should load setup scenarios");
+        assert!(
+            scenarios.len() >= 2,
+            "expected at least 2 setup scenarios, got {}",
+            scenarios.len()
+        );
+        // Verify tool restriction scenario has tools in setup.
+        let tool_restricted = scenarios
+            .iter()
+            .find(|s| s.name.contains("tool-restriction"));
+        assert!(
+            tool_restricted.is_some(),
+            "expected tool-restriction scenario"
+        );
+        assert!(!tool_restricted.unwrap().setup.tools.is_empty());
+
+        // Verify identity override scenario has identity in setup.
+        let identity = scenarios
+            .iter()
+            .find(|s| s.name.contains("identity-override"));
+        assert!(identity.is_some(), "expected identity-override scenario");
+        assert!(!identity.unwrap().setup.identity.is_empty());
+    }
+
     #[tokio::test]
     async fn test_seed_identity_files() {
         use crate::db::libsql::LibSqlBackend;
