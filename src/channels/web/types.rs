@@ -388,6 +388,9 @@ pub struct ExtensionInfo {
     /// Whether this extension has configurable secrets (setup schema).
     #[serde(default)]
     pub needs_setup: bool,
+    /// Whether this extension has an auth configuration (OAuth or manual token).
+    #[serde(default)]
+    pub has_auth: bool,
     /// WASM channel activation status: "installed", "configured", "active", "failed".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_status: Option<String>,
@@ -566,6 +569,9 @@ pub struct SkillSearchResponse {
 #[derive(Debug, Deserialize)]
 pub struct SkillInstallRequest {
     pub name: String,
+    /// Registry slug (e.g. "owner/skill-name"). Preferred over `name` for
+    /// constructing the download URL when fetching from ClawHub.
+    pub slug: Option<String>,
     pub url: Option<String>,
     pub content: Option<String>,
 }

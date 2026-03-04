@@ -12,14 +12,13 @@ exclude = [
     "tools-src/google-drive",
     "tools-src/google-sheets",
     "tools-src/google-slides",
-    "tools-src/okta",
     "tools-src/slack",
     "tools-src/telegram",
 ]
 
 [package]
 name = "ironclaw"
-version = "0.13.1"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"

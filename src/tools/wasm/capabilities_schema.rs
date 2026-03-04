@@ -512,6 +512,11 @@ pub struct ValidationEndpointSchema {
     /// Expected HTTP status code for success (defaults to 200).
     #[serde(default = "default_success_status")]
     pub success_status: u16,
+
+    /// Additional headers to send with the validation request.
+    /// Used for service-specific requirements (e.g., Notion-Version for Notion API).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 fn default_method() -> String {
