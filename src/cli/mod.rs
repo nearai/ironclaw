@@ -11,8 +11,6 @@
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
-#[cfg(feature = "benchmark")]
-mod benchmark;
 mod completion;
 mod config;
 mod doctor;
@@ -25,8 +23,6 @@ mod service;
 pub mod status;
 mod tool;
 
-#[cfg(feature = "benchmark")]
-pub use benchmark::{BenchmarkCommand, run_benchmark_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
@@ -216,14 +212,6 @@ pub enum Command {
         #[arg(long, default_value = "sonnet")]
         model: String,
     },
-
-    /// Run benchmark scenarios against the agent
-    #[cfg(feature = "benchmark")]
-    #[command(
-        about = "Run benchmark scenarios",
-        long_about = "Run benchmark scenarios against the agent and compare with baseline.\nExamples:\n  ironclaw benchmark\n  ironclaw benchmark --tags tools,memory\n  ironclaw benchmark --scenario pick-time --update-baseline"
-    )]
-    Benchmark(BenchmarkCommand),
 }
 
 impl Cli {
@@ -252,11 +240,6 @@ mod tests {
     fn test_help_output() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
-        // Use separate snapshot names per feature set since `benchmark` adds
-        // a subcommand that changes the help text.
-        #[cfg(feature = "benchmark")]
-        assert_snapshot!("help_output_with_benchmark", help);
-        #[cfg(not(feature = "benchmark"))]
         assert_snapshot!(help);
     }
 
@@ -264,9 +247,6 @@ mod tests {
     fn test_long_help_output() {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
-        #[cfg(feature = "benchmark")]
-        assert_snapshot!("long_help_output_with_benchmark", help);
-        #[cfg(not(feature = "benchmark"))]
         assert_snapshot!(help);
     }
 }
