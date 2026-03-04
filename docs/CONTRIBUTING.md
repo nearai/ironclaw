@@ -1,27 +1,34 @@
-# Contributing to IronClaw Docs
+> **Customize this file**: Tailor this template to your project by noting specific contribution types you're looking for, adding a Code of Conduct, or adjusting the writing guidelines to match your style.
 
-## Preview Locally
+# Contribute to the documentation
 
-Install dependencies and start the development server:
+Thank you for your interest in contributing to our documentation! This guide will help you get started.
 
-```bash
-npm install          # Install mintlify CLI (pinned version)
-npx mintlify dev     # Starts local server at http://localhost:3000
-```
+## How to contribute
 
-## Write Content
+### Option 1: Edit directly on GitHub
 
-- Pages are `.mdx` files in `docs/`
-- Add new pages to the `navigation` groups in `docs.json`
-- Use Mintlify components: `<Card>`, `<Steps>`, `<Tabs>`, `<Accordion>`, `<Warning>`, `<Note>`
-- Code blocks: Use `bash` (not `sh`), `toml` (not `TOML`), `json` for correct syntax highlighting
+1. Navigate to the page you want to edit
+2. Click the "Edit this file" button (the pencil icon)
+3. Make your changes and submit a pull request
 
-## Deploy
+### Option 2: Local development
 
-Mintlify deploys automatically when changes to `docs/` or `docs.json` are merged to `main`. No manual deploy step required.
+1. Fork and clone this repository
+2. Install the Mintlify CLI: `npm i -g mint`
+3. Create a branch for your changes
+4. Make changes
+5. Navigate to the docs directory and run `mint dev`
+6. Preview your changes at `http://localhost:3000`
+7. Commit your changes and submit a pull request
 
-To force a redeploy: Go to mintlify.com/dashboard → your project → Redeploy.
+For more details on local development, see our [development guide](development.mdx).
 
-## Update the Domain
+## Writing guidelines
 
-CNAME: `docs` → Configured in Mintlify dashboard under Domains.
+- **Use active voice**: "Run the command" not "The command should be run"
+- **Address the reader directly**: Use "you" instead of "the user"
+- **Keep sentences concise**: Aim for one idea per sentence
+- **Lead with the goal**: Start instructions with what the user wants to accomplish
+- **Use consistent terminology**: Don't alternate between synonyms for the same concept
+- **Include examples**: Show, don't just tell
