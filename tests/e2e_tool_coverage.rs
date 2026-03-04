@@ -13,7 +13,7 @@ mod tests {
 
     use ironclaw::tools::ToolRegistry;
 
-    use crate::support::assertions::{assert_all_tools_succeeded, assert_tool_succeeded};
+    use crate::support::assertions::assert_all_tools_succeeded;
     use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -293,13 +293,8 @@ mod tests {
             "Expected memory_search, got: {started:?}"
         );
 
-        // Verify individual tool successes. Note: memory_tree with empty path
-        // is a known failure in this fixture (empty string path is invalid),
-        // so we check specific tools rather than assert_all_tools_succeeded.
         let completed = rig.tool_calls_completed();
-        assert_tool_succeeded(&completed, "memory_write");
-        assert_tool_succeeded(&completed, "memory_read");
-        assert_tool_succeeded(&completed, "memory_search");
+        assert_all_tools_succeeded(&completed);
 
         let mem_tools: Vec<_> = completed
             .iter()

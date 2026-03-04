@@ -27,7 +27,6 @@
             "id": "call_mem_tree",
             "name": "memory_tree",
             "arguments": {
-              "path": "",
               "depth": 2
             }
           }
