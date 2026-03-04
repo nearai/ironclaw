@@ -2427,10 +2427,12 @@ function restartJob(jobId) {
   apiFetch('/api/jobs/' + jobId + '/restart', { method: 'POST' })
     .then((res) => {
       showToast('Job restarted as ' + (res.new_job_id || '').substring(0, 8), 'success');
-      loadJobs();
     })
     .catch((err) => {
       showToast('Failed to restart job: ' + err.message, 'error');
+    })
+    .finally(() => {
+      loadJobs();
     });
 }
 
@@ -3030,7 +3032,11 @@ function renderRoutineDetail(routine) {
 
 function triggerRoutine(id) {
   apiFetch('/api/routines/' + id + '/trigger', { method: 'POST' })
-    .then(() => showToast('Routine triggered', 'success'))
+    .then(() => {
+      showToast('Routine triggered', 'success');
+      if (currentRoutineId === id) openRoutineDetail(id);
+      else loadRoutines();
+    })
     .catch((err) => showToast('Trigger failed: ' + err.message, 'error'));
 }
 

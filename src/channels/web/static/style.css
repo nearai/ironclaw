@@ -30,6 +30,7 @@ body {
   background: var(--bg);
   color: var(--text);
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -41,6 +42,7 @@ body {
   align-items: center;
   justify-content: center;
   height: 100vh;
+  height: 100dvh;
 }
 
 .auth-card-login {
@@ -141,6 +143,7 @@ body {
   display: none;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
 }
 
 /* Tab Bar */
@@ -987,7 +990,7 @@ body {
 /* Chat input */
 .chat-input {
   display: flex;
-  padding: 12px 16px;
+  padding: 12px 16px max(12px, env(safe-area-inset-bottom)) 16px;
   gap: 8px;
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
@@ -1808,6 +1811,7 @@ body {
 .job-files {
   display: flex;
   height: calc(100vh - 280px);
+  height: calc(100dvh - 280px);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
