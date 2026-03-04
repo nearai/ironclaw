@@ -68,6 +68,14 @@ impl Agent {
                 self.handle_help_job(&message.user_id, &job_id).await?
             }
             MessageIntent::Command { command, args } => {
+                // Authorization check for restart command
+                if command == "restart" && message.channel != "web" {
+                    return Ok(SubmissionResult::error(
+                        "Restart is only available through the web interface with explicit user confirmation. \
+                         Use the Restart button in the UI.",
+                    ));
+                }
+
                 match self.handle_command(&command, &args).await? {
                     Some(s) => s,
                     None => return Ok(SubmissionResult::Ok { message: None }), // Shutdown signal
@@ -509,6 +517,7 @@ impl Agent {
             "ping" => Ok(SubmissionResult::response("pong!")),
 
             "restart" => {
+                // Authorization check is done in handle_job_or_command before reaching here.
                 // Trigger the restart tool via a system job with metadata requesting the tool
                 let metadata = serde_json::json!({
                     "tools": ["restart"]

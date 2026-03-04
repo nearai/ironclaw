@@ -66,6 +66,7 @@ async fn core_registration_covers_expected_tools() {
         "json",
         "list_dir",
         "read_file",
+        "restart",
         "shell",
         "time",
         "web_fetch",

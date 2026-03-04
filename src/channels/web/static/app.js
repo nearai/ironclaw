@@ -391,6 +391,7 @@ function cancelRestart() {
 
 function showRestartModal() {
   // Mark as restarting - modal will close when SSE reconnects
+  if (isRestarting) return; // Already showing
   isRestarting = true;
   const restartBtn = document.getElementById('restart-btn');
   const restartIcon = document.getElementById('restart-icon');
@@ -404,6 +405,15 @@ function showRestartModal() {
   // Show progress modal
   const loaderEl = document.getElementById('restart-loader');
   loaderEl.style.display = 'flex';
+}
+
+function tryShowRestartModal() {
+  // Defensive callback for when restart tool/command is detected in messages.
+  // Note: confirmRestart() already shows the modal immediately, so this
+  // is a fallback in case the user invokes /restart via another channel.
+  if (!isRestarting) {
+    showRestartModal();
+  }
 }
 
 // --- Slash Autocomplete ---
@@ -552,7 +562,7 @@ function addMessage(role, content) {
 
     // Detect restart messages (from /restart command) and show modal
     if (content.toLowerCase().includes('restart initiated')) {
-      setTimeout(() => showRestartModal(), 500);
+      setTimeout(() => tryShowRestartModal(), 500);
     }
   }
   container.appendChild(div);
@@ -571,7 +581,7 @@ function appendToLastAssistant(chunk) {
 
     // Detect restart message and show modal
     if (raw.toLowerCase().includes('restart initiated')) {
-      setTimeout(() => showRestartModal(), 500);
+      setTimeout(() => tryShowRestartModal(), 500);
     }
   } else {
     addMessage('assistant', chunk);
@@ -625,7 +635,7 @@ function removeActivityThinking() {
 function addToolCard(name) {
   // Detect restart tool execution and show modal
   if (name.toLowerCase() === 'restart') {
-    setTimeout(() => showRestartModal(), 1000);
+    setTimeout(() => tryShowRestartModal(), 1000);
   }
 
   // Hide thinking instead of destroying — it may reappear between tool rounds
