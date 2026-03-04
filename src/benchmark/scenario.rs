@@ -298,6 +298,24 @@ mod tests {
     }
 
     #[test]
+    fn test_load_scenario_files() {
+        let scenarios_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/benchmarks/scenarios");
+        for entry in std::fs::read_dir(scenarios_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let content = std::fs::read_to_string(&path).unwrap();
+                let scenarios: Vec<Scenario> = serde_json::from_str(&content)
+                    .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()));
+                assert!(!scenarios.is_empty(), "Empty scenario file: {}", path.display());
+                for s in &scenarios {
+                    assert!(!s.id.is_empty(), "Empty scenario ID in {}", path.display());
+                    assert!(!s.input.is_empty(), "Empty input in scenario {}", s.id);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_load_scenarios_from_json_array() {
         let json = r#"[
             {

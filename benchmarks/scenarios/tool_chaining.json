@@ -1,0 +1,37 @@
+[
+  {
+    "id": "tc-write-read-file",
+    "category": "tool_chaining",
+    "input": "Write the text 'IronClaw benchmark test' to /tmp/ironclaw_bench_write_read.txt, then read it back and tell me the contents.",
+    "success_criteria": [
+      {"type": "tool_used", "tool": "write_file"},
+      {"type": "tool_used", "tool": "read_file"},
+      {"type": "response_contains", "text": "IronClaw benchmark test"}
+    ],
+    "timeout_secs": 30,
+    "max_tool_iterations": 10
+  },
+  {
+    "id": "tc-json-parse-query",
+    "category": "tool_chaining",
+    "input": "Parse this JSON: {\"name\": \"IronClaw\", \"version\": \"0.13.0\"} and tell me the version field.",
+    "success_criteria": [
+      {"type": "tool_used", "tool": "json"},
+      {"type": "response_contains", "text": "0.13.0"}
+    ],
+    "timeout_secs": 30,
+    "max_tool_iterations": 10
+  },
+  {
+    "id": "tc-memory-write-search",
+    "category": "tool_chaining",
+    "input": "Save a note to memory at path 'bench/test-note.md' with content 'The secret code is ALPHA-7'. Then search your memory for 'secret code' and tell me what you find.",
+    "success_criteria": [
+      {"type": "tool_used", "tool": "memory_write"},
+      {"type": "tool_used", "tool": "memory_search"},
+      {"type": "response_contains", "text": "ALPHA-7"}
+    ],
+    "timeout_secs": 30,
+    "max_tool_iterations": 10
+  }
+]
