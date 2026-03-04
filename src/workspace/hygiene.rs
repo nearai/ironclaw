@@ -247,7 +247,13 @@ fn save_state(path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use crate::workspace::hygiene::*;
+
+    /// Serialize tests that touch the global `RUNNING` AtomicBool so they
+    /// don't interfere with each other when `cargo test` runs in parallel.
+    static RUNNING_TESTS: Mutex<()> = Mutex::new(());
 
     #[test]
     fn default_config_is_reasonable() {
@@ -320,6 +326,8 @@ mod tests {
     /// serialized by the AtomicBool guard.
     #[test]
     fn running_guard_prevents_reentry() {
+        let _lock = RUNNING_TESTS.lock().unwrap();
+
         // Simulate acquiring the guard
         assert!(
             RUNNING
