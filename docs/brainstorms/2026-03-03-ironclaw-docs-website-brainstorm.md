@@ -41,7 +41,7 @@ Clean separation between code and docs. Docs team/contributors can work independ
 | Platform | Mintlify | Identical to OpenClaw; rich components; Vercel-compatible |
 | Hosting | Vercel | User requirement; Mintlify builds static output |
 | Domain | `docs.ironclaw.ai` | Placeholder; configure post-deploy |
-| Repo | Separate (`ironclaw-docs`) | Clean separation, own CI |
+| Repo | Inside `ironclaw-src/docs/` | Docs and code versioned together; simpler sync |
 | Nav approach | Feature-first + Guides | Covers both power users and beginners |
 | Brand assets | Fetch from ironclaw.com | Logo/colors TBD; placeholders in initial build |
 
@@ -223,7 +223,7 @@ Defer to Phase 2: full Skills docs, WASM tool building guide, advanced routines,
 | Question | Decision |
 |---|---|
 | Mintlify vs Docusaurus? | Mintlify — closest match to OpenClaw |
-| Separate repo or in-repo? | Separate repo |
+| Separate repo or in-repo? | In-repo (`ironclaw-src/docs/`) |
 | Domain? | `docs.ironclaw.ai` (placeholder) |
 | Brand assets? | Fetch from ironclaw.com; use placeholders initially |
 | Target users? | All: local, VPS, NEAR AI cloud, integrators |

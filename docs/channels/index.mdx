@@ -1,0 +1,116 @@
+---
+title: Channels
+sidebarTitle: Overview
+description: Multi-channel input for IronClaw
+---
+
+IronClaw supports multiple input channels — ways to interact with your AI assistant.
+
+## Available Channels
+
+<CardGroup cols={2}>
+  <Card title="Terminal UI" icon="terminal" href="/channels/tui">
+    Full-featured TUI with Ratatui. Enabled by default.
+  </Card>
+
+  <Card title="Web Gateway" icon="globe" href="/channels/web-gateway">
+    Browser UI with real-time chat, memory, jobs, and settings.
+  </Card>
+
+  <Card title="Telegram" icon="message-circle" href="/channels/telegram">
+    Bot integration for DMs and group chats.
+  </Card>
+
+  <Card title="HTTP Webhook" icon="webhook" href="/channels/webhook">
+    REST API for external integrations.
+  </Card>
+
+  <Card title="Signal" icon="shield" href="/channels/signal">
+    Encrypted messaging via Signal (coming soon).
+  </Card>
+
+  <Card title="WASM Channels" icon="blocks">
+    Custom channels via WASM modules.
+  </Card>
+</CardGroup>
+
+## Channel Types
+
+IronClaw has two types of channels:
+
+### Built-in Channels
+
+These are compiled into IronClaw itself:
+
+| Channel | Type | Description |
+|---------|------|-------------|
+| **Terminal UI** | Built-in | Ratatui-based terminal interface |
+| **Web Gateway** | Built-in | HTTP server with WebSocket |
+| **HTTP Webhook** | Built-in | REST API endpoint |
+
+### WASM Channels
+
+These are separate modules loaded at runtime:
+
+| Channel | Type | Description |
+|---------|------|-------------|
+| **Telegram** | WASM | Bot integration via Telegram API |
+| **Signal** | WASM | Signal-cli integration |
+
+WASM channels are discovered in `~/.ironclaw/channels/` and loaded dynamically.
+
+## Adding Channels
+
+Add channels during onboarding:
+
+```bash
+ironclaw onboard --channels-only
+```
+
+Or manually configure:
+
+```bash
+# Enable Web Gateway
+export GATEWAY_ENABLED=true
+
+# Enable HTTP Webhook
+export HTTP_HOST=0.0.0.0
+export HTTP_PORT=8080
+
+# Start IronClaw
+ironclaw run
+```
+
+## Channel Comparison
+
+| Feature | TUI | Web | Telegram | Webhook |
+|---------|-----|-----|----------|---------|
+| Interactive approval | ✓ | ✓ | ✗ | ✗ |
+| Real-time updates | ✓ | ✓ | ✓ | ✗ |
+| File uploads | ✓ | ✓ | ✓ | ✓ |
+| Image support | ✓ | ✓ | ✓ | ✓ |
+| Mobile access | ✗ | ✓ | ✓ | ✗ |
+| Requires external service | ✗ | ✗ | ✓ | ✗ |
+
+## Security Considerations
+
+Each channel has different security implications:
+
+- **Terminal UI**: Local only, no network exposure
+- **Web Gateway**: Configurable auth token, local by default
+- **Telegram**: Bot token required, DM pairing for access control
+- **HTTP Webhook**: Shared secret validation, rate limited
+
+See [Security](/security) for detailed security guidance.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Web Gateway" icon="globe" href="/channels/web-gateway">
+    Browser UI setup and configuration
+  </Card>
+
+  <Card title="Telegram" icon="message-circle" href="/channels/telegram">
+    Bot setup and DM pairing
+  </Card>
+</CardGroup>

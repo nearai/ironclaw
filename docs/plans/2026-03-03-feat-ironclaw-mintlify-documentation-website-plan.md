@@ -1,7 +1,7 @@
 ---
 title: "feat: IronClaw Mintlify Documentation Website"
 type: feat
-status: active
+status: completed
 date: 2026-03-03
 origin: docs/brainstorms/2026-03-03-ironclaw-docs-website-brainstorm.md
 ---
@@ -10,17 +10,17 @@ origin: docs/brainstorms/2026-03-03-ironclaw-docs-website-brainstorm.md
 
 ## Overview
 
-Build a standalone documentation website for IronClaw — a secure, self-hosted AI assistant — targeting integrators and end-users (not developers). The site will be built with **Mintlify** (same platform as OpenClaw docs), live in a separate **`ironclaw-docs`** GitHub repository, and be hosted at **`docs.ironclaw.ai`** on Vercel or Mintlify's own CDN.
+Build a documentation website for IronClaw — a secure, self-hosted AI assistant — targeting integrators and end-users (not developers). The site will be built with **Mintlify** (same platform as OpenClaw docs), live in the **`docs/`** directory of the existing `ironclaw-src` repository, and be hosted via **Mintlify's own hosting** at `docs.ironclaw.ai`.
 
 The primary differentiator from generic software docs: IronClaw's **security architecture** (safety layer, secrets encryption, sandbox isolation, prompt injection defense) is front-and-center, not buried in reference material.
 
-**Key decisions from brainstorm** *(see brainstorm: docs/brainstorms/2026-03-03-ironclaw-docs-website-brainstorm.md)*:
+**Key decisions (updated)**:
 - Platform: Mintlify — identical component library to OpenClaw docs
-- Repo: Separate (`ironclaw-docs`)
-- Domain: `docs.ironclaw.ai` (placeholder; configure post-deploy)
+- Repo: **Inside `ironclaw-src`** at `docs/` — docs and code versioned together
+- Domain: `docs.ironclaw.ai` (configure CNAME post-deploy)
+- Hosting: **Mintlify's own hosting** — no Vercel, no static export
 - Nav: Feature-first primary nav + Guides section for use-case walkthroughs
 - Brand: Fetch from ironclaw.com; use placeholders in Phase 1
-- Deployment: Mintlify hosting with custom CNAME (preferred over static Vercel export — see deployment section)
 
 ---
 
@@ -32,7 +32,7 @@ IronClaw's target audience — integrators, system operators, and end-users — 
 
 ## Proposed Solution
 
-A Mintlify docs site in a separate `ironclaw-docs` repo, built in two phases:
+A Mintlify docs site living inside `ironclaw-src/docs/`, built in two phases:
 
 **Phase 1 (MVP):** Home, Getting Started, Install, Configuration, Channels (Telegram + Web Gateway + Webhook), LLM Providers, Security Overview, Troubleshooting — everything a new user needs to go from zero to running IronClaw.
 
@@ -42,134 +42,132 @@ A Mintlify docs site in a separate `ironclaw-docs` repo, built in two phases:
 
 ## Technical Approach
 
-### Deployment Model Decision
+### Deployment Model
 
-Two Mintlify deployment options exist. **Mintlify hosting with custom CNAME is the recommended approach:**
-
-| Model | Pros | Cons |
-|---|---|---|
-| **Mintlify hosting + CNAME** (recommended) | Full component support (feedback widget, analytics, search indexing, AI chat); simple GitHub push to deploy; no build step needed | Domain must be verified in Mintlify dashboard |
-| `mintlify build` + Vercel static export | Runs on Vercel infra | Missing Mintlify-cloud-only features; feedback widget broken; search may not index correctly |
-
-> **Decision:** Use Mintlify's own hosting with a CNAME DNS record pointing `docs.ironclaw.ai` to the Mintlify CDN. Vercel can still be used as a backup/preview environment if desired.
+**Mintlify's own hosting** — the simplest and most capable option:
+- Push to `main` branch of `ironclaw-src` → Mintlify auto-deploys from the `docs/` directory
+- Full component support: feedback widget, analytics, search indexing, AI assistant chat
+- No build step, no Vercel project, no separate CI for docs
+- Custom domain via CNAME: `docs.ironclaw.ai` → Mintlify CDN
+- Mintlify GitHub App monitors only the `docs/` path for changes (configured in dashboard)
 
 ### Repository Structure
 
-New repository: `github.com/[org]/ironclaw-docs`
+All docs live inside the existing `ironclaw-src` repo at `docs/`. Mintlify is configured to serve from this directory.
 
 ```
-ironclaw-docs/
-├── docs.json                    # Mintlify config (first deliverable)
-├── package.json                 # Pinned mintlify CLI version
-├── .github/
-│   └── workflows/
-│       └── build-check.yml      # CI: mintlify build on every PR
-├── assets/
-│   ├── logo-light.svg           # Placeholder → replace from ironclaw.com
-│   ├── logo-dark.svg            # Placeholder → replace from ironclaw.com
-│   └── favicon.svg
-├── images/                      # Screenshots, diagrams
+ironclaw-src/
+├── docs.json                        # Mintlify config (repo root — Mintlify requirement)
+├── package.json                     # { "mintlify": "^4.x" } for local preview
 │
-├── index.mdx                    # Home page
-│
-├── start/
-│   ├── getting-started.mdx      # Quickstart: zero to running
-│   └── wizard.mdx               # Onboarding wizard walkthrough (8 steps)
-│
-├── install/
-│   ├── index.mdx                # Install overview + method chooser
-│   ├── local.mdx                # Local: Linux / macOS / Windows tabs
-│   ├── docker.mdx               # Docker deployment
-│   ├── vps.mdx                  # VPS / cloud server
-│   ├── nearai-cloud.mdx         # NEAR AI managed hosting
-│   ├── updating.mdx             # Updating IronClaw
-│   └── uninstalling.mdx         # Clean uninstall
-│
-├── setup/
-│   ├── configuration.mdx        # Complete env var reference table
-│   └── database.mdx             # PostgreSQL vs libSQL/Turso
-│
-├── channels/
-│   ├── index.mdx                # Channels overview
-│   ├── web-gateway.mdx          # Browser UI (Web Gateway)
-│   ├── telegram.mdx             # Telegram setup (import from TELEGRAM_SETUP.md)
-│   ├── webhook.mdx              # HTTP Webhook channel
-│   ├── tui.mdx                  # Terminal UI
-│   └── signal.mdx               # Signal (stub — "in progress")
-│
-├── providers/
-│   ├── index.mdx                # Provider overview + comparison table
-│   ├── nearai.mdx               # NEAR AI (OAuth + API key paths)
-│   ├── anthropic.mdx            # Anthropic / Claude
-│   ├── openai.mdx               # OpenAI / GPT
-│   ├── ollama.mdx               # Ollama (local inference)
-│   ├── openai-compatible.mdx    # OpenRouter, Together, vLLM, LM Studio
-│   └── tinfoil.mdx              # Tinfoil (private TEE inference)
-│
-├── security/
-│   ├── index.mdx                # Security overview + architecture diagram
-│   ├── safety-layer.mdx         # Sanitizer, validator, policy, leak detector
-│   ├── secrets.mdx              # Secrets management + zero-exposure model
-│   └── sandbox.mdx              # Docker sandbox + network proxy
-│
-├── skills/                      # Phase 2
-│   ├── index.mdx
-│   ├── trust-model.mdx
-│   ├── skill-format.mdx
-│   ├── installing.mdx
-│   └── clawhub.mdx
-│
-├── tools/                       # Phase 2
-│   ├── index.mdx
-│   ├── builtin.mdx
-│   ├── wasm.mdx
-│   ├── mcp.mdx
-│   └── building.mdx
-│
-├── memory/                      # Phase 2
-│   ├── index.mdx
-│   ├── writing-reading.mdx
-│   ├── search.mdx
-│   ├── identity-files.mdx
-│   └── heartbeat.mdx
-│
-├── routines/                    # Phase 2
-│   ├── index.mdx
-│   ├── cron.mdx
-│   ├── event-driven.mdx
-│   └── webhook-triggers.mdx
-│
-├── guides/                      # Phase 2
-│   ├── index.mdx
-│   ├── telegram-in-10-minutes.mdx
-│   ├── connect-claude.mdx
-│   ├── vps-deployment.mdx
-│   ├── nearai-cloud-deployment.mdx
-│   ├── secure-your-deployment.mdx
-│   └── first-wasm-tool.mdx
-│
-├── reference/
-│   ├── cli.mdx                  # CLI command reference
-│   ├── env-vars.mdx             # Consolidated env var table (Phase 1)
-│   ├── api.mdx                  # Web Gateway API endpoints (Phase 2)
-│   └── changelog.mdx            # Import from CHANGELOG.md
-│
-└── help/
-    ├── troubleshooting.mdx      # Common errors + ironclaw doctor
-    └── faq.mdx                  # FAQ
+└── docs/
+    ├── CONTRIBUTING.md              # How to write, preview locally, and deploy docs
+    ├── assets/
+    │   ├── logo-light.svg           # Placeholder → replace from ironclaw.com
+    │   ├── logo-dark.svg
+    │   └── favicon.svg
+    ├── images/                      # Screenshots, architecture diagrams
+    │
+    ├── index.mdx                    # Home page
+    │
+    ├── start/
+    │   ├── getting-started.mdx      # Quickstart: zero to running in 10 min
+    │   └── wizard.mdx               # Onboarding wizard walkthrough (8 steps)
+    │
+    ├── install/
+    │   ├── index.mdx                # Install overview + method chooser
+    │   ├── local.mdx                # Local: tabs for Linux / macOS / Windows / WSL2
+    │   ├── docker.mdx               # Running IronClaw in Docker
+    │   ├── vps.mdx                  # VPS / cloud server
+    │   ├── nearai-cloud.mdx         # NEAR AI managed hosting
+    │   ├── updating.mdx             # How to update
+    │   └── uninstalling.mdx         # Clean uninstall
+    │
+    ├── setup/
+    │   ├── configuration.mdx        # Complete env var reference table
+    │   └── database.mdx             # PostgreSQL vs libSQL/Turso
+    │
+    ├── channels/
+    │   ├── index.mdx                # Channels overview
+    │   ├── web-gateway.mdx          # Browser UI
+    │   ├── telegram.mdx             # Telegram (import from TELEGRAM_SETUP.md)
+    │   ├── webhook.mdx              # HTTP Webhook
+    │   ├── tui.mdx                  # Terminal UI
+    │   └── signal.mdx               # Signal (stub — coming soon)
+    │
+    ├── providers/
+    │   ├── index.mdx                # Provider overview + comparison table
+    │   ├── nearai.mdx               # NEAR AI (OAuth + API key)
+    │   ├── anthropic.mdx            # Anthropic / Claude
+    │   ├── openai.mdx               # OpenAI / GPT
+    │   ├── ollama.mdx               # Ollama (local)
+    │   ├── openai-compatible.mdx    # OpenRouter, Together, vLLM, LM Studio
+    │   └── tinfoil.mdx              # Tinfoil (private TEE inference)
+    │
+    ├── security/
+    │   ├── index.mdx                # Security overview + architecture diagram
+    │   ├── safety-layer.mdx         # Sanitizer, validator, policy, leak detector
+    │   ├── secrets.mdx              # Secrets management + zero-exposure model
+    │   └── sandbox.mdx              # Docker sandbox + network proxy
+    │
+    ├── skills/                      # Phase 2
+    │   ├── index.mdx
+    │   ├── trust-model.mdx
+    │   ├── skill-format.mdx
+    │   ├── installing.mdx
+    │   └── clawhub.mdx
+    │
+    ├── tools/                       # Phase 2
+    │   ├── index.mdx
+    │   ├── builtin.mdx
+    │   ├── wasm.mdx
+    │   ├── mcp.mdx
+    │   └── building.mdx
+    │
+    ├── memory/                      # Phase 2
+    │   ├── index.mdx
+    │   ├── writing-reading.mdx
+    │   ├── search.mdx
+    │   ├── identity-files.mdx
+    │   └── heartbeat.mdx
+    │
+    ├── routines/                    # Phase 2
+    │   ├── index.mdx
+    │   ├── cron.mdx
+    │   ├── event-driven.mdx
+    │   └── webhook-triggers.mdx
+    │
+    ├── guides/                      # Phase 2
+    │   ├── index.mdx
+    │   ├── telegram-in-10-minutes.mdx
+    │   ├── connect-claude.mdx
+    │   ├── vps-deployment.mdx
+    │   ├── nearai-cloud-deployment.mdx
+    │   ├── secure-your-deployment.mdx
+    │   └── first-wasm-tool.mdx
+    │
+    ├── reference/
+    │   ├── cli.mdx                  # CLI command reference
+    │   ├── env-vars.mdx             # Consolidated env var table
+    │   ├── api.mdx                  # Web Gateway API (Phase 2)
+    │   └── changelog.mdx            # Import from CHANGELOG.md
+    │
+    └── help/
+        ├── troubleshooting.mdx      # Common errors + ironclaw doctor
+        └── faq.mdx
 ```
 
 ---
 
 ## Phase 1: Implementation Plan
 
-### Step 1: Repository Bootstrap (Day 1)
+### Step 1: Bootstrap Mintlify in `ironclaw-src` (Day 1)
 
 **Deliverables:**
-- Create `ironclaw-docs` GitHub repo
-- `docs.json` — complete Mintlify config (first and most important file)
-- `package.json` — pinned `mintlify` CLI (e.g., `"mintlify": "4.x"`)
-- `.github/workflows/build-check.yml` — CI on every PR
+- `docs.json` at repo root — complete Mintlify config (first and most important file)
+- `package.json` at repo root — pinned `mintlify` CLI for local preview
+- `docs/CONTRIBUTING.md` — how to preview locally, write content, and deploy
+- Install Mintlify GitHub App on `ironclaw-src` repo, set docs path to `docs/`
 
 **`docs.json` outline:**
 ```json
@@ -216,20 +214,51 @@ ironclaw-docs/
 }
 ```
 
-**GitHub Actions CI (`build-check.yml`):**
-```yaml
-name: Build Check
-on: [push, pull_request]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: "20" }
-      - run: npm ci
-      - run: npx mintlify build
+**`docs/CONTRIBUTING.md` — contributor instructions:**
+
+```markdown
+# Contributing to IronClaw Docs
+
+## Preview locally
+
+```bash
+npm install          # install mintlify CLI (pinned version)
+npx mintlify dev     # starts local server at http://localhost:3000
 ```
+
+## Write content
+
+- Pages are `.mdx` files in `docs/`
+- Add new pages to the `navigation` groups in `docs.json`
+- Use Mintlify components: `<Card>`, `<Steps>`, `<Tabs>`, `<Accordion>`, `<Warning>`, `<Note>`
+- Code blocks: use `bash` (not `sh`), `toml` (not `TOML`), `json` for correct syntax highlighting
+
+## Deploy
+
+Mintlify deploys automatically when changes to `docs/` or `docs.json` are
+merged to `main`. No manual deploy step required.
+
+To force a redeploy: go to mintlify.com/dashboard → your project → Redeploy.
+
+## Update the domain
+
+CNAME: `docs` → configured in Mintlify dashboard under Domains.
+```
+
+**`package.json` (root):**
+```json
+{
+  "scripts": {
+    "docs:dev": "mintlify dev",
+    "docs:check": "mintlify broken-links"
+  },
+  "devDependencies": {
+    "mintlify": "^4.0.0"
+  }
+}
+```
+
+> **Note:** If `ironclaw-src` already has a `package.json` for other purposes, add the `docs:dev` and `docs:check` scripts and the `mintlify` devDependency to it rather than creating a new file.
 
 ---
 
@@ -552,8 +581,8 @@ Key sections:
 | Approach | Verdict |
 |---|---|
 | Docusaurus | Rejected — traditional sidebar nav, no rich component library matching OpenClaw |
-| Mintlify static export to Vercel | Rejected — loses feedback widget, analytics, search indexing (cloud-only features) |
-| In-repo docs (`ironclaw-src/docs/`) | Rejected — docs team independence, own CI, cleaner separation |
+| Mintlify static export to Vercel | Rejected — loses feedback widget, analytics, search indexing (Mintlify-cloud-only features) |
+| Separate `ironclaw-docs` repo | Rejected — adds friction to keeping docs in sync with code; in-repo is simpler |
 | Use-case-first nav only | Rejected — harder to maintain, features scattered; added as Guides section instead |
 
 ---
@@ -573,24 +602,25 @@ Docs repo is a standalone content repository with no direct code dependencies. T
 
 ### Mintlify Deployment Sequence (SpecFlow Gap 5.3)
 Step-by-step to avoid chicken-and-egg:
-1. Create `ironclaw-docs` GitHub repo
-2. Add Mintlify GitHub App to the repo (from mintlify.com/dashboard)
-3. Mintlify auto-deploys from `main` branch → initial URL: `ironclaw.mintlify.app`
-4. Verify site builds correctly at Mintlify subdomain
-5. Add CNAME record in DNS: `docs` → `ironclaw.mintlify.app`
-6. Configure custom domain in Mintlify dashboard: `docs.ironclaw.ai`
-7. Verify HTTPS cert provisioning (Mintlify handles automatically)
+1. Add Mintlify GitHub App to the existing `ironclaw-src` repo
+2. In Mintlify dashboard: set docs directory to `docs/`, config file to `docs.json` at root
+3. Merge first commit (`docs.json` + placeholder home page) to `main`
+4. Mintlify auto-deploys → initial URL: `ironclaw.mintlify.app`
+5. Verify site builds correctly at Mintlify subdomain
+6. Add CNAME record in DNS: `docs` → `ironclaw.mintlify.app`
+7. Configure custom domain in Mintlify dashboard: `docs.ironclaw.ai`
+8. Verify HTTPS cert provisioning (Mintlify handles automatically)
 
 ---
 
 ## Acceptance Criteria
 
 ### Repository & Infrastructure
-- [ ] `ironclaw-docs` repo created with Mintlify GitHub App installed
-- [ ] `docs.json` complete with all Phase 1 nav groups and pages
-- [ ] `package.json` with pinned `mintlify` CLI version
-- [ ] CI workflow runs `mintlify build` on every PR; fails on broken links or build errors
-- [ ] Mintlify deploys from `main` branch automatically
+- [ ] Mintlify GitHub App installed on `ironclaw-src` repo; docs path set to `docs/`
+- [ ] `docs.json` at repo root with all Phase 1 nav groups and pages
+- [ ] `package.json` includes `mintlify` devDependency and `docs:dev` / `docs:check` scripts
+- [ ] `docs/CONTRIBUTING.md` with local preview, writing, and deployment instructions
+- [ ] Mintlify deploys automatically from `main` branch when `docs/` or `docs.json` changes
 - [ ] `docs.ironclaw.ai` CNAME resolves with valid HTTPS certificate
 
 ### Home Page

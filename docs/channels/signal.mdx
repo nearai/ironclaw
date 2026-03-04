@@ -1,0 +1,50 @@
+---
+title: Signal Channel
+sidebarTitle: Signal
+description: Signal messenger integration for IronClaw
+---
+
+<Info>
+Signal channel documentation is coming soon. The channel is fully implemented — documentation is being written.
+
+See [Configuration Reference](/setup/configuration) for `SIGNAL_*` environment variables.
+</Info>
+
+## Overview
+
+The Signal channel integrates IronClaw with Signal messenger via signal-cli.
+
+## Prerequisites
+
+- signal-cli daemon running
+- Signal account (phone number)
+- IronClaw configured with Signal credentials
+
+## Configuration
+
+```bash
+export SIGNAL_HTTP_URL=http://127.0.0.1:8080
+export SIGNAL_ACCOUNT=+1234567890
+export SIGNAL_ALLOW_FROM=+0987654321,+11234567890
+```
+
+## Coming Soon
+
+Full documentation covering:
+
+- signal-cli setup
+- Configuration options
+- DM and group policies
+- Troubleshooting
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="settings" href="/setup/configuration">
+    Environment variable reference
+  </Card>
+
+  <Card title="Telegram" icon="message-circle" href="/channels/telegram">
+    Similar channel with full documentation
+  </Card>
+</CardGroup>

@@ -1,0 +1,197 @@
+---
+title: IronClaw Documentation
+sidebarTitle: Overview
+description: Secure personal AI assistant. Your data stays yours, encrypted and local.
+---
+
+<div className="relative">
+  <div className="absolute inset-0 bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-slate-900 dark:to-slate-800 -z-10 rounded-2xl"></div>
+
+  <div className="pt-12 pb-8 px-8 text-center">
+    <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 mb-6 shadow-lg">
+      <svg viewBox="0 0 100 100" className="w-12 h-12" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100" height="100" rx="16" fill="white"/>
+        <path d="M30 35 L50 25 L70 35 L70 50 L50 60 L30 50 Z" fill="#5B6FFF"/>
+        <path d="M30 50 L50 60 L50 75 L30 65 Z" fill="#8B9AFF"/>
+        <path d="M70 50 L50 60 L50 75 L70 65 Z" fill="#4A5FE6"/>
+        <circle cx="50" cy="42" r="8" fill="#5B6FFF"/>
+      </svg>
+    </div>
+
+    <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-slate-900 to-slate-700 dark:from-white dark:to-slate-300 bg-clip-text text-transparent mb-4">
+      IronClaw
+    </h1>
+
+    <p className="text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto mb-8">
+      Secure personal AI assistant. Your data stays yours, encrypted and local.
+    </p>
+
+    <div className="flex flex-wrap justify-center gap-4">
+      <Button href="/start/getting-started" variant="primary" size="lg">
+        Get Started
+      </Button>
+      <Button href="/security" variant="secondary" size="lg">
+        Security Overview
+      </Button>
+    </div>
+  </div>
+</div>
+
+## What is IronClaw?
+
+IronClaw is a **secure, self-hosted AI assistant** designed for integrators, system operators, and privacy-conscious users. Unlike cloud-based assistants that send your data to external servers, IronClaw runs on your own hardware—keeping conversations, files, and secrets under your control.
+
+**Key differentiators:**
+
+- **Local-first** — Your data never leaves your machine unless you explicitly configure external LLM providers
+- **Security-first architecture** — Multi-layer defense with safety layer, WASM sandbox, Docker isolation, and encrypted secrets
+- **Multi-channel access** — Chat via web browser, Telegram, terminal UI, or HTTP webhooks
+- **Self-expanding** — Build and install custom tools dynamically without vendor dependency
+
+## How IronClaw Works
+
+```mermaid
+flowchart TB
+    subgraph Input["Input Channels"]
+        Web["Web Gateway"]
+        Telegram["Telegram"]
+        TUI["Terminal UI"]
+        Webhook["HTTP Webhook"]
+    end
+
+    subgraph Core["IronClaw Core"]
+        Agent["Agent Loop"]
+        Router["Intent Router"]
+        Scheduler["Job Scheduler"]
+    end
+
+    subgraph Safety["Safety Layer"]
+        Sanitizer["Sanitizer"]
+        Validator["Validator"]
+        Policy["Policy Engine"]
+        Leak["Leak Detector"]
+    end
+
+    subgraph Tools["Tool System"]
+        Builtin["Built-in Tools"]
+        WASM["WASM Sandbox"]
+        MCP["MCP Servers"]
+    end
+
+    subgraph Memory["Persistent Memory"]
+        Workspace["Workspace"]
+        Docs["Documents"]
+        Search["Hybrid Search"]
+    end
+
+    Input --> Core
+    Core --> Safety
+    Safety --> Tools
+    Tools --> Memory
+    Core --> Memory
+```
+
+## Key Capabilities
+
+<CardGroup cols={3}>
+  <Card title="Multi-Channel" icon="message-square" href="/channels">
+    Access IronClaw via web browser, Telegram, terminal UI, or HTTP webhooks
+  </Card>
+
+  <Card title="Security-First" icon="shield-check" href="/security">
+    Multi-layer defense: safety layer, WASM sandbox, Docker isolation, encrypted secrets
+  </Card>
+
+  <Card title="Multi-Provider LLM" icon="brain" href="/providers">
+    Choose from 7+ providers: NEAR AI, Anthropic, OpenAI, Ollama, Tinfoil, and more
+  </Card>
+
+  <Card title="Skills System" icon="puzzle" href="/skills">
+    Extend capabilities with SKILL.md prompt extensions from ClawHub registry
+  </Card>
+
+  <Card title="Parallel Jobs" icon="workflow" href="/start/wizard">
+    Execute multiple tasks concurrently with state machine and self-repair
+  </Card>
+
+  <Card title="Persistent Memory" icon="database" href="/memory">
+    Hybrid search (FTS + vector) with identity files and heartbeat system
+  </Card>
+</CardGroup>
+
+## Quick Start
+
+Get IronClaw running in under 10 minutes:
+
+<Steps>
+  <Step title="Install IronClaw" icon="download">
+    Run the install script for your platform:
+    ```bash
+    curl -fsSL https://install.ironclaw.ai | bash
+    ```
+    See [installation options](/install) for Docker, VPS, and other methods.
+  </Step>
+
+  <Step title="Run the Wizard" icon="settings">
+    Launch the interactive setup wizard:
+    ```bash
+    ironclaw onboard
+    ```
+    This configures your database, LLM provider, channels, and security settings in 8 steps.
+  </Step>
+
+  <Step title="Start IronClaw" icon="play">
+    Start the agent:
+    ```bash
+    ironclaw run
+    ```
+    If you enabled the Web Gateway, open `http://127.0.0.1:3001` in your browser.
+  </Step>
+</Steps>
+
+## Start Here
+
+<CardGroup cols={2}>
+  <Card title="Getting Started" icon="rocket" href="/start/getting-started">
+    Zero to running in 10 minutes with the complete quickstart guide
+  </Card>
+
+  <Card title="Installation" icon="download" href="/install">
+    Local install, Docker, VPS deployment, or NEAR AI managed hosting
+  </Card>
+
+  <Card title="Configuration" icon="settings" href="/setup/configuration">
+    Complete environment variable reference for all settings
+  </Card>
+
+  <Card title="Channels" icon="message-circle" href="/channels">
+    Set up Telegram, Web Gateway, Webhook, Terminal UI, and more
+  </Card>
+
+  <Card title="LLM Providers" icon="cpu" href="/providers">
+    Configure NEAR AI, Anthropic, OpenAI, Ollama, and other providers
+  </Card>
+
+  <Card title="Security" icon="lock" href="/security">
+    Understand IronClaw's defense-in-depth security architecture
+  </Card>
+</CardGroup>
+
+## Security at a Glance
+
+IronClaw's security architecture is designed around **defense in depth**—multiple independent layers that each provide protection:
+
+| Layer | Component | Protection |
+|-------|-----------|------------|
+| **Safety Layer** | Sanitizer, Validator, Policy, Leak Detector | Prompt injection defense, secret detection, input validation |
+| **WASM Sandbox** | wasmtime runtime | Sandboxed tool execution with fuel metering |
+| **Docker Sandbox** | Container isolation | Job execution in isolated containers with network proxy |
+| **Secrets** | AES-256-GCM encryption | Credentials encrypted at rest, injected at proxy boundary |
+
+Learn more in the [Security Overview](/security).
+
+---
+
+<Note>
+IronClaw is under active development. For the latest updates, see the [Changelog](/reference/changelog) or follow us on [GitHub](https://github.com/ironclaw-ai/ironclaw).
+</Note>

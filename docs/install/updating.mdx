@@ -1,0 +1,193 @@
+---
+title: Updating IronClaw
+sidebarTitle: Updating
+description: How to update IronClaw to the latest version
+---
+
+Keep IronClaw up to date for the latest features and security patches.
+
+## Check Current Version
+
+```bash
+ironclaw --version
+# ironclaw 0.13.0
+```
+
+## Update by Installation Method
+
+<Tabs>
+  <Tab title="Linux (Shell Script)">
+    ```bash
+    # Re-run the install script (updates in place)
+    curl -fsSL https://install.ironclaw.ai | bash
+
+    # Verify update
+    ironclaw --version
+    ```
+  </Tab>
+
+  <Tab title="Ubuntu/Debian (APT)">
+    ```bash
+    sudo apt update
+    sudo apt upgrade ironclaw
+    ```
+  </Tab>
+
+  <Tab title="macOS (Homebrew)">
+    ```bash
+    brew update
+    brew upgrade ironclaw
+    ```
+  </Tab>
+
+  <Tab title="Docker">
+    ```bash
+    # Pull latest image
+    docker pull ironclaw/ironclaw:latest
+
+    # Recreate container
+    docker stop ironclaw
+    docker rm ironclaw
+    docker run -d --name ironclaw ...
+
+    # Or with docker-compose
+    docker-compose pull
+    docker-compose up -d
+    ```
+  </Tab>
+
+  <Tab title="From Source">
+    ```bash
+    cd /path/to/ironclaw
+    git pull origin main
+    cargo build --release
+    sudo cp target/release/ironclaw /usr/local/bin/
+    ```
+  </Tab>
+</Tabs>
+
+## Post-Update Steps
+
+### 1. Review Changelog
+
+Check what changed in the new version:
+
+```bash
+# View changelog (if installed from source)
+cat /usr/local/share/ironclaw/CHANGELOG.md
+
+# Or online
+open https://github.com/ironclaw-ai/ironclaw/releases
+```
+
+### 2. Run Migrations
+
+Database migrations run automatically on startup, but verify:
+
+```bash
+ironclaw run
+# Look for: "Running migrations..." in logs
+```
+
+### 3. Restart Service
+
+If running as a service:
+
+```bash
+# systemd (Linux)
+sudo systemctl restart ironclaw
+
+# launchd (macOS)
+launchctl unload ~/Library/LaunchAgents/ai.ironclaw.service.plist
+launchctl load ~/Library/LaunchAgents/ai.ironclaw.service.plist
+
+# Homebrew
+brew services restart ironclaw
+```
+
+## Downgrading
+
+If you need to rollback:
+
+```bash
+# Linux/macOS shell script
+# Download specific version
+curl -fsSL https://install.ironclaw.ai | bash -s -- --version 0.12.0
+
+# Docker
+docker pull ironclaw/ironclaw:v0.12.0
+```
+
+<Warning>
+Downgrading may require manual database rollback if migrations were applied. Always backup before updating.
+</Warning>
+
+## Automatic Updates
+
+### systemd Timer (Linux)
+
+```bash
+sudo tee /etc/systemd/system/ironclaw-update.service <<EOF
+[Unit]
+Description=IronClaw Update Check
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'curl -fsSL https://install.ironclaw.ai | bash'
+EOF
+
+sudo tee /etc/systemd/system/ironclaw-update.timer <<EOF
+[Unit]
+Description=Run IronClaw update check daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+sudo systemctl enable --now ironclaw-update.timer
+```
+
+## Troubleshooting Updates
+
+<AccordionGroup>
+  <Accordion title="Update fails with permission denied" icon="lock">
+    ```bash
+    # Fix permissions
+    sudo chown -R $USER:$USER ~/.local/bin/ironclaw
+
+    # Or update with sudo
+    sudo curl -fsSL https://install.ironclaw.ai | bash
+    ```
+  </Accordion>
+
+  <Accordion title="Database migration fails" icon="database">
+    1. Stop IronClaw
+    2. Backup database
+    3. Run with debug logging: `RUST_LOG=debug ironclaw run`
+    4. Check specific migration error
+  </Accordion>
+
+  <Accordion title="Service won't start after update" icon="x-circle">
+    ```bash
+    # Check logs
+    sudo journalctl -u ironclaw -n 50
+
+    # Verify binary
+    which ironclaw
+    ironclaw --version
+
+    # Reinstall if corrupted
+    curl -fsSL https://install.ironclaw.ai | bash
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+- Check the [Changelog](/reference/changelog) for new features
+- Review [Security](/security) updates
+- See [Troubleshooting](/help/troubleshooting) if issues occur

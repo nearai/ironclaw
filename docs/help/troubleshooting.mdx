@@ -1,0 +1,317 @@
+---
+title: Troubleshooting
+sidebarTitle: Troubleshooting
+description: Common issues and solutions
+---
+
+Solutions for common IronClaw issues.
+
+## Diagnostic Tool
+
+Run diagnostics first:
+
+```bash
+ironclaw doctor
+```
+
+This checks:
+- Database connectivity
+- LLM provider access
+- Docker availability
+- Tunnel configuration
+
+## Common Issues
+
+### Installation
+
+<AccordionGroup>
+  <Accordion title="Binary not found after install" icon="x-circle">
+    **Cause:** PATH not updated
+
+    **Solution:**
+    ```bash
+    # Add to PATH
+    export PATH="$HOME/.local/bin:$PATH"
+
+    # Or restart your terminal
+    exec $SHELL
+    ```
+  </Accordion>
+
+  <Accordion title="Permission denied" icon="lock">
+    **Solution:**
+    ```bash
+    # Fix ownership
+    sudo chown -R $USER:$USER ~/.local/bin/ironclaw
+
+    # Or move to system path
+    sudo mv ~/.local/bin/ironclaw /usr/local/bin/
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Database
+
+<AccordionGroup>
+  <Accordion title="Database connection failed" icon="database">
+    **PostgreSQL:**
+    ```bash
+    # Check PostgreSQL is running
+    sudo systemctl status postgresql
+
+    # Verify connection
+    psql postgres://user:pass@localhost/ironclaw
+    ```
+
+    **libSQL:**
+    ```bash
+    # Check permissions
+    ls -la ~/.ironclaw/
+
+    # Fix ownership
+    chmod 755 ~/.ironclaw
+    ```
+  </Accordion>
+
+  <Accordion title="pgvector extension not found" icon="puzzle">
+    **Solution:**
+    ```bash
+    # Ubuntu/Debian
+    sudo apt install postgresql-15-pgvector
+
+    # Enable extension
+    sudo -u postgres psql -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+    ```
+  </Accordion>
+
+  <Accordion title="Database file is locked (libSQL)" icon="lock">
+    **Solution:**
+    ```bash
+    # Find and kill process
+    lsof ~/.ironclaw/ironclaw.db
+    kill -9 <pid>
+
+    # Or wait for process to exit
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### LLM Provider
+
+<AccordionGroup>
+  <Accordion title="Browser didn't open for OAuth" icon="globe">
+    **Solutions:**
+    1. Check default browser is set
+    2. Manually visit the URL shown in terminal
+    3. On VPS: use API key mode instead
+
+    ```bash
+    # Set callback URL for remote servers
+    export IRONCLAW_OAUTH_CALLBACK_URL=https://your-server:9876
+    ```
+  </Accordion>
+
+  <Accordion title="API key rejected" icon="key">
+    **Solutions:**
+    1. Verify key is copied correctly (no extra spaces)
+    2. Check key hasn't expired
+    3. Ensure billing is set up (OpenAI/Anthropic)
+  </Accordion>
+
+  <Accordion title="Session expired" icon="clock">
+    **Solution:**
+    ```bash
+    # Re-authenticate
+    ironclaw onboard --skip-auth
+    # Select NEAR AI → re-authenticate
+    ```
+  </Accordion>
+
+  <Accordion title="Rate limit exceeded" icon="alert">
+    **Solutions:**
+    1. Wait and retry
+    2. Implement exponential backoff
+    3. Check your provider's rate limits
+    4. Consider upgrading tier
+  </Accordion>
+
+  <Accordion title="Model not found" icon="search">
+    **Solutions:**
+    1. Verify model name spelling
+    2. Check model availability for your account
+    3. Try a different model
+  </Accordion>
+</AccordionGroup>
+
+### Channels
+
+<AccordionGroup>
+  <Accordion title="Web Gateway not accessible" icon="globe">
+    **Solutions:**
+    ```bash
+    # Check IronClaw is running
+    ironclaw status
+
+    # Verify port
+    sudo ss -tlnp | grep 3001
+
+    # Check firewall
+    sudo ufw status
+    sudo ufw allow 3001
+    ```
+  </Accordion>
+
+  <Accordion title="Web Gateway token not found" icon="key">
+    **Solution:**
+    ```bash
+    # View logs
+    RUST_LOG=ironclaw=info ironclaw run 2>&1 | grep "Gateway auth token"
+
+    # Or set persistent token
+    export GATEWAY_AUTH_TOKEN=your-token
+    ```
+  </Accordion>
+
+  <Accordion title="Telegram bot not responding" icon="message-circle">
+    **Solutions:**
+    1. Check bot token is valid (test with @BotFather)
+    2. Verify polling mode or webhook URL
+    3. Check logs for errors
+    4. Ensure owner is paired (if using pairing mode)
+  </Accordion>
+
+  <Accordion title="Webhook not receiving messages" icon="webhook">
+    **Solutions:**
+    1. Verify HTTPS URL is set (required by Telegram)
+    2. Check tunnel is running (ngrok, cloudflared)
+    3. Ensure webhook secret matches
+  </Accordion>
+
+  <Accordion title="Owner binding timeout" icon="clock">
+    **Solutions:**
+    1. Send `/start` to your bot in Telegram
+    2. Re-run `ironclaw onboard --channels-only`
+    3. Wait 120 seconds for first message
+  </Accordion>
+</AccordionGroup>
+
+### Sandbox
+
+<AccordionGroup>
+  <Accordion title="Docker not available" icon="x-circle">
+    **Solution:**
+    ```bash
+    # Install Docker
+    curl -fsSL https://get.docker.com | sh
+
+    # Add user to docker group
+    sudo usermod -aG docker $USER
+
+    # Log out and back in
+    ```
+  </Accordion>
+
+  <Accordion title="Sandbox timeout" icon="clock">
+    **Solutions:**
+    1. Increase timeout:
+       ```bash
+       export SANDBOX_TIMEOUT_SECS=300
+       ```
+    2. Check for infinite loops in job
+    3. Verify job logic
+  </Accordion>
+
+  <Accordion title="Out of memory" icon="alert">
+    **Solutions:**
+    1. Increase memory limit:
+       ```bash
+       export SANDBOX_MEMORY_LIMIT_MB=4096
+       ```
+    2. Optimize job memory usage
+    3. Use smaller models
+  </Accordion>
+</AccordionGroup>
+
+### Security
+
+<AccordionGroup>
+  <Accordion title="Keychain prompts repeatedly" icon="refresh-cw">
+    **Solutions:**
+    - On macOS, click "Always Allow" in keychain dialog
+    - This is expected OS behavior
+    - Caching minimizes prompts
+  </Accordion>
+
+  <Accordion title="Keychain not available on Linux" icon="linux">
+    **Solution:**
+    ```bash
+    # Install gnome-keyring
+    sudo apt install gnome-keyring
+
+    # Or use environment variable mode
+    export SECRETS_MASTER_KEY="your-key"
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Platform-Specific
+
+<AccordionGroup>
+  <Accordion title="macOS Keychain dialogs" icon="apple">
+    **Expected:** Two dialogs on first access:
+    1. "Enter your password to unlock the keychain"
+    2. "Allow ironclaw to access this keychain item"
+
+    **Solution:** Click "Always Allow" to prevent repeated prompts.
+  </Accordion>
+
+  <Accordion title="WSL2 port not accessible" icon="windows">
+    **Solutions:**
+    - WSL2 automatically forwards ports
+    - Use `http://localhost:3001` from Windows
+    - Check WSL2 is running: `wsl --status`
+  </Accordion>
+</AccordionGroup>
+
+## Debug Logging
+
+Enable verbose logging:
+
+```bash
+# All modules
+RUST_LOG=debug ironclaw run
+
+# Just IronClaw
+RUST_LOG=ironclaw=debug ironclaw run
+
+# Specific module
+RUST_LOG=ironclaw::agent=debug ironclaw run
+
+# With HTTP requests
+RUST_LOG=ironclaw=debug,tower_http=debug ironclaw run
+```
+
+## Getting Help
+
+If your issue isn't listed:
+
+1. Run `ironclaw doctor --json`
+2. Check logs with `RUST_LOG=debug`
+3. Search [GitHub Issues](https://github.com/ironclaw-ai/ironclaw/issues)
+4. Create a new issue with:
+   - IronClaw version
+   - Operating system
+   - Full error message
+   - Steps to reproduce
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="FAQ" icon="help-circle" href="/help/faq">
+    Frequently asked questions
+  </Card>
+
+  <Card title="CLI Reference" icon="terminal" href="/reference/cli">
+    Command-line reference
+  </Card>
+</CardGroup>
