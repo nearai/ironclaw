@@ -1155,8 +1155,7 @@ mod tests {
         if !config.scenarios_dir.exists() {
             return;
         }
-        let scenarios =
-            load_bench_scenarios(&config).expect("should load setup scenarios");
+        let scenarios = load_bench_scenarios(&config).expect("should load setup scenarios");
         assert!(
             scenarios.len() >= 2,
             "expected at least 2 setup scenarios, got {}",
