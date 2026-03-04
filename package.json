@@ -1,0 +1,12 @@
+{
+  "name": "ironclaw-docs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "docs:dev": "mintlify dev",
+    "docs:check": "mintlify broken-links"
+  },
+  "devDependencies": {
+    "mintlify": "^4.0.0"
+  }
+}

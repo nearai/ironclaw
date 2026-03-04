@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 60">
+  <g transform="translate(10, 10)">
+    <!-- Logo Icon -->
+    <rect width="40" height="40" fill="#5B6FFF" rx="8"/>
+    <path d="M12 20 L20 16 L28 20 L28 30 L20 34 L12 30 Z" fill="white"/>
+    <circle cx="20" cy="24" r="4" fill="white"/>
+    <!-- Text -->
+    <text x="50" y="28" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="600" fill="#1a1a1a">IronClaw</text>
+  </g>
+</svg>

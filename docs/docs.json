@@ -1,0 +1,41 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "IronClaw",
+  "description": "Secure personal AI assistant. Your data stays yours.",
+  "theme": "mint",
+  "icons": { "library": "lucide" },
+  "logo": {
+    "light": "/assets/logo-light.svg",
+    "dark": "/assets/logo-dark.svg"
+  },
+  "favicon": "/assets/favicon.svg",
+  "colors": {
+    "primary": "#5B6FFF",
+    "dark": "#5B6FFF",
+    "light": "#8B9AFF"
+  },
+  "navbar": {
+    "links": [
+      { "label": "GitHub", "href": "https://github.com/ironclaw-ai/ironclaw", "icon": "github" },
+      { "label": "Releases", "href": "https://github.com/ironclaw-ai/ironclaw/releases", "icon": "package" }
+    ]
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Docs",
+        "groups": [
+          { "group": "Get Started", "pages": ["index", "start/getting-started", "start/wizard"] },
+          { "group": "Install", "pages": ["install/index", "install/local", "install/docker", "install/vps", "install/nearai-cloud", "install/updating", "install/uninstalling"] },
+          { "group": "Setup", "pages": ["setup/configuration", "setup/database"] },
+          { "group": "Channels", "pages": ["channels/index", "channels/web-gateway", "channels/telegram", "channels/webhook", "channels/tui", "channels/signal"] },
+          { "group": "LLM Providers", "pages": ["providers/index", "providers/nearai", "providers/anthropic", "providers/openai", "providers/ollama", "providers/openai-compatible", "providers/tinfoil"] },
+          { "group": "Security", "pages": ["security/index", "security/safety-layer", "security/secrets", "security/sandbox"] },
+          { "group": "Reference", "pages": ["reference/cli", "reference/changelog"] },
+          { "group": "Help", "pages": ["help/troubleshooting", "help/faq"] }
+        ]
+      }
+    ]
+  },
+  "cname": "docs.ironclaw.ai"
+}

@@ -1,0 +1,191 @@
+---
+title: Telegram Channel
+sidebarTitle: Telegram
+description: Bot integration for Telegram
+---
+
+Connect IronClaw to Telegram for chat via DMs and groups.
+
+## Prerequisites
+
+- Telegram account
+- Bot token from [@BotFather](https://t.me/BotFather)
+
+## Quick Setup
+
+### 1. Create a Bot
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram
+2. Send `/newbot` and follow prompts
+3. Copy the bot token (looks like: `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+
+### 2. Configure via Wizard
+
+```bash
+ironclaw onboard --channels-only
+```
+
+When prompted:
+1. Select "Telegram" from channel list
+2. Paste your bot token
+3. Choose polling or webhook mode
+4. Complete owner binding
+
+### 3. Start IronClaw
+
+```bash
+ironclaw run
+```
+
+Your bot is now active!
+
+## Configuration Options
+
+| Option | Values | Default | Description |
+|--------|--------|---------|-------------|
+| `dm_policy` | `open`, `allowlist`, `pairing` | `pairing` | DM access control |
+| `allow_from` | user IDs | `[]` | Pre-approved users |
+| `owner_id` | Telegram user ID | — | Restrict to single owner |
+| `bot_username` | username | — | For group mention detection |
+| `respond_to_all_group_messages` | bool | `false` | Respond to all group messages |
+
+## Modes
+
+### Polling Mode (Default)
+
+- No external URL required
+- ~30 second delay
+- Simpler setup
+
+### Webhook Mode
+
+- Instant message delivery
+- Requires HTTPS URL
+- Use tunnel for local development
+
+```bash
+# Using ngrok
+ngrok http 8080
+
+# Set tunnel URL in wizard
+Tunnel URL: https://abc123.ngrok.io
+```
+
+<Warning>
+**ngrok free tier:** URL changes on restart → requires re-registration. Consider paid plan or Cloudflare Tunnel for production.
+</Warning>
+
+## DM Pairing
+
+Control who can message your bot:
+
+### Pairing Mode (Default)
+
+Unknown users receive a pairing code:
+
+```
+To pair with this bot, run: ironclaw pairing approve telegram ABC12345
+```
+
+You approve them with:
+```bash
+ironclaw pairing approve telegram ABC12345
+```
+
+### Other Modes
+
+- **open**: Allow all users
+- **allowlist**: Only pre-approved users (no pairing message)
+
+### Pairing Commands
+
+```bash
+# List pending requests
+ironclaw pairing list telegram
+
+# Approve by code
+ironclaw pairing approve telegram ABC12345
+
+# List as JSON
+ironclaw pairing list telegram --json
+```
+
+## Group Chats
+
+Enable group mentions:
+
+1. Add bot to group
+2. Configure `bot_username` in settings
+3. Mention with `@YourBot` or use `/command`
+
+Set `respond_to_all_group_messages: true` to respond to every message.
+
+## Webhook Secret (Optional)
+
+For additional security:
+
+1. Generate secret: `openssl rand -hex 16`
+2. Set `telegram_webhook_secret` in capabilities.json
+3. Telegram sends `X-Telegram-Bot-Api-Secret-Token` header
+4. IronClaw validates before processing
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Messages not delivered" icon="x-circle">
+    **Polling:** Check logs for `getUpdates` errors. Verify token is valid.
+
+    **Webhook:** Verify HTTPS URL is correct. Check tunnel is running.
+  </Accordion>
+
+  <Accordion title="Pairing code not sent" icon="message-circle">
+    - Ensure `dm_policy` is `pairing` (not `allowlist`)
+    - Check bot can send messages
+    - Verify `api.telegram.org` is accessible
+  </Accordion>
+
+  <Accordion title="Group mentions not working" icon="users">
+    - Set `bot_username` in config
+    - Ensure bot has group message permissions
+    - Check for `@YourBot` mention or `/command`
+  </Accordion>
+
+  <Accordion title="Owner binding timeout" icon="clock">
+    The wizard waits 120 seconds for the first message. If it times out:
+    - Send `/start` to your bot in Telegram
+    - Re-run `ironclaw onboard --channels-only`
+  </Accordion>
+
+  <Accordion title="Tunnel URL changed" icon="network">
+    ngrok free tier changes URLs on restart. Solutions:
+    - Upgrade to paid ngrok plan
+    - Use Cloudflare Tunnel (persistent URL)
+    - Use polling mode instead
+  </Accordion>
+</AccordionGroup>
+
+## Configuration File
+
+Edit `~/.ironclaw/channels/telegram.capabilities.json`:
+
+```json
+{
+  "dm_policy": "pairing",
+  "allow_from": [],
+  "owner_id": null,
+  "bot_username": "YourBotName",
+  "respond_to_all_group_messages": false
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Web Gateway" icon="globe" href="/channels/web-gateway">
+    Browser-based chat interface
+  </Card>
+
+  <Card title="Webhook" icon="webhook" href="/channels/webhook">
+    HTTP API for integrations
+  </Card>
+</CardGroup>

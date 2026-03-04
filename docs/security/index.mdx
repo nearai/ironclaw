@@ -1,0 +1,193 @@
+---
+title: Security
+sidebarTitle: Overview
+description: IronClaw's defense-in-depth security architecture
+---
+
+Security is IronClaw's primary differentiator. Your data stays yours through multiple layers of defense.
+
+## Security-First Design
+
+IronClaw is built with security as a core principle:
+
+- **Local-first** — Your data stays on your machine
+- **Encrypted at rest** — Secrets use AES-256-GCM
+- **Sandboxed execution** — Tools run in isolated environments
+- **Prompt injection defense** — Multi-layer protection
+- **Zero-exposure credentials** — Secrets never enter containers
+
+## Defense Layers
+
+```mermaid
+flowchart TB
+    subgraph Input["Input Layer"]
+        Channels["Channels\nTUI, Web, Telegram, Webhook"]
+    end
+
+    subgraph Layer1["Layer 1: Safety"]
+        Sanitizer["Sanitizer"]
+        Validator["Validator"]
+        Policy["Policy Engine"]
+    end
+
+    subgraph Layer2["Layer 2: WASM Sandbox"]
+        Wasm["wasmtime\nMemory limits\nFuel metering"]
+    end
+
+    subgraph Layer3["Layer 3: Docker Sandbox"]
+        Docker["Container isolation\nNetwork proxy\nCredential injection"]
+    end
+
+    subgraph Layer4["Layer 4: Secrets"]
+        Crypto["AES-256-GCM\nOS keychain\nZero exposure"]
+    end
+
+    subgraph Output["Output Layer"]
+        LLM["LLM Provider"]
+    end
+
+    Channels --> Sanitizer
+    Sanitizer --> Validator
+    Validator --> Policy
+    Policy --> Wasm
+    Wasm --> Docker
+    Docker --> Crypto
+    Crypto --> LLM
+```
+
+## The Four Defense Layers
+
+<CardGroup cols={2}>
+  <Card title="Safety Layer" icon="shield" href="/security/safety-layer">
+    Sanitizer, validator, policy engine, and leak detector. Protects against prompt injection and data exfiltration.
+  </Card>
+
+  <Card title="WASM Sandbox" icon="blocks" href="/security/sandbox">
+    Tools run in wasmtime with memory limits and fuel metering. Sandboxed execution.
+  </Card>
+
+  <Card title="Docker Sandbox" icon="container" href="/security/sandbox">
+    Job execution in isolated containers with network proxy and credential injection.
+  </Card>
+
+  <Card title="Secrets Management" icon="lock" href="/security/secrets">
+    AES-256-GCM encryption, OS keychain integration, zero-exposure credential model.
+  </Card>
+</CardGroup>
+
+## Security Defaults
+
+IronClaw ships with secure defaults:
+
+| Feature | Default | Why |
+|---------|---------|-----|
+| **Web Gateway host** | `127.0.0.1` | Local only |
+| **Webhook host** | `0.0.0.0` | ⚠️ Review if external not needed |
+| **Sandbox policy** | `readonly` | No filesystem writes |
+| **Secrets master key** | OS keychain | Hardware-backed |
+| **LLM backend** | NEAR AI | OAuth, no API key storage |
+| **Telegram DM policy** | `pairing` | Access control |
+
+## Prompt Injection Defense
+
+Multiple layers protect against prompt injection:
+
+1. **Input validation** — Length, encoding, forbidden patterns
+2. **Sanitizer** — Escapes dangerous content
+3. **Policy engine** — Severity-based actions
+4. **Leak detector** — Scans for 15+ secret patterns
+5. **Tool output wrapping** — XML format with escape hints
+
+<Note>
+Tool outputs are wrapped before reaching the LLM:
+```xml
+<tool_output name="search" sanitized="true">
+[content here]
+</tool_output>
+```
+</Note>
+
+## Data Flow
+
+```
+User Input
+    ↓
+[Validator] → Reject if invalid
+    ↓
+[Sanitizer] → Escape dangerous patterns
+    ↓
+[Policy Engine] → Apply rules
+    ↓
+[Leak Detector] → Scan for secrets
+    ↓
+LLM Processing
+    ↓
+Tool Execution
+    ↓
+[WASM Sandbox] → Sandboxed tool
+    ↓
+[Docker Sandbox] → Isolated job
+    ↓
+[Network Proxy] → Credential injection
+    ↓
+External Service
+```
+
+## Zero-Exposure Credential Model
+
+Secrets are never exposed to untrusted code:
+
+1. **Stored encrypted** — AES-256-GCM in database
+2. **Master key in keychain** — OS-managed
+3. **Injected at proxy** — HTTP requests only
+4. **Containers never see raw values** — Safe even if compromised
+
+See [Secrets](/security/secrets) for details.
+
+## Compliance Considerations
+
+IronClaw helps with security compliance:
+
+| Requirement | IronClaw Feature |
+|-------------|-----------------|
+| Data encryption at rest | AES-256-GCM for secrets |
+| Access control | Channel policies, owner binding |
+| Audit logging | Structured logs, job history |
+| Least privilege | Sandboxed execution |
+| Network isolation | Domain allowlists |
+
+## Security Checklist
+
+When deploying IronClaw:
+
+- [ ] Use OS keychain for master key (not env var)
+- [ ] Set `HTTP_HOST=127.0.0.1` if external webhooks not needed
+- [ ] Configure Telegram DM policy (not `open`)
+- [ ] Block port 50051 with firewall on VPS
+- [ ] Use libSQL encryption-at-rest warning
+- [ ] Review sandbox policy for your use case
+- [ ] Set strong Web Gateway auth token
+
+## Reporting Security Issues
+
+If you discover a security vulnerability:
+
+1. Email security@ironclaw.ai
+2. Do not disclose publicly until fixed
+3. Include steps to reproduce
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Safety Layer" icon="shield" href="/security/safety-layer">
+    Sanitizer, validator, policy, leak detector
+  </Card>
+
+  <Card title="Secrets" icon="lock" href="/security/secrets">
+    Encryption and credential management
+  </Card>
+
+  <Card title="Sandbox" icon="container" href="/security/sandbox">
+    WASM and Docker isolation
+  </Card>
+</CardGroup>
