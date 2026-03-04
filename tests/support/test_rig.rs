@@ -106,8 +106,8 @@ pub struct TestRig {
     instrumented_llm: Arc<InstrumentedLlm>,
     /// When the rig was created (for wall-time measurement).
     start_time: Instant,
-    /// Handle to the background agent task.
-    agent_handle: tokio::task::JoinHandle<()>,
+    /// Handle to the background agent task (wrapped in Option so Drop can take it).
+    agent_handle: Option<tokio::task::JoinHandle<()>>,
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
@@ -245,9 +245,22 @@ impl TestRig {
         }
     }
 
-    /// Abort the background agent task and drop the rig.
-    pub fn shutdown(self) {
-        self.agent_handle.abort();
+    /// Signal the channel to shut down and abort the background agent task.
+    pub fn shutdown(mut self) {
+        self.channel.signal_shutdown();
+        if let Some(handle) = self.agent_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for TestRig {
+    fn drop(&mut self) {
+        if let Some(handle) = self.agent_handle.take()
+            && !handle.is_finished()
+        {
+            handle.abort();
+        }
     }
 }
 
@@ -462,7 +475,7 @@ impl TestRigBuilder {
             channel: test_channel,
             instrumented_llm: instrumented,
             start_time: Instant::now(),
-            agent_handle,
+            agent_handle: Some(agent_handle),
             _temp_dir: temp_dir,
         }
     }

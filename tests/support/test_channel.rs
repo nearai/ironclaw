@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -39,6 +40,8 @@ pub struct TestChannel {
     tool_timings: Arc<Mutex<Vec<(String, u64)>>>,
     /// Default user ID for injected messages.
     user_id: String,
+    /// Shutdown signal: when set to `true`, signals the agent to stop.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl TestChannel {
@@ -58,7 +61,13 @@ impl TestChannel {
             tool_start_times: Arc::new(Mutex::new(HashMap::new())),
             tool_timings: Arc::new(Mutex::new(Vec::new())),
             user_id: user_id.into(),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Signal the channel (and any listening agent) to shut down.
+    pub fn signal_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
     }
 
     /// Inject a user message into the channel stream.
