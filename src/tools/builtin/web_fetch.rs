@@ -18,11 +18,10 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::Client;
 
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
-use crate::tools::builtin::http::validate_url;
+use crate::tools::builtin::http::{build_pinned_client, validate_and_resolve_url, validate_url};
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig};
 
 #[cfg(feature = "html-to-markdown")]
@@ -54,27 +53,24 @@ fn extract_title(html: &str) -> Option<String> {
     if title.is_empty() { None } else { Some(title) }
 }
 
-/// Web fetch tool — retrieve a URL and return clean Markdown content.
+/// Web fetch tool -- retrieve a URL and return clean Markdown content.
+///
+/// Each request builds a per-request client with DNS pinning.  On every hop
+/// (initial request + redirect follows), the hostname is resolved once,
+/// validated against the SSRF blocklist, and pinned into the reqwest client
+/// via [`reqwest::ClientBuilder::resolve`].
 pub struct WebFetchTool {
-    client: Client,
     leak_detector: LeakDetector,
 }
 
 impl WebFetchTool {
-    /// Create a new `WebFetchTool` with a Chrome-like UA and no auto-redirects.
+    /// Create a new `WebFetchTool`.
     ///
     /// Redirects are followed manually (up to [`MAX_REDIRECTS`] hops) so that
-    /// each `Location` URL is SSRF-validated before the next request is sent.
+    /// each `Location` URL is SSRF-validated and DNS-pinned before the next
+    /// request is sent.
     pub fn new() -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .user_agent(USER_AGENT)
-            .build()
-            .expect("Failed to create HTTP client for web_fetch");
-
         Self {
-            client,
             leak_detector: LeakDetector::new(),
         }
     }
@@ -124,21 +120,37 @@ impl Tool for WebFetchTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("'url' is required".to_string()))?;
 
-        // SSRF defence: HTTPS-only, no localhost, no private IPs, DNS rebinding check.
+        // SSRF defence: HTTPS-only, no localhost, no private IP literals.
         let mut current_url = validate_url(url_str)?;
 
-        // Outbound leak scan — reject if URL contains secrets.
+        // Outbound leak scan -- reject if URL contains secrets.
         self.leak_detector
             .scan_http_request(current_url.as_str(), &[], None)
             .map_err(|e| ToolError::NotAuthorized(e.to_string()))?;
 
-        // Follow redirects manually so every hop is SSRF-validated.
+        // Follow redirects manually so every hop is SSRF-validated and
+        // DNS-pinned.  Each hop resolves DNS once, validates all resolved IPs,
+        // then builds a per-hop client that pins the hostname to the validated
+        // addresses -- eliminating the TOCTOU window for DNS rebinding.
         let response = {
             let mut redirects_remaining = MAX_REDIRECTS;
             loop {
-                let resp = self
-                    .client
+                // Resolve DNS, validate IPs, build a pinned client for this hop.
+                let resolved_addrs = validate_and_resolve_url(&current_url).await?;
+                let host = current_url
+                    .host_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let client = build_pinned_client(
+                    &host,
+                    &resolved_addrs,
+                    Duration::from_secs(30),
+                    reqwest::redirect::Policy::none(),
+                )?;
+
+                let resp = client
                     .get(current_url.clone())
+                    .header(reqwest::header::USER_AGENT, USER_AGENT)
                     .header(
                         reqwest::header::ACCEPT,
                         "text/markdown, text/html;q=0.9, */*;q=0.8",
@@ -179,7 +191,7 @@ impl Tool for WebFetchTool {
                         if location.starts_with("http://") || location.starts_with("https://") {
                             location.to_string()
                         } else {
-                            // Relative redirect — join with current URL.
+                            // Relative redirect -- join with current URL.
                             current_url
                                 .join(location)
                                 .map(|u| u.to_string())
@@ -191,11 +203,14 @@ impl Tool for WebFetchTool {
                                 })?
                         };
 
-                    // SSRF re-validation on every hop.
+                    // SSRF re-validation on every hop (URL structure checks).
                     current_url = validate_url(&next_url_str)?;
                     self.leak_detector
                         .scan_http_request(current_url.as_str(), &[], None)
                         .map_err(|e| ToolError::NotAuthorized(e.to_string()))?;
+
+                    // DNS resolution + IP validation happens at the top of
+                    // the next loop iteration via validate_and_resolve_url.
 
                     redirects_remaining -= 1;
                     tracing::debug!(
