@@ -16,11 +16,15 @@ pub struct AuthState {
 
 /// Whether query-string token auth is allowed for this request.
 ///
-/// Only GET requests to SSE endpoints may use `?token=xxx`. This minimizes
-/// token-in-URL exposure on state-changing routes (POST/PUT/DELETE), where
-/// the token would leak via server logs, Referer headers, and browser history.
+/// Only GET requests to streaming endpoints may use `?token=xxx`. This
+/// minimizes token-in-URL exposure on state-changing routes, where the token
+/// would leak via server logs, Referer headers, and browser history.
 ///
-/// If you add a new SSE endpoint, add its path here.
+/// Allowed endpoints:
+/// - SSE: `/api/chat/events`, `/api/logs/events` (EventSource can't set headers)
+/// - WebSocket: `/api/chat/ws` (WS upgrade can't set custom headers)
+///
+/// If you add a new SSE or WebSocket endpoint, add its path here.
 fn allows_query_token_auth(request: &Request) -> bool {
     if request.method() != Method::GET {
         return false;
@@ -28,7 +32,7 @@ fn allows_query_token_auth(request: &Request) -> bool {
 
     matches!(
         request.uri().path(),
-        "/api/chat/events" | "/api/logs/events"
+        "/api/chat/events" | "/api/logs/events" | "/api/chat/ws"
     )
 }
 
@@ -99,8 +103,8 @@ mod tests {
         "ok"
     }
 
-    /// Router with SSE endpoints (query auth allowed) and non-SSE endpoints
-    /// (query auth rejected).
+    /// Router with streaming endpoints (query auth allowed) and regular
+    /// endpoints (query auth rejected).
     fn test_app(token: &str) -> Router {
         let state = AuthState {
             token: token.to_string(),
@@ -108,6 +112,7 @@ mod tests {
         Router::new()
             .route("/api/chat/events", get(dummy_handler))
             .route("/api/logs/events", get(dummy_handler))
+            .route("/api/chat/ws", get(dummy_handler))
             .route("/api/chat/history", get(dummy_handler))
             .route("/api/chat/send", post(dummy_handler))
             .layer(middleware::from_fn_with_state(state, auth_middleware))
@@ -157,6 +162,42 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_query_token_allowed_for_ws_upgrade() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/api/chat/ws?token=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_query_token_url_encoded() {
+        // Token with characters that get percent-encoded in URLs.
+        let raw_token = "tok+en/with spaces";
+        let app = test_app(raw_token);
+        let req = Request::builder()
+            .uri("/api/chat/events?token=tok%2Ben%2Fwith%20spaces")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_query_token_url_encoded_mismatch() {
+        let app = test_app("real-token");
+        // Encoded value decodes to "wrong-token", not "real-token".
+        let req = Request::builder()
+            .uri("/api/chat/events?token=wrong%2Dtoken")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
