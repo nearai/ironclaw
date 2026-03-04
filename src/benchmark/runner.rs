@@ -15,7 +15,9 @@ use crate::agent::{Agent, AgentDeps};
 use crate::benchmark::bench_channel::{BenchChannel, BenchChannelHandle};
 use crate::benchmark::instrumented::InstrumentedLlm;
 use crate::benchmark::judge::judge_turn;
-use crate::benchmark::metrics::{RunResult, ScenarioResult, ToolInvocation, TraceMetrics, TurnMetrics};
+use crate::benchmark::metrics::{
+    RunResult, ScenarioResult, ToolInvocation, TraceMetrics, TurnMetrics,
+};
 use crate::benchmark::scenario::{BenchScenario, EvalContext, Scenario};
 use crate::channels::{ChannelManager, IncomingMessage};
 use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
@@ -528,11 +530,19 @@ pub async fn run_bench_scenario(
     let backend = match LibSqlBackend::new_memory().await {
         Ok(b) => b,
         Err(e) => {
-            return error_result(&scenario.name, scenario_start, format!("Failed to create database: {e}"));
+            return error_result(
+                &scenario.name,
+                scenario_start,
+                format!("Failed to create database: {e}"),
+            );
         }
     };
     if let Err(e) = backend.run_migrations().await {
-        return error_result(&scenario.name, scenario_start, format!("Failed to run migrations: {e}"));
+        return error_result(
+            &scenario.name,
+            scenario_start,
+            format!("Failed to run migrations: {e}"),
+        );
     }
     let db: Arc<dyn Database> = Arc::new(backend);
 
@@ -551,12 +561,22 @@ pub async fn run_bench_scenario(
         tools.register_memory_tools(Arc::clone(ws));
     }
 
+    // Filter tools to scenario allowlist (if specified).
+    if !scenario.setup.tools.is_empty() {
+        let names: Vec<&str> = scenario.setup.tools.iter().map(|s| s.as_str()).collect();
+        tools.retain_only(&names).await;
+    }
+
     // 4. Seed workspace documents from setup.
     if let Some(ref ws_setup) = scenario.setup.workspace
         && let Some(ref ws) = workspace
         && let Err(e) = seed_workspace(ws, ws_setup).await
     {
-        return error_result(&scenario.name, scenario_start, format!("Failed to seed workspace: {e}"));
+        return error_result(
+            &scenario.name,
+            scenario_start,
+            format!("Failed to seed workspace: {e}"),
+        );
     }
 
     // 5. Safety layer, hooks, cost guard.
@@ -765,9 +785,9 @@ pub async fn run_bench_scenario(
             .collect(),
         turns: turn_metrics_list.len() as u32,
         hit_iteration_limit: false,
-        hit_timeout: turn_metrics_list.last().is_some_and(|t| {
-            t.errors.iter().any(|e| e.contains("timed out"))
-        }),
+        hit_timeout: turn_metrics_list
+            .last()
+            .is_some_and(|t| t.errors.iter().any(|e| e.contains("timed out"))),
     };
 
     // 12. Cleanup: abort the agent.

@@ -130,24 +130,16 @@ impl TurnAssertions {
         let mut criteria = Vec::new();
 
         for tool in &self.tools_called {
-            criteria.push(Criterion::ToolUsed {
-                tool: tool.clone(),
-            });
+            criteria.push(Criterion::ToolUsed { tool: tool.clone() });
         }
         for tool in &self.tools_not_called {
-            criteria.push(Criterion::ToolNotUsed {
-                tool: tool.clone(),
-            });
+            criteria.push(Criterion::ToolNotUsed { tool: tool.clone() });
         }
         for text in &self.response_contains {
-            criteria.push(Criterion::ResponseContains {
-                text: text.clone(),
-            });
+            criteria.push(Criterion::ResponseContains { text: text.clone() });
         }
         for text in &self.response_not_contains {
-            criteria.push(Criterion::ResponseNotContains {
-                text: text.clone(),
-            });
+            criteria.push(Criterion::ResponseNotContains { text: text.clone() });
         }
         for pattern in &self.response_matches {
             criteria.push(Criterion::ResponseMatches {
@@ -549,7 +541,10 @@ mod tests {
         }"#;
         let scenario: BenchScenario = serde_json::from_str(json).unwrap();
         assert_eq!(scenario.name, "echo-roundtrip");
-        assert_eq!(scenario.description, "Verify the agent can echo a message back");
+        assert_eq!(
+            scenario.description,
+            "Verify the agent can echo a message back"
+        );
         assert_eq!(scenario.tags, vec!["tool_selection", "basic"]);
         assert_eq!(scenario.turns.len(), 1);
         assert_eq!(scenario.turns[0].user, "Echo the word hello");
@@ -598,7 +593,10 @@ mod tests {
         }"#;
         let scenario: BenchScenario = serde_json::from_str(json).unwrap();
         assert_eq!(scenario.turns.len(), 2);
-        assert_eq!(scenario.turns[0].assertions.tools_called, vec!["write_file"]);
+        assert_eq!(
+            scenario.turns[0].assertions.tools_called,
+            vec!["write_file"]
+        );
         assert_eq!(
             scenario.turns[0].assertions.response_contains,
             vec!["wrote", "test.txt"]
@@ -761,9 +759,7 @@ mod tests {
         assert!(matches!(&criteria[1], Criterion::ToolUsed { tool } if tool == "time"));
         assert!(matches!(&criteria[2], Criterion::ToolNotUsed { tool } if tool == "shell"));
         assert!(matches!(&criteria[3], Criterion::ResponseContains { text } if text == "hello"));
-        assert!(
-            matches!(&criteria[4], Criterion::ResponseNotContains { text } if text == "error")
-        );
+        assert!(matches!(&criteria[4], Criterion::ResponseNotContains { text } if text == "error"));
         assert!(
             matches!(&criteria[5], Criterion::ResponseMatches { pattern } if pattern == r"\d{4}")
         );
