@@ -803,6 +803,8 @@ pub fn build_platform_state(nonce: &str) -> String {
 /// Strip the instance prefix from a state parameter to recover the lookup nonce.
 ///
 /// `"myinstance:abc123"` → `"abc123"`, `"abc123"` → `"abc123"` (no prefix).
+///
+/// Safe because nonces are base64url-encoded (`[A-Za-z0-9_-]`, no colons).
 pub fn strip_instance_prefix(state: &str) -> &str {
     state
         .split_once(':')

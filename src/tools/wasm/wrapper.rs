@@ -656,8 +656,12 @@ impl Tool for WasmToolWrapper {
         // Pre-resolve host credentials from secrets store (async, before blocking task).
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
-        // Credentials are stored under "default" by the ExtensionManager regardless
-        // of which channel the job came from (e.g., Telegram user IDs differ).
+        //
+        // BUG FIX: ExtensionManager stores OAuth tokens under user_id "default"
+        // (hardcoded at construction in app.rs), but this was previously looking
+        // them up under ctx.user_id — which could be a Telegram user ID, web
+        // gateway user, etc. — causing credential resolution to silently fail.
+        // Must match the storage key until per-user credential isolation is added.
         let credential_user_id = "default";
         let host_credentials = resolve_host_credentials(
             &self.capabilities,

@@ -2726,11 +2726,11 @@ mod tests {
         let html = String::from_utf8_lossy(&body);
 
         // The flow was found (stripped prefix matched) but is expired, so the
-        // handler returns an error page with the tool's display name — proving
-        // that the instance prefix was stripped and the flow was looked up.
+        // handler returns an error landing page. The flow being consumed from
+        // the registry (checked below) proves the prefix was stripped correctly.
         assert!(
-            html.contains("Test Tool") && html.contains("Authorization Failed"),
-            "Expected error page with tool name, html was: {}",
+            html.contains("Authorization Failed"),
+            "Expected error page, html was: {}",
             &html[..html.len().min(500)]
         );
 
