@@ -6,15 +6,16 @@
     "required_secrets": [
       {
         "name": "slack_bot_token",
-        "prompt": "Enter your Slack Bot OAuth Token (xoxb-...)",
+        "prompt": "Enter your Slack Bot User OAuth Token (starts with xoxb-). Find it under OAuth & Permissions in your Slack App settings.",
         "optional": false
       },
       {
         "name": "slack_signing_secret",
-        "prompt": "Enter your Slack Signing Secret (from App Credentials)",
+        "prompt": "Enter your Slack App Signing Secret (found under Basic Information > App Credentials in your Slack App settings).",
         "optional": false
       }
-    ]
+    ],
+    "setup_url": "https://api.slack.com/apps"
   },
   "capabilities": {
     "http": {
