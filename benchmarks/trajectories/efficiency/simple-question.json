@@ -1,0 +1,16 @@
+{
+  "name": "simple-question",
+  "description": "Simple math should need zero tool calls",
+  "tags": ["efficiency", "basic"],
+  "timeout_secs": 30,
+  "max_tool_iterations": 5,
+  "turns": [
+    {
+      "user": "What is 2 + 2?",
+      "assertions": {
+        "response_contains": ["4"],
+        "max_tool_calls": 0
+      }
+    }
+  ]
+}

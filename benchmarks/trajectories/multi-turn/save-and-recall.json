@@ -1,0 +1,25 @@
+{
+  "name": "save-and-recall",
+  "description": "Save a note in turn 1, recall it in turn 2",
+  "tags": ["memory", "multi-turn"],
+  "setup": {
+    "tools": ["memory_write", "memory_search", "memory_read"]
+  },
+  "timeout_secs": 60,
+  "max_tool_iterations": 10,
+  "turns": [
+    {
+      "user": "Save a note: Project Alpha launches on March 15th",
+      "assertions": {
+        "tools_called": ["memory_write"]
+      }
+    },
+    {
+      "user": "When does Project Alpha launch?",
+      "assertions": {
+        "tools_called": ["memory_search"],
+        "response_contains": ["March 15"]
+      }
+    }
+  ]
+}

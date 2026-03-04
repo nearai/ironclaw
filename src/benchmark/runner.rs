@@ -15,7 +15,7 @@ use crate::agent::{Agent, AgentDeps};
 use crate::benchmark::bench_channel::{BenchChannel, BenchChannelHandle};
 use crate::benchmark::instrumented::InstrumentedLlm;
 use crate::benchmark::metrics::{RunResult, ScenarioResult, ToolInvocation, TraceMetrics};
-use crate::benchmark::scenario::{EvalContext, Scenario};
+use crate::benchmark::scenario::{BenchScenario, EvalContext, Scenario};
 use crate::channels::{ChannelManager, IncomingMessage};
 use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
 use crate::db::Database;
@@ -36,6 +36,9 @@ pub struct BenchmarkConfig {
     pub filter: Option<String>,
     /// Optional category filter (exact match).
     pub category_filter: Option<String>,
+    /// Optional tag filter for `BenchScenario` loading. A scenario must have
+    /// at least one matching tag to be included.
+    pub tags_filter: Option<Vec<String>>,
 }
 
 impl Default for BenchmarkConfig {
@@ -45,6 +48,7 @@ impl Default for BenchmarkConfig {
             global_timeout_secs: 120,
             filter: None,
             category_filter: None,
+            tags_filter: None,
         }
     }
 }
@@ -79,6 +83,67 @@ pub fn load_scenarios(config: &BenchmarkConfig) -> Result<Vec<Scenario>, String>
     }
     if let Some(ref category) = config.category_filter {
         scenarios.retain(|s| s.category == *category);
+    }
+
+    Ok(scenarios)
+}
+
+/// Recursively discover `.json` files under `dir` and deserialize each as a
+/// single `BenchScenario`, appending to `scenarios`.
+fn load_json_recursive(
+    dir: &std::path::Path,
+    scenarios: &mut Vec<(PathBuf, BenchScenario)>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("Failed to read directory {}: {e}", dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read entry in {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            load_json_recursive(&path, scenarios)?;
+        } else if path.extension().is_some_and(|ext| ext == "json") {
+            let contents = std::fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+            let scenario: BenchScenario = serde_json::from_str(&contents)
+                .map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
+            scenarios.push((path, scenario));
+        }
+    }
+    Ok(())
+}
+
+/// Load all `BenchScenario`s from the configured trajectories directory,
+/// applying optional name and tag filters.
+///
+/// Each `.json` file in (or under) `config.scenarios_dir` is expected to
+/// contain a single `BenchScenario` object. Subdirectories are traversed
+/// recursively. Results are sorted by file path for deterministic ordering.
+pub fn load_bench_scenarios(config: &BenchmarkConfig) -> Result<Vec<BenchScenario>, String> {
+    let dir = &config.scenarios_dir;
+    if !dir.exists() {
+        return Err(format!(
+            "Trajectories directory not found: {}",
+            dir.display()
+        ));
+    }
+
+    let mut entries: Vec<(PathBuf, BenchScenario)> = Vec::new();
+    load_json_recursive(dir, &mut entries)?;
+
+    // Sort by file path for deterministic ordering.
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut scenarios: Vec<BenchScenario> = entries.into_iter().map(|(_, s)| s).collect();
+
+    // Apply name substring filter.
+    if let Some(ref filter) = config.filter {
+        scenarios.retain(|s| s.name.contains(filter.as_str()));
+    }
+
+    // Apply tag filter: scenario must have at least one matching tag.
+    if let Some(ref tags) = config.tags_filter {
+        scenarios.retain(|s| s.tags.iter().any(|t| tags.contains(t)));
     }
 
     Ok(scenarios)
@@ -433,6 +498,87 @@ mod tests {
         if let Some(ref h) = hash {
             assert!(!h.is_empty(), "hash should not be empty");
             assert!(h.len() <= 12, "short hash should be <= 12 chars");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // BenchScenario loader tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_load_bench_scenarios_from_trajectories() {
+        let config = BenchmarkConfig {
+            scenarios_dir: PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/benchmarks/trajectories"
+            )),
+            ..BenchmarkConfig::default()
+        };
+        if !config.scenarios_dir.exists() {
+            return;
+        }
+        let scenarios =
+            load_bench_scenarios(&config).expect("should load bench scenarios from trajectories");
+        assert!(
+            !scenarios.is_empty(),
+            "expected at least one BenchScenario in benchmarks/trajectories/"
+        );
+    }
+
+    #[test]
+    fn test_load_bench_scenarios_with_tag_filter() {
+        let config = BenchmarkConfig {
+            scenarios_dir: PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/benchmarks/trajectories"
+            )),
+            tags_filter: Some(vec!["tools".to_string()]),
+            ..BenchmarkConfig::default()
+        };
+        if !config.scenarios_dir.exists() {
+            return;
+        }
+        let scenarios =
+            load_bench_scenarios(&config).expect("should load bench scenarios with tag filter");
+        assert!(
+            !scenarios.is_empty(),
+            "expected at least one scenario with tag 'tools'"
+        );
+        for s in &scenarios {
+            assert!(
+                s.tags.contains(&"tools".to_string()),
+                "scenario '{}' should have tag 'tools', got tags: {:?}",
+                s.name,
+                s.tags
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_bench_scenarios_with_name_filter() {
+        let config = BenchmarkConfig {
+            scenarios_dir: PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/benchmarks/trajectories"
+            )),
+            filter: Some("pick-time".to_string()),
+            ..BenchmarkConfig::default()
+        };
+        if !config.scenarios_dir.exists() {
+            return;
+        }
+        let scenarios =
+            load_bench_scenarios(&config).expect("should load bench scenarios with name filter");
+        assert!(
+            !scenarios.is_empty(),
+            "expected at least one scenario matching 'pick-time'"
+        );
+        for s in &scenarios {
+            assert!(
+                s.name.contains("pick-time"),
+                "scenario '{}' should contain 'pick-time' in name",
+                s.name
+            );
         }
     }
 }
