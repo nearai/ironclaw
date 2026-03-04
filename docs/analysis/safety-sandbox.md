@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Safety & Sandbox Security Model
 
-> Updated: 2026-02-26 | Version: v0.13.0
+> Updated: 2026-03-05 | Version: v0.14.0
 
 ## 1. Overview
 
@@ -118,7 +118,7 @@ The `validate_tool_params` method recursively walks a `serde_json::Value` and ap
 
 ### 3.3 Leak Detector (`src/safety/leak_detector.rs`)
 
-The leak detector scans content for recognizable secret patterns at two points: before outbound HTTP requests from WASM tools (to prevent exfiltration), and in tool outputs before they reach the LLM (to prevent accidental exposure).
+The leak detector scans content for recognizable secret patterns at three points: before outbound HTTP requests from WASM tools (to prevent exfiltration), in tool outputs before they reach the LLM (to prevent accidental exposure), and in inbound user messages before they are processed by the agent (added in v0.13.0, PR #433). The third scan point catches accidentally-included secrets before the LLM can echo them back, which would trigger the outbound leak detector and create error loops.
 
 Each pattern specifies a `LeakAction`:
 

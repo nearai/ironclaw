@@ -1,6 +1,6 @@
 # IronClaw Installation & Deployment Guide
 
-> Version: v0.13.0 | Tested on: macOS 15 (Apple Silicon), macOS 14 (Intel), Linux
+> Version: v0.14.0 | Tested on: macOS 15 (Apple Silicon), macOS 14 (Intel), Linux
 
 Complete guide for installing, configuring, and deploying IronClaw as a personal AI assistant.
 
@@ -101,7 +101,7 @@ irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-install
 **Verify:**
 ```bash
 ironclaw --version
-# Expected: ironclaw 0.13.0
+# Expected: ironclaw 0.14.0
 ```
 
 ### 3.2 Build from Source
@@ -179,6 +179,7 @@ CLI_ENABLED=false
 DATABASE_BACKEND=libsql          # libsql (local) or postgres
 # DATABASE_URL="postgres://user:pass@host/db"  # Required if postgres
 # LIBSQL_PATH="~/.ironclaw/ironclaw.db"        # Default location
+# IRONCLAW_BASE_DIR=~/.ironclaw               # Override base dir (new in v0.13.0, default: ~/.ironclaw)
 
 ##############################################
 # LLM Backend
@@ -197,7 +198,7 @@ OPENAI_MODEL=gpt-4o              # or gpt-4-turbo, gpt-4o-mini, o1, o3-mini
 # NEAR AI (alternative)
 # LLM_BACKEND=nearai
 # NEARAI_API_KEY=your-nearai-key
-# NEARAI_MODEL=fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic
+# NEARAI_MODEL=zai-org/GLM-latest
 # NEARAI_CHEAP_MODEL=claude-haiku-4-20250514  # For smart routing (v0.10.0+)
 
 # Smart Routing (v0.10.0+)
@@ -239,6 +240,12 @@ GATEWAY_ENABLED=true
 GATEWAY_HOST=127.0.0.1
 GATEWAY_PORT=3000
 GATEWAY_AUTH_TOKEN=<your-32-byte-hex-token>
+# IRONCLAW_OAUTH_CALLBACK_URL=https://your-server.com/oauth/callback
+                              # Override OAuth callback URL for remote/VPS deployments
+                              # Default: http://127.0.0.1:9876/oauth/callback
+                              # Required when users access the gateway from a different machine
+# OAUTH_CALLBACK_HOST=127.0.0.1  # Interface to bind OAuth callback listener
+                              # Set to 0.0.0.0 for LAN access or SSH port forwarding
 
 ##############################################
 # Docker Sandbox
@@ -260,6 +267,8 @@ SANDBOX_MEMORY_LIMIT_MB=2048
 ##############################################
 RUST_LOG=ironclaw=info,tower_http=info
 ```
+
+> **v0.14.0 (#491):** The **Jobs** tab in the web gateway now shows both sandbox jobs (Docker container tasks) and regular agent jobs (long-running LLM reasoning tasks). Both job types display with unified status tracking, progress, and logs.
 
 ---
 
@@ -513,6 +522,8 @@ systemctl --user status ironclaw
 
 Direct workspace operations without starting the agent:
 
+**Workspace initialization files:** On first run, IronClaw seeds your workspace with well-known files including `MEMORY.md`, `IDENTITY.md`, `SOUL.md`, `TOOLS.md`, and `BOOTSTRAP.md`. The `BOOTSTRAP.md` triggers a one-time onboarding ritual (fresh workspaces only) after which it is automatically deleted. See [AGENT_README.md](AGENT_README.md) for details on workspace files.
+
 ```bash
 # Search workspace (hybrid FTS + semantic with PostgreSQL; hybrid FTS + vector with libSQL when embeddings are enabled; FTS-only when embeddings are disabled)
 ironclaw memory search "deployment notes"
@@ -718,6 +729,17 @@ launchctl unload ~/Library/LaunchAgents/ai.ironclaw.plist
 launchctl load ~/Library/LaunchAgents/ai.ironclaw.plist
 ```
 
+### Upgrading from v0.13.x
+
+**Okta WASM tool removed (v0.14.0):** If upgrading from v0.13.x and you had the Okta tool installed, remove the leftover files:
+
+```bash
+rm -f ~/.ironclaw/tools/okta.wasm
+rm -f ~/.ironclaw/tools/okta.capabilities.json
+```
+
+If you need Okta integration, build a custom WASM tool using [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md).
+
 ---
 
-*Source: IronClaw v0.13.0 · See also: [ARCHITECTURE.md](ARCHITECTURE.md), [AGENT_README.md](AGENT_README.md)*
+*Source: IronClaw v0.14.0 · See also: [ARCHITECTURE.md](ARCHITECTURE.md), [AGENT_README.md](AGENT_README.md)*

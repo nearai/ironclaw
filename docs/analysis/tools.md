@@ -1,6 +1,6 @@
 # IronClaw Tool System — Developer Reference
 
-Version: v0.12.0
+Version: v0.14.0
 Source: `src/tools/`
 
 ---
@@ -15,7 +15,7 @@ an MCP server — is expressed as a `Tool` implementation registered in the `Too
 
 | Category | Source | Domain | Description |
 |----------|--------|--------|-------------|
-| Core utilities | `builtin/` | Orchestrator | echo, time, json, http |
+| Core utilities | `builtin/` | Orchestrator | echo, time, json, http, web_fetch |
 | Filesystem | `builtin/file.rs` | Container | read_file, write_file, list_dir, apply_patch |
 | Shell | `builtin/shell.rs` | Container | shell command execution |
 | Memory | `builtin/memory.rs` | Orchestrator | memory_search, memory_write, memory_read, memory_tree |
@@ -208,6 +208,21 @@ The registry assembles built-in tools in these groups during startup:
 
 > **v0.12.0 note (#346):** As of v0.12.0, the Telegram MTPRoto API tool is registered as `telegram-mtproto` and the Slack API tool as `slack-tool` (renamed to avoid name collisions with the WASM channel entries).
 
+> **v0.13.1 (#474):** Brave Web Search WASM tool added to the registry.
+>
+> **Setup:**
+> 1. Get a Brave Search API key at https://brave.com/search/api/ (free tier: 2,000 queries/month)
+> 2. Install from the extension registry in the web UI, or run: `ironclaw tool auth web-search`
+> 3. Enter your API key when prompted — stored as `brave_api_key` secret
+>
+> **Tool invocation:** `web_search` with parameters:
+> - `query` (string, required): search terms
+> - `count` (number, optional): results to return
+> - `offset` (number, optional): pagination offset
+>
+> **Rate limits:** 30 requests/minute, 500 requests/hour
+> **Auth:** Manual — Bearer token injected as `X-Subscription-Token` header to `api.search.brave.com`
+
 ---
 
 ## 4. Built-in Tools Reference
@@ -220,6 +235,7 @@ The registry assembles built-in tools in these groups during startup:
 | `time` | operation* | Orchestrator | No |
 | `json` | operation*, data* | Orchestrator | No |
 | `http` | method*, url* | Orchestrator | Yes |
+| `web_fetch` | url* | Orchestrator | No |
 | `read_file` | path* | Container | No |
 | `write_file` | path*, content* | Container | No |
 | `list_dir` | — | Container | No |
@@ -385,7 +401,44 @@ Security controls enforced:
 
 ---
 
-### 4.5 File Tools (`builtin/file.rs`)
+### 4.5 `web_fetch` (`builtin/web_fetch.rs`)
+
+Fetches a web page and converts HTML to Markdown via Readability. Purpose-built for reading articles, documentation, and web pages; use `http` for API calls that require POST, custom headers, or authentication.
+
+- **No approval required** — auto-approved; SSRF and leak protections are unconditional
+- **Chrome-like User-Agent** — avoids bot-detection blocks on most sites
+- **GET-only** — no custom headers or request body
+- **HTML to Markdown conversion** — always attempted for `text/html` responses
+- **Rate-limited** — 30 requests/minute, 500/hour (same as `http`)
+- **Max response size** — 5 MB hard cap
+- **Returns** — structured JSON: `{url, final_url, status, title, content, word_count}`
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "description": "HTTPS URL to fetch. Must be a public URL (no localhost or private IPs)."
+    }
+  },
+  "required": ["url"],
+  "additionalProperties": false
+}
+```
+
+Security controls enforced:
+
+- HTTPS-only — HTTP URLs are rejected
+- SSRF protection on every redirect hop — each `Location` URL is validated before the next request
+- Max redirects: 3
+- DNS rebinding check — resolved IP addresses are validated against the SSRF blocklist
+- LeakDetector scans the outbound URL and response body for credential exposure
+- `requires_sanitization: true` — response is sanitized before reaching LLM
+
+---
+
+### 4.6 File Tools (`builtin/file.rs`)
 
 All four file tools use `domain = Container` and enforce sandbox path restrictions.
 
@@ -460,7 +513,7 @@ separators because normalization is lexical-only and reject is applied before an
 
 ---
 
-### 4.6 `shell` (`builtin/shell.rs`)
+### 4.7 `shell` (`builtin/shell.rs`)
 
 Execute shell commands. Domain: Container.
 
@@ -513,7 +566,7 @@ Security layers applied in order:
 
 ---
 
-### 4.7 Memory Tools (`builtin/memory.rs`)
+### 4.8 Memory Tools (`builtin/memory.rs`)
 
 Persistent workspace memory backed by the database (not the filesystem).
 
@@ -540,7 +593,7 @@ memory documents. Call before answering questions about prior work.
   "type": "object",
   "properties": {
     "content": { "type": "string" },
-    "target":  { "type": "string", "description": "Path: memory, daily_log, heartbeat, or custom" },
+    "target":  { "type": "string", "description": "Path: memory, daily_log, heartbeat, bootstrap, or custom" },
     "append":  { "type": "boolean" }
   },
   "required": ["content"]
@@ -578,7 +631,7 @@ Returns a hierarchical JSON structure of the workspace file tree.
 
 ---
 
-### 4.8 Job Tools (`builtin/job.rs`)
+### 4.9 Job Tools (`builtin/job.rs`)
 
 Manage parallel background jobs.
 
@@ -662,7 +715,7 @@ into a running job's input stream.
 
 ---
 
-### 4.9 Routine Tools (`builtin/routine.rs`)
+### 4.10 Routine Tools (`builtin/routine.rs`)
 
 Manage scheduled and reactive automations.
 
@@ -697,7 +750,7 @@ Manage scheduled and reactive automations.
 
 ---
 
-### 4.10 Extension Tools (`builtin/extension_tools.rs`)
+### 4.11 Extension Tools (`builtin/extension_tools.rs`)
 
 Manage WASM and MCP tool extensions.
 
@@ -712,7 +765,7 @@ Manage WASM and MCP tool extensions.
 
 ---
 
-### 4.11 Skill Tools (`builtin/skill_tools.rs`)
+### 4.12 Skill Tools (`builtin/skill_tools.rs`)
 
 Manage SKILL.md prompt extensions.
 
@@ -725,7 +778,7 @@ Manage SKILL.md prompt extensions.
 
 ---
 
-### 4.12 `message` (`builtin/message.rs`)
+### 4.13 `message` (`builtin/message.rs`)
 
 Send messages across connected channels, including optional attachments.
 
@@ -762,7 +815,7 @@ Behavior:
 
 ---
 
-### 4.13 HTML to Markdown Converter (`builtin/html_converter.rs`)
+### 4.14 HTML to Markdown Converter (`builtin/html_converter.rs`)
 
 Added in v0.10.0. Built-in tool and two-stage pipeline for converting HTML content to clean Markdown. Used internally by the `http` tool when fetching HTML pages, and exposed directly as the `html_to_markdown` built-in tool for web content ingestion and formatting.
 
@@ -788,7 +841,7 @@ let markdown = convert_html_to_markdown(html_content, "https://example.com/artic
 
 ---
 
-### 4.14 Built-in Tool Rate Limiter (`src/tools/rate_limiter.rs`)
+### 4.15 Built-in Tool Rate Limiter (`src/tools/rate_limiter.rs`)
 
 Added in v0.10.0. Shared rate limiter for built-in tool invocations (separate from WASM tool rate limiting). Provides per-tool, per-user sliding window rate limiting checked before every built-in tool execution.
 

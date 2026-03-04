@@ -3,9 +3,9 @@
 > **AI Agent Use**: Optimized for code review, bug triage, and targeted fixes.
 > Jump directly to the section relevant to the error or task — no narrative reading required.
 
-> Version baseline: IronClaw v0.13.0 (`v0.13.0` tag snapshot)
+> Version baseline: IronClaw v0.14.0 (`v0.14.0` tag snapshot)
 
-**Source**: IronClaw v0.13.0 (`v0.13.0`) · `~/src/ironclaw/`
+**Source**: IronClaw v0.14.0 (`v0.14.0`) · `~/src/ironclaw/`
 
 ---
 
@@ -63,6 +63,7 @@
 | Shell tool (env scrubbing) | `src/tools/builtin/shell.rs` |
 | HTML-to-Markdown converter (for HTTP responses) | `src/tools/builtin/html_converter.rs` |
 | HTTP tool (external requests) | `src/tools/builtin/http.rs` |
+| Web page fetch tool | `src/tools/builtin/web_fetch.rs` |
 | File tools (read/write/patch/list) | `src/tools/builtin/file.rs` |
 | Memory tools (search/write/read) | `src/tools/builtin/memory.rs` |
 | Job management tools | `src/tools/builtin/job.rs` |
@@ -119,7 +120,7 @@
 | Orchestrator internal API | `src/orchestrator/api.rs` |
 | Per-job bearer token store | `src/orchestrator/auth.rs` |
 | Entry point, CLI arg parsing | `src/main.rs` |
-| `ironclaw --version` (print version and exit, e.g., "ironclaw 0.12.0") | `src/main.rs` |
+| `ironclaw --version` (print version and exit, e.g., "ironclaw 0.13.0") | `src/main.rs` |
 | Library root, module declarations | `src/lib.rs` |
 
 ---
@@ -282,6 +283,12 @@ Config loading is two-stage by function, then `resolve()`-level precedence is ap
 - Runtime settings are loaded once at process startup (`from_env_with_toml`/`from_db_with_toml`); edits to env/config/db during runtime do not trigger reload without a restart.
 
 Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,String>>` for secret overlay
+
+### 4.0 Core
+
+| Env Var | Type | Default | Notes |
+|---------|------|---------|-------|
+| `IRONCLAW_BASE_DIR` | path | `~/.ironclaw` | Override base data directory for all ironclaw files (new in v0.13.0) |
 
 ### 4.1 Database
 
@@ -469,11 +476,67 @@ Config struct fields: `http_url`, `account`, `allow_from`, `dm_policy`, `group_p
 | `EMBEDDING_DIMENSION` | usize | model-derived | Explicit vector size override |
 | `HEARTBEAT_ENABLED` | bool | `false` | Enable proactive execution |
 | `HEARTBEAT_INTERVAL_SECS` | u64 | `1800` | 30 minutes default |
-| `HEARTBEAT_NOTIFY_CHANNEL` | string | unset | Channel to send findings |
+| `HEARTBEAT_NOTIFY_CHANNEL` | string | unset | Primary channel for heartbeat findings; falls back to all installed channels if unset or if targeted delivery fails. |
 | `HEARTBEAT_NOTIFY_USER` | string | unset | User to notify |
 | `MEMORY_HYGIENE_ENABLED` | bool | `true` | Enable automatic workspace hygiene |
 | `MEMORY_HYGIENE_RETENTION_DAYS` | u32 | `30` | Daily document retention window |
 | `MEMORY_HYGIENE_CADENCE_HOURS` | u32 | `12` | Minimum hours between hygiene passes |
+
+#### Workspace Initialization Files
+
+IronClaw seeds well-known workspace files on first run. Existing files are never overwritten.
+
+| File | Injected As | Agent-Writable | Description |
+|------|-------------|----------------|-------------|
+| `AGENTS.md` | `## Agent Instructions` | No (protected) | Behavioral guidelines and tool usage rules |
+| `SOUL.md` | `## Core Values` | No (protected) | Core values and principles |
+| `USER.md` | `## User Context` | No (protected) | User name, timezone, preferences |
+| `IDENTITY.md` | `## Identity` | No (protected) | Agent name, personality, identity |
+| `TOOLS.md` | `## Tool Notes` | **Yes** | Environment-specific tool guidance (agent-maintained) |
+| `MEMORY.md` | `## Long-Term Memory` | **Yes** | Curated long-term facts and decisions |
+| `HEARTBEAT.md` | — | **Yes** | Periodic task checklist |
+| `BOOTSTRAP.md` | `## First-Run Bootstrap` | **Yes** | First-run setup ritual (fresh workspaces only) |
+
+**Write-protected files** (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`) cannot be modified by the agent for security. Edit them directly in `~/.ironclaw/workspace/`.
+
+#### TOOLS.md — Environment-Specific Guidance
+
+`TOOLS.md` is agent-maintained guidance about your specific environment. It does **not** control which tools are available — it provides context the agent uses to operate more effectively.
+
+Default seed content:
+```markdown
+<!-- TOOLS.md — Environment-specific tool notes.
+     This file does not control which tools are available; it is guidance only.
+     The agent can update this file as it learns your setup.
+
+     Examples:
+     - SSH hosts: dev-box (Ubuntu 22.04, username: alice)
+     - Camera: Canon R6 mounted at /Volumes/EOS_R
+     - Default shell on remote: bash, no zsh
+
+     Add your environment notes below (outside the comment block).
+-->
+```
+
+Add your own notes below the comment block. The agent will refine and append as it discovers more about your environment.
+
+#### BOOTSTRAP.md — First-Run Onboarding
+
+`BOOTSTRAP.md` triggers a one-time onboarding ritual when IronClaw starts for the first time on a fresh workspace.
+
+**Behavior:**
+- Seeded **only on fresh workspaces** (not on upgrades — existing workspaces keep their memory)
+- The agent reads it at session start, follows the steps inside, then **automatically deletes it** so the ritual never repeats
+- Detection: fresh workspace means none of `AGENTS.md`, `SOUL.md`, `USER.md` exist yet
+
+**Default onboarding steps the agent follows:**
+1. Greet the user and introduce itself
+2. Ask questions to understand who you are, what you work on, and what you want from an AI assistant
+3. Save environment-specific tool details to `TOOLS.md`
+4. Save a summary of the conversation to `MEMORY.md`
+5. Delete `BOOTSTRAP.md` to complete the ritual
+
+**Custom BOOTSTRAP.md:** You can create your own `BOOTSTRAP.md` before first run to inject custom setup instructions. The agent will execute them on first boot then delete the file.
 
 ### 4.16 Tunnel
 
@@ -732,6 +795,7 @@ impl Tool for MyTool {
 | `time` | `builtin/time.rs` | Utility |
 | `json` | `builtin/json.rs` | Data |
 | `http` | `builtin/http.rs` | Network |
+| `web_fetch` | `builtin/web_fetch.rs` | Network |
 | `read_file`, `write_file`, `list_dir`, `apply_patch` | `builtin/file.rs` | Filesystem |
 | `shell` | `builtin/shell.rs` | Execution |
 | `message` | `builtin/message.rs` | Messaging |
@@ -783,6 +847,8 @@ Source: `src/tools/wasm/`
 | Rate limit | Capability-driven per-tool limits (`capabilities.json`) |
 | Module cache | `WASM_CACHE_DIR` (compiled `.cwasm` files) |
 | Component model | wasmtime component model (WASM P2) |
+
+**WASM Tool OAuth (v0.14.0):** WASM tools can declare OAuth flows in `capabilities.json` (`auth.oauth`). The web gateway handles the full flow — token exchange, validation, and scope merging for shared providers. Built-in defaults provided for Google OAuth.
 
 ### 8.6 MCP Client
 
@@ -839,6 +905,66 @@ LLM context (sanitized)
 **Credential detect** (`src/safety/credential_detect.rs`): Used by the HTTP tool specifically to detect manually-provided credentials in request parameters (headers, URL query params, URL userinfo). Checks for auth header names (Authorization, X-Api-Key, etc.), auth value prefixes (Bearer, Basic, Token), credential query params (api_key, access_token, etc.), and embedded URL userinfo. Triggers approval prompt before executing the HTTP request.
 
 **Shell tool** (`src/tools/builtin/shell.rs`): scrubs sensitive env vars before command execution to prevent `env` / `printenv` / `$VAR` leakage.
+
+---
+
+## 9.1 Slash Commands / Control Messages
+
+The following slash commands can be sent in any channel (REPL, web gateway, Telegram, Signal):
+
+**Control commands:**
+
+| Command | Description |
+|---------|-------------|
+| `/status [job_id]` | Show status of running jobs; optional job ID for specific job |
+| `/list` | List all active and recent jobs (alias for `/status`) |
+| `/progress [job_id]` | Show progress of a job (alias for `/status`) |
+| `/undo` | Undo the last agent action |
+| `/redo` | Redo the last undone action |
+| `/compact` | Manually trigger conversation compaction |
+| `/clear` | Clear the current conversation thread |
+| `/interrupt`, `/stop` | Interrupt the currently running agent turn |
+| `/heartbeat` | Manually trigger a heartbeat check |
+| `/summarize`, `/summary` | Generate a summary of the current thread |
+| `/suggest` | Suggest next steps based on the current thread state |
+
+**Thread management:**
+
+| Command | Description |
+|---------|-------------|
+| `/thread new`, `/new` | Create a new conversation thread |
+| `/thread <uuid>` | Switch to an existing thread by UUID |
+| `/resume <uuid>` | Resume from a specific checkpoint by UUID |
+| `/cancel <job_id>` | Cancel a specific running job by ID or ID prefix |
+
+**System commands:**
+
+| Command | Description |
+|---------|-------------|
+| `/help`, `/?` | Show available commands and help text |
+| `/version` | Show the current ironclaw version |
+| `/tools` | List available tools |
+| `/skills [args]` | List or search loaded skills |
+| `/ping` | Ping the agent (connectivity check) |
+| `/debug` | Toggle debug mode |
+| `/model` | Show the current LLM model |
+| `/model <name>` | Switch to a different LLM model |
+
+**Session control:**
+
+| Command | Description |
+|---------|-------------|
+| `/quit`, `/exit`, `/shutdown` | Exit/shutdown the agent |
+
+**Tool Approval Commands** (sent in response to approval prompts):
+
+| Response | Effect |
+|----------|--------|
+| `yes`, `y`, `approve`, `ok`, `/approve`, `/yes`, `/y` | Approve this specific tool call |
+| `always`, `a`, `yes always`, `approve always`, `/always`, `/a` | Approve and auto-approve future calls to this tool |
+| `no`, `n`, `deny`, `reject`, `cancel`, `/deny`, `/no`, `/n` | Deny this tool call |
+
+Source: `src/agent/submission.rs`
 
 ---
 
@@ -1244,4 +1370,4 @@ sqlite3 ~/.ironclaw/ironclaw.db "SELECT id, status, created_at FROM agent_jobs O
 
 ---
 
-*Source: IronClaw v0.13.0 (`v0.13.0`) · Docs: github.com/nearai/ironclaw-docs · Generated: 2026-03-02*
+*Source: IronClaw v0.14.0 (`v0.14.0`) · Docs: github.com/nearai/ironclaw-docs · Generated: 2026-03-05*

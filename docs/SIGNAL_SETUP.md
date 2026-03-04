@@ -1,6 +1,6 @@
 # Signal Channel Setup
 
-> Version baseline: IronClaw v0.13.0 (`v0.13.0` tag snapshot)
+> Version baseline: IronClaw v0.14.0 (`v0.14.0` tag snapshot)
 
 This guide covers configuring the native Signal channel for IronClaw, using the signal-cli HTTP daemon.
 
@@ -15,6 +15,7 @@ It supports:
 - **Tool approval workflow**: Interactive approve/deny prompts for tool execution
 - **DM pairing**: Allowlist-based access control with optional pairing mode
 - **Allowlist controls**: Phone numbers, UUIDs, or wildcard access
+- **Sending Attachments**: The agent can send file attachments via Signal using the `message` tool's `attachments` parameter (added in v0.13.0, PR #375). Attachment paths must be within `~/.ironclaw/`. Example: `attachments: ["~/.ironclaw/report.pdf"]`
 
 ## Prerequisites
 
@@ -134,17 +135,22 @@ Each entry in `SIGNAL_ALLOW_FROM` is one of:
 When IronClaw needs to use a tool (e.g., write a file, execute code), it sends an approval prompt to the Signal conversation:
 
 ```
-🔧 Tool Request
-Tool: write_file
-Description: Write content to a file
+⚠️ *Approval Required*
 
-Parameters:
+*Request ID:* `<uuid>`
+*Tool:* write_file
+*Parameters:*
+```
 {
   "path": "/home/user/notes.txt",
   "content": "Meeting notes..."
 }
+```
 
-Reply: yes/approve/ok (once) | always (session) | no/deny/reject (block)
+Reply with:
+• `yes` or `y` - Approve this request
+• `always` or `a` - Approve and auto-approve future write_file requests
+• `no` or `n` - Deny
 ```
 
 Supported responses:

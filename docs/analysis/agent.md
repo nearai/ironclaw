@@ -1,8 +1,8 @@
 # IronClaw Agent Runtime System — Deep Dive
 
-**Version:** v0.12.0
+**Version:** v0.14.0
 **Source tree:** `src/agent/` (21 files)
-**Last updated:** 2026-02-26
+**Last updated:** 2026-03-05
 
 ---
 
@@ -287,6 +287,8 @@ preserving deterministic output ordering even though execution is parallel.
 text response in the final assistant turn terminates the loop. This blocks
 prompt injection via malicious tool return values.
 
+**SSE Event Broadcasting (v0.14.0)**: Each worker event is broadcast in real-time via `SseEvent` to the web gateway's SSE channel for live UI updates. Event types: `JobMessage` (assistant/user turns), `JobToolUse` (tool invocations), `JobToolResult` (tool outputs), `JobStatus` (progress updates), `JobResult` (completion). `WorkerDeps` carries an `sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>` for this purpose.
+
 ### 5.4 Parallel Tool Dispatch — Three Phases
 
 `dispatcher.rs` implements `run_agentic_loop()` with three sequential phases
@@ -333,6 +335,8 @@ pub enum Trigger {
     Manual,
 }
 ```
+
+> **v0.14.0 (#500):** Manual routine triggers (Run Now) assign a unique `thread_id` of the form `"routine-{routine_id}-{timestamp}"` to prevent context mixing between separate trigger executions. Trigger handlers also verify `routine.user_id` matches the authenticated user before dispatching.
 
 ### 6.2 Action Types
 
