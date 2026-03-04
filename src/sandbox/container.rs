@@ -63,6 +63,29 @@ pub struct ContainerRunner {
     proxy_port: u16,
 }
 
+/// Append `text` into `buffer` up to `limit` bytes without breaking UTF-8.
+///
+/// Returns `true` when truncation occurred.
+fn append_with_limit(buffer: &mut String, text: &str, limit: usize) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+
+    if buffer.len() >= limit {
+        return true;
+    }
+
+    let remaining = limit - buffer.len();
+    if text.len() <= remaining {
+        buffer.push_str(text);
+        return false;
+    }
+
+    let end = crate::util::floor_char_boundary(text, remaining);
+    buffer.push_str(&text[..end]);
+    true
+}
+
 impl ContainerRunner {
     /// Create a new container runner.
     pub fn new(docker: Docker, image: String, proxy_port: u16) -> Self {
@@ -393,23 +416,11 @@ impl ContainerRunner {
             match result {
                 Ok(LogOutput::StdOut { message }) => {
                     let text = String::from_utf8_lossy(&message);
-                    if stdout.len() + text.len() > half_max {
-                        truncated = true;
-                        let remaining = half_max.saturating_sub(stdout.len());
-                        stdout.push_str(&text[..remaining.min(text.len())]);
-                    } else {
-                        stdout.push_str(&text);
-                    }
+                    truncated |= append_with_limit(&mut stdout, &text, half_max);
                 }
                 Ok(LogOutput::StdErr { message }) => {
                     let text = String::from_utf8_lossy(&message);
-                    if stderr.len() + text.len() > half_max {
-                        truncated = true;
-                        let remaining = half_max.saturating_sub(stderr.len());
-                        stderr.push_str(&text[..remaining.min(text.len())]);
-                    } else {
-                        stderr.push_str(&text);
-                    }
+                    truncated |= append_with_limit(&mut stderr, &text, half_max);
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -439,23 +450,11 @@ impl ContainerRunner {
                 match result {
                     Ok(LogOutput::StdOut { message }) => {
                         let text = String::from_utf8_lossy(&message);
-                        if stdout.len() < half_max {
-                            let remaining = half_max.saturating_sub(stdout.len());
-                            stdout.push_str(&text[..remaining.min(text.len())]);
-                            if text.len() > remaining {
-                                truncated = true;
-                            }
-                        }
+                        truncated |= append_with_limit(&mut stdout, &text, half_max);
                     }
                     Ok(LogOutput::StdErr { message }) => {
                         let text = String::from_utf8_lossy(&message);
-                        if stderr.len() < half_max {
-                            let remaining = half_max.saturating_sub(stderr.len());
-                            stderr.push_str(&text[..remaining.min(text.len())]);
-                            if text.len() > remaining {
-                                truncated = true;
-                            }
-                        }
+                        truncated |= append_with_limit(&mut stderr, &text, half_max);
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -576,6 +575,30 @@ fn unix_socket_candidates_from_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_with_limit_truncates_on_utf8_boundary() {
+        let mut out = String::new();
+        let truncated = append_with_limit(&mut out, "ab🙂cd", 5);
+        assert!(truncated);
+        assert_eq!(out, "ab");
+    }
+
+    #[test]
+    fn append_with_limit_marks_truncated_when_full() {
+        let mut out = "abc".to_string();
+        let truncated = append_with_limit(&mut out, "z", 3);
+        assert!(truncated);
+        assert_eq!(out, "abc");
+    }
+
+    #[test]
+    fn append_with_limit_appends_without_truncation() {
+        let mut out = String::new();
+        let truncated = append_with_limit(&mut out, "hello", 10);
+        assert!(!truncated);
+        assert_eq!(out, "hello");
+    }
 
     #[cfg(unix)]
     #[test]

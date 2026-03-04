@@ -81,6 +81,7 @@ impl WasmChannelLoader {
                     let cap_bytes = fs::read(cap_path).await?;
                     let cap_file = ChannelCapabilitiesFile::from_bytes(&cap_bytes)
                         .map_err(|e| WasmChannelError::InvalidCapabilities(e.to_string()))?;
+                    cap_file.validate();
 
                     // Debug: log raw capabilities
                     tracing::debug!(

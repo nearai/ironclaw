@@ -2110,7 +2110,7 @@ impl ExtensionManager {
                 auth_url: None,
                 callback_type: None,
                 instructions: Some(next.prompt.clone()),
-                setup_url: cap_file.setup.validation_endpoint.clone(),
+                setup_url: cap_file.setup.setup_url.clone(),
                 awaiting_token: true,
                 status: "awaiting_token".to_string(),
             });
@@ -2124,7 +2124,7 @@ impl ExtensionManager {
             auth_url: None,
             callback_type: None,
             instructions: Some(secret.prompt.clone()),
-            setup_url: cap_file.setup.validation_endpoint.clone(),
+            setup_url: cap_file.setup.setup_url.clone(),
             awaiting_token: true,
             status: "awaiting_token".to_string(),
         })

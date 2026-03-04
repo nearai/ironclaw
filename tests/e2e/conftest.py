@@ -133,9 +133,12 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server):
         )
     finally:
         if proc.returncode is None:
-            proc.send_signal(signal.SIGTERM)
+            # Use SIGINT (not SIGTERM) so tokio's ctrl_c handler triggers a
+            # graceful shutdown.  This lets the LLVM coverage runtime run its
+            # atexit handler and flush .profraw files for cargo-llvm-cov.
+            proc.send_signal(signal.SIGINT)
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
+                await asyncio.wait_for(proc.wait(), timeout=10)
             except asyncio.TimeoutError:
                 proc.kill()
 
