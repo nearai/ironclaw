@@ -403,15 +403,11 @@ impl SessionManager {
             });
         }
 
-        // Set env var so Config picks it up immediately
-        // (LlmConfig::resolve() auto-selects ChatCompletions mode when
-        // NEARAI_API_KEY is present).
-        //
-        // SAFETY: called during single-threaded interactive login flow.
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("NEARAI_API_KEY", &key);
-        }
+        // Make the key visible to Config resolution and `env_or_override()`
+        // callers for the remainder of this process. Uses a thread-safe
+        // overlay instead of `std::env::set_var`, which is UB in
+        // multi-threaded programs (Rust 1.82+).
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", &key);
 
         // Persist to ~/.ironclaw/.env so the key survives restarts
         // (bootstrap layer — available before DB is connected).
