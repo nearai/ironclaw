@@ -61,6 +61,23 @@ impl Default for ToolRateLimitConfig {
     }
 }
 
+/// Risk level of a tool invocation.
+///
+/// Used by the shell tool to classify commands and by the worker to drive
+/// approval decisions and observability logging. Implements `Ord` so callers
+/// can compare levels (e.g. `risk >= RiskLevel::High`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RiskLevel {
+    /// Read-only, safe, reversible (e.g. `ls`, `cat`, `grep`).
+    Low,
+    /// Creates or modifies state, but generally reversible
+    /// (e.g. `mkdir`, `git commit`, `cargo build`).
+    Medium,
+    /// Destructive, irreversible, or security-sensitive
+    /// (e.g. `rm -rf`, `git push --force`, `kill -9`).
+    High,
+}
+
 /// Where a tool should execute: orchestrator process or inside a container.
 ///
 /// Orchestrator tools run in the main agent process (memory access, job mgmt, etc).
@@ -210,6 +227,18 @@ pub trait Tool: Send + Sync {
     /// where the output might contain malicious content.
     fn requires_sanitization(&self) -> bool {
         true
+    }
+
+    /// Risk level for a specific invocation of this tool.
+    ///
+    /// Defaults to `Low` (read-only, safe). Override for tools whose risk
+    /// depends on the parameters — the shell tool classifies commands into
+    /// `Low` / `Medium` / `High` based on the command string.
+    ///
+    /// The worker logs this value with every tool call so operators can audit
+    /// the risk level at which each execution was classified.
+    fn risk_level_for(&self, _params: &serde_json::Value) -> RiskLevel {
+        RiskLevel::Low
     }
 
     /// Whether this tool invocation requires user approval.
