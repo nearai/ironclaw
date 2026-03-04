@@ -466,6 +466,24 @@ async fn load_fixtures_recursive(
     Ok(())
 }
 
+/// Seed identity override files into the workspace.
+///
+/// Each entry in `identity` maps a workspace path (e.g., "IDENTITY.md") to
+/// its content. These are written before the agent starts so that
+/// `workspace.system_prompt()` picks them up.
+async fn seed_identity(
+    workspace: &crate::workspace::Workspace,
+    identity: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    for (path, content) in identity {
+        workspace
+            .write(path, content)
+            .await
+            .map_err(|e| format!("Failed to seed identity file '{}': {e}", path))?;
+    }
+    Ok(())
+}
+
 /// Build tool invocation records from BenchChannel data.
 fn build_tool_invocations(
     tool_calls_completed: &[(String, bool)],
@@ -576,6 +594,18 @@ pub async fn run_bench_scenario(
             &scenario.name,
             scenario_start,
             format!("Failed to seed workspace: {e}"),
+        );
+    }
+
+    // 4b. Seed identity override files from setup.
+    if !scenario.setup.identity.is_empty()
+        && let Some(ref ws) = workspace
+        && let Err(e) = seed_identity(ws, &scenario.setup.identity).await
+    {
+        return error_result(
+            &scenario.name,
+            scenario_start,
+            format!("Failed to seed identity: {e}"),
         );
     }
 
@@ -1026,5 +1056,31 @@ mod tests {
                 s.name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_seed_identity_files() {
+        use crate::db::libsql::LibSqlBackend;
+        use crate::workspace::Workspace;
+
+        // Use a temp file so connections share state (in-memory DBs are
+        // connection-local in libsql).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_seed_identity.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let ws = Workspace::new_with_db("bench-user", db);
+
+        let mut identity = std::collections::HashMap::new();
+        identity.insert("IDENTITY.md".to_string(), "You are TestBot.".to_string());
+        identity.insert("USER.md".to_string(), "The user is a tester.".to_string());
+
+        seed_identity(&ws, &identity).await.unwrap();
+
+        let id_doc = ws.read("IDENTITY.md").await.unwrap();
+        assert_eq!(id_doc.content, "You are TestBot.");
+        let user_doc = ws.read("USER.md").await.unwrap();
+        assert_eq!(user_doc.content, "The user is a tester.");
     }
 }
