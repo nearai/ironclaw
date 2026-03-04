@@ -1,9 +1,9 @@
 {
   "name": "whatsapp",
-  "display_name": "WhatsApp",
+  "display_name": "WhatsApp Channel",
   "kind": "channel",
   "version": "0.1.0",
-  "description": "WhatsApp Cloud API channel for receiving and responding to messages",
+  "description": "Talk to your agent through WhatsApp",
   "keywords": ["messaging", "chat", "whatsapp", "meta"],
 
   "source": {

@@ -1,9 +1,9 @@
 {
   "name": "discord",
-  "display_name": "Discord",
+  "display_name": "Discord Channel",
   "kind": "channel",
   "version": "0.1.0",
-  "description": "Discord Gateway/Webhook channel for slash commands, buttons, and messages",
+  "description": "Talk to your agent in Discord",
   "keywords": ["messaging", "chat", "discord", "bot"],
 
   "source": {

@@ -60,7 +60,7 @@ impl HttpTool {
     }
 }
 
-fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
+pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
 

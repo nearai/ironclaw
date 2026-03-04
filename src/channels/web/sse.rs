@@ -36,10 +36,32 @@ impl SseManager {
         }
     }
 
+    /// Create an SSE manager that reuses an existing broadcast sender.
+    ///
+    /// This preserves the broadcast channel across `rebuild_state` calls so
+    /// that sender handles captured by other components remain valid.
+    ///
+    /// **Important:** The connection counter is reset to zero. This method must
+    /// only be called before the server starts accepting connections (i.e.,
+    /// during startup wiring). Calling it after connections are established
+    /// will break connection tracking and allow exceeding `MAX_CONNECTIONS`.
+    pub fn from_sender(tx: broadcast::Sender<SseEvent>) -> Self {
+        Self {
+            tx,
+            connection_count: Arc::new(AtomicU64::new(0)),
+            max_connections: MAX_CONNECTIONS,
+        }
+    }
+
     /// Broadcast an event to all connected clients.
     pub fn broadcast(&self, event: SseEvent) {
         // Ignore send errors (no receivers is fine)
         let _ = self.tx.send(event);
+    }
+
+    /// Get a clone of the broadcast sender for use by other components.
+    pub fn sender(&self) -> broadcast::Sender<SseEvent> {
+        self.tx.clone()
     }
 
     /// Get current number of active connections.
@@ -120,6 +142,7 @@ impl SseManager {
                     SseEvent::JobStatus { .. } => "job_status",
                     SseEvent::JobResult { .. } => "job_result",
                     SseEvent::Heartbeat => "heartbeat",
+                    SseEvent::ExtensionStatus { .. } => "extension_status",
                 };
                 Ok(Event::default().event(event_type).data(data))
             });

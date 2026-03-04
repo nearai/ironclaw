@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>IronClaw</title>
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -78,9 +78,9 @@
       </div>
       <div class="chat-container">
         <div class="chat-messages" id="chat-messages"></div>
-        <div class="chat-status" id="chat-status"></div>
+        <div id="slash-autocomplete" class="slash-autocomplete" style="display:none"></div>
         <div class="chat-input">
-          <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
+          <textarea id="chat-input" placeholder="Message or / for commands..." rows="1"></textarea>
           <button id="send-btn" onclick="sendMessage()">Send</button>
         </div>
       </div>

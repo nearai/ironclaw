@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
+use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobState};
 use crate::db::Database;
 use crate::error::Error;
@@ -34,6 +35,8 @@ pub struct WorkerDeps {
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
+    /// SSE broadcast sender for live job event streaming to the web gateway.
+    pub sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
 }
 
 /// Worker that executes a single job.
@@ -98,17 +101,89 @@ impl Worker {
         }
     }
 
-    /// Fire-and-forget persistence of a job event.
+    /// Fire-and-forget persistence of a job event and SSE broadcast.
     fn log_event(&self, event_type: &str, data: serde_json::Value) {
+        let job_id = self.job_id;
+
+        // Persist to DB
         if let Some(store) = self.store() {
             let store = store.clone();
-            let job_id = self.job_id;
-            let event_type = event_type.to_string();
+            let et = event_type.to_string();
+            let d = data.clone();
             tokio::spawn(async move {
-                if let Err(e) = store.save_job_event(job_id, &event_type, &data).await {
+                if let Err(e) = store.save_job_event(job_id, &et, &d).await {
                     tracing::warn!("Failed to persist event for job {}: {}", job_id, e);
                 }
             });
+        }
+
+        // Broadcast SSE for live web UI updates
+        if let Some(ref tx) = self.deps.sse_tx {
+            let job_id_str = job_id.to_string();
+            let event = match event_type {
+                "message" => Some(SseEvent::JobMessage {
+                    job_id: job_id_str,
+                    role: data
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("assistant")
+                        .to_string(),
+                    content: data
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                }),
+                "tool_use" => Some(SseEvent::JobToolUse {
+                    job_id: job_id_str,
+                    tool_name: data
+                        .get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    input: data
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                }),
+                "tool_result" => Some(SseEvent::JobToolResult {
+                    job_id: job_id_str,
+                    tool_name: data
+                        .get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    output: data
+                        .get("output")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                }),
+                "status" => Some(SseEvent::JobStatus {
+                    job_id: job_id_str,
+                    message: data
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                }),
+                "result" => Some(SseEvent::JobResult {
+                    job_id: job_id_str,
+                    status: data
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("completed")
+                        .to_string(),
+                    session_id: data
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                }),
+                _ => None,
+            };
+            if let Some(event) = event {
+                let _ = tx.send(event);
+            }
         }
     }
 
@@ -123,7 +198,7 @@ impl Worker {
                 tracing::debug!("Worker for job {} stopped before starting", self.job_id);
                 return Ok(());
             }
-            Some(WorkerMessage::Ping) => {}
+            Some(WorkerMessage::Ping) | Some(WorkerMessage::UserMessage(_)) => {}
         }
 
         // Get job context
@@ -158,6 +233,37 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         match result {
             Ok(Ok(())) => {
                 tracing::info!("Worker for job {} completed successfully", self.job_id);
+                // Only mark completed if still in an active, non-stuck state.
+                // The execution_loop may have already called mark_completed or
+                // mark_stuck (e.g. "plan completed but work remains").
+                let current_state = self
+                    .context_manager()
+                    .get_context(self.job_id)
+                    .await
+                    .map(|ctx| ctx.state);
+                match current_state {
+                    Ok(state) if state.is_terminal() => {
+                        // Already in a terminal state (e.g. execution_loop
+                        // called mark_completed itself).
+                    }
+                    Ok(JobState::Stuck) => {
+                        // execution_loop marked this as stuck (e.g. "plan
+                        // completed but work remains"); leave for self-repair.
+                        tracing::info!(
+                            "Job {} returned Ok but is Stuck — leaving for self-repair",
+                            self.job_id
+                        );
+                    }
+                    Ok(_) => {
+                        self.mark_completed().await?;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            job_id = %self.job_id,
+                            "Failed to get job context, cannot mark as completed: {}", e
+                        );
+                    }
+                }
             }
             Ok(Err(e)) => {
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
@@ -188,6 +294,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .unwrap_or(50) as usize;
         let max_iterations = max_iterations.min(MAX_WORKER_ITERATIONS);
         let mut iteration = 0;
+        const MAX_CONSECUTIVE_RATE_LIMITS: usize = 10;
+        let mut consecutive_rate_limits = 0usize;
 
         // Initial tool definitions for planning (will be refreshed in loop)
         reason_ctx.available_tools = self.tools().tool_definitions().await;
@@ -238,15 +346,27 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             None
         };
 
-        // If we have a plan, execute it
+        // If we have a plan, execute it. Two exit paths:
+        // 1. Plan ran to completion → job is Completed or needs continuation
+        //    (check state and only fall through if not terminal)
+        // 2. Plan was interrupted by UserMessage → fall through to direct loop
         if let Some(ref plan) = plan {
-            return self.execute_plan(rx, reasoning, reason_ctx, plan).await;
+            self.execute_plan(rx, reasoning, reason_ctx, plan).await?;
+
+            // If the plan marked the job terminal, we're done. Only fall
+            // through to the direct selection loop if the plan was
+            // interrupted or explicitly left the job in-progress.
+            if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
+                && (ctx.state.is_terminal() || ctx.state == JobState::Stuck)
+            {
+                return Ok(());
+            }
         }
 
-        // Otherwise, use direct tool selection loop
+        // Direct tool selection loop (also used as fallback after plan interruption)
         loop {
-            // Check for stop signal
-            if let Ok(msg) = rx.try_recv() {
+            // Check for stop signal and injected user messages
+            while let Ok(msg) = rx.try_recv() {
                 match msg {
                     WorkerMessage::Stop => {
                         tracing::debug!("Worker for job {} received stop signal", self.job_id);
@@ -256,6 +376,20 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         tracing::trace!("Worker for job {} received ping", self.job_id);
                     }
                     WorkerMessage::Start => {}
+                    WorkerMessage::UserMessage(content) => {
+                        tracing::info!(
+                            job_id = %self.job_id,
+                            "Worker received follow-up user message"
+                        );
+                        reason_ctx.messages.push(ChatMessage::user(&content));
+                        self.log_event(
+                            "message",
+                            serde_json::json!({
+                                "role": "user",
+                                "content": content,
+                            }),
+                        );
+                    }
                 }
             }
 
@@ -276,12 +410,64 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             // Refresh tool definitions so newly built tools become visible
             reason_ctx.available_tools = self.tools().tool_definitions().await;
 
-            // Select next tool(s) to use
-            let selections = reasoning.select_tools(reason_ctx).await?;
+            // Select next tool(s) to use, with rate-limit retry.
+            let selections = match reasoning.select_tools(reason_ctx).await {
+                Ok(s) => s,
+                Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
+                    consecutive_rate_limits += 1;
+                    let wait = retry_after.unwrap_or(Duration::from_secs(5));
+                    tracing::warn!(
+                        job_id = %self.job_id,
+                        wait_secs = wait.as_secs(),
+                        attempt = consecutive_rate_limits,
+                        "LLM rate limited during tool selection, backing off"
+                    );
+                    if consecutive_rate_limits >= MAX_CONSECUTIVE_RATE_LIMITS {
+                        self.mark_stuck("Persistent rate limiting").await?;
+                        return Ok(());
+                    }
+                    self.log_event(
+                        "status",
+                        serde_json::json!({
+                            "message": format!("Rate limited, retrying in {}s ({}/{})...",
+                                wait.as_secs(), consecutive_rate_limits, MAX_CONSECUTIVE_RATE_LIMITS),
+                        }),
+                    );
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
 
             if selections.is_empty() {
                 // No tools from select_tools, ask LLM directly (may still return tool calls)
-                let respond_output = reasoning.respond_with_tools(reason_ctx).await?;
+                let respond_output = match reasoning.respond_with_tools(reason_ctx).await {
+                    Ok(o) => o,
+                    Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
+                        consecutive_rate_limits += 1;
+                        let wait = retry_after.unwrap_or(Duration::from_secs(5));
+                        tracing::warn!(
+                            job_id = %self.job_id,
+                            wait_secs = wait.as_secs(),
+                            attempt = consecutive_rate_limits,
+                            "LLM rate limited during respond_with_tools, backing off"
+                        );
+                        if consecutive_rate_limits >= MAX_CONSECUTIVE_RATE_LIMITS {
+                            self.mark_stuck("Persistent rate limiting").await?;
+                            return Ok(());
+                        }
+                        self.log_event(
+                            "status",
+                            serde_json::json!({
+                                "message": format!("Rate limited, retrying in {}s ({}/{})...",
+                                    wait.as_secs(), consecutive_rate_limits, MAX_CONSECUTIVE_RATE_LIMITS),
+                            }),
+                        );
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
 
                 match respond_output.result {
                     RespondResult::Text(response) => {
@@ -392,6 +578,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         .await?;
                 }
             }
+
+            // Reset rate-limit counter after a successful iteration (all LLM
+            // calls succeeded). Placed here so alternating success/fail between
+            // select_tools and respond_with_tools cannot bypass the cap.
+            consecutive_rate_limits = 0;
 
             // Small delay between iterations
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -805,8 +996,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         plan: &ActionPlan,
     ) -> Result<(), Error> {
         for (i, action) in plan.actions.iter().enumerate() {
-            // Check for stop signal
-            if let Ok(msg) = rx.try_recv() {
+            // Check for stop signal and injected user messages
+            while let Ok(msg) = rx.try_recv() {
                 match msg {
                     WorkerMessage::Stop => {
                         tracing::debug!(
@@ -819,6 +1010,29 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         tracing::trace!("Worker for job {} received ping", self.job_id);
                     }
                     WorkerMessage::Start => {}
+                    WorkerMessage::UserMessage(content) => {
+                        tracing::info!(
+                            job_id = %self.job_id,
+                            "User message received during plan execution, abandoning plan"
+                        );
+                        reason_ctx.messages.push(ChatMessage::user(&content));
+                        self.log_event(
+                            "message",
+                            serde_json::json!({
+                                "role": "user",
+                                "content": content,
+                            }),
+                        );
+                        self.log_event(
+                            "status",
+                            serde_json::json!({
+                                "message": "Plan interrupted by user message, re-evaluating...",
+                            }),
+                        );
+                        // Return Ok to break out of plan; caller falls through to
+                        // the direct selection loop for LLM re-evaluation.
+                        return Ok(());
+                    }
                 }
             }
 
@@ -871,14 +1085,18 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         if crate::util::llm_signals_completion(&response) {
             self.mark_completed().await?;
         } else {
-            // Job not complete, could re-plan or fall back to direct selection
+            // Job not complete — return Ok without marking terminal so the
+            // caller falls through to the direct selection loop for continuation.
             tracing::info!(
                 "Job {} plan completed but work remains, falling back to direct selection",
                 self.job_id
             );
-            // Continue with standard execution loop by returning (will be picked up by main loop)
-            self.mark_stuck("Plan completed but job incomplete - needs re-planning")
-                .await?;
+            self.log_event(
+                "status",
+                serde_json::json!({
+                    "message": "Plan completed but job needs more work, continuing...",
+                }),
+            );
         }
 
         Ok(())
@@ -909,6 +1127,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         self.log_event(
             "result",
             serde_json::json!({
+                "status": "completed",
                 "success": true,
                 "message": "Job completed successfully",
             }),
@@ -934,6 +1153,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         self.log_event(
             "result",
             serde_json::json!({
+                "status": "failed",
                 "success": false,
                 "message": format!("Execution failed: {}", reason),
             }),
@@ -954,6 +1174,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         self.log_event(
             "result",
             serde_json::json!({
+                "status": "stuck",
                 "success": false,
                 "message": format!("Job stuck: {}", reason),
             }),
@@ -1072,6 +1293,7 @@ mod tests {
             hooks: Arc::new(crate::hooks::HookRegistry::new()),
             timeout: Duration::from_secs(30),
             use_planning: false,
+            sse_tx: None,
         };
 
         Worker::new(job_id, deps)

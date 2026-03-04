@@ -73,6 +73,8 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    /// SSE broadcast sender for live job event streaming to the web gateway.
+    pub sse_tx: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
 }
 
 /// The main agent that coordinates all components.
@@ -111,7 +113,7 @@ impl Agent {
 
         let session_manager = session_manager.unwrap_or_else(|| Arc::new(SessionManager::new()));
 
-        let scheduler = Arc::new(Scheduler::new(
+        let mut scheduler = Scheduler::new(
             config.clone(),
             context_manager.clone(),
             deps.llm.clone(),
@@ -119,7 +121,11 @@ impl Agent {
             deps.tools.clone(),
             deps.store.clone(),
             deps.hooks.clone(),
-        ));
+        );
+        if let Some(ref tx) = deps.sse_tx {
+            scheduler.set_sse_sender(tx.clone());
+        }
+        let scheduler = Arc::new(scheduler);
 
         Self {
             config,
@@ -137,6 +143,11 @@ impl Agent {
     }
 
     // Convenience accessors
+
+    /// Get the scheduler (for external wiring, e.g. CreateJobTool).
+    pub fn scheduler(&self) -> Arc<Scheduler> {
+        Arc::clone(&self.scheduler)
+    }
 
     pub(super) fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()
@@ -413,7 +424,7 @@ impl Agent {
                     // Load initial event cache
                     engine.refresh_event_cache().await;
 
-                    // Spawn notification forwarder
+                    // Spawn notification forwarder (mirrors heartbeat pattern)
                     let channels = self.channels.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
@@ -423,14 +434,33 @@ impl Agent {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("default")
                                 .to_string();
-                            let results = channels.broadcast_all(&user, response).await;
-                            for (ch, result) in results {
-                                if let Err(e) = result {
-                                    tracing::warn!(
-                                        "Failed to broadcast routine notification to {}: {}",
-                                        ch,
-                                        e
-                                    );
+                            let notify_channel = response
+                                .metadata
+                                .get("notify_channel")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+
+                            // Try the configured channel first, fall back to
+                            // broadcasting on all channels.
+                            let targeted_ok = if let Some(ref channel) = notify_channel {
+                                channels
+                                    .broadcast(channel, &user, response.clone())
+                                    .await
+                                    .is_ok()
+                            } else {
+                                false
+                            };
+
+                            if !targeted_ok {
+                                let results = channels.broadcast_all(&user, response).await;
+                                for (ch, result) in results {
+                                    if let Err(e) = result {
+                                        tracing::warn!(
+                                            "Failed to broadcast routine notification to {}: {}",
+                                            ch,
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -588,6 +618,19 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+        // Set message tool context for this turn (current channel and target)
+        // For Signal, use signal_target from metadata (group:ID or phone number),
+        // otherwise fall back to user_id
+        let target = message
+            .metadata
+            .get("signal_target")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| message.user_id.clone());
+        self.tools()
+            .set_message_tool_context(Some(message.channel.clone()), Some(target))
+            .await;
+
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
 
@@ -685,6 +728,13 @@ impl Agent {
             Submission::Heartbeat => self.process_heartbeat().await,
             Submission::Summarize => self.process_summarize(session, thread_id).await,
             Submission::Suggest => self.process_suggest(session, thread_id).await,
+            Submission::JobStatus { job_id } => {
+                self.process_job_status(&message.user_id, job_id.as_deref())
+                    .await
+            }
+            Submission::JobCancel { job_id } => {
+                self.process_job_cancel(&message.user_id, &job_id).await
+            }
             Submission::Quit => return Ok(None),
             Submission::SwitchThread { thread_id: target } => {
                 self.process_switch_thread(message, target).await

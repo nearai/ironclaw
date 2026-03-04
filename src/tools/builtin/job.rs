@@ -12,8 +12,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
@@ -23,6 +25,12 @@ use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+
+/// Lazy scheduler reference, filled after Agent::new creates the Scheduler.
+///
+/// Solves the chicken-and-egg: tools are registered before the Scheduler exists
+/// (Scheduler needs the ToolRegistry). Created empty, filled after Agent::new.
+pub type SchedulerSlot = Arc<RwLock<Option<Arc<crate::agent::Scheduler>>>>;
 
 /// Resolve a job ID from a full UUID or a short prefix (like git short SHAs).
 ///
@@ -72,6 +80,8 @@ async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result
 /// job via the ContextManager. The LLM never needs to know the difference.
 pub struct CreateJobTool {
     context_manager: Arc<ContextManager>,
+    /// Lazy scheduler for dispatching local (non-sandbox) jobs.
+    scheduler_slot: Option<SchedulerSlot>,
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
     /// Broadcast sender for job events (used to subscribe a monitor).
@@ -86,6 +96,7 @@ impl CreateJobTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
         Self {
             context_manager,
+            scheduler_slot: None,
             job_manager: None,
             store: None,
             event_tx: None,
@@ -114,6 +125,12 @@ impl CreateJobTool {
     ) -> Self {
         self.event_tx = Some(event_tx);
         self.inject_tx = Some(inject_tx);
+        self
+    }
+
+    /// Inject a lazy scheduler slot for dispatching local (non-sandbox) jobs.
+    pub fn with_scheduler_slot(mut self, slot: SchedulerSlot) -> Self {
+        self.scheduler_slot = Some(slot);
         self
     }
 
@@ -238,7 +255,8 @@ impl CreateJobTool {
         }
     }
 
-    /// Execute via in-memory ContextManager (no sandbox).
+    /// Execute via Scheduler (persists to DB + spawns worker), or fall back to
+    /// ContextManager-only if the scheduler isn't available yet.
     async fn execute_local(
         &self,
         title: &str,
@@ -246,6 +264,38 @@ impl CreateJobTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+
+        // Use the scheduler if available — creates in ContextManager, persists
+        // to DB, transitions to InProgress, and spawns a worker. The new job
+        // runs independently with its own Worker and LLM context (not inheriting
+        // the parent conversation). MaxJobsExceeded is returned as error JSON
+        // so the LLM can report it to the user.
+        if let Some(ref slot) = self.scheduler_slot
+            && let Some(ref scheduler) = *slot.read().await
+        {
+            return match scheduler
+                .dispatch_job(&ctx.user_id, title, description, None)
+                .await
+            {
+                Ok(job_id) => {
+                    let result = serde_json::json!({
+                        "job_id": job_id.to_string(),
+                        "title": title,
+                        "status": "in_progress",
+                        "message": format!("Created and scheduled job '{}'", title)
+                    });
+                    Ok(ToolOutput::success(result, start.elapsed()))
+                }
+                Err(e) => {
+                    let result = serde_json::json!({
+                        "error": e.to_string()
+                    });
+                    Ok(ToolOutput::success(result, start.elapsed()))
+                }
+            };
+        }
+
+        // Fallback: ContextManager-only (scheduler not yet initialized).
         match self
             .context_manager
             .create_job_for_user(&ctx.user_id, title, description)
@@ -256,7 +306,7 @@ impl CreateJobTool {
                     "job_id": job_id.to_string(),
                     "title": title,
                     "status": "pending",
-                    "message": format!("Created job '{}'", title)
+                    "message": format!("Created job '{}' (not scheduled — scheduler unavailable)", title)
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
@@ -554,10 +604,7 @@ fn validate_env_var_name(name: &str) -> Result<(), ToolError> {
 }
 
 fn projects_base() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("projects")
+    ironclaw_base_dir().join("projects")
 }
 
 /// Resolve the project directory, creating it if it doesn't exist.

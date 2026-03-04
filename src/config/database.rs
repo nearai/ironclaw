@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use secrecy::{ExposeSecret, SecretString};
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{optional_env, parse_optional_env};
 use crate::error::ConfigError;
 
@@ -39,6 +40,48 @@ impl std::str::FromStr for DatabaseBackend {
     }
 }
 
+/// PostgreSQL SSL/TLS mode, matching libpq semantics for the common cases.
+///
+/// Default is `Prefer`: attempt TLS, fall back to plaintext.  This is the
+/// safest non-breaking default — local Postgres without TLS keeps working
+/// while managed providers (Neon, Supabase, RDS) automatically get TLS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SslMode {
+    /// Never use TLS (equivalent to libpq `sslmode=disable`).
+    Disable,
+    /// Try TLS first; fall back to plaintext on failure (default).
+    #[default]
+    Prefer,
+    /// Require TLS; fail if the server does not support it.
+    Require,
+}
+
+impl std::fmt::Display for SslMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disable => write!(f, "disable"),
+            Self::Prefer => write!(f, "prefer"),
+            Self::Require => write!(f, "require"),
+        }
+    }
+}
+
+impl std::str::FromStr for SslMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "disable" => Ok(Self::Disable),
+            "prefer" => Ok(Self::Prefer),
+            "require" => Ok(Self::Require),
+            _ => Err(format!(
+                "invalid DATABASE_SSLMODE '{}', expected 'disable', 'prefer', or 'require'",
+                s
+            )),
+        }
+    }
+}
+
 /// Database configuration.
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
@@ -48,6 +91,8 @@ pub struct DatabaseConfig {
     // -- PostgreSQL fields --
     pub url: SecretString,
     pub pool_size: usize,
+    /// TLS mode for PostgreSQL connections (default: Prefer).
+    pub ssl_mode: SslMode,
 
     // -- libSQL fields --
     /// Path to local libSQL database file (default: ~/.ironclaw/ironclaw.db).
@@ -87,6 +132,15 @@ impl DatabaseConfig {
 
         let pool_size = parse_optional_env("DATABASE_POOL_SIZE", 10)?;
 
+        let ssl_mode: SslMode = if let Some(s) = optional_env("DATABASE_SSLMODE")? {
+            s.parse().map_err(|e| ConfigError::InvalidValue {
+                key: "DATABASE_SSLMODE".to_string(),
+                message: e,
+            })?
+        } else {
+            SslMode::default()
+        };
+
         let libsql_path = optional_env("LIBSQL_PATH")?.map(PathBuf::from).or_else(|| {
             if backend == DatabaseBackend::LibSql {
                 Some(default_libsql_path())
@@ -109,6 +163,7 @@ impl DatabaseConfig {
             backend,
             url: SecretString::from(url),
             pool_size,
+            ssl_mode,
             libsql_path,
             libsql_url,
             libsql_auth_token,
@@ -121,10 +176,52 @@ impl DatabaseConfig {
     }
 }
 
+impl SslMode {
+    /// Read from `DATABASE_SSLMODE` env var, defaulting to `Prefer`.
+    ///
+    /// Silently falls back to `Prefer` on missing or unparseable values.
+    /// Used by lightweight CLI tools (status, doctor) that don't run the
+    /// full config pipeline.
+    pub fn from_env() -> Self {
+        std::env::var("DATABASE_SSLMODE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default()
+    }
+}
+
 /// Default libSQL database path (~/.ironclaw/ironclaw.db).
 pub fn default_libsql_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("ironclaw.db")
+    ironclaw_base_dir().join("ironclaw.db")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssl_mode_default_is_prefer() {
+        assert_eq!(SslMode::default(), SslMode::Prefer);
+    }
+
+    #[test]
+    fn ssl_mode_parse_roundtrip() {
+        for mode in [SslMode::Disable, SslMode::Prefer, SslMode::Require] {
+            let s = mode.to_string();
+            let parsed: SslMode = s.parse().expect("should parse");
+            assert_eq!(parsed, mode);
+        }
+    }
+
+    #[test]
+    fn ssl_mode_parse_case_insensitive() {
+        assert_eq!("DISABLE".parse::<SslMode>().unwrap(), SslMode::Disable);
+        assert_eq!("Prefer".parse::<SslMode>().unwrap(), SslMode::Prefer);
+        assert_eq!("REQUIRE".parse::<SslMode>().unwrap(), SslMode::Require);
+    }
+
+    #[test]
+    fn ssl_mode_parse_invalid() {
+        assert!("invalid".parse::<SslMode>().is_err());
+    }
 }
