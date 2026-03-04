@@ -43,6 +43,10 @@ pub struct BenchmarkCommand {
     /// Maximum total cost in USD across all scenarios; abort remaining if exceeded
     #[arg(long)]
     pub max_cost: Option<f64>,
+
+    /// Output results as JSON (machine-readable) instead of human-readable report
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub async fn run_benchmark_command(cmd: &BenchmarkCommand) -> anyhow::Result<()> {
@@ -77,10 +81,17 @@ pub async fn run_benchmark_command(cmd: &BenchmarkCommand) -> anyhow::Result<()>
     let result_dir = save_scenario_results(&run_result).map_err(|e| anyhow::anyhow!("{}", e))?;
     eprintln!("Results saved to: {}/", result_dir);
 
-    // Load baseline and format comparison report.
-    let baseline = load_baseline().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let report = format_report(&run_result, baseline.as_ref());
-    println!("{report}");
+    if cmd.json {
+        // Machine-readable JSON output to stdout.
+        let json = serde_json::to_string_pretty(&run_result)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize results: {}", e))?;
+        println!("{json}");
+    } else {
+        // Human-readable report with baseline comparison.
+        let baseline = load_baseline().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let report = format_report(&run_result, baseline.as_ref());
+        println!("{report}");
+    }
 
     // Promote to baseline if requested.
     if cmd.update_baseline {
