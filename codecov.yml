@@ -14,5 +14,3 @@ ignore:
   - "src/tools/builtin/ecommerce.rs"
   - "src/tools/builtin/taskrabbit.rs"
   - "src/tools/builtin/restaurant.rs"
-  - "channels-src/**"
-  - "tools-src/**"
