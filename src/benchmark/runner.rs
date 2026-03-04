@@ -591,6 +591,17 @@ pub async fn run_bench_scenario(
         tools.retain_only(&names).await;
     }
 
+    // 3b. Create and filter skill registry (if skills specified in setup).
+    let skill_registry = if !scenario.setup.skills.is_empty() {
+        let mut registry = crate::skills::SkillRegistry::new(SkillsConfig::default().local_dir);
+        registry.discover_all().await;
+        let names: Vec<&str> = scenario.setup.skills.iter().map(|s| s.as_str()).collect();
+        registry.retain_only(&names);
+        Some(Arc::new(std::sync::RwLock::new(registry)))
+    } else {
+        None
+    };
+
     // 4. Seed workspace documents from setup.
     if let Some(ref ws_setup) = scenario.setup.workspace
         && let Some(ref ws) = workspace
@@ -661,7 +672,7 @@ pub async fn run_bench_scenario(
         tools,
         workspace,
         extension_manager: None,
-        skill_registry: None,
+        skill_registry,
         skill_catalog: None,
         skills_config: SkillsConfig::default(),
         hooks,
