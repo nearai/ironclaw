@@ -332,6 +332,15 @@ pub struct JobDetailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_mode: Option<String>,
     pub transitions: Vec<TransitionInfo>,
+    /// Whether this job can be restarted from the UI.
+    #[serde(default)]
+    pub can_restart: bool,
+    /// Whether follow-up prompts can be sent to this job.
+    #[serde(default)]
+    pub can_prompt: bool,
+    /// The kind of job: "sandbox" or "agent".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_kind: Option<String>,
 }
 
 // --- Project Files ---
@@ -379,6 +388,9 @@ pub struct ExtensionInfo {
     /// Whether this extension has configurable secrets (setup schema).
     #[serde(default)]
     pub needs_setup: bool,
+    /// Whether this extension has an auth configuration (OAuth or manual token).
+    #[serde(default)]
+    pub has_auth: bool,
     /// WASM channel activation status: "installed", "configured", "active", "failed".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_status: Option<String>,
@@ -451,9 +463,6 @@ pub struct ActionResponse {
     /// Whether the channel was successfully activated after setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
-    /// Whether a gateway restart is needed (activation failed).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub needs_restart: Option<bool>,
 }
 
 impl ActionResponse {
@@ -465,7 +474,6 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-            needs_restart: None,
         }
     }
 
@@ -477,7 +485,6 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-            needs_restart: None,
         }
     }
 }
@@ -562,6 +569,9 @@ pub struct SkillSearchResponse {
 #[derive(Debug, Deserialize)]
 pub struct SkillInstallRequest {
     pub name: String,
+    /// Registry slug (e.g. "owner/skill-name"). Preferred over `name` for
+    /// constructing the download URL when fetching from ClawHub.
+    pub slug: Option<String>,
     pub url: Option<String>,
     pub content: Option<String>,
 }
