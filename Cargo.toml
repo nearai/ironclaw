@@ -191,12 +191,17 @@ postgres = [
     "rust_decimal/db-tokio-postgres",
 ]
 libsql = ["dep:libsql"]
+benchmark = ["libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 
 [[test]]
 name = "html_to_markdown"
 required-features = ["html-to-markdown"]
+
+[[test]]
+name = "benchmark_runner"
+required-features = ["benchmark"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
