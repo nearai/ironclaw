@@ -252,6 +252,11 @@ mod tests {
     fn test_help_output() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
+        // Use separate snapshot names per feature set since `benchmark` adds
+        // a subcommand that changes the help text.
+        #[cfg(feature = "benchmark")]
+        assert_snapshot!("help_output_with_benchmark", help);
+        #[cfg(not(feature = "benchmark"))]
         assert_snapshot!(help);
     }
 
@@ -259,6 +264,9 @@ mod tests {
     fn test_long_help_output() {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
+        #[cfg(feature = "benchmark")]
+        assert_snapshot!("long_help_output_with_benchmark", help);
+        #[cfg(not(feature = "benchmark"))]
         assert_snapshot!(help);
     }
 }
