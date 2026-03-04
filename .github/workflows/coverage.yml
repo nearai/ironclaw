@@ -1,6 +1,5 @@
 name: Code Coverage
 on:
-  pull_request:
   push:
     branches: [main]
 
@@ -30,4 +29,4 @@ jobs:
           files: lcov.info
           disable_search: true
           use_oidc: true
-          fail_ci_if_error: ${{ github.event_name == 'push' }}
+          fail_ci_if_error: true
