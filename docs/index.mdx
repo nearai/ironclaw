@@ -50,46 +50,21 @@ IronClaw is a **secure, self-hosted AI assistant** designed for integrators, sys
 
 ## How IronClaw Works
 
-```mermaid
-flowchart TB
-    subgraph Input["Input Channels"]
-        Web["Web Gateway"]
-        Telegram["Telegram"]
-        TUI["Terminal UI"]
-        Webhook["HTTP Webhook"]
-    end
+<Frame>
+  <img src="/assets/ironclaw-architecture.svg" alt="IronClaw Architecture Diagram" />
+</Frame>
 
-    subgraph Core["IronClaw Core"]
-        Agent["Agent Loop"]
-        Router["Intent Router"]
-        Scheduler["Job Scheduler"]
-    end
+<Note>
+  [Download the Excalidraw file](/assets/ironclaw-architecture.excalidraw) to explore or edit this diagram.
+</Note>
 
-    subgraph Safety["Safety Layer"]
-        Sanitizer["Sanitizer"]
-        Validator["Validator"]
-        Policy["Policy Engine"]
-        Leak["Leak Detector"]
-    end
+The architecture shows how user input flows through IronClaw's multi-layer system:
 
-    subgraph Tools["Tool System"]
-        Builtin["Built-in Tools"]
-        WASM["WASM Sandbox"]
-        MCP["MCP Servers"]
-    end
-
-    subgraph Memory["Persistent Memory"]
-        Workspace["Workspace"]
-        Docs["Documents"]
-        Search["Hybrid Search"]
-    end
-
-    Input --> Core
-    Core --> Safety
-    Safety --> Tools
-    Tools --> Memory
-    Core --> Memory
-```
+1. **Input Channels** — Web Gateway, Telegram, Terminal UI, HTTP Webhook
+2. **IronClaw Core** — Agent Loop, Intent Router, Job Scheduler
+3. **Safety Layer** — Sanitizer, Validator, Policy Engine, Leak Detector
+4. **Tool System** — Built-in Tools, WASM Sandbox, MCP Servers
+5. **Persistent Memory** — Workspace, Documents, Hybrid Search
 
 ## Key Capabilities
 

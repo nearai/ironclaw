@@ -122,11 +122,13 @@ Secrets are injected into HTTP requests at the proxy:
 3. Proxy adds authorization header
 4. Container never sees raw credential
 
-```
-Container ──► Proxy ──► External Service
-              │
-              └── Injects Authorization: Bearer {token}
-```
+<Frame>
+  <img src="/assets/sandbox-network-proxy.svg" alt="Network Proxy Credential Injection" />
+</Frame>
+
+<Note>
+  [Download the Excalidraw file](/assets/sandbox-network-proxy.excalidraw) to explore or edit this diagram.
+</Note>
 
 ## Zero-Exposure Credential Model
 

@@ -10,6 +10,10 @@ The Safety Layer provides multi-stage defense against prompt injection, data exf
 
 All external content passes through the Safety Layer before reaching the LLM:
 
+<Frame>
+  <img src="/assets/safety-layer-overview.svg" alt="Safety Layer Overview Diagram" />
+</Frame>
+
 ```
 External Data → Validator → Sanitizer → Policy Engine → Leak Detector → LLM
 ```

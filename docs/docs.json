@@ -5,10 +5,10 @@
   "theme": "mint",
   "icons": { "library": "lucide" },
   "logo": {
-    "light": "/assets/logo-light.svg",
-    "dark": "/assets/logo-dark.svg"
+    "light": "/assets/ironclaw.png",
+    "dark": "/assets/ironclaw.png"
   },
-  "favicon": "/assets/favicon.svg",
+  "favicon": "/assets/ironclaw.png",
   "colors": {
     "primary": "#5B6FFF",
     "dark": "#5B6FFF",
@@ -16,8 +16,8 @@
   },
   "navbar": {
     "links": [
-      { "label": "GitHub", "href": "https://github.com/ironclaw-ai/ironclaw", "icon": "github" },
-      { "label": "Releases", "href": "https://github.com/ironclaw-ai/ironclaw/releases", "icon": "package" }
+      { "label": "GitHub", "href": "https://github.com/nearai/ironclaw", "icon": "github" },
+      { "label": "Releases", "href": "https://github.com/nearai/ironclaw/releases", "icon": "package" }
     ]
   },
   "navigation": {

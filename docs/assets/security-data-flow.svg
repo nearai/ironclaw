@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="465" height="580" viewBox="150 -10 465 580">
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#1e3a5f" />
+    </marker>
+  </defs>
+  <ellipse cx="400" cy="60" rx="50" ry="20" fill="#dbeafe" stroke="#5B6FFF" stroke-width="2"/>
+  <text x="440" y="67" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">User Input</text>
+  <rect x="350" y="100" width="100" height="35" fill="#fef3c7" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="440" y="122" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">Validator</text>
+  <polygon points="400,155 425,172.5 400,190 375,172.5" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+  <text x="420" y="177" font-family="sans-serif" font-size="10" fill="#dc2626" text-anchor="middle">Valid?</text>
+  <rect x="350" y="210" width="100" height="35" fill="#fef3c7" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="440" y="232" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">Sanitizer</text>
+  <rect x="350" y="265" width="100" height="35" fill="#fef3c7" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="440" y="287" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">Policy</text>
+  <rect x="350" y="320" width="100" height="35" fill="#fef3c7" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="445" y="341" font-family="sans-serif" font-size="11" fill="#374151" text-anchor="middle">Leak Detector</text>
+  <ellipse cx="400" cy="395" rx="50" ry="20" fill="#ddd6fe" stroke="#6d28d9" stroke-width="2"/>
+  <text x="430" y="404" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">LLM</text>
+  <rect x="200" y="375" width="80" height="35" fill="#a7f3d0" stroke="#047857" stroke-width="2" rx="8"/>
+  <text x="275" y="397" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">WASM</text>
+  <rect x="200" y="430" width="80" height="35" fill="#a7f3d0" stroke="#047857" stroke-width="2" rx="8"/>
+  <text x="275" y="452" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">Docker</text>
+  <ellipse cx="240" cy="502.5" rx="40" ry="17.5" fill="#fecaca" stroke="#b91c1c" stroke-width="2"/>
+  <text x="270" y="509" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">Proxy</text>
+  <ellipse cx="360" cy="502.5" rx="40" ry="17.5" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="390" y="509" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">External</text>
+  <rect x="480" y="155" width="70" height="30" fill="#fee2e2" stroke="#dc2626" stroke-width="2" rx="8"/>
+  <text x="540" y="178" font-family="sans-serif" font-size="11" fill="#dc2626" text-anchor="middle">Reject</text>
+  <path d="M 400 80 L 400 100" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 400 135 L 400 155" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 425 172 L 480 172" fill="none" stroke="#dc2626" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 400 190 L 400 210" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 400 245 L 400 265" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 400 300 L 400 320" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 400 355 L 400 375" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 350 395 L 280 395" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 240 410 L 240 430" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 240 465 L 240 485" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 280 502 L 320 502" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+</svg>
