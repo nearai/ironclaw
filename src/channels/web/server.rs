@@ -426,6 +426,12 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
+/// Return an OAuth error landing page response.
+fn oauth_error_page(label: &str) -> axum::response::Response {
+    let html = crate::cli::oauth_defaults::landing_html(label, false);
+    axum::response::Html(html).into_response()
+}
+
 /// OAuth callback handler for the web gateway.
 ///
 /// This is a PUBLIC route (no Bearer token required) because OAuth providers
@@ -447,33 +453,23 @@ async fn oauth_callback_handler(
             .get("error_description")
             .cloned()
             .unwrap_or_else(|| error.clone());
-        let html = oauth_defaults::landing_html(&description, false);
-        return axum::response::Html(html).into_response();
+        return oauth_error_page(&description);
     }
 
     let state_param = match params.get("state") {
         Some(s) if !s.is_empty() => s.clone(),
-        _ => {
-            let html = oauth_defaults::landing_html("IronClaw", false);
-            return axum::response::Html(html).into_response();
-        }
+        _ => return oauth_error_page("IronClaw"),
     };
 
     let code = match params.get("code") {
         Some(c) if !c.is_empty() => c.clone(),
-        _ => {
-            let html = oauth_defaults::landing_html("IronClaw", false);
-            return axum::response::Html(html).into_response();
-        }
+        _ => return oauth_error_page("IronClaw"),
     };
 
     // Look up the pending flow by CSRF state (atomic remove prevents replay)
     let ext_mgr = match state.extension_manager.as_ref() {
         Some(mgr) => mgr,
-        None => {
-            let html = oauth_defaults::landing_html("IronClaw", false);
-            return axum::response::Html(html).into_response();
-        }
+        None => return oauth_error_page("IronClaw"),
     };
 
     // Strip instance prefix from state for registry lookup.
@@ -494,8 +490,7 @@ async fn oauth_callback_handler(
                 lookup_key = %lookup_key,
                 "OAuth callback received with unknown or expired state"
             );
-            let html = oauth_defaults::landing_html("IronClaw", false);
-            return axum::response::Html(html).into_response();
+            return oauth_error_page("IronClaw");
         }
     };
 
@@ -505,8 +500,7 @@ async fn oauth_callback_handler(
             extension = %flow.extension_name,
             "OAuth flow expired"
         );
-        let html = oauth_defaults::landing_html(&flow.display_name, false);
-        return axum::response::Html(html).into_response();
+        return oauth_error_page(&flow.display_name);
     }
 
     // Exchange the authorization code for tokens.
@@ -734,7 +728,7 @@ async fn chat_auth_token_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if result.status == "authenticated" {
+    if result.is_authenticated() {
         // Auto-activate so tools are available immediately
         let msg = match ext_mgr.activate(&req.extension_name).await {
             Ok(r) => format!(
@@ -762,13 +756,14 @@ async fn chat_auth_token_handler(
         // Re-emit auth_required for retry
         state.sse.broadcast(SseEvent::AuthRequired {
             extension_name: req.extension_name.clone(),
-            instructions: result.instructions.clone(),
-            auth_url: result.auth_url.clone(),
-            setup_url: result.setup_url.clone(),
+            instructions: result.instructions().map(String::from),
+            auth_url: result.auth_url().map(String::from),
+            setup_url: result.setup_url().map(String::from),
         });
         Ok(Json(ActionResponse::fail(
             result
-                .instructions
+                .instructions()
+                .map(String::from)
                 .unwrap_or_else(|| "Invalid token".to_string()),
         )))
     }
@@ -1514,12 +1509,9 @@ async fn extensions_install_handler(
                 // configured (e.g., built-in providers). We only surface an auth_url
                 // when the extension reports it is awaiting authorization.
                 match ext_mgr.auth(&req.name, None).await {
-                    Ok(auth_result)
-                        if auth_result.auth_url.is_some()
-                            && auth_result.status == "awaiting_authorization" =>
-                    {
+                    Ok(auth_result) if auth_result.auth_url().is_some() => {
                         // Scope expansion or initial OAuth: user needs to authorize
-                        resp.auth_url = auth_result.auth_url;
+                        resp.auth_url = auth_result.auth_url().map(String::from);
                     }
                     _ => {}
                 }
@@ -1548,10 +1540,9 @@ async fn extensions_activate_handler(
             // Initial OAuth setup is triggered via save_setup_secrets.
             let mut resp = ActionResponse::ok(result.message);
             if let Ok(auth_result) = ext_mgr.auth(&name, None).await
-                && auth_result.auth_url.is_some()
-                && auth_result.status == "awaiting_authorization"
+                && auth_result.auth_url().is_some()
             {
-                resp.auth_url = auth_result.auth_url;
+                resp.auth_url = auth_result.auth_url().map(String::from);
             }
             Ok(Json(resp))
         }
@@ -1567,7 +1558,7 @@ async fn extensions_activate_handler(
 
             // Activation failed due to auth; try authenticating first.
             match ext_mgr.auth(&name, None).await {
-                Ok(auth_result) if auth_result.status == "authenticated" => {
+                Ok(auth_result) if auth_result.is_authenticated() => {
                     // Auth succeeded, retry activation.
                     match ext_mgr.activate(&name).await {
                         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
@@ -1578,13 +1569,13 @@ async fn extensions_activate_handler(
                     // Auth in progress (OAuth URL or awaiting manual token).
                     let mut resp = ActionResponse::fail(
                         auth_result
-                            .instructions
-                            .clone()
+                            .instructions()
+                            .map(String::from)
                             .unwrap_or_else(|| format!("'{}' requires authentication.", name)),
                     );
-                    resp.auth_url = auth_result.auth_url;
-                    resp.awaiting_token = Some(auth_result.awaiting_token);
-                    resp.instructions = auth_result.instructions;
+                    resp.auth_url = auth_result.auth_url().map(String::from);
+                    resp.awaiting_token = Some(auth_result.is_awaiting_token());
+                    resp.instructions = auth_result.instructions().map(String::from);
                     Ok(Json(resp))
                 }
                 Err(auth_err) => Ok(Json(ActionResponse::fail(format!(

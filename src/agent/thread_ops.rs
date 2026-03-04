@@ -1284,7 +1284,7 @@ impl Agent {
         };
 
         match ext_mgr.auth(&pending.extension_name, Some(token)).await {
-            Ok(result) if result.status == "authenticated" => {
+            Ok(result) if result.is_authenticated() => {
                 tracing::info!(
                     "Extension '{}' authenticated via auth mode",
                     pending.extension_name
@@ -1353,8 +1353,8 @@ impl Agent {
                     }
                 }
                 let msg = result
-                    .instructions
-                    .clone()
+                    .instructions()
+                    .map(String::from)
                     .unwrap_or_else(|| "Invalid token. Please try again.".to_string());
                 // Re-emit AuthRequired so web UI re-shows the card
                 let _ = self
@@ -1364,8 +1364,8 @@ impl Agent {
                         StatusUpdate::AuthRequired {
                             extension_name: pending.extension_name.clone(),
                             instructions: Some(msg.clone()),
-                            auth_url: result.auth_url,
-                            setup_url: result.setup_url,
+                            auth_url: result.auth_url().map(String::from),
+                            setup_url: result.setup_url().map(String::from),
                         },
                         &message.metadata,
                     )

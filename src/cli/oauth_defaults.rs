@@ -790,9 +790,13 @@ pub async fn sweep_expired_flows(registry: &PendingOAuthRegistry) {
 /// Returns the nonce unchanged when `IRONCLAW_INSTANCE_NAME` is not set
 /// (local/non-platform mode).
 pub fn build_platform_state(nonce: &str) -> String {
-    match std::env::var("IRONCLAW_INSTANCE_NAME") {
-        Ok(name) if !name.is_empty() => format!("{}:{}", name, nonce),
-        _ => nonce.to_string(),
+    let instance = std::env::var("IRONCLAW_INSTANCE_NAME")
+        .or_else(|_| std::env::var("OPENCLAW_INSTANCE_NAME"))
+        .ok()
+        .filter(|v| !v.is_empty());
+    match instance {
+        Some(name) => format!("{}:{}", name, nonce),
+        None => nonce.to_string(),
     }
 }
 
@@ -823,7 +827,10 @@ pub async fn exchange_via_proxy(
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
     let exchange_url = format!("{}/oauth/exchange", proxy_url.trim_end_matches('/'));
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
     let mut params = vec![
         ("code", code.to_string()),
         ("redirect_uri", redirect_uri.to_string()),
@@ -1240,14 +1247,44 @@ mod tests {
 
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         let original = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
+        let original_oc = std::env::var("OPENCLAW_INSTANCE_NAME").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("IRONCLAW_INSTANCE_NAME");
+            std::env::remove_var("OPENCLAW_INSTANCE_NAME");
         }
         assert_eq!(build_platform_state("abc123"), "abc123");
         unsafe {
             if let Some(val) = original {
                 std::env::set_var("IRONCLAW_INSTANCE_NAME", val);
+            }
+            if let Some(val) = original_oc {
+                std::env::set_var("OPENCLAW_INSTANCE_NAME", val);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_platform_state_with_openclaw_instance() {
+        use crate::cli::oauth_defaults::build_platform_state;
+
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original_ic = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
+        let original_oc = std::env::var("OPENCLAW_INSTANCE_NAME").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_INSTANCE_NAME");
+            std::env::set_var("OPENCLAW_INSTANCE_NAME", "quiet-lion");
+        }
+        assert_eq!(build_platform_state("xyz789"), "quiet-lion:xyz789");
+        unsafe {
+            if let Some(val) = original_ic {
+                std::env::set_var("IRONCLAW_INSTANCE_NAME", val);
+            }
+            if let Some(val) = original_oc {
+                std::env::set_var("OPENCLAW_INSTANCE_NAME", val);
+            } else {
+                std::env::remove_var("OPENCLAW_INSTANCE_NAME");
             }
         }
     }
