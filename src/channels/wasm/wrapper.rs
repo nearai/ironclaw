@@ -2293,6 +2293,64 @@ impl Channel for WasmChannel {
         self.handle_status_update(status, metadata).await
     }
 
+    /// Send a proactive outbound message for WASM channels.
+    ///
+    /// Current limitations:
+    /// - Only `telegram` channel is supported.
+    /// - Attachments are not supported.
+    /// - Uses `on_status(Status)` callback path instead of `on_respond`.
+    /// - `message_id: 0` in metadata is a sentinel to avoid reply threading.
+    /// - This path is private-chat only (`chat_id > 0`).
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        if !response.attachments.is_empty() {
+            return Err(ChannelError::SendFailed {
+                name: self.name.clone(),
+                reason: "WASM broadcast does not support attachments yet".to_string(),
+            });
+        }
+
+        // Broadcast routing metadata is channel-specific. For now, support
+        // Telegram's expected metadata shape so proactive notifications can be
+        // delivered to a chat ID.
+        if self.name != "telegram" {
+            return Err(ChannelError::SendFailed {
+                name: self.name.clone(),
+                reason: "WASM broadcast is only implemented for telegram".to_string(),
+            });
+        }
+
+        let chat_id = user_id.parse::<i64>().map_err(|e| ChannelError::SendFailed {
+            name: self.name.clone(),
+            reason: format!("Invalid telegram chat_id '{}': {}", user_id, e),
+        })?;
+        if chat_id <= 0 {
+            return Err(ChannelError::SendFailed {
+                name: self.name.clone(),
+                reason: "Telegram proactive broadcast currently supports private chats only (chat_id must be > 0)".to_string(),
+            });
+        }
+
+        let metadata = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": 0,
+            "user_id": chat_id,
+            "is_private": chat_id > 0
+        });
+
+        // Use on_status(Status) for proactive outbound sends. Telegram channel
+        // already has retry logic that drops reply context if message_id is not usable.
+        self.call_on_status(&StatusUpdate::Status(response.content), &metadata)
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: self.name.clone(),
+                reason: e.to_string(),
+            })
+    }
+
     async fn health_check(&self) -> Result<(), ChannelError> {
         // Check if we have an active message sender
         if self.message_tx.read().await.is_some() {
@@ -2402,6 +2460,14 @@ impl Channel for SharedWasmChannel {
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         self.inner.send_status(status, metadata).await
+    }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.inner.broadcast(user_id, response).await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -2743,6 +2809,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::channels::Channel;
+    use crate::channels::OutgoingResponse;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
@@ -2771,6 +2838,28 @@ mod tests {
             "{}".to_string(),
             Arc::new(PairingStore::new()),
             None,
+        )
+    }
+
+    fn create_telegram_test_channel() -> WasmChannel {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+
+        let prepared = Arc::new(PreparedChannelModule {
+            name: "telegram".to_string(),
+            description: "Telegram test channel".to_string(),
+            component: None,
+            limits: ResourceLimits::default(),
+        });
+
+        let capabilities = ChannelCapabilities::for_channel("telegram").with_path("/webhook/test");
+
+        WasmChannel::new(
+            runtime,
+            prepared,
+            capabilities,
+            "{}".to_string(),
+            Arc::new(PairingStore::new()),
         )
     }
 
@@ -2820,6 +2909,70 @@ mod tests {
 
         // Health check should fail after shutdown
         assert!(channel.health_check().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_rejects_non_telegram_channels() {
+        let channel = create_test_channel();
+        let result = channel
+            .broadcast("146032821", OutgoingResponse::text("hello"))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("only implemented for telegram"));
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_rejects_invalid_telegram_chat_id() {
+        let channel = create_telegram_test_channel();
+        let result = channel
+            .broadcast("not-a-number", OutgoingResponse::text("hello"))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("Invalid telegram chat_id"));
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_rejects_non_private_telegram_chat_id() {
+        let channel = create_telegram_test_channel();
+        let result = channel
+            .broadcast("-100123", OutgoingResponse::text("hello"))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("private chats only"));
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_rejects_attachments() {
+        let channel = create_telegram_test_channel();
+        let result = channel
+            .broadcast(
+                "146032821",
+                OutgoingResponse::text("hello")
+                    .with_attachments(vec!["/tmp/file.png".to_string()]),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("does not support attachments"));
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_accepts_valid_telegram_chat_id() {
+        let channel = create_telegram_test_channel();
+        // This validates pre-WASM routing/metadata checks only. The test
+        // channel is created with `component: None`, so no WASM callback runs.
+        let result = channel
+            .broadcast("146032821", OutgoingResponse::text("hello"))
+            .await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
