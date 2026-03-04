@@ -1,0 +1,18 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+        threshold: 5%
+
+ignore:
+  - "src/tools/builtin/marketplace.rs"
+  - "src/tools/builtin/ecommerce.rs"
+  - "src/tools/builtin/taskrabbit.rs"
+  - "src/tools/builtin/restaurant.rs"
+  - "channels-src/**"
+  - "tools-src/**"
