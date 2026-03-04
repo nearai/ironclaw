@@ -908,9 +908,9 @@ impl SetupWizard {
         self.persist_session_to_db().await;
 
         // If the user chose the API key path, NEARAI_API_KEY is now set
-        // in the environment. Persist it to the encrypted secrets store
-        // so inject_llm_keys_from_secrets() can load it on future runs.
-        if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+        // in the runtime env overlay. Persist it to the encrypted secrets
+        // store so inject_llm_keys_from_secrets() can load it on future runs.
+        if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
             && !api_key.is_empty()
             && let Ok(ctx) = self.init_secrets_context().await
         {
@@ -2042,8 +2042,9 @@ impl SetupWizard {
             env_vars.push((backend.model_env_var(), model.clone()));
         }
 
-        // Preserve NEARAI_API_KEY if present (set by API key auth flow)
-        if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+        // Preserve NEARAI_API_KEY if present (set by API key auth flow
+        // via the thread-safe runtime env overlay).
+        if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
             && !api_key.is_empty()
         {
             env_vars.push(("NEARAI_API_KEY", api_key));

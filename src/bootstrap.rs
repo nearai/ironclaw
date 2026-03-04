@@ -116,8 +116,15 @@ pub fn load_ironclaw_env() {
             .join(".ironclaw")
             .join("ironclaw.db");
         if default_db.exists() {
-            // SAFETY: `load_ironclaw_env` is called from a synchronous `fn main()`
-            // before the Tokio runtime is started, so no other threads exist yet.
+            // SAFETY: `load_ironclaw_env` is called from synchronous `fn main()`
+            // before the Tokio runtime is constructed (`main.rs:51`). At this
+            // point we are the only thread in the process, so mutating the
+            // process environment is safe. The assertion below verifies that
+            // no async runtime is active (which would imply worker threads).
+            debug_assert!(
+                tokio::runtime::Handle::try_current().is_err(),
+                "load_ironclaw_env must be called before the Tokio runtime starts"
+            );
             unsafe { std::env::set_var("DATABASE_BACKEND", "libsql") };
         }
     }
