@@ -585,7 +585,7 @@ impl ToolRegistry {
             limits: None,
             description: Some(&tool_with_binary.tool.description),
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
-            secrets_store: None,
+            secrets_store: self.secrets_store.clone(),
             oauth_refresh: None,
         })
         .await

@@ -26,7 +26,7 @@ use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
-    SecretsContext, setup_http, setup_signal, setup_telegram, setup_tunnel, setup_wasm_channel,
+    SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
     confirm, input, optional_input, print_error, print_header, print_info, print_step,
@@ -1670,15 +1670,6 @@ impl SetupWizard {
                 let result = if let Some(cap_file) = discovered_by_name.get(&channel_name) {
                     if !cap_file.setup.required_secrets.is_empty() {
                         setup_wasm_channel(ctx, &channel_name, &cap_file.setup).await?
-                    } else if channel_name == "telegram" {
-                        let telegram_result = setup_telegram(ctx, &self.settings).await?;
-                        if let Some(owner_id) = telegram_result.owner_id {
-                            self.settings.channels.telegram_owner_id = Some(owner_id);
-                        }
-                        crate::setup::channels::WasmChannelSetupResult {
-                            enabled: telegram_result.enabled,
-                            channel_name: "telegram".to_string(),
-                        }
                     } else {
                         print_info(&format!(
                             "No setup configuration found for {}",

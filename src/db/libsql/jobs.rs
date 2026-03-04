@@ -213,6 +213,30 @@ impl JobStore for LibSqlBackend {
         Ok(jobs)
     }
 
+    async fn get_agent_job_failure_reason(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT failure_reason FROM agent_jobs WHERE id = ?1",
+                [id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Ok(get_opt_text(&row, 0))
+        } else {
+            Ok(None)
+        }
+    }
+
     async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn
