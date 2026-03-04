@@ -1,8 +1,8 @@
 # Smart Model Routing for IronClaw
 
-**Status:** Proposed  
-**Author:** Microwave  
-**Date:** 2026-02-19  
+**Status:** Implemented
+**Author:** Microwave
+**Date:** 2026-02-19
 
 ## What
 

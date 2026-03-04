@@ -2858,7 +2858,6 @@ dependencies = [
  "hyper 1.8.1",
  "hyper-util",
  "insta",
- "lazy_static",
  "libsql",
  "lru",
  "mime_guess",
