@@ -520,12 +520,14 @@ impl Agent {
             };
 
             match self.handle_message(&message).await {
-                Ok(Some(response)) if !response.is_empty() => {
+                Ok(Some(mut response))
+                    if !response.content.is_empty() || !response.attachments.is_empty() =>
+                {
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
                     let event = crate::hooks::HookEvent::Outbound {
                         user_id: message.user_id.clone(),
                         channel: message.channel.clone(),
-                        content: response.clone(),
+                        content: response.content.clone(),
                         thread_id: message.thread_id.clone(),
                     };
                     match self.hooks().run(&event).await {
@@ -535,11 +537,8 @@ impl Agent {
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
                         }) => {
-                            if let Err(e) = self
-                                .channels
-                                .respond(&message, OutgoingResponse::text(new_content))
-                                .await
-                            {
+                            response.content = new_content;
+                            if let Err(e) = self.channels.respond(&message, response).await {
                                 tracing::error!(
                                     channel = %message.channel,
                                     error = %e,
@@ -548,11 +547,7 @@ impl Agent {
                             }
                         }
                         _ => {
-                            if let Err(e) = self
-                                .channels
-                                .respond(&message, OutgoingResponse::text(response))
-                                .await
-                            {
+                            if let Err(e) = self.channels.respond(&message, response).await {
                                 tracing::error!(
                                     channel = %message.channel,
                                     error = %e,
@@ -567,7 +562,7 @@ impl Agent {
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
-                        empty_len = empty.len(),
+                        empty_len = empty.content.len(),
                         "Suppressed empty response (not sent to channel)"
                     );
                 }
@@ -617,7 +612,10 @@ impl Agent {
         Ok(())
     }
 
-    async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+    async fn handle_message(
+        &self,
+        message: &IncomingMessage,
+    ) -> Result<Option<OutgoingResponse>, Error> {
         // Set message tool context for this turn (current channel and target)
         // For Signal, use signal_target from metadata (group:ID or phone number),
         // otherwise fall back to user_id
@@ -644,10 +642,16 @@ impl Agent {
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
-                    return Ok(Some(format!("[Message rejected: {}]", reason)));
+                    return Ok(Some(OutgoingResponse::text(format!(
+                        "[Message rejected: {}]",
+                        reason
+                    ))));
                 }
                 Err(err) => {
-                    return Ok(Some(format!("[Message blocked by hook policy: {}]", err)));
+                    return Ok(Some(OutgoingResponse::text(format!(
+                        "[Message blocked by hook policy: {}]",
+                        err
+                    ))));
                 }
                 Ok(crate::hooks::HookOutcome::Continue {
                     modified: Some(new_content),
@@ -690,7 +694,8 @@ impl Agent {
                 Submission::UserInput { content } => {
                     return self
                         .process_auth_token(message, &pending, content, session, thread_id)
-                        .await;
+                        .await
+                        .map(|response| response.map(OutgoingResponse::text));
                 }
                 _ => {
                     // Any control submission (interrupt, undo, etc.) cancels auth mode
@@ -717,7 +722,8 @@ impl Agent {
                     .await
             }
             Submission::SystemCommand { command, args } => {
-                self.handle_system_command(&command, &args).await
+                self.handle_system_command(&command, &args, Some(message))
+                    .await
             }
             Submission::Undo => self.process_undo(session, thread_id).await,
             Submission::Redo => self.process_redo(session, thread_id).await,
@@ -765,18 +771,25 @@ impl Agent {
 
         // Convert SubmissionResult to response string
         match result? {
-            SubmissionResult::Response { content } => {
+            SubmissionResult::Response {
+                content,
+                attachments,
+            } => {
                 // Suppress silent replies (e.g. from group chat "nothing to say" responses)
-                if crate::llm::is_silent_reply(&content) {
+                if attachments.is_empty() && crate::llm::is_silent_reply(&content) {
                     tracing::debug!("Suppressing silent reply token");
                     Ok(None)
                 } else {
-                    Ok(Some(content))
+                    Ok(Some(
+                        OutgoingResponse::text(content).with_attachments(attachments),
+                    ))
                 }
             }
-            SubmissionResult::Ok { message } => Ok(message),
-            SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
-            SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
+            SubmissionResult::Ok { message } => Ok(message.map(OutgoingResponse::text)),
+            SubmissionResult::Error { message } => {
+                Ok(Some(OutgoingResponse::text(format!("Error: {}", message))))
+            }
+            SubmissionResult::Interrupted => Ok(Some(OutgoingResponse::text("Interrupted."))),
             SubmissionResult::NeedApproval {
                 request_id,
                 tool_name,
@@ -800,7 +813,7 @@ impl Agent {
                     .await;
 
                 // Empty string signals the caller to skip respond() (no duplicate text)
-                Ok(Some(String::new()))
+                Ok(Some(OutgoingResponse::text(String::new())))
             }
         }
     }

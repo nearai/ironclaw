@@ -1322,6 +1322,7 @@ impl WasmChannel {
         &self,
         message_id: Uuid,
         content: &str,
+        attachments: &[String],
         thread_id: Option<&str>,
         metadata_json: &str,
     ) -> Result<(), WasmChannelError> {
@@ -1329,6 +1330,7 @@ impl WasmChannel {
             channel = %self.name,
             message_id = %message_id,
             content_len = content.len(),
+            attachment_count = attachments.len(),
             thread_id = ?thread_id,
             "call_on_respond invoked"
         );
@@ -1365,6 +1367,7 @@ impl WasmChannel {
         // Prepare response data
         let message_id_str = message_id.to_string();
         let content = content.to_string();
+        let attachments = attachments.to_vec();
         let thread_id = thread_id.map(|s| s.to_string());
         let metadata_json = metadata_json.to_string();
 
@@ -1390,6 +1393,7 @@ impl WasmChannel {
                 let wit_response = wit_channel::AgentResponse {
                     message_id: message_id_str,
                     content: content.clone(),
+                    attachments,
                     thread_id,
                     metadata_json,
                 };
@@ -1742,7 +1746,7 @@ impl WasmChannel {
 
                 let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
                 if let Err(e) = self
-                    .call_on_respond(uuid::Uuid::new_v4(), &prompt, None, &metadata_json)
+                    .call_on_respond(uuid::Uuid::new_v4(), &prompt, &[], None, &metadata_json)
                     .await
                 {
                     tracing::warn!(
@@ -2252,6 +2256,7 @@ impl Channel for WasmChannel {
         self.call_on_respond(
             msg.id,
             &response.content,
+            &response.attachments,
             response.thread_id.as_deref(),
             &metadata_json,
         )
@@ -2282,6 +2287,7 @@ impl Channel for WasmChannel {
         self.call_on_respond(
             uuid::Uuid::new_v4(),
             &response.content,
+            &response.attachments,
             response.thread_id.as_deref(),
             &metadata_json,
         )

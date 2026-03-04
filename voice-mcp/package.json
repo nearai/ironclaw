@@ -1,0 +1,10 @@
+{
+  "name": "voice-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "fastify": "^5.1.0",
+    "zod": "^3.23.8"
+  }
+}

@@ -26,6 +26,7 @@ wit_bindgen::generate!({
     path: "../../wit/channel.wit",
 });
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 // Re-export generated types
@@ -75,6 +76,14 @@ struct TelegramMessage {
     /// Caption for media (photo, video, document, etc.).
     #[serde(default)]
     caption: Option<String>,
+
+    /// Telegram voice note payload.
+    #[serde(default)]
+    voice: Option<TelegramVoice>,
+
+    /// Telegram audio payload.
+    #[serde(default)]
+    audio: Option<TelegramAudio>,
 
     /// Original message if this is a reply.
     reply_to_message: Option<Box<TelegramMessage>>,
@@ -152,6 +161,34 @@ struct TelegramApiResponse<T> {
     result: Option<T>,
 }
 
+/// Telegram voice payload.
+#[derive(Debug, Deserialize)]
+struct TelegramVoice {
+    file_id: String,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    file_size: Option<u64>,
+}
+
+/// Telegram audio payload.
+#[derive(Debug, Deserialize)]
+struct TelegramAudio {
+    file_id: String,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    file_size: Option<u64>,
+}
+
+/// Telegram file metadata returned by getFile.
+#[derive(Debug, Deserialize)]
+struct TelegramFile {
+    file_path: String,
+    #[serde(default)]
+    file_size: Option<u64>,
+}
+
 /// Response from sendMessage.
 #[derive(Debug, Deserialize)]
 struct SentMessage {
@@ -160,6 +197,8 @@ struct SentMessage {
 
 /// Workspace path for storing polling state.
 const POLLING_STATE_PATH: &str = "state/last_update_id";
+/// Workspace flag to disable polling when Telegram reports webhook mode conflict.
+const POLLING_DISABLED_PATH: &str = "state/polling_disabled";
 
 /// Workspace path for persisting owner_id across WASM callbacks.
 const OWNER_ID_PATH: &str = "state/owner_id";
@@ -179,6 +218,12 @@ const BOT_USERNAME_PATH: &str = "state/bot_username";
 /// Workspace path for persisting respond_to_all_group_messages flag.
 const RESPOND_TO_ALL_GROUP_PATH: &str = "state/respond_to_all_group_messages";
 
+/// Workspace key prefix for per-chat mentor voice mode state.
+const MENTOR_VOICE_MODE_PREFIX: &str = "state/mentor_voice_mode_";
+
+/// Maximum inbound voice/audio payload accepted for STT.
+const MAX_VOICE_BYTES: u64 = 10 * 1024 * 1024;
+
 // ============================================================================
 // Channel Metadata
 // ============================================================================
@@ -197,6 +242,18 @@ struct TelegramMessageMetadata {
 
     /// Whether this is a private (DM) chat.
     is_private: bool,
+    /// Whether mentor voice mode is currently enabled for this chat.
+    #[serde(default)]
+    mentor_voice_mode: bool,
+    /// Whether this message changed mentor voice mode ("on"/"off").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mentor_voice_mode_changed: Option<String>,
+    /// Transcript generated from an inbound voice message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mentor_voice_transcript: Option<String>,
+    /// STT error for inbound voice message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mentor_voice_transcription_error: Option<String>,
 }
 
 /// Channel configuration injected by host.
@@ -305,6 +362,118 @@ fn classify_status_update(update: &StatusUpdate) -> Option<TelegramStatusAction>
     }
 }
 
+fn mentor_voice_mode_path(chat_id: i64) -> String {
+    format!("{MENTOR_VOICE_MODE_PREFIX}{chat_id}")
+}
+
+fn read_mentor_voice_mode(chat_id: i64) -> bool {
+    let path = mentor_voice_mode_path(chat_id);
+    channel_host::workspace_read(&path)
+        .map(|value| value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn write_mentor_voice_mode(chat_id: i64, enabled: bool) {
+    let value = if enabled { "on" } else { "off" };
+    let path = mentor_voice_mode_path(chat_id);
+    if let Err(err) = channel_host::workspace_write(&path, value) {
+        channel_host::log(
+            channel_host::LogLevel::Error,
+            &format!("Failed to persist mentor voice mode for chat {}: {}", chat_id, err),
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MentorVoiceToggle {
+    On,
+    Off,
+    Status,
+}
+
+fn parse_mentor_voice_toggle(text: &str) -> Option<MentorVoiceToggle> {
+    let mut parts = text.split_whitespace();
+    let first = parts.next()?.to_ascii_lowercase();
+    let first_command = first
+        .split('@')
+        .next()
+        .map(|value| value.to_string())
+        .unwrap_or(first);
+
+    if first_command != "/mentor_voice" {
+        return None;
+    }
+
+    match parts.next().map(|value| value.to_ascii_lowercase()).as_deref() {
+        Some("on") => Some(MentorVoiceToggle::On),
+        Some("off") => Some(MentorVoiceToggle::Off),
+        Some("status") => Some(MentorVoiceToggle::Status),
+        _ => None,
+    }
+}
+
+fn parse_data_url_audio(data_url: &str) -> Result<(String, Vec<u8>), String> {
+    let mut parts = data_url.splitn(2, ',');
+    let header = parts
+        .next()
+        .ok_or_else(|| "invalid data URL: missing header".to_string())?;
+    let payload = parts
+        .next()
+        .ok_or_else(|| "invalid data URL: missing payload".to_string())?;
+
+    if !header.starts_with("data:") || !header.contains(";base64") {
+        return Err("invalid data URL: expected base64 audio".to_string());
+    }
+
+    let mime = header
+        .trim_start_matches("data:")
+        .split(';')
+        .next()
+        .unwrap_or("audio/mpeg")
+        .to_string();
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|err| format!("invalid base64 audio payload: {}", err))?;
+
+    Ok((mime, bytes))
+}
+
+fn multipart_payload(
+    fields: &[(&str, String)],
+    file_field: &str,
+    file_name: &str,
+    file_mime: &str,
+    file_data: &[u8],
+) -> (String, Vec<u8>) {
+    let boundary = format!("----ironclaw-telegram-{}", channel_host::now_millis());
+    let mut body = Vec::new();
+
+    for (name, value) in fields {
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(
+            format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
+        );
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+            file_field, file_name
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", file_mime).as_bytes());
+    body.extend_from_slice(file_data);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+    (boundary, body)
+}
+
 impl Guest for TelegramChannel {
     fn on_start(config_json: String) -> Result<ChannelConfig, String> {
         channel_host::log(
@@ -372,6 +541,7 @@ impl Guest for TelegramChannel {
                 channel_host::LogLevel::Info,
                 "Webhook mode enabled (tunnel configured)",
             );
+            let _ = channel_host::workspace_write(POLLING_DISABLED_PATH, "false");
 
             // Register webhook with Telegram API — propagate errors so a bad token
             // causes activation to fail rather than silently succeeding.
@@ -392,6 +562,7 @@ impl Guest for TelegramChannel {
                 channel_host::LogLevel::Info,
                 "Polling mode enabled (no tunnel configured)",
             );
+            let _ = channel_host::workspace_write(POLLING_DISABLED_PATH, "false");
 
             // Delete any existing webhook before polling. Telegram returns success
             // when no webhook exists, so any error here (e.g. 401) means a bad token.
@@ -468,6 +639,10 @@ impl Guest for TelegramChannel {
     }
 
     fn on_poll() {
+        if channel_host::workspace_read(POLLING_DISABLED_PATH).as_deref() == Some("true") {
+            return;
+        }
+
         // Read last offset from workspace storage
         let offset = match channel_host::workspace_read(POLLING_STATE_PATH) {
             Some(s) => s.parse::<i64>().unwrap_or(0),
@@ -514,6 +689,18 @@ impl Guest for TelegramChannel {
             Ok(response) => {
                 if response.status != 200 {
                     let body_str = String::from_utf8_lossy(&response.body);
+                    if response.status == 409
+                        && body_str
+                            .to_ascii_lowercase()
+                            .contains("can't use getupdates method while webhook is active")
+                    {
+                        let _ = channel_host::workspace_write(POLLING_DISABLED_PATH, "true");
+                        channel_host::log(
+                            channel_host::LogLevel::Warn,
+                            "Polling disabled after Telegram 409 webhook conflict; webhook mode should own ingress.",
+                        );
+                        return;
+                    }
                     channel_host::log(
                         channel_host::LogLevel::Error,
                         &format!("getUpdates returned {}: {}", response.status, body_str),
@@ -584,50 +771,68 @@ impl Guest for TelegramChannel {
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        // Try sending with Markdown first; fall back to plain text if Telegram
-        // can't parse the entities (e.g. model leaked <tool_call> with underscores).
-        let result = send_message(
-            metadata.chat_id,
-            &response.content,
-            Some(metadata.message_id),
-            Some("Markdown"),
-        );
+        if !response.content.trim().is_empty() {
+            // Try sending with Markdown first; fall back to plain text if Telegram
+            // can't parse the entities (e.g. model leaked <tool_call> with underscores).
+            let result = send_message(
+                metadata.chat_id,
+                &response.content,
+                Some(metadata.message_id),
+                Some("Markdown"),
+            );
 
-        match result {
-            Ok(msg_id) => {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent message to chat {}: message_id={}",
-                        metadata.chat_id, msg_id
-                    ),
-                );
-                Ok(())
-            }
-            Err(SendError::ParseEntities(detail)) => {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!("Markdown parse failed ({}), retrying as plain text", detail),
-                );
-                let msg_id = send_message(
-                    metadata.chat_id,
-                    &response.content,
-                    Some(metadata.message_id),
-                    None,
-                )
-                .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
+            match result {
+                Ok(msg_id) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Sent message to chat {}: message_id={}",
+                            metadata.chat_id, msg_id
+                        ),
+                    );
+                }
+                Err(SendError::ParseEntities(detail)) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!("Markdown parse failed ({}), retrying as plain text", detail),
+                    );
+                    let msg_id = send_message(
+                        metadata.chat_id,
+                        &response.content,
+                        Some(metadata.message_id),
+                        None,
+                    )
+                    .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
 
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent plain-text message to chat {}: message_id={}",
-                        metadata.chat_id, msg_id
-                    ),
-                );
-                Ok(())
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Sent plain-text message to chat {}: message_id={}",
+                            metadata.chat_id, msg_id
+                        ),
+                    );
+                }
+                Err(e) => return Err(e.to_string()),
             }
-            Err(e) => Err(e.to_string()),
         }
+
+        for attachment in response.attachments {
+            let delivery = if attachment.starts_with("data:audio/") {
+                send_voice_data_url(metadata.chat_id, &attachment, Some(metadata.message_id))
+            } else if attachment.starts_with("data:") {
+                send_document_data_url(metadata.chat_id, &attachment, Some(metadata.message_id))
+            } else {
+                Err("Unsupported attachment payload; expected data URL".to_string())
+            };
+
+            if let Err(err) = delivery {
+                let fallback = format!("Voice delivery failed: {}", err);
+                let _ = send_message(metadata.chat_id, &fallback, Some(metadata.message_id), None);
+                return Err(err);
+            }
+        }
+
+        Ok(())
     }
 
     fn on_status(update: StatusUpdate) {
@@ -813,6 +1018,205 @@ fn send_message(
     }
 }
 
+fn send_voice_data_url(
+    chat_id: i64,
+    data_url: &str,
+    reply_to_message_id: Option<i64>,
+) -> Result<(), String> {
+    let (mime, bytes) = parse_data_url_audio(data_url)?;
+    let extension = if mime.contains("ogg") {
+        "ogg"
+    } else if mime.contains("wav") {
+        "wav"
+    } else if mime.contains("mp4") || mime.contains("m4a") {
+        "m4a"
+    } else {
+        "mp3"
+    };
+
+    let mut fields = vec![("chat_id", chat_id.to_string())];
+    if let Some(reply_id) = reply_to_message_id {
+        fields.push(("reply_to_message_id", reply_id.to_string()));
+    }
+
+    let (boundary, body) = multipart_payload(
+        &fields,
+        "voice",
+        &format!("mentor.{}", extension),
+        &mime,
+        &bytes,
+    );
+    let headers = serde_json::json!({
+        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
+    });
+
+    let response = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice",
+        &headers.to_string(),
+        Some(&body),
+        None,
+    )
+    .map_err(|err| format!("sendVoice request failed: {}", err))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "sendVoice failed with status {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    Ok(())
+}
+
+fn send_document_data_url(
+    chat_id: i64,
+    data_url: &str,
+    reply_to_message_id: Option<i64>,
+) -> Result<(), String> {
+    let (mime, bytes) = parse_data_url_audio(data_url)?;
+
+    let mut fields = vec![("chat_id", chat_id.to_string())];
+    if let Some(reply_id) = reply_to_message_id {
+        fields.push(("reply_to_message_id", reply_id.to_string()));
+    }
+
+    let (boundary, body) =
+        multipart_payload(&fields, "document", "mentor-audio.bin", &mime, &bytes);
+    let headers = serde_json::json!({
+        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
+    });
+
+    let response = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+        &headers.to_string(),
+        Some(&body),
+        None,
+    )
+    .map_err(|err| format!("sendDocument request failed: {}", err))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "sendDocument failed with status {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    Ok(())
+}
+
+fn telegram_get_file(file_id: &str) -> Result<TelegramFile, String> {
+    let payload = serde_json::json!({ "file_id": file_id });
+    let body = serde_json::to_vec(&payload).map_err(|err| err.to_string())?;
+    let headers = serde_json::json!({ "Content-Type": "application/json" });
+
+    let response = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+        &headers.to_string(),
+        Some(&body),
+        None,
+    )
+    .map_err(|err| format!("getFile request failed: {}", err))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!("getFile failed ({}): {}", response.status, body_str));
+    }
+
+    let api: TelegramApiResponse<TelegramFile> =
+        serde_json::from_slice(&response.body).map_err(|err| err.to_string())?;
+    if !api.ok {
+        return Err(api
+            .description
+            .unwrap_or_else(|| "Telegram getFile returned error".to_string()));
+    }
+    api.result
+        .ok_or_else(|| "Telegram getFile returned no result".to_string())
+}
+
+fn download_telegram_file(file_path: &str) -> Result<Vec<u8>, String> {
+    let headers = serde_json::json!({}).to_string();
+    let url = format!(
+        "https://api.telegram.org/file/bot{{TELEGRAM_BOT_TOKEN}}/{}",
+        file_path
+    );
+    let response = channel_host::http_request("GET", &url, &headers, None, Some(30_000))
+        .map_err(|err| format!("file download failed: {}", err))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "file download failed with status {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    Ok(response.body)
+}
+
+fn transcribe_with_mentor_mcp(audio: &[u8], mime_type: Option<&str>) -> Result<String, String> {
+    let base64_audio = base64::engine::general_purpose::STANDARD.encode(audio);
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "telegram-voice-transcribe",
+        "method": "tools/call",
+        "params": {
+            "name": "mentor.transcribe",
+            "arguments": {
+                "base64Audio": base64_audio,
+                "mimeType": mime_type.unwrap_or("audio/ogg"),
+            }
+        }
+    });
+    let body = serde_json::to_vec(&payload).map_err(|err| err.to_string())?;
+    let headers = serde_json::json!({ "Content-Type": "application/json" });
+
+    let response = channel_host::http_request(
+        "POST",
+        "http://mentor-mcp:8791/mcp",
+        &headers.to_string(),
+        Some(&body),
+        Some(30_000),
+    )
+    .map_err(|err| format!("mentor.transcribe request failed: {}", err))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "mentor.transcribe failed ({}) {}",
+            response.status, body_str
+        ));
+    }
+
+    let rpc: serde_json::Value =
+        serde_json::from_slice(&response.body).map_err(|err| err.to_string())?;
+    if let Some(error) = rpc.get("error") {
+        return Err(format!("mentor.transcribe RPC error: {}", error));
+    }
+
+    let content_text = rpc
+        .get("result")
+        .and_then(|value| value.get("content"))
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|value| value.get("text"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "mentor.transcribe returned no text payload".to_string())?;
+
+    let parsed_payload: serde_json::Value =
+        serde_json::from_str(content_text).map_err(|err| format!("Invalid mentor payload: {}", err))?;
+    parsed_payload
+        .get("text")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "mentor.transcribe returned empty transcript".to_string())
+}
+
 // ============================================================================
 // Webhook Management
 // ============================================================================
@@ -992,19 +1396,19 @@ fn handle_update(update: TelegramUpdate) {
 
 /// Process a single message.
 fn handle_message(message: TelegramMessage) {
-    // Use text or caption (for media messages)
-    let content = message
+    let message_text = message
         .text
-        .filter(|t| !t.is_empty())
-        .or_else(|| message.caption.filter(|c| !c.is_empty()))
-        .unwrap_or_default();
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        .or_else(|| message.caption.as_deref().filter(|caption| !caption.is_empty()));
+    let has_voice_payload = message.voice.is_some() || message.audio.is_some();
 
-    if content.is_empty() {
+    if message_text.is_none() && !has_voice_payload {
         return;
     }
 
     // Skip messages without a sender (channel posts)
-    let from = match message.from {
+    let from = match message.from.as_ref() {
         Some(f) => f,
         None => return,
     };
@@ -1095,32 +1499,150 @@ fn handle_message(message: TelegramMessage) {
             .as_deref()
             .unwrap_or("false")
             == "true";
+        let text_for_group_checks = message_text.unwrap_or_default();
 
         if !respond_to_all {
-            let has_command = content.starts_with('/');
+            let has_command = text_for_group_checks.starts_with('/');
             let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
             let has_bot_mention = if bot_username.is_empty() {
-                content.contains('@')
+                text_for_group_checks.contains('@')
             } else {
                 let mention = format!("@{}", bot_username);
-                content.to_lowercase().contains(&mention.to_lowercase())
+                text_for_group_checks
+                    .to_lowercase()
+                    .contains(&mention.to_lowercase())
             };
 
             if !has_command && !has_bot_mention {
                 channel_host::log(
                     channel_host::LogLevel::Debug,
-                    &format!("Ignoring group message without mention: {}", content),
+                    &format!(
+                        "Ignoring group message without mention: {}",
+                        text_for_group_checks
+                    ),
                 );
                 return;
             }
         }
     }
 
+    let mut mentor_voice_mode = read_mentor_voice_mode(message.chat.id);
+    let mut mentor_voice_mode_changed = None;
+
+    if let Some(text) = message_text {
+        if let Some(toggle) = parse_mentor_voice_toggle(text) {
+            match toggle {
+                MentorVoiceToggle::On => {
+                    mentor_voice_mode = true;
+                    mentor_voice_mode_changed = Some("on".to_string());
+                    write_mentor_voice_mode(message.chat.id, true);
+                }
+                MentorVoiceToggle::Off => {
+                    mentor_voice_mode = false;
+                    mentor_voice_mode_changed = Some("off".to_string());
+                    write_mentor_voice_mode(message.chat.id, false);
+                }
+                MentorVoiceToggle::Status => {}
+            }
+        }
+    }
+
     // Build user display name
-    let user_name = if let Some(ref last) = from.last_name {
+    let user_name = if let Some(last) = from.last_name.as_deref() {
         format!("{} {}", from.first_name, last)
     } else {
         from.first_name.clone()
+    };
+
+    let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
+    let mut mentor_voice_transcript: Option<String> = None;
+    let mut mentor_voice_transcription_error: Option<String> = None;
+
+    let mut content_to_emit = if let Some(content) = message_text {
+        content_to_emit_for_agent(
+            content,
+            if bot_username.is_empty() {
+                None
+            } else {
+                Some(bot_username.as_str())
+            },
+        )
+    } else {
+        None
+    };
+
+    if content_to_emit.is_none() && has_voice_payload && mentor_voice_mode {
+        let (file_id, declared_size, mime_type) = if let Some(voice) = message.voice.as_ref() {
+            (
+                voice.file_id.as_str(),
+                voice.file_size,
+                voice.mime_type.as_deref().or(Some("audio/ogg")),
+            )
+        } else if let Some(audio) = message.audio.as_ref() {
+            (
+                audio.file_id.as_str(),
+                audio.file_size,
+                audio.mime_type.as_deref().or(Some("audio/mpeg")),
+            )
+        } else {
+            ("", None, None)
+        };
+
+        if !file_id.is_empty() {
+            let stt_result = (|| -> Result<String, String> {
+                if let Some(size) = declared_size {
+                    if size > MAX_VOICE_BYTES {
+                        return Err(format!(
+                            "Voice note too large ({} bytes > {} bytes)",
+                            size, MAX_VOICE_BYTES
+                        ));
+                    }
+                }
+
+                let file = telegram_get_file(file_id)?;
+                if let Some(size) = file.file_size {
+                    if size > MAX_VOICE_BYTES {
+                        return Err(format!(
+                            "Voice note too large ({} bytes > {} bytes)",
+                            size, MAX_VOICE_BYTES
+                        ));
+                    }
+                }
+
+                let bytes = download_telegram_file(&file.file_path)?;
+                if bytes.len() as u64 > MAX_VOICE_BYTES {
+                    return Err(format!(
+                        "Voice note too large ({} bytes > {} bytes)",
+                        bytes.len(),
+                        MAX_VOICE_BYTES
+                    ));
+                }
+
+                transcribe_with_mentor_mcp(&bytes, mime_type)
+            })();
+
+            match stt_result {
+                Ok(transcript) => {
+                    mentor_voice_transcript = Some(transcript.clone());
+                    content_to_emit = Some(format!("/mentor_voice {}", transcript));
+                }
+                Err(err) => {
+                    mentor_voice_transcription_error = Some(err.clone());
+                    content_to_emit = Some("/mentor_voice".to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(content) = content_to_emit.as_ref() {
+        if mentor_voice_mode && !content.trim().starts_with('/') {
+            content_to_emit = Some(format!("/mentor_voice {}", content.trim()));
+        }
+    }
+
+    let content_to_emit = match content_to_emit {
+        Some(value) => value,
+        None => return,
     };
 
     // Build metadata for response routing
@@ -1129,22 +1651,13 @@ fn handle_message(message: TelegramMessage) {
         message_id: message.message_id,
         user_id: from.id,
         is_private,
+        mentor_voice_mode,
+        mentor_voice_mode_changed,
+        mentor_voice_transcript,
+        mentor_voice_transcription_error,
     };
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
-
-    let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
-    let content_to_emit = match content_to_emit_for_agent(
-        &content,
-        if bot_username.is_empty() {
-            None
-        } else {
-            Some(bot_username.as_str())
-        },
-    ) {
-        Some(value) => value,
-        None => return,
-    };
 
     // Emit the message to the agent
     channel_host::emit_message(&EmittedMessage {
@@ -1168,16 +1681,6 @@ fn handle_message(message: TelegramMessage) {
 /// When bot_username is set, only strips that specific mention; otherwise strips any leading @mention.
 fn clean_message_text(text: &str, bot_username: Option<&str>) -> String {
     let mut result = text.trim().to_string();
-
-    // Remove leading /command
-    if result.starts_with('/') {
-        if let Some(space_idx) = result.find(' ') {
-            result = result[space_idx..].trim_start().to_string();
-        } else {
-            // Just a command with no text
-            return String::new();
-        }
-    }
 
     // Remove leading @mention
     if result.starts_with('@') {
@@ -1211,6 +1714,41 @@ fn clean_message_text(text: &str, bot_username: Option<&str>) -> String {
     result
 }
 
+fn normalize_command_for_agent(command_text: &str, bot_username: Option<&str>) -> String {
+    let mut parts = command_text.split_whitespace();
+    let Some(first) = parts.next() else {
+        return command_text.to_string();
+    };
+
+    let normalized_first = if let Some(bot) = bot_username {
+        let mention = format!("@{}", bot.to_ascii_lowercase());
+        let first_lower = first.to_ascii_lowercase();
+        if let Some((base, suffix)) = first_lower.split_once('@') {
+            if format!("@{}", suffix) == mention {
+                // Preserve original command casing for the base token.
+                first
+                    .split('@')
+                    .next()
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| base.to_string())
+            } else {
+                first.to_string()
+            }
+        } else {
+            first.to_string()
+        }
+    } else {
+        first.to_string()
+    };
+
+    let rest = parts.collect::<Vec<_>>();
+    if rest.is_empty() {
+        normalized_first
+    } else {
+        format!("{} {}", normalized_first, rest.join(" "))
+    }
+}
+
 /// Decide which user content should be emitted to the agent loop.
 ///
 /// - `/start` emits a placeholder so the agent can greet the user
@@ -1218,17 +1756,17 @@ fn clean_message_text(text: &str, bot_username: Option<&str>) -> String {
 /// - empty/mention-only messages are ignored
 /// - otherwise cleaned text is emitted
 fn content_to_emit_for_agent(content: &str, bot_username: Option<&str>) -> Option<String> {
-    let cleaned_text = clean_message_text(content, bot_username);
     let trimmed_content = content.trim();
 
     if trimmed_content.eq_ignore_ascii_case("/start") {
         return Some("[User started the bot]".to_string());
     }
 
-    if cleaned_text.is_empty() && trimmed_content.starts_with('/') {
-        return Some(trimmed_content.to_string());
+    if trimmed_content.starts_with('/') {
+        return Some(normalize_command_for_agent(trimmed_content, bot_username));
     }
 
+    let cleaned_text = clean_message_text(content, bot_username);
     if cleaned_text.is_empty() {
         return None;
     }
@@ -1266,9 +1804,9 @@ mod tests {
     #[test]
     fn test_clean_message_text() {
         // Without bot_username: strips any leading @mention
-        assert_eq!(clean_message_text("/start hello", None), "hello");
+        assert_eq!(clean_message_text("/start hello", None), "/start hello");
         assert_eq!(clean_message_text("@bot hello world", None), "hello world");
-        assert_eq!(clean_message_text("/start", None), "");
+        assert_eq!(clean_message_text("/start", None), "/start");
         assert_eq!(clean_message_text("@botname", None), "");
         assert_eq!(clean_message_text("just text", None), "just text");
         assert_eq!(clean_message_text("  spaced  ", None), "spaced");
@@ -1285,21 +1823,36 @@ mod tests {
 
     #[test]
     fn test_clean_message_text_bare_commands() {
-        // Bare commands return empty (the caller decides what to emit)
-        assert_eq!(clean_message_text("/start", None), "");
-        assert_eq!(clean_message_text("/interrupt", None), "");
-        assert_eq!(clean_message_text("/stop", None), "");
-        assert_eq!(clean_message_text("/help", None), "");
-        assert_eq!(clean_message_text("/undo", None), "");
-        assert_eq!(clean_message_text("/ping", None), "");
+        // Slash commands are preserved for parser routing.
+        assert_eq!(clean_message_text("/start", None), "/start");
+        assert_eq!(clean_message_text("/interrupt", None), "/interrupt");
+        assert_eq!(clean_message_text("/stop", None), "/stop");
+        assert_eq!(clean_message_text("/help", None), "/help");
+        assert_eq!(clean_message_text("/undo", None), "/undo");
+        assert_eq!(clean_message_text("/ping", None), "/ping");
+        assert_eq!(clean_message_text("/start hello", None), "/start hello");
+        assert_eq!(clean_message_text("/help me please", None), "/help me please");
+    }
 
-        // Commands with args: command prefix stripped, args returned
-        assert_eq!(clean_message_text("/start hello", None), "hello");
-        assert_eq!(clean_message_text("/help me please", None), "me please");
-        assert_eq!(
-            clean_message_text("/model claude-opus-4-6", None),
-            "claude-opus-4-6"
-        );
+    #[test]
+    fn test_parse_mentor_voice_toggle() {
+        assert!(matches!(
+            parse_mentor_voice_toggle("/mentor_voice on"),
+            Some(MentorVoiceToggle::On)
+        ));
+        assert!(matches!(
+            parse_mentor_voice_toggle("/mentor_voice off"),
+            Some(MentorVoiceToggle::Off)
+        ));
+        assert!(matches!(
+            parse_mentor_voice_toggle("/mentor_voice status"),
+            Some(MentorVoiceToggle::Status)
+        ));
+        assert!(matches!(
+            parse_mentor_voice_toggle("/mentor_voice@MyBot on"),
+            Some(MentorVoiceToggle::On)
+        ));
+        assert!(parse_mentor_voice_toggle("/mentor_voice hello").is_none());
     }
 
     /// Tests for the content_to_emit logic in handle_message.
@@ -1320,10 +1873,10 @@ mod tests {
             Some("[User started the bot]".to_string())
         );
 
-        // /start with args → pass args through
+        // /start with args remains a raw command for parser handling.
         assert_eq!(
             content_to_emit_for_agent("/start hello", None),
-            Some("hello".to_string())
+            Some("/start hello".to_string())
         );
 
         // Control commands → pass through raw so Submission::parse() can match
@@ -1388,10 +1941,14 @@ mod tests {
             Some("/no".to_string())
         );
 
-        // Commands with args → cleaned text (command stripped)
+        // Commands with args remain raw command text.
         assert_eq!(
             content_to_emit_for_agent("/help me please", None),
-            Some("me please".to_string())
+            Some("/help me please".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/mentor_voice@MyBot on", Some("MyBot")),
+            Some("/mentor_voice on".to_string())
         );
 
         // Plain text → pass through

@@ -76,10 +76,10 @@ impl McpServerConfig {
             });
         }
 
-        // Remote servers must use HTTPS (localhost is allowed for development)
+        // Remote servers must use HTTPS (local/dev MCP hosts are allowed over HTTP).
         let url_lower = self.url.to_lowercase();
-        let is_localhost = url_lower.contains("localhost") || url_lower.contains("127.0.0.1");
-        if !is_localhost && !url_lower.starts_with("https://") {
+        let is_local_dev = is_local_dev_url(&url_lower);
+        if !is_local_dev && !url_lower.starts_with("https://") {
             return Err(ConfigError::InvalidConfig {
                 reason: "Remote MCP servers must use HTTPS".to_string(),
             });
@@ -97,10 +97,10 @@ impl McpServerConfig {
             return true;
         }
         // Remote HTTPS servers need auth handling (DCR, token refresh, 401 detection).
-        // Localhost/127.0.0.1 servers are assumed to be dev servers without auth.
+        // Local/dev MCP hosts are assumed to be trusted service-to-service traffic.
         let url_lower = self.url.to_lowercase();
-        let is_localhost = is_localhost_url(&url_lower);
-        url_lower.starts_with("https://") && !is_localhost
+        let is_local_dev = is_local_dev_url(&url_lower);
+        url_lower.starts_with("https://") && !is_local_dev
     }
 
     /// Get the secret name used to store the access token.
@@ -410,16 +410,22 @@ pub async fn remove_mcp_server_db(
     Ok(())
 }
 
-/// Check if a URL points to a loopback address (localhost, 127.0.0.1, [::1]).
+fn is_local_dev_domain(domain: &str) -> bool {
+    domain.eq_ignore_ascii_case("localhost")
+        || domain.eq_ignore_ascii_case("camoufox-mcp")
+        || domain.eq_ignore_ascii_case("mentor-mcp")
+        || domain.eq_ignore_ascii_case("voice-mcp")
+}
+
+/// Check if a URL points to a local/dev MCP host.
 ///
-/// Uses `url::Url` for proper parsing so edge cases (IPv6, userinfo, ports)
-/// are handled correctly without manual string splitting.
-fn is_localhost_url(url: &str) -> bool {
+/// Uses `url::Url` for robust parsing across userinfo, IPv4/IPv6, and ports.
+fn is_local_dev_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
     match parsed.host() {
-        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Domain(d)) => is_local_dev_domain(d),
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
         Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
         None => false,
@@ -432,19 +438,22 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_is_localhost_url() {
-        assert!(is_localhost_url("http://localhost:3000/path"));
-        assert!(is_localhost_url("https://localhost/path"));
-        assert!(is_localhost_url("http://127.0.0.1:8080"));
-        assert!(is_localhost_url("http://127.0.0.1"));
-        assert!(!is_localhost_url("https://notlocalhost.com/path"));
-        assert!(!is_localhost_url("https://example-localhost.io"));
-        assert!(!is_localhost_url("https://mcp.notion.com"));
-        assert!(is_localhost_url("http://user:pass@localhost:3000/path"));
+    fn test_is_local_dev_url() {
+        assert!(is_local_dev_url("http://localhost:3000/path"));
+        assert!(is_local_dev_url("https://localhost/path"));
+        assert!(is_local_dev_url("http://127.0.0.1:8080"));
+        assert!(is_local_dev_url("http://127.0.0.1"));
+        assert!(is_local_dev_url("http://camoufox-mcp:8790/mcp"));
+        assert!(is_local_dev_url("http://mentor-mcp:8791/mcp"));
+        assert!(is_local_dev_url("http://voice-mcp:8792/mcp"));
+        assert!(!is_local_dev_url("https://notlocalhost.com/path"));
+        assert!(!is_local_dev_url("https://example-localhost.io"));
+        assert!(!is_local_dev_url("https://mcp.notion.com"));
+        assert!(is_local_dev_url("http://user:pass@localhost:3000/path"));
         // IPv6 loopback
-        assert!(is_localhost_url("http://[::1]:8080/path"));
-        assert!(is_localhost_url("http://[::1]/path"));
-        assert!(!is_localhost_url("http://[::2]:8080/path"));
+        assert!(is_local_dev_url("http://[::1]:8080/path"));
+        assert!(is_local_dev_url("http://[::1]/path"));
+        assert!(!is_local_dev_url("http://[::2]:8080/path"));
     }
 
     #[test]
@@ -455,6 +464,8 @@ mod tests {
 
         // Valid localhost (allowed for dev)
         let config = McpServerConfig::new("local", "http://localhost:8080");
+        assert!(config.validate().is_ok());
+        let config = McpServerConfig::new("mentor", "http://mentor-mcp:8791/mcp");
         assert!(config.validate().is_ok());
 
         // Invalid: empty name

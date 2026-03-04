@@ -241,6 +241,8 @@ interface channel {
         message-id: string,
         /// Response content from the agent.
         content: string,
+        /// Optional attachment payloads (e.g., data URLs).
+        attachments: list<string>,
         /// Optional thread ID for threaded replies.
         thread-id: option<string>,
         /// Channel-specific metadata as JSON string.

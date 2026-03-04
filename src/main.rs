@@ -14,6 +14,7 @@ use ironclaw::{
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
             WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
+            install_bundled_channel,
         },
         web::log_layer::LogBroadcaster,
     },
@@ -907,6 +908,35 @@ async fn setup_wasm_channels(
     );
     if let Some(secrets) = secrets_store {
         loader = loader.with_secrets_store(Arc::clone(secrets));
+    }
+
+    let force_sync_channels = std::env::var("WASM_CHANNEL_FORCE_SYNC")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(|name| name.to_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if !force_sync_channels.is_empty() {
+        for channel_name in force_sync_channels {
+            match install_bundled_channel(&channel_name, &config.channels.wasm_channels_dir, true)
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    channel = %channel_name,
+                    "Force-synced bundled WASM channel artifact"
+                ),
+                Err(error) => tracing::warn!(
+                    channel = %channel_name,
+                    error = %error,
+                    "Failed to force-sync bundled WASM channel artifact"
+                ),
+            }
+        }
     }
 
     let results = match loader

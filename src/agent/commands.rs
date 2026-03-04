@@ -3,8 +3,13 @@
 //! Extracted from `agent_loop.rs` to isolate the /help, /model, /status,
 //! and other command processing from the core agent loop.
 
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use base64::Engine;
+use serde_json::json;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -12,9 +17,19 @@ use crate::agent::session::Session;
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{Agent, MessageIntent};
 use crate::channels::{IncomingMessage, StatusUpdate};
-use crate::context::JobState;
+use crate::context::{JobContext, JobState};
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
+use crate::tools::ToolError;
+
+#[derive(Debug, Clone)]
+struct MentorContext {
+    session_id: String,
+    voice_mode: bool,
+    voice_mode_changed: Option<String>,
+    voice_transcript: Option<String>,
+    voice_transcription_error: Option<String>,
+}
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
 fn format_count(n: u64, suffix: &str) -> String {
@@ -25,6 +40,188 @@ fn format_count(n: u64, suffix: &str) -> String {
     } else {
         format!("{} {}", n, suffix)
     }
+}
+
+fn mentor_error_summary(error: &str) -> String {
+    let lower = error.to_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") {
+        "mcp_transport_error: Mentor MCP transport timeout. Text fallback is active."
+            .to_string()
+    } else if lower.contains("invalid params") || lower.contains("schema") {
+        "mcp_schema_error: Mentor tool schema error. Check mentor MCP argument contract."
+            .to_string()
+    } else if lower.contains("transcribe") || lower.contains("whisper") {
+        "stt_backend_error: Voice STT backend error while processing the voice note."
+            .to_string()
+    } else if lower.contains("speak")
+        || lower.contains("voice")
+        || lower.contains("kokoro")
+        || lower.contains("csm")
+    {
+        "tts_backend_error: Voice TTS backend error. Text fallback is active.".to_string()
+    } else if lower.contains("telegram") || lower.contains("sendvoice") {
+        "telegram_api_error: Telegram delivery error while sending voice response.".to_string()
+    } else {
+        format!("Mentor error: {}", error)
+    }
+}
+
+fn parse_tool_json_output(raw: &str) -> Result<serde_json::Value, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("Invalid tool JSON: {}", e))?;
+
+    if let Some(inner) = parsed.as_str() {
+        if let Ok(inner_json) = serde_json::from_str::<serde_json::Value>(inner) {
+            return Ok(inner_json);
+        }
+        return Ok(json!({ "text": inner }));
+    }
+
+    Ok(parsed)
+}
+
+fn map_mentor_tool_error(tool_name: &str, error: ToolError) -> String {
+    match error {
+        ToolError::InvalidParameters(reason) => {
+            format!("Mentor tool schema error ({tool_name}): {reason}")
+        }
+        ToolError::ExecutionFailed(reason) => reason,
+        ToolError::Timeout(timeout) => {
+            format!(
+                "Mentor MCP transport timeout ({tool_name}) after {}s",
+                timeout.as_secs()
+            )
+        }
+        ToolError::ExternalService(reason) => reason,
+        ToolError::NotAuthorized(reason) => {
+            format!("Mentor tool not authorized ({tool_name}): {reason}")
+        }
+        ToolError::RateLimited(retry_after) => match retry_after {
+            Some(delay) => format!(
+                "Mentor tool rate limited ({tool_name}), retry in {}s",
+                delay.as_secs()
+            ),
+            None => format!("Mentor tool rate limited ({tool_name})"),
+        },
+        ToolError::Sandbox(reason) => format!("Mentor tool sandbox error ({tool_name}): {reason}"),
+    }
+}
+
+fn mentor_context_from_message(message: Option<&IncomingMessage>) -> MentorContext {
+    let mut ctx = MentorContext {
+        session_id: "default".to_string(),
+        voice_mode: false,
+        voice_mode_changed: None,
+        voice_transcript: None,
+        voice_transcription_error: None,
+    };
+
+    let Some(message) = message else {
+        return ctx;
+    };
+
+    if let Some(chat_id) = message
+        .metadata
+        .get("chat_id")
+        .and_then(|value| value.as_i64())
+    {
+        ctx.session_id = format!("telegram:{chat_id}");
+    } else if let Some(thread_id) = message.thread_id.as_deref() {
+        ctx.session_id = thread_id.to_string();
+    } else {
+        ctx.session_id = format!("{}:{}", message.channel, message.user_id);
+    }
+
+    ctx.voice_mode = message
+        .metadata
+        .get("mentor_voice_mode")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    ctx.voice_mode_changed = message
+        .metadata
+        .get("mentor_voice_mode_changed")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+
+    ctx.voice_transcript = message
+        .metadata
+        .get("mentor_voice_transcript")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            message
+                .metadata
+                .get("voice_transcript")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        });
+
+    ctx.voice_transcription_error = message
+        .metadata
+        .get("mentor_voice_transcription_error")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            message
+                .metadata
+                .get("voice_transcription_error")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        });
+
+    ctx
+}
+
+fn extract_mentor_reply(payload: &serde_json::Value) -> String {
+    payload
+        .get("reply")
+        .and_then(|value| value.as_str())
+        .or_else(|| payload.get("text").and_then(|value| value.as_str()))
+        .or_else(|| payload.get("content").and_then(|value| value.as_str()))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn enforce_voice_reply_style(reply: &str) -> String {
+    let trimmed = reply.trim();
+    if trimmed.chars().count() <= 260 {
+        return trimmed.to_string();
+    }
+    let clipped: String = trimmed.chars().take(257).collect();
+    format!("{clipped}...")
+}
+
+fn audio_mime_type_for_path(path: &str) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "m4a" | "mp4" => "audio/mp4",
+        "webm" => "audio/webm",
+        _ => "audio/mpeg",
+    }
+}
+
+fn load_audio_attachment_data_url(path: &str) -> Result<String, String> {
+    if path.starts_with("data:audio/") {
+        return Ok(path.to_string());
+    }
+
+    let bytes =
+        fs::read(path).map_err(|err| format!("Failed reading mentor audio artifact: {err}"))?;
+    if bytes.is_empty() {
+        return Err("Mentor audio artifact is empty".to_string());
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let mime = audio_mime_type_for_path(path);
+    Ok(format!("data:{mime};base64,{encoded}"))
 }
 
 impl Agent {
@@ -68,10 +265,9 @@ impl Agent {
                 self.handle_help_job(&message.user_id, &job_id).await?
             }
             MessageIntent::Command { command, args } => {
-                match self.handle_command(&command, &args).await? {
-                    Some(s) => s,
-                    None => return Ok(SubmissionResult::Ok { message: None }), // Shutdown signal
-                }
+                return self
+                    .handle_system_command(&command, &args, Some(message))
+                    .await;
             }
             _ => "Unknown intent".to_string(),
         };
@@ -466,6 +662,7 @@ impl Agent {
         &self,
         command: &str,
         args: &[String],
+        message: Option<&IncomingMessage>,
     ) -> Result<SubmissionResult, Error> {
         match command {
             "help" => Ok(SubmissionResult::response(concat!(
@@ -502,7 +699,7 @@ impl Agent {
                 "  /summarize        Summarize current thread\n",
                 "  /suggest          Suggest next steps\n",
                 "  /mentor <msg>     Ask mentor (text route)\n",
-                "  /mentor_voice <m> Ask mentor (voice-preferred route)\n",
+                "  /mentor_voice on|off|status|<msg>\n",
                 "\n",
                 "  /quit             Exit",
             ))),
@@ -611,32 +808,16 @@ impl Agent {
             }
 
             "mentor" => {
-                let message = args.join(" ").trim().to_string();
-                if message.is_empty() {
-                    Ok(SubmissionResult::response(
-                        "Usage: /mentor <message>",
-                    ))
+                let mentor_input = args.join(" ").trim().to_string();
+                if mentor_input.is_empty() {
+                    Ok(SubmissionResult::response("Usage: /mentor <message>"))
                 } else {
-                    Ok(SubmissionResult::response(format!(
-                        "Mentor request received. Send this as plain text if your channel does not support mentor command routing:\n\n{}",
-                        message
-                    )))
+                    self.handle_mentor_chat_command(message, &mentor_input, false)
+                        .await
                 }
             }
 
-            "mentor_voice" => {
-                let message = args.join(" ").trim().to_string();
-                if message.is_empty() {
-                    Ok(SubmissionResult::response(
-                        "Usage: /mentor_voice <message>",
-                    ))
-                } else {
-                    Ok(SubmissionResult::response(format!(
-                        "Mentor voice request received. If voice response is configured, ask with plain text:\n\nMentor voice request: {}",
-                        message
-                    )))
-                }
-            }
+            "mentor_voice" => self.handle_mentor_voice_command(message, args).await,
 
             _ => Ok(SubmissionResult::error(format!(
                 "Unknown command. Try /help"
@@ -767,8 +948,271 @@ impl Agent {
         Ok(SubmissionResult::response(out))
     }
 
+    async fn resolve_mentor_tool_name(&self, logical_tool_name: &str) -> Option<String> {
+        let suffix = format!("_{logical_tool_name}");
+        let tools = self.tools().list().await;
+
+        tools
+            .iter()
+            .find(|name| {
+                name.starts_with("mentor_")
+                    && (name.as_str() == logical_tool_name || name.ends_with(&suffix))
+            })
+            .cloned()
+            .or_else(|| {
+                tools
+                    .iter()
+                    .find(|name| name.as_str() == logical_tool_name || name.ends_with(&suffix))
+                    .cloned()
+            })
+    }
+
+    async fn execute_mentor_tool(
+        &self,
+        logical_tool_name: &str,
+        params: serde_json::Value,
+        user_id: &str,
+    ) -> Result<serde_json::Value, String> {
+        let tool_name = self
+            .resolve_mentor_tool_name(logical_tool_name)
+            .await
+            .ok_or_else(|| format!("Mentor tool not registered: {logical_tool_name}"))?;
+
+        let tool = self
+            .tools()
+            .get(&tool_name)
+            .await
+            .ok_or_else(|| format!("Mentor tool unavailable at runtime: {tool_name}"))?;
+
+        let mut job_ctx = JobContext::with_user(
+            user_id,
+            format!("mentor:{logical_tool_name}"),
+            "Mentor command invocation",
+        );
+        job_ctx.metadata = json!({
+            "source": "mentor_command",
+            "logical_tool_name": logical_tool_name,
+            "tool_name": tool_name,
+        });
+
+        let output = tokio::time::timeout(Duration::from_secs(60), async {
+            tool.execute(params, &job_ctx).await
+        })
+        .await
+        .map_err(|_| format!("Mentor MCP transport timeout while waiting for {logical_tool_name}"))?
+        .map_err(|err| map_mentor_tool_error(logical_tool_name, err))?;
+
+        let raw_payload = match output.result {
+            serde_json::Value::String(raw) => raw,
+            other => other.to_string(),
+        };
+
+        parse_tool_json_output(&raw_payload).or_else(|_| Ok(json!({ "text": raw_payload })))
+    }
+
+    async fn handle_mentor_chat_command(
+        &self,
+        message: Option<&IncomingMessage>,
+        mentor_input: &str,
+        voice_reply: bool,
+    ) -> Result<SubmissionResult, Error> {
+        let mentor_ctx = mentor_context_from_message(message);
+        let user_id = message.map(|msg| msg.user_id.as_str()).unwrap_or("default");
+
+        let payload = self
+            .execute_mentor_tool(
+                "mentor.chat",
+                json!({
+                    "message": mentor_input,
+                    "sessionId": mentor_ctx.session_id,
+                    "voiceReply": voice_reply,
+                }),
+                user_id,
+            )
+            .await;
+
+        let payload = match payload {
+            Ok(payload) => payload,
+            Err(primary_error) => {
+                if voice_reply {
+                    let fallback = self
+                        .execute_mentor_tool(
+                            "mentor.chat",
+                            json!({
+                                "message": mentor_input,
+                                "sessionId": mentor_ctx.session_id,
+                                "voiceReply": false,
+                            }),
+                            user_id,
+                        )
+                        .await;
+
+                    if let Ok(fallback_payload) = fallback {
+                        let text = extract_mentor_reply(&fallback_payload);
+                        let text = if text.is_empty() {
+                            "Mentor returned no content.".to_string()
+                        } else {
+                            text
+                        };
+                        let fallback_note = mentor_error_summary(&primary_error);
+                        return Ok(SubmissionResult::response(format!(
+                            "{text}\n\nVoice fallback: {fallback_note}"
+                        )));
+                    }
+                }
+
+                return Ok(SubmissionResult::error(mentor_error_summary(
+                    &primary_error,
+                )));
+            }
+        };
+
+        let mut reply = extract_mentor_reply(&payload);
+        if reply.is_empty() {
+            reply = "Mentor returned no content.".to_string();
+        }
+        if voice_reply {
+            reply = enforce_voice_reply_style(&reply);
+        }
+
+        if !voice_reply {
+            return Ok(SubmissionResult::response(reply));
+        }
+
+        let voice_artifact = payload
+            .get("voiceArtifact")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+
+        let Some(voice_artifact) = voice_artifact else {
+            return Ok(SubmissionResult::response(reply));
+        };
+
+        match load_audio_attachment_data_url(&voice_artifact) {
+            Ok(data_url) => Ok(SubmissionResult::response_with_attachments(
+                reply,
+                vec![data_url],
+            )),
+            Err(error) => Ok(SubmissionResult::response(format!(
+                "{reply}\n\nVoice fallback: {}",
+                mentor_error_summary(&error)
+            ))),
+        }
+    }
+
+    async fn mentor_voice_status(
+        &self,
+        message: Option<&IncomingMessage>,
+    ) -> Result<SubmissionResult, Error> {
+        let mentor_ctx = mentor_context_from_message(message);
+        let user_id = message.map(|msg| msg.user_id.as_str()).unwrap_or("default");
+
+        let status = self
+            .execute_mentor_tool("mentor.status", json!({}), user_id)
+            .await;
+        match status {
+            Ok(status) => {
+                let mentor_name = status
+                    .get("mentor")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Lippyclaw Mentor");
+                let llm_ready = status
+                    .get("llm")
+                    .and_then(|value| value.get("apiKeyConfigured"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let voice_enabled = status
+                    .get("voice")
+                    .and_then(|value| value.get("enabled"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let sample_ready = status
+                    .get("voice")
+                    .and_then(|value| value.get("sampleReady"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let context_ready = status
+                    .get("voice")
+                    .and_then(|value| value.get("contextReady"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+
+                Ok(SubmissionResult::response(format!(
+                    "{mentor_name} status\nvoice_mode={}\nllm_ready={}\nvoice_enabled={}\nsample_ready={}\ncontext_ready={}",
+                    if mentor_ctx.voice_mode { "on" } else { "off" },
+                    llm_ready,
+                    voice_enabled,
+                    sample_ready,
+                    context_ready
+                )))
+            }
+            Err(error) => Ok(SubmissionResult::error(mentor_error_summary(&error))),
+        }
+    }
+
+    async fn handle_mentor_voice_command(
+        &self,
+        message: Option<&IncomingMessage>,
+        args: &[String],
+    ) -> Result<SubmissionResult, Error> {
+        let mentor_ctx = mentor_context_from_message(message);
+
+        if args.is_empty() {
+            if let Some(transcript) = mentor_ctx.voice_transcript.as_deref()
+                && !transcript.trim().is_empty()
+            {
+                return self
+                    .handle_mentor_chat_command(message, transcript.trim(), true)
+                    .await;
+            }
+
+            if let Some(transcription_error) = mentor_ctx.voice_transcription_error {
+                return Ok(SubmissionResult::error(mentor_error_summary(
+                    &transcription_error,
+                )));
+            }
+
+            return Ok(SubmissionResult::response(
+                "Usage: /mentor_voice on|off|status|<message>",
+            ));
+        }
+
+        let first = args[0].to_lowercase();
+        if args.len() == 1 {
+            match first.as_str() {
+                "on" | "off" => {
+                    let mode = if first == "on" { "on" } else { "off" };
+                    let applied = mentor_ctx
+                        .voice_mode_changed
+                        .as_deref()
+                        .map(|value| value.eq_ignore_ascii_case(mode))
+                        .unwrap_or(false);
+                    let current_mode = if mentor_ctx.voice_mode { "on" } else { "off" };
+                    let status_line = if applied {
+                        format!("mentor_voice mode set to {mode} (current={current_mode})")
+                    } else {
+                        format!(
+                            "mentor_voice mode request={mode} (current={current_mode}). If this is Telegram, ensure the channel persisted the toggle."
+                        )
+                    };
+
+                    return Ok(SubmissionResult::response(status_line));
+                }
+                "status" => {
+                    return self.mentor_voice_status(message).await;
+                }
+                _ => {}
+            }
+        }
+
+        let mentor_input = args.join(" ");
+        self.handle_mentor_chat_command(message, mentor_input.trim(), true)
+            .await
+    }
+
     /// Handle legacy command routing from the Router (job commands that go through
     /// process_user_input -> router -> handle_job_or_command -> here).
+    #[allow(dead_code)]
     pub(super) async fn handle_command(
         &self,
         command: &str,
@@ -776,8 +1220,8 @@ impl Agent {
     ) -> Result<Option<String>, Error> {
         // System commands are now handled directly via Submission::SystemCommand,
         // but the router may still send us unknown /commands.
-        match self.handle_system_command(command, args).await? {
-            SubmissionResult::Response { content } => Ok(Some(content)),
+        match self.handle_system_command(command, args, None).await? {
+            SubmissionResult::Response { content, .. } => Ok(Some(content)),
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             _ => Ok(None),

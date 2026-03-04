@@ -43,30 +43,6 @@ impl SubmissionParser {
         if lower == "/thread new" || lower == "/new" {
             return Submission::NewThread;
         }
-        // Mentor aliases: route to normal user input so they work across channels
-        // without requiring channel-specific command routers.
-        if let Some(rest) = trimmed.strip_prefix("/mentor_voice") {
-            let msg = rest.trim();
-            if msg.is_empty() {
-                return Submission::UserInput {
-                    content: "Mentor voice usage: /mentor_voice <message>".to_string(),
-                };
-            }
-            return Submission::UserInput {
-                content: format!("Mentor voice request: {}", msg),
-            };
-        }
-        if let Some(rest) = trimmed.strip_prefix("/mentor") {
-            let msg = rest.trim();
-            if msg.is_empty() {
-                return Submission::UserInput {
-                    content: "Mentor usage: /mentor <message>".to_string(),
-                };
-            }
-            return Submission::UserInput {
-                content: format!("Mentor request: {}", msg),
-            };
-        }
         // System commands (bypass thread-state checks)
         if lower == "/help" || lower == "/?" {
             return Submission::SystemCommand {
@@ -123,6 +99,28 @@ impl SubmissionParser {
                 .collect();
             return Submission::SystemCommand {
                 command: "model".to_string(),
+                args,
+            };
+        }
+        if lower == "/mentor" || lower.starts_with("/mentor ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "mentor".to_string(),
+                args,
+            };
+        }
+        if lower == "/mentor_voice" || lower.starts_with("/mentor_voice ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "mentor_voice".to_string(),
                 args,
             };
         }
@@ -386,6 +384,8 @@ pub enum SubmissionResult {
     Response {
         /// The agent's response.
         content: String,
+        /// Optional attachment payloads (e.g., audio data URLs).
+        attachments: Vec<String>,
     },
 
     /// Need approval before continuing.
@@ -421,6 +421,15 @@ impl SubmissionResult {
     pub fn response(content: impl Into<String>) -> Self {
         Self::Response {
             content: content.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Create a response result with attachments.
+    pub fn response_with_attachments(content: impl Into<String>, attachments: Vec<String>) -> Self {
+        Self::Response {
+            content: content.into(),
+            attachments,
         }
     }
 
@@ -798,6 +807,36 @@ mod tests {
         assert!(
             matches!(submission, Submission::SystemCommand { command, args }
                 if command == "skills" && args == vec!["search", "code", "review", "tools"])
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_mentor() {
+        let submission = SubmissionParser::parse("/mentor");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args }
+                if command == "mentor" && args.is_empty())
+        );
+
+        let submission = SubmissionParser::parse("/mentor explain wasm");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args }
+                if command == "mentor" && args == vec!["explain", "wasm"])
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_mentor_voice() {
+        let submission = SubmissionParser::parse("/mentor_voice");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args }
+                if command == "mentor_voice" && args.is_empty())
+        );
+
+        let submission = SubmissionParser::parse("/mentor_voice on");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args }
+                if command == "mentor_voice" && args == vec!["on"])
         );
     }
 
