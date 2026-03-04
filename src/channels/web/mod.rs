@@ -316,6 +316,7 @@ impl Channel for GatewayChannel {
             },
             StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk {
                 content,
+                chunk_type: crate::channels::web::types::ChunkType::Content,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::Status(msg) => SseEvent::Status {
