@@ -20,6 +20,12 @@ pub fn format_report(current: &RunResult, baseline: Option<&RunResult>) -> Strin
         "Scenarios: {passed}/{total} passed ({:.0}%)\n",
         current.pass_rate * 100.0
     ));
+    if current.skipped_scenarios > 0 {
+        out.push_str(&format!(
+            "Skipped: {} (budget cap reached)\n",
+            current.skipped_scenarios
+        ));
+    }
 
     // Per-scenario results.
     for s in &current.scenarios {

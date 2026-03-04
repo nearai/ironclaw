@@ -853,33 +853,104 @@ pub async fn run_all_bench(
         return Err("No bench scenarios matched the given filters".to_string());
     }
 
-    tracing::info!("Running {} bench scenario(s)", scenarios.len());
+    tracing::info!(
+        "Running {} bench scenario(s) (parallel: {})",
+        scenarios.len(),
+        config.parallel
+    );
 
     let mut results = Vec::with_capacity(scenarios.len());
-    for scenario in &scenarios {
-        tracing::info!(
-            "[bench] Running scenario: {} (tags: {:?})",
-            scenario.name,
-            scenario.tags
-        );
-        let result =
-            run_bench_scenario(scenario, Arc::clone(&llm), config.global_timeout_secs).await;
+    let mut skipped = 0usize;
 
-        let status = if result.passed { "PASS" } else { "FAIL" };
-        tracing::info!(
-            "[bench] {} -- {} ({}ms, {} LLM calls, {} turns)",
-            scenario.name,
-            status,
-            result.trace.wall_time_ms,
-            result.trace.llm_calls,
-            result.trace.turns,
-        );
+    if config.parallel <= 1 {
+        // Sequential execution (original behavior) with budget cap check.
+        for scenario in &scenarios {
+            if let Some(max_cost) = config.max_total_cost_usd {
+                let running_cost: f64 = results
+                    .iter()
+                    .map(|r: &ScenarioResult| r.trace.estimated_cost_usd)
+                    .sum();
+                if running_cost >= max_cost {
+                    tracing::warn!(
+                        "[bench] Budget cap ${:.4} reached (spent ${:.4}), skipping remaining {} scenarios",
+                        max_cost,
+                        running_cost,
+                        scenarios.len() - results.len()
+                    );
+                    skipped = scenarios.len() - results.len();
+                    break;
+                }
+            }
 
-        results.push(result);
+            tracing::info!(
+                "[bench] Running scenario: {} (tags: {:?})",
+                scenario.name,
+                scenario.tags
+            );
+            let result =
+                run_bench_scenario(scenario, Arc::clone(&llm), config.global_timeout_secs).await;
+
+            let status = if result.passed { "PASS" } else { "FAIL" };
+            tracing::info!(
+                "[bench] {} -- {} ({}ms, {} LLM calls, {} turns)",
+                scenario.name,
+                status,
+                result.trace.wall_time_ms,
+                result.trace.llm_calls,
+                result.trace.turns,
+            );
+
+            results.push(result);
+        }
+    } else {
+        // Parallel execution with bounded concurrency.
+        use tokio::task::JoinSet;
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(config.parallel));
+        let mut join_set = JoinSet::new();
+
+        for scenario in scenarios {
+            let llm = Arc::clone(&llm);
+            let timeout = config.global_timeout_secs;
+            let sem = Arc::clone(&semaphore);
+
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await.expect("semaphore closed");
+                tracing::info!(
+                    "[bench] Running scenario: {} (tags: {:?})",
+                    scenario.name,
+                    scenario.tags
+                );
+                let result = run_bench_scenario(&scenario, llm, timeout).await;
+                let status = if result.passed { "PASS" } else { "FAIL" };
+                tracing::info!(
+                    "[bench] {} -- {} ({}ms, {} LLM calls, {} turns)",
+                    scenario.name,
+                    status,
+                    result.trace.wall_time_ms,
+                    result.trace.llm_calls,
+                    result.trace.turns,
+                );
+                result
+            });
+        }
+
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok(result) => results.push(result),
+                Err(e) => {
+                    tracing::error!("[bench] Scenario task panicked: {e}");
+                }
+            }
+        }
+
+        // Sort results by scenario_id for deterministic ordering.
+        results.sort_by(|a, b| a.scenario_id.cmp(&b.scenario_id));
     }
 
     let run_id = format!("bench-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
     let mut run_result = RunResult::from_scenarios(run_id, results);
+    run_result.skipped_scenarios = skipped;
     if let Some(hash) = git_commit_hash() {
         run_result = run_result.with_commit_hash(hash);
     }
@@ -1062,6 +1133,13 @@ mod tests {
                 s.name
             );
         }
+    }
+
+    #[test]
+    fn test_parallel_config_defaults() {
+        let config = BenchmarkConfig::default();
+        assert_eq!(config.parallel, 1);
+        assert!(config.max_total_cost_usd.is_none());
     }
 
     #[tokio::test]

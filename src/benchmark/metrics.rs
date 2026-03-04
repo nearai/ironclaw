@@ -125,6 +125,9 @@ pub struct RunResult {
     /// Git commit hash for reproducibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_hash: Option<String>,
+    /// Number of scenarios skipped (e.g., due to budget cap).
+    #[serde(default)]
+    pub skipped_scenarios: usize,
 }
 
 impl RunResult {
@@ -146,6 +149,7 @@ impl RunResult {
             total_wall_time_ms,
             scenarios,
             commit_hash: None,
+            skipped_scenarios: 0,
         }
     }
 
