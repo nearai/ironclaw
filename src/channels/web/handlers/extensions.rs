@@ -33,7 +33,7 @@ pub async fn extensions_list_handler(
                     "failed".to_string()
                 } else if !ext.authenticated {
                     "installed".to_string()
-                } else if ext.active && ext.name == "telegram" {
+                } else if ext.active {
                     let has_paired = pairing_store
                         .read_allow_from(&ext.name)
                         .map(|list| !list.is_empty())
@@ -59,6 +59,7 @@ pub async fn extensions_list_handler(
                 active: ext.active,
                 tools: ext.tools,
                 needs_setup: ext.needs_setup,
+                has_auth: ext.has_auth,
                 activation_status,
                 activation_error: ext.activation_error,
             }
@@ -123,7 +124,11 @@ pub async fn extensions_activate_handler(
     ))?;
 
     match ext_mgr.activate(&name).await {
-        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
+        Ok(result) => {
+            // Activation just loads the WASM module. Auth (OAuth/manual) is
+            // triggered separately via save_setup_secrets or the auth endpoint.
+            Ok(Json(ActionResponse::ok(result.message)))
+        }
         Err(activate_err) => {
             let err_str = activate_err.to_string();
             let needs_auth = err_str.contains("authentication")

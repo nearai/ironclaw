@@ -291,7 +291,11 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
-                    return Ok(AgenticLoopResult::Response(text));
+                    // Strip internal "[Called tool ...]" text that can leak when
+                    // provider flattening (e.g. NEAR AI) converts tool_calls to
+                    // plain text and the LLM echoes it back.
+                    let sanitized = strip_internal_tool_call_text(&text);
+                    return Ok(AgenticLoopResult::Response(sanitized));
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
@@ -900,6 +904,38 @@ fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     compacted
 }
 
+/// Strip internal `[Called tool ...]` and `[Tool ... returned: ...]` markers
+/// from a response string. These markers are inserted by provider-level message
+/// flattening (e.g. NEAR AI) and can leak into the user-visible response when
+/// the LLM echoes them back.
+fn strip_internal_tool_call_text(text: &str) -> String {
+    // Remove lines that are purely internal tool-call markers.
+    // Pattern: lines matching `[Called tool <name>(...)]` or `[Tool <name> returned: ...]`
+    let result = text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !((trimmed.starts_with("[Called tool ") && trimmed.ends_with(']'))
+                || (trimmed.starts_with("[Tool ")
+                    && trimmed.contains(" returned:")
+                    && trimmed.ends_with(']')))
+        })
+        .fold(String::new(), |mut acc, s| {
+            if !acc.is_empty() {
+                acc.push('\n');
+            }
+            acc.push_str(s);
+            acc
+        });
+
+    let result = result.trim();
+    if result.is_empty() {
+        "I wasn't able to complete that request. Could you try rephrasing or providing more details?".to_string()
+    } else {
+        result.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -982,6 +1018,7 @@ mod tests {
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
         };
 
         Agent::new(
@@ -1719,6 +1756,7 @@ mod tests {
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
         };
 
         Agent::new(
@@ -1830,6 +1868,7 @@ mod tests {
                 skills_config: SkillsConfig::default(),
                 hooks: Arc::new(HookRegistry::new()),
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+                sse_tx: None,
             };
 
             Agent::new(
@@ -1898,5 +1937,33 @@ mod tests {
                 panic!("Expected text response, got NeedApproval");
             }
         }
+    }
+
+    #[test]
+    fn test_strip_internal_tool_call_text_removes_markers() {
+        let input = "[Called tool search({\"query\": \"test\"})]\nHere is the answer.";
+        let result = super::strip_internal_tool_call_text(input);
+        assert_eq!(result, "Here is the answer.");
+    }
+
+    #[test]
+    fn test_strip_internal_tool_call_text_removes_returned_markers() {
+        let input = "[Tool search returned: some result]\nSummary of findings.";
+        let result = super::strip_internal_tool_call_text(input);
+        assert_eq!(result, "Summary of findings.");
+    }
+
+    #[test]
+    fn test_strip_internal_tool_call_text_all_markers_yields_fallback() {
+        let input = "[Called tool search({\"query\": \"test\"})]\n[Tool search returned: error]";
+        let result = super::strip_internal_tool_call_text(input);
+        assert!(result.contains("wasn't able to complete"));
+    }
+
+    #[test]
+    fn test_strip_internal_tool_call_text_preserves_normal_text() {
+        let input = "This is a normal response with [brackets] inside.";
+        let result = super::strip_internal_tool_call_text(input);
+        assert_eq!(result, input);
     }
 }

@@ -331,6 +331,9 @@ pub enum WorkspaceError {
 
     #[error("Heartbeat error: {reason}")]
     HeartbeatError { reason: String },
+
+    #[error("I/O error: {reason}")]
+    IoError { reason: String },
 }
 
 /// Orchestrator errors (internal API, container management).

@@ -531,13 +531,16 @@ pub async fn wait_for_authorization_callback(
     listener: TcpListener,
     server_name: &str,
 ) -> Result<String, AuthError> {
-    oauth_defaults::wait_for_callback(listener, "/callback", "code", server_name)
+    oauth_defaults::wait_for_callback(listener, "/callback", "code", server_name, None)
         .await
         .map_err(|e| match e {
             oauth_defaults::OAuthCallbackError::Denied => AuthError::AuthorizationDenied,
             oauth_defaults::OAuthCallbackError::Timeout => AuthError::Timeout,
             oauth_defaults::OAuthCallbackError::PortInUse(_, msg) => {
                 AuthError::Http(format!("Port error: {}", msg))
+            }
+            oauth_defaults::OAuthCallbackError::StateMismatch { .. } => {
+                AuthError::Http("CSRF state mismatch in OAuth callback".to_string())
             }
             oauth_defaults::OAuthCallbackError::Io(msg) => AuthError::Http(msg),
         })

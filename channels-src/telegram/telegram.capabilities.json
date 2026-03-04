@@ -39,6 +39,10 @@
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Telegram-Bot-Api-Secret-Token",
+        "secret_name": "telegram_webhook_secret"
       }
     }
   },

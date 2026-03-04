@@ -30,6 +30,7 @@ body {
   background: var(--bg);
   color: var(--text);
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -41,6 +42,7 @@ body {
   align-items: center;
   justify-content: center;
   height: 100vh;
+  height: 100dvh;
 }
 
 .auth-card-login {
@@ -141,6 +143,7 @@ body {
   display: none;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
 }
 
 /* Tab Bar */
@@ -987,7 +990,7 @@ body {
 /* Chat input */
 .chat-input {
   display: flex;
-  padding: 12px 16px;
+  padding: 12px 16px max(12px, env(safe-area-inset-bottom)) 16px;
   gap: 8px;
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
@@ -1808,6 +1811,7 @@ body {
 .job-files {
   display: flex;
   height: calc(100vh - 280px);
+  height: calc(100dvh - 280px);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
@@ -2310,43 +2314,6 @@ body {
   border-radius: var(--radius);
   padding: 6px 8px;
   margin-top: 6px;
-}
-
-/* Restart overlay */
-.restart-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: rgba(0, 0, 0, 0.8);
-  z-index: 2000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.restart-message {
-  text-align: center;
-  color: var(--text);
-}
-
-.restart-message h2 {
-  margin: 16px 0 8px;
-}
-
-.restart-message p {
-  color: var(--text-secondary);
-}
-
-.restart-spinner {
-  width: 40px;
-  height: 40px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin: 0 auto;
 }
 
 @keyframes spin {
