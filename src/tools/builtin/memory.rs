@@ -191,6 +191,11 @@ impl Tool for MemoryWriteTool {
                 "layer": {
                     "type": "string",
                     "description": "Memory layer to write to (e.g. 'private', 'household', 'finance'). When omitted, writes to the workspace's default scope."
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Skip privacy classification and write directly to the specified layer without redirect. Use when you're certain the content belongs in the target layer.",
+                    "default": false
                 }
             },
             "required": ["content"]
@@ -264,6 +269,10 @@ impl Tool for MemoryWriteTool {
             .unwrap_or(true);
 
         let layer = params.get("layer").and_then(|v| v.as_str());
+        let force = params
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Resolve the target to a workspace path
         let resolved_path = match target {
@@ -294,14 +303,14 @@ impl Tool for MemoryWriteTool {
         let layer_result = if let Some(layer_name) = layer {
             let result = if append {
                 self.workspace
-                    .append_to_layer(layer_name, &resolved_path, content)
+                    .append_to_layer(layer_name, &resolved_path, content, force)
                     .await
                     .map_err(|e| {
                         ToolError::ExecutionFailed(format!("Write failed: {}", e))
                     })?
             } else {
                 self.workspace
-                    .write_to_layer(layer_name, &resolved_path, content)
+                    .write_to_layer(layer_name, &resolved_path, content, force)
                     .await
                     .map_err(|e| {
                         ToolError::ExecutionFailed(format!("Write failed: {}", e))
