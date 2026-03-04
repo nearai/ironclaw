@@ -665,18 +665,14 @@ impl AppBuilder {
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
-            match ws.seed_if_empty().await {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("Failed to seed workspace: {}", e);
-                }
-            }
-
-            // Import workspace files from disk if WORKSPACE_IMPORT_DIR is set.
+            // Import workspace files from disk FIRST if WORKSPACE_IMPORT_DIR is set.
             // This lets Docker images / deployment scripts ship customized
             // workspace templates (e.g., AGENTS.md, TOOLS.md) that override
             // the generic seeds. Only imports files that don't already exist
             // in the database — never overwrites user edits.
+            //
+            // Runs before seed_if_empty() so that custom templates take priority
+            // over generic seeds. seed_if_empty() then fills any remaining gaps.
             if let Ok(import_dir) = std::env::var("WORKSPACE_IMPORT_DIR") {
                 let import_path = std::path::Path::new(&import_dir);
                 match ws.import_from_directory(import_path).await {
@@ -691,6 +687,13 @@ impl AppBuilder {
                             e
                         );
                     }
+                }
+            }
+
+            match ws.seed_if_empty().await {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to seed workspace: {}", e);
                 }
             }
 
