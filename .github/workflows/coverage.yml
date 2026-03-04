@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   coverage:
     name: Coverage
@@ -24,6 +28,5 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           files: lcov.info
+          use_oidc: true
           fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
