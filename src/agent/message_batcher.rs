@@ -279,6 +279,15 @@ impl MessageBatcher {
 
         let first = &batch.messages[0];
 
+        // Collect all message_ids from the batch for mark_as_read support
+        // This ensures that when messages are batched, all original message IDs
+        // are preserved so the channel can mark all of them as read
+        let original_message_ids: Vec<serde_json::Value> = batch
+            .messages
+            .iter()
+            .filter_map(|m| m.metadata.get("message_id").cloned())
+            .collect();
+
         // Join message contents with double newlines
         let content = batch
             .messages
@@ -287,7 +296,14 @@ impl MessageBatcher {
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        // Create merged message using the first message's metadata
+        // Create merged metadata with all original message IDs
+        let mut merged_metadata = first.metadata.clone();
+        if original_message_ids.len() > 1 {
+            merged_metadata["original_message_ids"] =
+                serde_json::Value::Array(original_message_ids);
+        }
+
+        // Create merged message
         Some(IncomingMessage {
             id: uuid::Uuid::new_v4(),
             channel: first.channel.clone(),
@@ -296,7 +312,7 @@ impl MessageBatcher {
             content,
             thread_id: first.thread_id.clone(),
             received_at: first.received_at,
-            metadata: first.metadata.clone(),
+            metadata: merged_metadata,
         })
     }
 
@@ -443,5 +459,107 @@ mod tests {
             received_messages.contains(&"user2_msg".to_string()),
             "Message from user2 not found"
         );
+    }
+
+    #[tokio::test]
+    async fn test_merge_batch_preserves_all_message_ids() {
+        use chrono::Utc;
+
+        // Create a batch with multiple WhatsApp-style messages
+        let batch = PendingBatch {
+            messages: vec![
+                IncomingMessage {
+                    id: uuid::Uuid::new_v4(),
+                    channel: "whatsapp".to_string(),
+                    user_id: "user1".to_string(),
+                    user_name: None,
+                    content: "msg1".to_string(),
+                    thread_id: None,
+                    received_at: Utc::now(),
+                    metadata: serde_json::json!({
+                        "message_id": "wamid.xxx1",
+                        "phone_number_id": "123456",
+                        "sender_phone": "+1234567890"
+                    }),
+                },
+                IncomingMessage {
+                    id: uuid::Uuid::new_v4(),
+                    channel: "whatsapp".to_string(),
+                    user_id: "user1".to_string(),
+                    user_name: None,
+                    content: "msg2".to_string(),
+                    thread_id: None,
+                    received_at: Utc::now(),
+                    metadata: serde_json::json!({
+                        "message_id": "wamid.xxx2",
+                        "phone_number_id": "123456",
+                        "sender_phone": "+1234567890"
+                    }),
+                },
+                IncomingMessage {
+                    id: uuid::Uuid::new_v4(),
+                    channel: "whatsapp".to_string(),
+                    user_id: "user1".to_string(),
+                    user_name: None,
+                    content: "msg3".to_string(),
+                    thread_id: None,
+                    received_at: Utc::now(),
+                    metadata: serde_json::json!({
+                        "message_id": "wamid.xxx3",
+                        "phone_number_id": "123456",
+                        "sender_phone": "+1234567890"
+                    }),
+                },
+            ],
+        };
+
+        let merged = MessageBatcher::merge_batch(&batch).unwrap();
+
+        // Verify all message IDs are preserved in original_message_ids
+        let original_ids = merged
+            .metadata
+            .get("original_message_ids")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(original_ids.len(), 3);
+        assert!(original_ids.contains(&serde_json::Value::String("wamid.xxx1".to_string())));
+        assert!(original_ids.contains(&serde_json::Value::String("wamid.xxx2".to_string())));
+        assert!(original_ids.contains(&serde_json::Value::String("wamid.xxx3".to_string())));
+
+        // Verify content is merged
+        assert_eq!(merged.content, "msg1\n\nmsg2\n\nmsg3");
+
+        // Verify first message's metadata is still present (for backward compat)
+        assert_eq!(merged.metadata.get("phone_number_id").unwrap(), "123456");
+    }
+
+    #[tokio::test]
+    async fn test_merge_batch_single_message_no_original_ids() {
+        use chrono::Utc;
+
+        // Single message should NOT have original_message_ids
+        let batch = PendingBatch {
+            messages: vec![IncomingMessage {
+                id: uuid::Uuid::new_v4(),
+                channel: "whatsapp".to_string(),
+                user_id: "user1".to_string(),
+                user_name: None,
+                content: "single".to_string(),
+                thread_id: None,
+                received_at: Utc::now(),
+                metadata: serde_json::json!({
+                    "message_id": "wamid.single",
+                    "phone_number_id": "123456",
+                }),
+            }],
+        };
+
+        let merged = MessageBatcher::merge_batch(&batch).unwrap();
+
+        // Single message should NOT have original_message_ids array
+        assert!(merged.metadata.get("original_message_ids").is_none());
+
+        // Original metadata should be preserved
+        assert_eq!(merged.metadata.get("message_id").unwrap(), "wamid.single");
     }
 }
