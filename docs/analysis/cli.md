@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — CLI Interface
 
-> Updated: 2026-02-26 | Version: v0.13.0
+> Updated: 2026-03-05 | Version: v0.14.0
 
 ## 1. Overview
 
@@ -33,7 +33,7 @@ The full command tree derived from `src/cli/mod.rs` and `src/app.rs`:
 |---------|-------------|
 | `ironclaw` | Start agent in REPL/TUI mode (interactive, default) |
 | `ironclaw run` | Explicitly start the agent (same as no subcommand) |
-| `ironclaw onboard` | Run the interactive 7-step onboarding wizard |
+| `ironclaw onboard` | Run the interactive 9-step onboarding wizard |
 | `ironclaw onboard --skip-auth` | Onboard without re-authenticating (use existing session) |
 | `ironclaw onboard --channels-only` | Reconfigure channels only, skip other wizard steps |
 | `ironclaw config init` | Generate a default `config.toml` file |
@@ -54,6 +54,7 @@ The full command tree derived from `src/cli/mod.rs` and `src/app.rs`:
 | `ironclaw tool remove <NAME>` | Remove an installed WASM tool |
 | `ironclaw tool info <NAME>` | Show details and capabilities for a specific tool |
 | `ironclaw tool auth <NAME>` | Configure authentication for a WASM tool (OAuth or manual) |
+| `ironclaw tool setup <NAME>` | Configure required secrets for a tool interactively |
 | `ironclaw registry list` | List available extensions in the local registry |
 | `ironclaw registry list --kind <tool\|channel>` | Filter by extension kind |
 | `ironclaw registry list --tag <TAG>` | Filter by tag (e.g., `default`, `google`) |

@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Skills, Extensions & Hooks
 
-> Updated: 2026-02-26 | Version: v0.12.0
+> Updated: 2026-02-26 | Version: v0.14.0
 
 ## 1. Overview
 
@@ -289,7 +289,9 @@ Extensions are the user-facing abstraction over two underlying plugin mechanisms
 
 - **MCP servers** — hosted HTTP services implementing the Model Context Protocol, authenticated via OAuth 2.1
 - **WASM tools** — sandboxed WebAssembly modules providing tools to the agent, with capabilities declared in a sidecar JSON file
-- **WASM channels** — WebAssembly modules that act as input channels (Telegram, Slack, etc.); currently require a restart to activate
+- **WASM channels** — WebAssembly modules that act as input channels (Telegram, Slack, etc.); hot-activated at runtime as of v0.14.0 without requiring restart
+
+> **v0.14.0 (#493):** WASM channel restart infrastructure removed. Channels now support hot-activation at runtime, eliminating the need to restart the agent after installing or configuring a channel.
 
 Unlike skills (which inject prompt text), extensions add **callable tools** to the agent's tool list.
 
@@ -309,7 +311,7 @@ Defined in `src/extensions/mod.rs` as `ExtensionKind`:
 |------|-----------|------|------------|
 | `McpServer` | HTTP (SSE or JSON-RPC) | OAuth 2.1 or manual token | Runtime, no restart needed |
 | `WasmTool` | In-process WASM sandbox | Capabilities file (`auth` section) | Runtime, no restart needed |
-| `WasmChannel` | In-process WASM sandbox | Capabilities file | Requires restart |
+| `WasmChannel` | In-process WASM sandbox | Capabilities file | Runtime, hot-activated (v0.14.0) |
 
 ### 3.3 Extension Lifecycle
 
@@ -325,7 +327,7 @@ All operations flow through `ExtensionManager` (`src/extensions/manager.rs`):
 **Auth**:
 
 - MCP server: attempts full OAuth 2.1 PKCE flow; falls back to building an auth URL for non-interactive environments; falls back to manual token entry if OAuth is not supported
-- WASM tool: checks `auth.env_var` first, then checks secrets store; if neither, returns instructions for manual token entry
+- WASM tool: supports OAuth 2.0 flows (configurable via `auth.oauth` in the capabilities file, with built-in defaults for Google OAuth); checks `auth.env_var` first for backward compatibility, then attempts OAuth if configured, then checks secrets store; finally returns instructions for manual token entry
 
 **Activate**:
 
@@ -336,7 +338,7 @@ All operations flow through `ExtensionManager` (`src/extensions/manager.rs`):
 
 - MCP server: unregisters tools with server's name prefix, removes MCP client, removes config entry
 - WASM tool: unregisters from `ToolRegistry`, unregisters any hooks with `plugin.tool:<name>::` prefix, deletes `.wasm` and `.capabilities.json` files
-- WASM channel: manual deletion required (`~/.ironclaw/channels/`) + restart
+- WASM channel: unregisters from channel manager, unregisters hooks, deletes `.wasm` and `.capabilities.json` files
 
 ### 3.4 Built-in Extension Registry
 

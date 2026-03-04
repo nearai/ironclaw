@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Configuration System
 
-> Updated: 2026-02-24 | Version: v0.12.0
+> Updated: 2026-03-05 | Version: v0.14.0
 
 ## 1. Overview
 
@@ -52,16 +52,19 @@ default is possible.
 
 | Env Var | Type | Default | Required | Description |
 |---------|------|---------|----------|-------------|
+| **Bootstrap** | | | | |
+| `IRONCLAW_BASE_DIR` | path | `~/.ironclaw` | No | Overrides the base directory for all ironclaw data files (sessions, database, tools, channels, skills). Value is cached via `LazyLock` for the process lifetime. Relative paths work but emit a warning. Added in v0.13.0 (PR #397). |
 | **Database** | | | | |
 | `DATABASE_BACKEND` | string | `postgres` | No | `postgres` (or `pg`, `postgresql`) or `libsql` (or `turso`, `sqlite`) |
 | `DATABASE_URL` | secret | — | If postgres | PostgreSQL connection string (e.g. `postgres://user:pass@host/db`) |
-| `DATABASE_POOL_SIZE` | u32 | `10` | No | PostgreSQL connection pool size |
+| `DATABASE_POOL_SIZE` | usize | `10` | No | PostgreSQL connection pool size |
+| `DATABASE_SSLMODE` | string | `prefer` | No | PostgreSQL TLS mode; one of `disable`, `prefer`, `require`. Applies during `DATABASE_URL` pool setup |
 | `LIBSQL_PATH` | path | `~/.ironclaw/ironclaw.db` | No | Path to local libSQL/SQLite database file |
 | `LIBSQL_URL` | string | — | No | Turso cloud URL for remote sync (e.g. `libsql://xxx.turso.io`) |
 | `LIBSQL_AUTH_TOKEN` | secret | — | If `LIBSQL_URL` is set | Turso authentication token |
 | **LLM Backend** | | | | |
 | `LLM_BACKEND` | string | `nearai` | No | `nearai`, `openai`, `anthropic`, `ollama`, `openai_compatible`, or `tinfoil` |
-| `NEARAI_MODEL` | string | `fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic` | No | Model name for NEAR AI |
+| `NEARAI_MODEL` | string | `zai-org/GLM-latest` | No | Model name for NEAR AI |
 | `NEARAI_CHEAP_MODEL` | string | — | No | Optional model name for SmartRoutingProvider cheap-model path (e.g., `claude-haiku-4-20250514`). Added v0.10.0. |
 | `NEARAI_BASE_URL` | string | `https://private.near.ai` (Responses) or `https://cloud-api.near.ai` (Chat) | No | NEAR AI API base URL |
 | `NEARAI_AUTH_URL` | string | `https://private.near.ai` | No | NEAR AI auth/refresh endpoint base URL |
@@ -130,6 +133,7 @@ default is possible.
 | `WASM_CHANNELS_DIR` | path | `~/.ironclaw/channels/` | No | Directory containing WASM channel modules (Telegram, Slack, etc.) |
 | `WASM_CHANNELS_ENABLED` | bool | `true` | No | Enable WASM channel modules |
 | `TELEGRAM_OWNER_ID` | i64 | — | No | Telegram user ID. When set, bot only responds to this user |
+| `WASM_CHANNEL_OWNER_IDS` | string | — | No | Per-WASM-channel owner user IDs; format: comma-separated `channel_name:user_id` pairs. Controls which user can trigger each channel. Example: `WASM_CHANNEL_OWNER_IDS=telegram:123456,slack:789012`. Added v0.14.0. |
 | **Channels: Signal** | | | | |
 | `SIGNAL_HTTP_URL` | string | — | If Signal enabled | Base URL of signal-cli HTTP daemon (e.g. `http://127.0.0.1:8080`). Setting this and `SIGNAL_ACCOUNT` enables the Signal channel |
 | `SIGNAL_ACCOUNT` | string | — | If Signal enabled | Bot's E.164 phone number (e.g. `+1234567890`) |
@@ -175,6 +179,18 @@ default is possible.
 | `WASM_DEFAULT_FUEL_LIMIT` | u64 | `10000000` | No | Default fuel (CPU instruction budget) per WASM call |
 | `WASM_CACHE_COMPILED` | bool | `true` | No | Cache compiled WASM modules to disk |
 | `WASM_CACHE_DIR` | path | — | No | Directory for compiled module cache. Defaults to a system temp path |
+| `IRONCLAW_OAUTH_CALLBACK_URL` | string | `http://127.0.0.1:9876/oauth/callback` | No | Override OAuth callback URL for remote server deployments. Set this when users access the gateway from a different machine than where ironclaw runs. |
+| `OAUTH_CALLBACK_HOST` | string | `127.0.0.1` | No | Network interface for the OAuth callback listener. Set to `0.0.0.0` for LAN access or SSH port forwarding scenarios. |
+
+### OAuth for WASM Tools (v0.14.0)
+
+WASM tools can declare OAuth 2.0 flows in their `capabilities.json`. No new env vars are required — OAuth is configured per-tool via:
+- `setup_secrets`: client_id and client_secret pairs collected from the user via the web UI
+- `validation_endpoint`: (optional) POST endpoint to verify the token is for the correct account
+- `custom_headers`: (optional) custom HTTP headers for validation requests (e.g., `Notion-Version`)
+
+The runtime handles token exchange, scope merging for shared providers (e.g., two Google tools share one auth session), and secure storage in the encrypted secrets store. Built-in Google OAuth defaults are provided so tools using Google APIs do not require users to register their own OAuth app.
+
 | **Heartbeat** | | | | |
 | `HEARTBEAT_ENABLED` | bool | `false` | No | Enable proactive periodic heartbeat execution |
 | `HEARTBEAT_INTERVAL_SECS` | u64 | `1800` (30 min) | No | Interval between heartbeat checks |
@@ -256,6 +272,8 @@ pub struct AgentConfig {
     pub allow_local_tools: bool,             // ALLOW_LOCAL_TOOLS
     pub max_cost_per_day_cents: Option<u64>, // MAX_COST_PER_DAY_CENTS
     pub max_actions_per_hour: Option<u64>,   // MAX_ACTIONS_PER_HOUR
+    pub max_tool_iterations: usize,          // AGENT_MAX_TOOL_ITERATIONS (default: 50)
+    pub auto_approve_tools: bool,            // AGENT_AUTO_APPROVE_TOOLS (default: false)
 }
 ```
 
@@ -274,18 +292,12 @@ pub enum LlmBackend {
     Tinfoil,          // "tinfoil"
 }
 
-pub enum NearAiApiMode {
-    Responses,        // NEAR AI Chat (Responses API, session token auth) — default
-    ChatCompletions,  // NEAR AI Cloud (Chat Completions API, API key auth)
-}
-
 pub struct NearAiConfig {
     pub model: String,
     pub cheap_model: Option<String>,
     pub base_url: String,
     pub auth_base_url: String,
     pub session_path: PathBuf,
-    pub api_mode: NearAiApiMode,
     pub api_key: Option<SecretString>,
     pub fallback_model: Option<String>,
     pub max_retries: u32,
@@ -296,6 +308,7 @@ pub struct NearAiConfig {
     pub response_cache_max_entries: usize,
     pub failover_cooldown_secs: u64,
     pub failover_cooldown_threshold: u32,
+    pub smart_routing_cascade: bool,    // SMART_ROUTING_CASCADE (default: true)
 }
 
 pub struct LlmConfig {
@@ -349,6 +362,7 @@ pub struct DatabaseConfig {
     pub backend: DatabaseBackend,      // DATABASE_BACKEND
     pub url: SecretString,             // DATABASE_URL (required for postgres)
     pub pool_size: usize,              // DATABASE_POOL_SIZE (default: 10)
+    pub ssl_mode: SslMode,             // DATABASE_SSLMODE (default: prefer)
     pub libsql_path: Option<PathBuf>, // LIBSQL_PATH (default: ~/.ironclaw/ironclaw.db)
     pub libsql_url: Option<String>,   // LIBSQL_URL (Turso cloud, optional)
     pub libsql_auth_token: Option<SecretString>, // LIBSQL_AUTH_TOKEN (required with libsql_url)
@@ -769,7 +783,7 @@ OPENAI_MODEL="gpt-4o"
 
 # NEAR AI Chat (Responses API — session token auth, default mode)
 # LLM_BACKEND="nearai"
-# NEARAI_MODEL="fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic"
+# NEARAI_MODEL="zai-org/GLM-latest"
 # NEARAI_SESSION_PATH="~/.ironclaw/session.json"
 # NEARAI_BASE_URL="https://private.near.ai"
 # NEARAI_AUTH_URL="https://private.near.ai"

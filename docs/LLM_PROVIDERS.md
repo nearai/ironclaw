@@ -1,6 +1,6 @@
 # LLM Provider Configuration
 
-> Version baseline: IronClaw v0.13.0 (`v0.13.0` tag snapshot)
+> Version baseline: IronClaw v0.14.0 (`v0.14.0` tag snapshot)
 
 IronClaw defaults to NEAR AI for model access, but supports any OpenAI-compatible
 endpoint as well as Anthropic and Ollama directly. This guide covers the most common
@@ -19,6 +19,7 @@ configurations.
 | Fireworks AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | vLLM / LiteLLM | `openai_compatible` | Optional | Self-hosted |
 | LM Studio | `openai_compatible` | No | Local GUI |
+| Tinfoil | `tinfoil` | `TINFOIL_API_KEY` | Private TEE inference |
 
 ---
 
@@ -28,7 +29,8 @@ No additional configuration required. On first run, `ironclaw onboard` opens a b
 for OAuth authentication. Credentials are saved to `~/.ironclaw/session.json`.
 
 ```env
-NEARAI_MODEL=claude-3-5-sonnet-20241022
+NEARAI_MODEL=zai-org/GLM-latest        # Default if unset: zai-org/GLM-latest
+# Override example: NEARAI_MODEL=claude-3-5-sonnet-20241022
 NEARAI_BASE_URL=https://private.near.ai
 ```
 
@@ -62,11 +64,22 @@ Install Ollama from [ollama.com](https://ollama.com), pull a model, then:
 
 ```env
 LLM_BACKEND=ollama
-OLLAMA_MODEL=llama3.2
+OLLAMA_MODEL=llama3.2                  # Default if unset: llama3
 # OLLAMA_BASE_URL=http://localhost:11434   # default
 ```
 
 Pull a model first: `ollama pull llama3.2`
+
+### Ollama as Embeddings Provider
+
+Ollama can also serve as a local embeddings provider for fully offline operation:
+
+```env
+EMBEDDING_PROVIDER=ollama
+EMBEDDING_MODEL=nomic-embed-text   # or mxbai-embed-large, all-minilm
+OLLAMA_BASE_URL=http://localhost:11434
+EMBEDDING_ENABLED=true
+```
 
 ---
 
@@ -86,7 +99,11 @@ LLM_BACKEND=openai_compatible
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_API_KEY=sk-or-...
 LLM_MODEL=anthropic/claude-sonnet-4
+# Optional: Attribution headers recommended by OpenRouter
+LLM_EXTRA_HEADERS=HTTP-Referer:https://myapp.com,X-Title:MyApp
 ```
+
+`LLM_EXTRA_HEADERS` accepts a comma-separated list of `Key:Value` pairs injected into every LLM request. Useful for OpenRouter attribution headers or provider-specific requirements.
 
 Popular OpenRouter model IDs:
 
@@ -163,6 +180,23 @@ LLM_MODEL=llama-3.2-3b-instruct-q4_K_M
 
 ---
 
+## Tinfoil (Private TEE Inference)
+
+Tinfoil runs models inside hardware-attested Trusted Execution Environments (TEEs), ensuring your prompts and completions are private even from the server operator.
+
+```env
+LLM_BACKEND=tinfoil
+TINFOIL_API_KEY=your-tinfoil-api-key
+TINFOIL_MODEL=kimi-k2-5          # Default model
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TINFOIL_API_KEY` | — | Required. Tinfoil API key |
+| `TINFOIL_MODEL` | `kimi-k2-5` | Model identifier |
+
+---
+
 ## Using the Setup Wizard
 
 Instead of editing `.env` manually, run the onboarding wizard:
@@ -176,3 +210,17 @@ automatically sets the base URL to `https://openrouter.ai/api/v1`. For other pro
 select **"OpenAI-compatible"** (Together AI, Fireworks, vLLM, LiteLLM, or LM Studio).
 You will be prompted for the base URL and (optionally) an API key.
 The model name is configured in the following step.
+
+---
+
+## Smart Routing (Cost Optimization)
+
+Smart routing automatically selects the cheapest model capable of answering a query, reducing costs without sacrificing quality.
+
+```env
+LLM_BACKEND=openai                 # Primary (capable) provider
+NEARAI_CHEAP_MODEL=gpt-4o-mini    # Or any cheap model identifier
+SMART_ROUTING_CASCADE=true         # Retry with primary if cheap model is uncertain
+```
+
+Simple queries (greetings, yes/no questions) are routed to the cheap model. Complex queries (code, reasoning, multi-step) use the primary model. With `SMART_ROUTING_CASCADE=true`, uncertain cheap-model responses are escalated to the primary model automatically.

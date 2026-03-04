@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Workspace, Memory & Storage
 
-> Updated: 2026-02-26 | Version: v0.12.0
+> Updated: 2026-02-26 | Version: v0.14.0
 
 ## 1. Overview
 
@@ -349,6 +349,7 @@ Four files compose the agent's identity, loaded in order by `Workspace::system_p
 | `SOUL.md` | `## Core Values` | Principles that govern agent behavior |
 | `USER.md` | `## User Context` | User name, preferences, ongoing context |
 | `IDENTITY.md` | `## Identity` | Agent name, nature, personality |
+| `TOOLS.md` | `## Tool Notes` | Environment-specific tool guidance (updated by agent as it learns) |
 
 After identity files, the system prompt also appends today's and yesterday's daily logs under `## Today's Notes` / `## Yesterday's Notes`. All sections are joined with `\n\n---\n\n`.
 
@@ -358,7 +359,16 @@ The system prompt is assembled at session start and injected as the LLM system m
 
 ### Seeding
 
-On every boot, `Workspace::seed_if_empty()` checks for each identity file and creates it with a default template if missing. Existing files are never overwritten, preserving user edits. The method returns the count of files created. Seeded files: `README.md`, `MEMORY.md`, `IDENTITY.md`, `SOUL.md`, `AGENTS.md`, `USER.md`, `HEARTBEAT.md`.
+On every boot, `Workspace::seed_if_empty()` checks for each identity file and creates it with a default template if missing. Existing files are never overwritten, preserving user edits. The method returns the count of files created. Seeded files: `README.md`, `MEMORY.md`, `IDENTITY.md`, `SOUL.md`, `AGENTS.md`, `USER.md`, `HEARTBEAT.md`, `TOOLS.md` *(environment-specific tool notes; updated by agent as it learns environment details)*, `BOOTSTRAP.md` *(seeded only on fresh workspaces, not upgrades; agent reads and deletes it to prevent repetition)*.
+
+### Disk-to-DB Import (v0.14.0)
+
+`Workspace::import_from_directory()` scans a directory for `*.md` files (non-recursive) and imports each one into the workspace DB, skipping files that already exist. This allows deployment scripts or Docker images to ship customized workspace templates that override the generic seeds.
+
+Use cases:
+- Docker image ships a custom `MEMORY.md` pre-populated with environment context
+- Organization-specific `SOUL.md` injected during container startup
+- The workspace picks up these files automatically without user intervention
 
 ### Multi-Agent Isolation
 

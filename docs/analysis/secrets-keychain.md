@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Secrets Management & Keychain
 
-> Updated: 2026-02-26 | Version: v0.13.0
+> Updated: 2026-03-05 | Version: v0.14.0
 
 ## 1. Overview
 
@@ -85,6 +85,8 @@ The fallback `mod platform` returns `SecretError::KeychainError` for all operati
 The encrypted store holds application secrets that cannot or should not live in process environment variables: user-supplied API keys, OAuth tokens, service passwords, and any credential that must survive across sessions. Environment variables are process-scoped and ephemeral; the encrypted store is persistent and per-user.
 
 ### Storage Layout
+
+> **Case normalization (v0.13.0, PR #413/#431):** Secret names are normalized to lowercase at storage and retrieval time. Lookups are case-insensitive — `MY_SECRET` and `my_secret` refer to the same stored value.
 
 Secrets are stored in a `secrets` table (both PostgreSQL and libSQL backends). The relevant columns per row are:
 
