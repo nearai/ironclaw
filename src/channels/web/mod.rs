@@ -20,6 +20,7 @@ pub mod log_layer;
 pub mod openai_compat;
 pub mod server;
 pub mod sse;
+pub mod sse_token;
 pub mod types;
 pub(crate) mod util;
 pub mod ws;
@@ -95,6 +96,7 @@ impl GatewayChannel {
             registry_entries: Vec::new(),
             cost_guard: None,
             startup_time: std::time::Instant::now(),
+            auth_token: auth_token.clone(),
         });
 
         Self {
@@ -130,6 +132,7 @@ impl GatewayChannel {
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             startup_time: self.state.startup_time,
+            auth_token: self.state.auth_token.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

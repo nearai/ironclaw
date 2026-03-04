@@ -167,6 +167,8 @@ pub struct GatewayState {
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
+    /// Gateway auth token for HMAC-based SSE token generation.
+    pub auth_token: String,
 }
 
 /// Start the gateway HTTP server.
@@ -197,6 +199,8 @@ pub async fn start_server(
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
     let protected = Router::new()
+        // Auth
+        .route("/api/auth/sse-token", post(sse_token_handler))
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
@@ -422,6 +426,25 @@ async fn health_handler() -> Json<HealthResponse> {
         status: "healthy",
         channel: "gateway",
     })
+}
+
+// --- SSE token handler ---
+
+/// Issue a short-lived HMAC-derived token for SSE connections.
+///
+/// Clients POST here (with their bearer token in the Authorization header) to
+/// receive a short-lived SSE token that can be passed as `?sse_token=...` in
+/// the EventSource URL. This prevents the main gateway token from appearing in
+/// URL query strings (where it would leak into proxy logs, browser history,
+/// and Referer headers).
+async fn sse_token_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Json<serde_json::Value> {
+    let sse_token = crate::channels::web::sse_token::generate_sse_token(&state.auth_token);
+    Json(serde_json::json!({
+        "sse_token": sse_token,
+        "expires_in": crate::channels::web::sse_token::SSE_TOKEN_LIFETIME_SECS,
+    }))
 }
 
 // --- Chat handlers ---

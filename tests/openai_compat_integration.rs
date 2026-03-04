@@ -202,6 +202,7 @@ async fn start_test_server_with_provider(
         registry_entries: Vec::new(),
         cost_guard: None,
         startup_time: std::time::Instant::now(),
+        auth_token: "test-auth-token".to_string(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -691,6 +692,7 @@ async fn test_no_llm_provider_returns_503() {
         registry_entries: Vec::new(),
         cost_guard: None,
         startup_time: std::time::Instant::now(),
+        auth_token: "test-auth-token".to_string(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

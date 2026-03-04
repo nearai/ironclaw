@@ -494,6 +494,7 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             startup_time: std::time::Instant::now(),
+            auth_token: "test-token".to_string(),
         }
     }
 }

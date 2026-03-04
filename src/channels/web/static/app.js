@@ -135,10 +135,29 @@ function apiFetch(path, options) {
 
 // --- SSE ---
 
-function connectSSE() {
+// Fetch a short-lived HMAC-derived SSE token so the main gateway token
+// never appears in EventSource URL query strings (avoids log leakage).
+async function getSseToken() {
+  const resp = await fetch('/api/auth/sse-token', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token }
+  });
+  if (!resp.ok) {
+    // Fall back to main token if SSE token endpoint is unavailable
+    return null;
+  }
+  const data = await resp.json();
+  return data.sse_token;
+}
+
+async function connectSSE() {
   if (eventSource) eventSource.close();
 
-  eventSource = new EventSource('/api/chat/events?token=' + encodeURIComponent(token));
+  const sseToken = await getSseToken();
+  const sseUrl = sseToken
+    ? '/api/chat/events?sse_token=' + encodeURIComponent(sseToken)
+    : '/api/chat/events?token=' + encodeURIComponent(token);
+  eventSource = new EventSource(sseUrl);
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
@@ -1526,10 +1545,14 @@ const LOG_MAX_ENTRIES = 2000;
 let logsPaused = false;
 let logBuffer = []; // buffer while paused
 
-function connectLogSSE() {
+async function connectLogSSE() {
   if (logEventSource) logEventSource.close();
 
-  logEventSource = new EventSource('/api/logs/events?token=' + encodeURIComponent(token));
+  const sseToken = await getSseToken();
+  const logUrl = sseToken
+    ? '/api/logs/events?sse_token=' + encodeURIComponent(sseToken)
+    : '/api/logs/events?token=' + encodeURIComponent(token);
+  logEventSource = new EventSource(logUrl);
 
   logEventSource.addEventListener('log', (e) => {
     const entry = JSON.parse(e.data);

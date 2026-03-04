@@ -8,6 +8,8 @@ use axum::{
 };
 use subtle::ConstantTimeEq;
 
+use crate::channels::web::sse_token;
+
 /// Shared auth state injected via axum middleware state.
 #[derive(Clone)]
 pub struct AuthState {
@@ -16,8 +18,10 @@ pub struct AuthState {
 
 /// Auth middleware that validates bearer token from header or query param.
 ///
-/// SSE connections can't set headers from `EventSource`, so we also accept
-/// `?token=xxx` as a query parameter.
+/// Accepts authentication via:
+/// 1. `Authorization: Bearer <gateway_token>` header (preferred for non-SSE requests)
+/// 2. `?token=<gateway_token>` query parameter (legacy, for backward compat)
+/// 3. `?sse_token=<hmac_token>` query parameter (preferred for SSE -- short-lived HMAC token)
 pub async fn auth_middleware(
     State(auth): State<AuthState>,
     headers: HeaderMap,
@@ -35,9 +39,16 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    // Fall back to query parameter for SSE EventSource (constant-time comparison)
+    // Fall back to query parameters for SSE EventSource connections.
     if let Some(query) = request.uri().query() {
         for pair in query.split('&') {
+            // Short-lived HMAC SSE token (preferred -- main token never in URL)
+            if let Some(candidate) = pair.strip_prefix("sse_token=")
+                && sse_token::validate_sse_token(&auth.token, candidate)
+            {
+                return next.run(request).await;
+            }
+            // Legacy: raw gateway token in query param (backward compat)
             if let Some(token) = pair.strip_prefix("token=")
                 && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
             {
@@ -182,6 +193,44 @@ mod tests {
         let req = Request::builder()
             .uri("/test")
             .header("Authorization", "Bearer  secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_sse_token_query_param_accepted() {
+        let gateway_token = "secret-token";
+        let app = test_app(gateway_token);
+        let sse_tok = crate::channels::web::sse_token::generate_sse_token(gateway_token);
+        let uri = format!("/test?sse_token={}", sse_tok);
+        let req = Request::builder()
+            .uri(uri.as_str())
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_sse_token_invalid_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test?sse_token=not-a-valid-hmac")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_sse_token_wrong_gateway_token_rejected() {
+        let sse_tok = crate::channels::web::sse_token::generate_sse_token("other-token");
+        let app = test_app("secret-token");
+        let uri = format!("/test?sse_token={}", sse_tok);
+        let req = Request::builder()
+            .uri(uri.as_str())
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
