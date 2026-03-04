@@ -9,6 +9,12 @@ pub struct SandboxConfig {
     pub enabled: bool,
     /// Security policy for sandbox execution.
     pub policy: SandboxPolicy,
+    /// Whether `FullAccess` policy is explicitly allowed.
+    ///
+    /// When `policy` is `FullAccess` but this field is `false`, the manager
+    /// will downgrade to `WorkspaceWrite` and emit a `tracing::error!` log.
+    /// Set via `SANDBOX_ALLOW_FULL_ACCESS=true` env var.
+    pub allow_full_access: bool,
     /// Default timeout for command execution.
     pub timeout: Duration,
     /// Memory limit in megabytes.
@@ -30,6 +36,7 @@ impl Default for SandboxConfig {
         Self {
             enabled: true, // Startup check disables gracefully if Docker unavailable
             policy: SandboxPolicy::ReadOnly,
+            allow_full_access: false,
             timeout: Duration::from_secs(120),
             memory_limit_mb: 2048,
             cpu_shares: 1024,
@@ -66,7 +73,15 @@ pub enum SandboxPolicy {
     WorkspaceWrite,
 
     /// Full access (no sandbox). Use with extreme caution.
-    /// This bypasses all isolation and runs directly on host.
+    ///
+    /// **BLAST RADIUS**: This bypasses Docker entirely and executes commands
+    /// via `sh -c` directly on the host with the agent process's full
+    /// privileges. If prompt injection bypasses tool approval, arbitrary
+    /// host shell commands can run. File system, network, and environment
+    /// are completely unrestricted.
+    ///
+    /// Requires `SANDBOX_ALLOW_FULL_ACCESS=true` as a second opt-in.
+    /// Without it, the sandbox manager will downgrade to `WorkspaceWrite`.
     FullAccess,
 }
 
