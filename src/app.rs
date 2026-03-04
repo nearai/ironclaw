@@ -9,13 +9,14 @@
 
 use std::sync::Arc;
 
+use crate::agent::SessionManager as AgentSessionManager;
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::config::Config;
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::{LlmProvider, SessionManager as LlmSessionManager};
+use crate::llm::{LlmProvider, SessionManager};
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
@@ -46,11 +47,11 @@ pub struct AppComponents {
     pub context_manager: Arc<ContextManager>,
     pub hooks: Arc<HookRegistry>,
     /// Shared thread/session manager used by the standard agent runtime.
-    pub agent_session_manager: Arc<crate::agent::SessionManager>,
+    pub agent_session_manager: Arc<AgentSessionManager>,
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
-    pub session: Arc<LlmSessionManager>,
+    pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
 }
@@ -66,7 +67,7 @@ pub struct AppBuilder {
     config: Config,
     flags: AppBuilderFlags,
     toml_path: Option<std::path::PathBuf>,
-    session: Arc<LlmSessionManager>,
+    session: Arc<SessionManager>,
     log_broadcaster: Arc<LogBroadcaster>,
 
     // Accumulated state
@@ -90,7 +91,7 @@ impl AppBuilder {
         config: Config,
         flags: AppBuilderFlags,
         toml_path: Option<std::path::PathBuf>,
-        session: Arc<LlmSessionManager>,
+        session: Arc<SessionManager>,
         log_broadcaster: Arc<LogBroadcaster>,
     ) -> Self {
         Self {
@@ -657,7 +658,7 @@ impl AppBuilder {
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
         let agent_session_manager =
-            Arc::new(crate::agent::SessionManager::new().with_hooks(Arc::clone(&hooks)));
+            Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
 
         let (
             mcp_session_manager,
@@ -780,7 +781,7 @@ mod tests {
     use async_trait::async_trait;
     use tokio::sync::mpsc;
 
-    use crate::agent::SessionManager;
+    use crate::agent::SessionManager as AgentSessionManager;
     use crate::hooks::{
         Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint, HookRegistry,
     };
@@ -809,7 +810,11 @@ mod tests {
                 session_id,
             } = event
             {
-                let _ = self.tx.send((user_id.clone(), session_id.clone()));
+                self.tx
+                    .send((user_id.clone(), session_id.clone()))
+                    .expect("test channel receiver should be alive");
+            } else {
+                panic!("SessionStartHook received an unexpected event: {event:?}");
             }
             Ok(HookOutcome::ok())
         }
@@ -821,7 +826,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         hooks.register(Arc::new(SessionStartHook { tx })).await;
 
-        let manager = SessionManager::new().with_hooks(Arc::clone(&hooks));
+        let manager = AgentSessionManager::new().with_hooks(Arc::clone(&hooks));
         manager.get_or_create_session("user-123").await;
 
         let (user_id, session_id) =
