@@ -5,10 +5,14 @@ ironclaw agents with worker sandboxing.
 
 ## Approaches
 
-| Name | Description |
-|------|-------------|
-| `container-docker` | Agent in Docker container, workers as sibling containers via shared Docker socket |
-| `vm-qemu` | Agent in QEMU/KVM VM, workers as containers inside the VM |
+| Approach | Isolation boundary | Daemon | Worker isolation |
+|---|---|---|---|
+| `container-docker` | cgroups/namespaces | dockerd + containerd | Shared kernel, shared daemon |
+| `container-gvisor` | cgroups/namespaces + gVisor sentry | dockerd + containerd | gVisor syscall interception, shared daemon |
+| `container-gvisor-dind` | gVisor sandbox per agent | Per-agent dockerd inside gVisor | gVisor kernel isolation + private daemon |
+| `podman-rootless` | cgroups/namespaces per user | None (socket-activated) | Separate user namespaces, no persistent daemon |
+| `vm-qemu` | Full VM per agent | QEMU process + inner dockerd | Full VM (heavy) |
+| `hybrid-firecracker` | Firecracker microVM per worker | dockerd (for agents) | Hardware-level KVM, lightweight |
 
 ## Quick Start
 
@@ -32,6 +36,30 @@ make compare
 make plot
 ```
 
+### gVisor approaches (requires runsc)
+
+```bash
+# container-gvisor uses gVisor for workers only
+make run APPROACH=container-gvisor AGENTS=5
+
+# container-gvisor-dind runs each agent in its own gVisor sandbox
+# with a private Docker daemon (Docker-in-gVisor)
+make run APPROACH=container-gvisor-dind AGENTS=3
+```
+
+Requires `runsc` runtime registered in `/etc/docker/daemon.json` with
+`--net-raw` and `--allow-packet-socket-write` flags (for the DinD variant).
+
+### Podman rootless (requires podman + systemd-container)
+
+```bash
+make podman-setup
+make run APPROACH=podman-rootless AGENTS=3
+```
+
+Creates ephemeral OS users per agent. Requires `podman`, `uidmap`, and
+`systemd-container` (for `machinectl` / `systemd-run --machine`).
+
 ### VM approach (requires KVM + libguestfs)
 
 ```bash
@@ -41,6 +69,16 @@ make vm-image
 # Run
 make run APPROACH=vm-qemu AGENTS=5
 ```
+
+### Firecracker hybrid (requires firecracker + KVM)
+
+```bash
+make fc-setup
+make run APPROACH=hybrid-firecracker AGENTS=3
+```
+
+Agents run in Docker containers with `/dev/kvm` passthrough. Workers are
+Firecracker microVMs spawned directly by the agent.
 
 ### GCP VM Setup
 
@@ -62,7 +100,10 @@ sudo bash benchmarks/setup-gcp.sh
 ## Prerequisites
 
 - **All approaches**: Linux, Docker daemon, Python 3.8+, `docker` Python SDK
+- **gVisor approaches**: `runsc` runtime registered in Docker daemon config
+- **Podman rootless**: `podman`, `uidmap`, `systemd-container`
 - **VM approach**: QEMU (`qemu-system-x86_64`), KVM (`/dev/kvm`), libguestfs-tools
+- **Firecracker hybrid**: `firecracker` binary, KVM (`/dev/kvm`)
 - **Charts**: `pip install matplotlib`
 - **GCP**: Use `setup-gcp.sh` to install everything
 
