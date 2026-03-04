@@ -251,6 +251,8 @@ enum TelegramStatusAction {
 }
 
 const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
+/// Telegram's hard limit for message text length.
+const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
 
 fn truncate_status_message(input: &str, max_chars: usize) -> String {
     let mut iter = input.chars();
@@ -260,6 +262,66 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+/// Split a long message into chunks that fit within Telegram's 4096-char limit.
+///
+/// Tries to split at the most natural boundary available (in priority order):
+/// 1. Double newline (paragraph break)
+/// 2. Single newline
+/// 3. Sentence end (`. `, `! `, `? `)
+/// 4. Word boundary (space)
+/// 5. Hard cut at the limit (last resort for pathological input)
+fn split_message(text: &str) -> Vec<String> {
+    if text.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        // Count chars to find the byte offset for our window.
+        let window_bytes = remaining
+            .char_indices()
+            .take(TELEGRAM_MAX_MESSAGE_LEN)
+            .last()
+            .map(|(byte_idx, ch)| byte_idx + ch.len_utf8())
+            .unwrap_or(remaining.len());
+
+        if window_bytes >= remaining.len() {
+            // Remainder fits entirely.
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        let window = &remaining[..window_bytes];
+
+        // 1. Double newline — best paragraph boundary
+        let split_at = window.rfind("\n\n")
+            // 2. Single newline
+            .or_else(|| window.rfind('\n'))
+            // 3. Sentence-ending punctuation followed by space
+            .or_else(|| {
+                let bytes = window.as_bytes();
+                // Search backwards for '. ', '! ', '? '
+                (1..bytes.len()).rev().find(|&i| {
+                    matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' '
+                })
+            })
+            // 4. Word boundary (last space)
+            .or_else(|| window.rfind(' '))
+            // 5. Hard cut
+            .unwrap_or(window_bytes);
+
+        // Avoid empty chunks (e.g. text starting with \n\n).
+        let split_at = if split_at == 0 { window_bytes } else { split_at };
+
+        chunks.push(remaining[..split_at].trim_end().to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+
+    chunks
 }
 
 fn status_message_for_user(update: &StatusUpdate) -> Option<String> {
@@ -584,50 +646,64 @@ impl Guest for TelegramChannel {
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        // Try sending with Markdown first; fall back to plain text if Telegram
-        // can't parse the entities (e.g. model leaked <tool_call> with underscores).
-        let result = send_message(
-            metadata.chat_id,
-            &response.content,
-            Some(metadata.message_id),
-            Some("Markdown"),
-        );
+        let chunks = split_message(&response.content);
+        let total = chunks.len();
 
-        match result {
-            Ok(msg_id) => {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent message to chat {}: message_id={}",
-                        metadata.chat_id, msg_id
-                    ),
-                );
-                Ok(())
-            }
-            Err(SendError::ParseEntities(detail)) => {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!("Markdown parse failed ({}), retrying as plain text", detail),
-                );
-                let msg_id = send_message(
-                    metadata.chat_id,
-                    &response.content,
-                    Some(metadata.message_id),
-                    None,
-                )
-                .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
+        // The first chunk replies to the original message; subsequent chunks
+        // reply to the previously sent chunk so they form a visual thread.
+        let mut reply_to: Option<i64> = Some(metadata.message_id);
 
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Sent plain-text message to chat {}: message_id={}",
-                        metadata.chat_id, msg_id
-                    ),
-                );
-                Ok(())
-            }
-            Err(e) => Err(e.to_string()),
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            // Try sending with Markdown first; fall back to plain text if Telegram
+            // can't parse the entities (e.g. model leaked <tool_call> with underscores).
+            let result = send_message(metadata.chat_id, &chunk, reply_to, Some("Markdown"));
+
+            let msg_id = match result {
+                Ok(id) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Sent message chunk {}/{} to chat {}: message_id={}",
+                            i + 1,
+                            total,
+                            metadata.chat_id,
+                            id,
+                        ),
+                    );
+                    id
+                }
+                Err(SendError::ParseEntities(detail)) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!(
+                            "Markdown parse failed on chunk {}/{} ({}), retrying as plain text",
+                            i + 1,
+                            total,
+                            detail
+                        ),
+                    );
+                    let id = send_message(metadata.chat_id, &chunk, reply_to, None)
+                        .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Sent plain-text chunk {}/{} to chat {}: message_id={}",
+                            i + 1,
+                            total,
+                            metadata.chat_id,
+                            id,
+                        ),
+                    );
+                    id
+                }
+                Err(e) => return Err(e.to_string()),
+            };
+
+            // Each subsequent chunk threads off the previous sent message.
+            reply_to = Some(msg_id);
         }
+
+        Ok(())
     }
 
     fn on_status(update: StatusUpdate) {
@@ -1262,6 +1338,55 @@ export!(TelegramChannel);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_split_message_short() {
+        let text = "Hello, world!";
+        let chunks = split_message(text);
+        assert_eq!(chunks, vec![text]);
+    }
+
+    #[test]
+    fn test_split_message_paragraph_boundary() {
+        let para_a = "A".repeat(3000);
+        let para_b = "B".repeat(3000);
+        let text = format!("{}\n\n{}", para_a, para_b);
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], para_a);
+        assert_eq!(chunks[1], para_b);
+    }
+
+    #[test]
+    fn test_split_message_word_boundary() {
+        // Build a string well over the limit with no newlines.
+        let words: Vec<String> = (0..1000).map(|i| format!("word{:04}", i)).collect();
+        let text = words.join(" ");
+        assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
+        let chunks = split_message(&text);
+        assert!(chunks.len() > 1, "expected multiple chunks");
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+        }
+        // All words must be present across chunks.
+        let rejoined = chunks.join(" ");
+        for word in &words {
+            assert!(rejoined.contains(word.as_str()));
+        }
+    }
+
+    #[test]
+    fn test_split_message_each_chunk_fits() {
+        // Stress-test: 20 000 chars of mixed text.
+        let text: String = (0..500)
+            .map(|i| format!("Sentence number {}. ", i))
+            .collect();
+        assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
+        let chunks = split_message(&text);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+        }
+    }
 
     #[test]
     fn test_clean_message_text() {
