@@ -15,7 +15,7 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::{LlmProvider, SessionManager};
+use crate::llm::{LlmProvider, SessionManager as LlmSessionManager};
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
@@ -45,10 +45,12 @@ pub struct AppComponents {
     pub log_broadcaster: Arc<LogBroadcaster>,
     pub context_manager: Arc<ContextManager>,
     pub hooks: Arc<HookRegistry>,
+    /// Shared thread/session manager used by the standard agent runtime.
+    pub agent_session_manager: Arc<crate::agent::SessionManager>,
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
-    pub session: Arc<SessionManager>,
+    pub session: Arc<LlmSessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
 }
@@ -64,7 +66,7 @@ pub struct AppBuilder {
     config: Config,
     flags: AppBuilderFlags,
     toml_path: Option<std::path::PathBuf>,
-    session: Arc<SessionManager>,
+    session: Arc<LlmSessionManager>,
     log_broadcaster: Arc<LogBroadcaster>,
 
     // Accumulated state
@@ -88,7 +90,7 @@ impl AppBuilder {
         config: Config,
         flags: AppBuilderFlags,
         toml_path: Option<std::path::PathBuf>,
-        session: Arc<SessionManager>,
+        session: Arc<LlmSessionManager>,
         log_broadcaster: Arc<LogBroadcaster>,
     ) -> Self {
         Self {
@@ -654,6 +656,8 @@ impl AppBuilder {
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
+        let agent_session_manager =
+            Arc::new(crate::agent::SessionManager::new().with_hooks(Arc::clone(&hooks)));
 
         let (
             mcp_session_manager,
@@ -758,6 +762,7 @@ impl AppBuilder {
             log_broadcaster: self.log_broadcaster,
             context_manager,
             hooks,
+            agent_session_manager,
             skill_registry,
             skill_catalog,
             cost_guard,
@@ -765,5 +770,67 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+
+    use crate::agent::SessionManager;
+    use crate::hooks::{
+        Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint, HookRegistry,
+    };
+
+    struct SessionStartHook {
+        tx: mpsc::UnboundedSender<(String, String)>,
+    }
+
+    #[async_trait]
+    impl Hook for SessionStartHook {
+        fn name(&self) -> &str {
+            "session-start-test"
+        }
+
+        fn hook_points(&self) -> &[HookPoint] {
+            &[HookPoint::OnSessionStart]
+        }
+
+        async fn execute(
+            &self,
+            event: &HookEvent,
+            _ctx: &HookContext,
+        ) -> Result<HookOutcome, HookError> {
+            if let HookEvent::SessionStart {
+                user_id,
+                session_id,
+            } = event
+            {
+                let _ = self.tx.send((user_id.clone(), session_id.clone()));
+            }
+            Ok(HookOutcome::ok())
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_session_manager_runs_session_start_hooks() {
+        let hooks = Arc::new(HookRegistry::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hooks.register(Arc::new(SessionStartHook { tx })).await;
+
+        let manager = SessionManager::new().with_hooks(Arc::clone(&hooks));
+        manager.get_or_create_session("user-123").await;
+
+        let (user_id, session_id) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("session start hook should fire")
+                .expect("session start payload should be present");
+
+        assert_eq!(user_id, "user-123");
+        assert!(!session_id.is_empty());
     }
 }
