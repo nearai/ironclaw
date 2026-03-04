@@ -14,6 +14,7 @@ use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
 use crate::agent::{Agent, AgentDeps};
 use crate::benchmark::bench_channel::{BenchChannel, BenchChannelHandle};
 use crate::benchmark::instrumented::InstrumentedLlm;
+use crate::benchmark::judge::judge_turn;
 use crate::benchmark::metrics::{RunResult, ScenarioResult, ToolInvocation, TraceMetrics, TurnMetrics};
 use crate::benchmark::scenario::{BenchScenario, EvalContext, Scenario};
 use crate::channels::{ChannelManager, IncomingMessage};
@@ -695,6 +696,32 @@ pub async fn run_bench_scenario(
             turn_errors.push("Turn timed out".to_string());
         }
 
+        // LLM-as-judge scoring (if configured for this turn).
+        let judge_score = if let Some(ref judge_config) = turn.judge {
+            let llm_for_judge: Arc<dyn LlmProvider> =
+                Arc::clone(&instrumented) as Arc<dyn LlmProvider>;
+            let score = judge_turn(
+                &llm_for_judge,
+                &turn.user,
+                &response_text,
+                &eval_ctx.tool_calls,
+                &judge_config.criteria,
+            )
+            .await;
+            if let Some(s) = score
+                && s < judge_config.min_score
+            {
+                turn_passed = false;
+                turn_errors.push(format!(
+                    "Judge score {s} is below minimum {}",
+                    judge_config.min_score
+                ));
+            }
+            score
+        } else {
+            None
+        };
+
         if !turn_passed {
             all_turns_passed = false;
             aggregated_errors.extend(turn_errors.iter().map(|e| format!("turn {turn_idx}: {e}")));
@@ -712,7 +739,7 @@ pub async fn run_bench_scenario(
             tool_calls: tool_invocations,
             response: response_text,
             assertions_passed: turn_passed,
-            judge_score: None,
+            judge_score,
             errors: turn_errors,
         });
 

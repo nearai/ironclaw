@@ -6,6 +6,7 @@
 pub mod baseline;
 pub mod bench_channel;
 pub mod instrumented;
+pub mod judge;
 pub mod metrics;
 pub mod report;
 #[cfg(feature = "libsql")]
