@@ -21,6 +21,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::ChatMessage;
+use crate::tools::redact_params;
 
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
@@ -357,7 +358,7 @@ impl Agent {
                 let request_id = pending.request_id;
                 let tool_name = pending.tool_name.clone();
                 let description = pending.description.clone();
-                let parameters = pending.parameters.clone();
+                let parameters = pending.display_parameters.clone();
                 thread.await_approval(pending);
                 let _ = self
                     .channels
@@ -751,14 +752,17 @@ impl Agent {
                 .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
                 .await;
 
+            let tool_ref = self.tools().get(&pending.tool_name).await;
             let _ = self
                 .channels
                 .send_status(
                     &message.channel,
-                    StatusUpdate::ToolCompleted {
-                        name: pending.tool_name.clone(),
-                        success: tool_result.is_ok(),
-                    },
+                    StatusUpdate::tool_completed(
+                        pending.tool_name.clone(),
+                        &tool_result,
+                        &pending.display_parameters,
+                        tool_ref.as_deref(),
+                    ),
                     &message.metadata,
                 )
                 .await;
@@ -908,14 +912,17 @@ impl Agent {
                         .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                         .await;
 
+                    let deferred_tool = self.tools().get(&tc.name).await;
                     let _ = self
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::ToolCompleted {
-                                name: tc.name.clone(),
-                                success: result.is_ok(),
-                            },
+                            StatusUpdate::tool_completed(
+                                tc.name.clone(),
+                                &result,
+                                &tc.arguments,
+                                deferred_tool.as_deref(),
+                            ),
                             &message.metadata,
                         )
                         .await;
@@ -957,13 +964,16 @@ impl Agent {
                         )
                         .await;
 
+                        let par_tool = tools.get(&tc.name).await;
                         let _ = channels
                             .send_status(
                                 &channel,
-                                StatusUpdate::ToolCompleted {
-                                    name: tc.name.clone(),
-                                    success: result.is_ok(),
-                                },
+                                StatusUpdate::tool_completed(
+                                    tc.name.clone(),
+                                    &result,
+                                    &tc.arguments,
+                                    par_tool.as_deref(),
+                                ),
                                 &metadata,
                             )
                             .await;
@@ -1086,6 +1096,7 @@ impl Agent {
                     request_id: Uuid::new_v4(),
                     tool_name: tc.name.clone(),
                     parameters: tc.arguments.clone(),
+                    display_parameters: redact_params(&tc.arguments, tool.sensitive_params()),
                     description: tool.description().to_string(),
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
@@ -1095,7 +1106,7 @@ impl Agent {
                 let request_id = new_pending.request_id;
                 let tool_name = new_pending.tool_name.clone();
                 let description = new_pending.description.clone();
-                let parameters = new_pending.parameters.clone();
+                let parameters = new_pending.display_parameters.clone();
 
                 {
                     let mut sess = session.lock().await;
@@ -1162,7 +1173,7 @@ impl Agent {
                     let request_id = new_pending.request_id;
                     let tool_name = new_pending.tool_name.clone();
                     let description = new_pending.description.clone();
-                    let parameters = new_pending.parameters.clone();
+                    let parameters = new_pending.display_parameters.clone();
                     thread.await_approval(new_pending);
                     let _ = self
                         .channels

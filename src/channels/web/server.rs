@@ -1592,6 +1592,13 @@ async fn extensions_setup_submit_handler(
 
     match ext_mgr.save_setup_secrets(&name, &req.secrets).await {
         Ok(result) => {
+            // Broadcast auth_completed so the chat UI can dismiss any in-progress
+            // auth card or setup modal that was triggered by tool_auth/tool_activate.
+            state.sse.broadcast(SseEvent::AuthCompleted {
+                extension_name: name.clone(),
+                success: true,
+                message: result.message.clone(),
+            });
             let mut resp = ActionResponse::ok(result.message);
             resp.activated = Some(result.activated);
             resp.auth_url = result.auth_url;
