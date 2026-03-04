@@ -524,7 +524,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ OpenAI-compatible / OpenRouter provider support
 
 ### P1 - High Priority
-- ❌ Slack channel (real implementation)
+- ✅ Slack channel (Socket Mode + webhook, WASM)
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)

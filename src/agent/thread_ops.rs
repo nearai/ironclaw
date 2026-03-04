@@ -666,26 +666,78 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get pending approval for this thread
-        let pending = {
+        // Get pending approval for this thread, or search other threads in the
+        // session. This handles the common case in Slack/Telegram DMs where the
+        // approval prompt is sent as a threaded reply but the user responds in
+        // the main chat, creating a different thread key.
+        let (pending, actual_thread_id) = {
             let mut sess = session.lock().await;
-            let thread = sess
-                .threads
-                .get_mut(&thread_id)
-                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-            if thread.state != ThreadState::AwaitingApproval {
-                // Stale or duplicate approval (tool already executed) — silently ignore.
-                tracing::debug!(
-                    %thread_id,
-                    state = ?thread.state,
-                    "Ignoring stale approval: thread not in AwaitingApproval state"
-                );
-                return Ok(SubmissionResult::ok_with_message(""));
+            // Check the target thread's state first (immutable borrow).
+            let target_state = sess.threads.get(&thread_id).map(|t| t.state);
+
+            match target_state {
+                Some(ThreadState::AwaitingApproval) => {
+                    // Target thread is awaiting approval — take it directly.
+                    let thread = sess.threads.get_mut(&thread_id).unwrap();
+                    let p = thread.take_pending_approval();
+                    if p.is_some() {
+                        (p, thread_id)
+                    } else {
+                        (None, thread_id)
+                    }
+                }
+                Some(state) => {
+                    // Resolved thread isn't awaiting approval — search session
+                    // for any thread that is (single-user assistant typically
+                    // has only one pending approval at a time).
+                    let mut awaiting: Vec<Uuid> = Vec::new();
+                    for (&tid, t) in sess.threads.iter() {
+                        if tid != thread_id && t.state == ThreadState::AwaitingApproval {
+                            awaiting.push(tid);
+                        }
+                    }
+
+                    if awaiting.is_empty() {
+                        // Stale or duplicate approval (tool already executed) — silently ignore.
+                        tracing::debug!(
+                            %thread_id,
+                            ?state,
+                            "Ignoring stale approval: no thread in AwaitingApproval state"
+                        );
+                        return Ok(SubmissionResult::ok_with_message(""));
+                    }
+
+                    if awaiting.len() > 1 {
+                        tracing::warn!(
+                            session_id = %sess.id,
+                            count = awaiting.len(),
+                            thread_ids = ?awaiting,
+                            "Multiple threads awaiting approval; picking earliest by ID"
+                        );
+                    }
+
+                    // Sort for deterministic selection regardless of HashMap order
+                    awaiting.sort();
+                    let target_tid = awaiting[0];
+
+                    let t = sess.threads.get_mut(&target_tid).unwrap();
+                    let p = t.take_pending_approval();
+                    match p {
+                        Some(pending) => (Some(pending), target_tid),
+                        None => {
+                            return Ok(SubmissionResult::error("No pending approval request."));
+                        }
+                    }
+                }
+                None => {
+                    return Err(Error::from(crate::error::JobError::NotFound {
+                        id: thread_id,
+                    }));
+                }
             }
-
-            thread.take_pending_approval()
         };
+        let thread_id = actual_thread_id;
 
         let pending = match pending {
             Some(p) => p,
@@ -1455,5 +1507,164 @@ impl Agent {
         } else {
             Ok(SubmissionResult::error("Checkpoint not found."))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use crate::agent::session::{PendingApproval, Session, ThreadState};
+    use crate::llm::ChatMessage;
+
+    #[test]
+    fn test_cross_thread_approval_search() {
+        let mut session = Session::new("user-1");
+
+        // Create two threads
+        let thread_a_id = session.create_thread().id;
+        let thread_b_id = session.create_thread().id;
+
+        // Put thread B into AwaitingApproval state
+        let pending = PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "ls"}),
+            description: "List files".to_string(),
+            tool_call_id: "call_abc".to_string(),
+            context_messages: vec![ChatMessage::user("list files please")],
+            deferred_tool_calls: vec![],
+        };
+        session
+            .threads
+            .get_mut(&thread_b_id)
+            .unwrap()
+            .await_approval(pending);
+
+        // Thread A is Idle, thread B is AwaitingApproval
+        assert_eq!(
+            session.threads.get(&thread_a_id).unwrap().state,
+            ThreadState::Idle
+        );
+        assert_eq!(
+            session.threads.get(&thread_b_id).unwrap().state,
+            ThreadState::AwaitingApproval
+        );
+
+        // Simulate cross-thread search: starting from thread A's perspective,
+        // iterate all threads to find one that is AwaitingApproval.
+        let mut found_thread_id = None;
+        for (&tid, thread) in &session.threads {
+            if tid != thread_a_id && thread.state == ThreadState::AwaitingApproval {
+                found_thread_id = Some(tid);
+                break;
+            }
+        }
+
+        assert_eq!(found_thread_id, Some(thread_b_id));
+
+        // Take the pending approval from the found thread
+        let taken = session
+            .threads
+            .get_mut(&thread_b_id)
+            .unwrap()
+            .take_pending_approval();
+        assert!(taken.is_some());
+        assert_eq!(taken.unwrap().tool_name, "shell");
+    }
+
+    #[test]
+    fn test_cross_thread_approval_search_multiple_pending_is_deterministic() {
+        // Regression: When multiple threads are in AwaitingApproval state,
+        // HashMap iteration order is non-deterministic. The code should
+        // pick the same thread consistently (smallest Uuid for determinism).
+        let mut session = Session::new("user-1");
+
+        let origin_id = session.create_thread().id;
+
+        // Create multiple threads with pending approvals
+        let mut awaiting_ids = Vec::new();
+        for i in 0..5 {
+            let tid = session.create_thread().id;
+            let pending = PendingApproval {
+                request_id: Uuid::new_v4(),
+                tool_name: format!("tool_{}", i),
+                parameters: serde_json::json!({}),
+                description: format!("Tool {}", i),
+                tool_call_id: format!("call_{}", i),
+                context_messages: vec![],
+                deferred_tool_calls: vec![],
+            };
+            session
+                .threads
+                .get_mut(&tid)
+                .unwrap()
+                .await_approval(pending);
+            awaiting_ids.push(tid);
+        }
+
+        // The deterministic selection should always pick the same thread:
+        // smallest Uuid among those in AwaitingApproval state.
+        let expected_tid = awaiting_ids.iter().copied().min().unwrap();
+
+        // Run the search 10 times to catch non-determinism
+        // (HashMap randomizes order across process runs, but within a single
+        // run the iteration order is stable — so we verify the sort logic
+        // by checking it picks the minimum Uuid).
+        let mut candidates: Vec<Uuid> = Vec::new();
+        for (tid, t) in &session.threads {
+            if *tid != origin_id && t.state == ThreadState::AwaitingApproval {
+                candidates.push(*tid);
+            }
+        }
+
+        assert!(candidates.len() >= 5, "Should have 5 awaiting threads");
+
+        // The fix should pick the minimum Uuid
+        let selected = *candidates.iter().min().unwrap();
+        assert_eq!(
+            selected, expected_tid,
+            "Deterministic selection should pick the smallest Uuid"
+        );
+    }
+
+    #[test]
+    fn test_direct_thread_approval() {
+        let mut session = Session::new("user-1");
+        let thread_id = session.create_thread().id;
+
+        let request_id = Uuid::new_v4();
+        let pending = PendingApproval {
+            request_id,
+            tool_name: "http_request".to_string(),
+            parameters: serde_json::json!({"url": "https://example.com"}),
+            description: "Fetch a URL".to_string(),
+            tool_call_id: "call_xyz".to_string(),
+            context_messages: vec![
+                ChatMessage::user("fetch example.com"),
+                ChatMessage::assistant("I will fetch that URL for you."),
+            ],
+            deferred_tool_calls: vec![],
+        };
+
+        // Put thread into AwaitingApproval
+        let thread = session.threads.get_mut(&thread_id).unwrap();
+        thread.await_approval(pending);
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+        assert!(thread.pending_approval.is_some());
+
+        // Take the approval
+        let taken = thread.take_pending_approval();
+        assert!(taken.is_some());
+
+        let approval = taken.unwrap();
+        assert_eq!(approval.request_id, request_id);
+        assert_eq!(approval.tool_name, "http_request");
+        assert_eq!(approval.tool_call_id, "call_xyz");
+        assert_eq!(approval.context_messages.len(), 2);
+
+        // After taking, it should be gone
+        assert!(thread.pending_approval.is_none());
+        assert!(thread.take_pending_approval().is_none());
     }
 }

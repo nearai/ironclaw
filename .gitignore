@@ -4,8 +4,9 @@
 .env.*
 !.env.example
 
-# Claude Code worktrees
+# Claude Code worktrees and local notes
 .claude/worktrees/
+.claude/docs/
 
 # Sidecar tool data
 .sidecar/
