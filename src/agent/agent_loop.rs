@@ -13,7 +13,7 @@ use futures::StreamExt;
 
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
-use crate::agent::message_batcher::{BatchingConfig, MessageBatcher};
+use crate::agent::message_batcher::MessageBatcher;
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
@@ -505,22 +505,9 @@ impl Agent {
         let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
         // Set up message batching for rapid inbound messages
-        let batching_config = BatchingConfig {
-            enabled: self.config.batching_enabled,
-            window_ms: self.config.batching_window_ms,
-            max_messages: self.config.batching_max_messages,
-        };
-        let batcher = Arc::new(MessageBatcher::new(batching_config));
+        // Per-channel batching config is determined automatically by MessageBatcher
+        let batcher = Arc::new(MessageBatcher::new());
         let mut batched_rx = batcher.subscribe();
-
-        // Spawn task to forward raw messages to batcher
-        let batcher_clone = Arc::clone(&batcher);
-        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::channel::<IncomingMessage>(64);
-        tokio::spawn(async move {
-            while let Some(msg) = raw_rx.recv().await {
-                batcher_clone.push(msg).await;
-            }
-        });
 
         // Main message loop
         tracing::info!("Agent {} ready and listening", self.config.name);
@@ -530,13 +517,8 @@ impl Agent {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("Ctrl+C received, flushing pending batches...");
-                    batcher.flush_all().await;
-                    // Drain any flushed messages before shutdown
-                    while let Ok(msg) = batched_rx.try_recv() {
-                        if let Err(e) = self.handle_message(&msg).await {
-                            tracing::error!("Error handling flushed message during shutdown: {}", e);
-                        }
-                    }
+                    self.flush_and_drain_batcher(&batcher, &mut batched_rx).await;
+                    batcher.shutdown().await;
                     break;
                 }
                 // Receive batched (merged) messages
@@ -553,25 +535,20 @@ impl Agent {
                         }
                     }
                 }
-                // Receive raw messages and forward to batcher
+                // Receive raw messages and push directly to batcher
                 msg = message_stream.next() => {
                     match msg {
                         Some(m) => {
-                            // Forward to batcher and continue to next iteration
+                            // Push directly to batcher (per-channel config is automatic)
                             // The batcher will emit the (possibly merged) message
                             // through the batched_rx channel
-                            let _ = raw_tx.send(m).await;
+                            batcher.push(m).await;
                             continue;
                         }
                         None => {
                             tracing::info!("All channel streams ended, flushing pending batches...");
-                            batcher.flush_all().await;
-                            // Drain any flushed messages before shutdown
-                            while let Ok(msg) = batched_rx.try_recv() {
-                                if let Err(e) = self.handle_message(&msg).await {
-                                    tracing::error!("Error handling flushed message during shutdown: {}", e);
-                                }
-                            }
+                            self.flush_and_drain_batcher(&batcher, &mut batched_rx).await;
+                            batcher.shutdown().await;
                             break;
                         }
                     }
@@ -633,16 +610,9 @@ impl Agent {
                 Ok(None) => {
                     // Shutdown signal received (/quit, /exit, /shutdown)
                     tracing::info!("Shutdown command received, flushing pending batches...");
-                    batcher.flush_all().await;
-                    // Drain any flushed messages before shutdown
-                    while let Ok(msg) = batched_rx.try_recv() {
-                        if let Err(e) = self.handle_message(&msg).await {
-                            tracing::error!(
-                                "Error handling flushed message during shutdown: {}",
-                                e
-                            );
-                        }
-                    }
+                    self.flush_and_drain_batcher(&batcher, &mut batched_rx)
+                        .await;
+                    batcher.shutdown().await;
                     break;
                 }
                 Err(e) => {
@@ -684,6 +654,23 @@ impl Agent {
         self.channels.shutdown_all().await?;
 
         Ok(())
+    }
+
+    /// Flush all pending message batches and drain any flushed messages.
+    ///
+    /// This helper ensures all batched messages are processed before shutdown.
+    async fn flush_and_drain_batcher(
+        &self,
+        batcher: &MessageBatcher,
+        batched_rx: &mut tokio::sync::broadcast::Receiver<IncomingMessage>,
+    ) {
+        batcher.flush_all().await;
+        // Drain any flushed messages before shutdown
+        while let Ok(msg) = batched_rx.try_recv() {
+            if let Err(e) = self.handle_message(&msg).await {
+                tracing::error!("Error handling flushed message during shutdown: {}", e);
+            }
+        }
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
