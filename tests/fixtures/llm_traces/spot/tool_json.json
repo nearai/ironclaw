@@ -11,7 +11,7 @@
           {
             "id": "call_json_1",
             "name": "json",
-            "arguments": { "operation": "parse", "input": "{\"key\": \"value\"}" }
+            "arguments": { "operation": "parse", "data": "{\"key\": \"value\"}" }
           }
         ],
         "input_tokens": 50,

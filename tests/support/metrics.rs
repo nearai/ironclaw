@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Metrics types for test instrumentation.
 //!
 //! These types were previously in the `ironclaw::benchmark::metrics` module.

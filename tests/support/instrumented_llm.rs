@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! InstrumentedLlm -- an LLM provider wrapper that captures per-call metrics.
 //!
 //! Wraps any `Arc<dyn LlmProvider>` and transparently intercepts `complete()`

@@ -104,14 +104,10 @@ mod tests {
             "ToolStarted without matching ToolCompleted: {pending_starts:?}"
         );
 
-        // Verify expected tool names.
+        // Verify expected tool names (fixture uses echo calls only).
         assert!(
             starts.contains(&"echo"),
             "Expected echo in tool starts, got: {starts:?}"
-        );
-        assert!(
-            starts.contains(&"time"),
-            "Expected time in tool starts, got: {starts:?}"
         );
 
         // Verify all completions were successful.
