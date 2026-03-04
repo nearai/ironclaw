@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use clap::Args;
 
-use crate::benchmark::baseline::{load_baseline, promote_to_baseline, save_result};
+use crate::benchmark::baseline::{load_baseline, promote_to_baseline, save_scenario_results};
 use crate::benchmark::report::format_report;
-use crate::benchmark::runner::{run_all_bench, BenchmarkConfig};
+use crate::benchmark::runner::{BenchmarkConfig, run_all_bench};
 use crate::config::Config;
 use crate::llm::{SessionConfig, build_provider_chain, create_session_manager};
 
@@ -63,19 +63,19 @@ pub async fn run_benchmark_command(cmd: &BenchmarkCommand) -> anyhow::Result<()>
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Save results to disk.
-    let result_path = save_result(&run_result).map_err(|e| anyhow::anyhow!("{}", e))?;
-    eprintln!("Results saved to: {}", result_path);
+    // Save results to disk (per-scenario files + summary).
+    let result_dir = save_scenario_results(&run_result).map_err(|e| anyhow::anyhow!("{}", e))?;
+    eprintln!("Results saved to: {}/", result_dir);
 
     // Load baseline and format comparison report.
-    let baseline = load_baseline()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let baseline = load_baseline().map_err(|e| anyhow::anyhow!("{}", e))?;
     let report = format_report(&run_result, baseline.as_ref());
     println!("{report}");
 
     // Promote to baseline if requested.
     if cmd.update_baseline {
-        promote_to_baseline(&result_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let summary_path = format!("{result_dir}/summary.json");
+        promote_to_baseline(&summary_path).map_err(|e| anyhow::anyhow!("{}", e))?;
         eprintln!("Baseline updated.");
     }
 
