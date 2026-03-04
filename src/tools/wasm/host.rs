@@ -262,7 +262,10 @@ impl HostState {
         // Use the allowlist validator
         use crate::tools::wasm::allowlist::AllowlistValidator;
 
-        let validator = AllowlistValidator::new(capability.allowlist.clone());
+        let mut validator = AllowlistValidator::new(capability.allowlist.clone());
+        if is_local_dev_http_url(url) {
+            validator = validator.allow_http();
+        }
         let result = validator.validate(url, method);
 
         if result.is_allowed() {
@@ -377,6 +380,28 @@ fn validate_workspace_path(path: &str) -> Result<(), WasmError> {
     Ok(())
 }
 
+fn is_local_dev_domain(domain: &str) -> bool {
+    domain.eq_ignore_ascii_case("localhost")
+        || domain.eq_ignore_ascii_case("camoufox-mcp")
+        || domain.eq_ignore_ascii_case("mentor-mcp")
+        || domain.eq_ignore_ascii_case("voice-mcp")
+}
+
+fn is_local_dev_http_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    match parsed.host() {
+        Some(url::Host::Domain(d)) => is_local_dev_domain(d),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -385,7 +410,8 @@ mod tests {
         Capabilities, SecretsCapability, WorkspaceCapability, WorkspaceReader,
     };
     use crate::tools::wasm::host::{
-        HostState, LogLevel, MAX_LOG_ENTRIES, MAX_LOG_MESSAGE_BYTES, validate_workspace_path,
+        HostState, LogLevel, MAX_LOG_ENTRIES, MAX_LOG_MESSAGE_BYTES, is_local_dev_http_url,
+        validate_workspace_path,
     };
 
     struct MockReader {
@@ -602,5 +628,15 @@ mod tests {
     fn test_new_with_user() {
         let state = HostState::new_with_user(Capabilities::default(), "user123");
         assert_eq!(state.user_id(), Some("user123"));
+    }
+
+    #[test]
+    fn test_is_local_dev_http_url() {
+        assert!(is_local_dev_http_url("http://localhost:3000/path"));
+        assert!(is_local_dev_http_url("http://127.0.0.1:8790/mcp"));
+        assert!(is_local_dev_http_url("http://[::1]:8791/mcp"));
+        assert!(is_local_dev_http_url("http://mentor-mcp:8791/mcp"));
+        assert!(!is_local_dev_http_url("https://mentor-mcp:8791/mcp"));
+        assert!(!is_local_dev_http_url("http://example.com/mcp"));
     }
 }
