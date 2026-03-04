@@ -91,6 +91,12 @@ impl SubmissionParser {
                 args: vec![],
             };
         }
+        if lower == "/restart" {
+            return Submission::SystemCommand {
+                command: "restart".to_string(),
+                args: vec![],
+            };
+        }
         if lower.starts_with("/model") {
             let args: Vec<String> = trimmed
                 .split_whitespace()

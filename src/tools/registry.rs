@@ -18,9 +18,10 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
     JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
-    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WebFetchTool, WriteFileTool,
+    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, RestartTool, ShellTool,
+    SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool,
+    ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WebFetchTool,
+    WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -69,6 +70,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_remove",
     "message",
     "web_fetch",
+    "restart",
 ];
 
 /// Registry of available tools.
@@ -219,6 +221,7 @@ impl ToolRegistry {
         }
         self.register_sync(Arc::new(http));
         self.register_sync(Arc::new(WebFetchTool::new()));
+        self.register_sync(Arc::new(RestartTool));
 
         tracing::info!("Registered {} built-in tools", self.count());
     }

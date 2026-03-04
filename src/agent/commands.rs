@@ -501,11 +501,26 @@ impl Agent {
                 "  /heartbeat        Run heartbeat check\n",
                 "  /summarize        Summarize current thread\n",
                 "  /suggest          Suggest next steps\n",
+                "  /restart          Gracefully restart the process\n",
                 "\n",
                 "  /quit             Exit",
             ))),
 
             "ping" => Ok(SubmissionResult::response("pong!")),
+
+            "restart" => {
+                // Trigger the restart tool via a system job with metadata requesting the tool
+                let metadata = serde_json::json!({
+                    "tools": ["restart"]
+                });
+                let _job_id = self
+                    .scheduler
+                    .dispatch_job("system", "Restart", "Execute restart tool", Some(metadata))
+                    .await?;
+                Ok(SubmissionResult::response(
+                    "Restart initiated. Process will exit cleanly and restart shortly.",
+                ))
+            }
 
             "version" => Ok(SubmissionResult::response(format!(
                 "{} v{}",

@@ -256,6 +256,284 @@ body {
   white-space: nowrap;
 }
 
+/* Restart Button */
+.restart-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 0.5rem;
+  font-size: 0.8rem;
+  border: 1px solid;
+  border-color: #00d894;
+  color: #00d894;
+  background-color: transparent;
+  cursor: pointer;
+  transition: color 150ms, background-color 150ms, border-color 150ms;
+}
+
+.restart-btn:hover:not(:disabled) {
+  background-color: rgba(0, 216, 148, 0.1);
+}
+
+.restart-btn:disabled {
+  border-color: #333;
+  color: #666;
+  cursor: not-allowed;
+}
+
+.restart-btn:disabled:hover {
+  background-color: transparent;
+}
+
+.restart-btn svg {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+}
+
+.restart-btn svg.spinning {
+  animation: spin-icon 1s linear infinite;
+}
+
+@keyframes spin-icon {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Restart Loader Overlay */
+.restart-loader {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.restart-loader-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  z-index: -1;
+}
+
+.restart-loader-content {
+  position: relative;
+  z-index: 10000;
+  background-color: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 0.75rem;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  width: 100%;
+  max-width: 28rem;
+  margin: 0 1rem;
+  overflow: hidden;
+  padding: 1.25rem;
+}
+
+.restart-spinner {
+  display: none;
+}
+
+.restart-loader-text {
+  padding: 0;
+}
+
+.restart-title {
+  color: #e0e0e0;
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+  margin-top: 0;
+}
+
+.restart-subtitle {
+  display: none;
+}
+
+/* Restart Modal (Confirmation) */
+.restart-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.restart-modal-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+}
+
+.restart-modal-content {
+  position: relative;
+  z-index: 10000;
+  background-color: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 0.75rem;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  width: 100%;
+  max-width: 28rem;
+  margin: 0 1rem;
+  overflow: hidden;
+}
+
+.restart-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.restart-modal-header h2 {
+  color: #e0e0e0;
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.restart-modal-close {
+  color: #888;
+  padding: 0.25rem;
+  border-radius: 0.25rem;
+  background-color: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color 150ms, background-color 150ms;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.restart-modal-close:hover {
+  color: #ccc;
+  background-color: #2a2a2a;
+}
+
+.restart-modal-body {
+  padding: 1.25rem;
+}
+
+.restart-modal-description {
+  color: #aaa;
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.restart-modal-warning {
+  margin-top: 1rem;
+  background-color: #1e1400;
+  border: 1px solid #3a2a00;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+}
+
+.restart-modal-warning p {
+  color: #facc15;
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.restart-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid #2a2a2a;
+}
+
+.restart-modal-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
+  border: none;
+  cursor: pointer;
+  transition: background-color 150ms;
+}
+
+.restart-modal-btn.cancel {
+  color: #ccc;
+  background-color: transparent;
+}
+
+.restart-modal-btn.cancel:hover {
+  background-color: #2a2a2a;
+}
+
+.restart-modal-btn.confirm {
+  background-color: #00D894;
+  color: #111;
+}
+
+.restart-modal-btn.confirm:hover {
+  background-color: #00be82;
+}
+
+/* Progress Bar for Restart */
+.restart-progress-bar {
+  width: 100%;
+  height: 0.375rem;
+  background-color: #2a2a2a;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.restart-progress-fill {
+  height: 100%;
+  border-radius: 9999px;
+  background-color: #00D894;
+  width: 40%;
+  animation: indeterminate 1.5s ease-in-out infinite;
+}
+
+@keyframes indeterminate {
+  0% {
+    margin-left: 0;
+    width: 40%;
+  }
+  50% {
+    margin-left: 60%;
+    width: 40%;
+  }
+  100% {
+    margin-left: 0;
+    width: 40%;
+  }
+}
+
+.restart-modal-info {
+  color: #666;
+  font-size: 0.8rem;
+  margin-top: 1.25rem;
+  margin-bottom: 0;
+}
+
+.restart-modal-info a {
+  color: #00D894;
+  text-decoration: none;
+}
+
+.restart-modal-info a:hover {
+  text-decoration: underline;
+}
+
 .tee-popover {
   display: none;
   position: absolute;

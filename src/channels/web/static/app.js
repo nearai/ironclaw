@@ -13,6 +13,7 @@ let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
+let isRestarting = false; // Track if we're currently restarting
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
@@ -30,6 +31,7 @@ const SLASH_COMMANDS = [
   { cmd: '/heartbeat',  desc: 'Trigger manual heartbeat check' },
   { cmd: '/summarize',  desc: 'Summarize the current thread' },
   { cmd: '/suggest',    desc: 'Suggest next steps' },
+  { cmd: '/restart',    desc: 'Gracefully restart the process' },
   { cmd: '/help',       desc: 'Show help' },
   { cmd: '/version',    desc: 'Show version info' },
   { cmd: '/tools',      desc: 'List available tools' },
@@ -143,6 +145,19 @@ function connectSSE() {
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
     document.getElementById('sse-status').textContent = 'Connected';
+
+    // If we were restarting, close the modal and reset button now that server is back
+    if (isRestarting) {
+      isRestarting = false;
+      const loaderEl = document.getElementById('restart-loader');
+      const restartBtn = document.getElementById('restart-btn');
+      const restartIcon = document.getElementById('restart-icon');
+      loaderEl.style.display = 'none';
+      restartBtn.disabled = false;
+      restartIcon.classList.remove('spinning');
+      addMessage('system', '✓ Server restarted successfully!');
+    }
+
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
       loadHistory();
@@ -318,6 +333,79 @@ function enableChatInput() {
   // no-op: input and send button are always enabled
 }
 
+function triggerRestart() {
+  if (!currentThreadId) {
+    alert('Please start a conversation first');
+    return;
+  }
+
+  // Show the confirmation modal
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'flex';
+}
+
+function confirmRestart() {
+  if (!currentThreadId) {
+    alert('Please start a conversation first');
+    return;
+  }
+
+  // Hide confirmation modal
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'none';
+
+  const restartBtn = document.getElementById('restart-btn');
+  const restartIcon = document.getElementById('restart-icon');
+
+  // Mark as restarting
+  isRestarting = true;
+  restartBtn.disabled = true;
+  restartIcon.classList.add('spinning');
+
+  // Show progress modal
+  const loaderEl = document.getElementById('restart-loader');
+  loaderEl.style.display = 'flex';
+
+  // Send restart command via chat
+  apiFetch('/api/chat/send', {
+    method: 'POST',
+    body: {
+      content: '/restart',
+      thread_id: currentThreadId,
+    },
+  })
+    .catch((err) => {
+      console.error('Restart request failed:', err);
+      addMessage('system', 'Restart failed: ' + err.message);
+      isRestarting = false;
+      restartBtn.disabled = false;
+      restartIcon.classList.remove('spinning');
+      loaderEl.style.display = 'none';
+    });
+}
+
+function cancelRestart() {
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'none';
+}
+
+function showRestartModal() {
+  // Mark as restarting - modal will close when SSE reconnects
+  isRestarting = true;
+  const restartBtn = document.getElementById('restart-btn');
+  const restartIcon = document.getElementById('restart-icon');
+  restartBtn.disabled = true;
+  restartIcon.classList.add('spinning');
+
+  // Hide confirmation modal if visible
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'none';
+
+  // Show progress modal
+  const loaderEl = document.getElementById('restart-loader');
+  loaderEl.style.display = 'flex';
+}
+
 // --- Slash Autocomplete ---
 
 function showSlashAutocomplete(matches) {
@@ -461,6 +549,11 @@ function addMessage(role, content) {
   } else {
     div.setAttribute('data-raw', content);
     div.innerHTML = renderMarkdown(content);
+
+    // Detect restart messages (from /restart command) and show modal
+    if (content.toLowerCase().includes('restart initiated')) {
+      setTimeout(() => showRestartModal(), 500);
+    }
   }
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
@@ -475,6 +568,11 @@ function appendToLastAssistant(chunk) {
     last.setAttribute('data-raw', raw);
     last.innerHTML = renderMarkdown(raw);
     container.scrollTop = container.scrollHeight;
+
+    // Detect restart message and show modal
+    if (raw.toLowerCase().includes('restart initiated')) {
+      setTimeout(() => showRestartModal(), 500);
+    }
   } else {
     addMessage('assistant', chunk);
   }
@@ -525,6 +623,11 @@ function removeActivityThinking() {
 }
 
 function addToolCard(name) {
+  // Detect restart tool execution and show modal
+  if (name.toLowerCase() === 'restart') {
+    setTimeout(() => showRestartModal(), 1000);
+  }
+
   // Hide thinking instead of destroying — it may reappear between tool rounds
   if (_activityThinking) _activityThinking.style.display = 'none';
   const group = getOrCreateActivityGroup();
