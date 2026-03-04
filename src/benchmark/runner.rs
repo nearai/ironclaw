@@ -42,6 +42,10 @@ pub struct BenchmarkConfig {
     /// Optional tag filter for `BenchScenario` loading. A scenario must have
     /// at least one matching tag to be included.
     pub tags_filter: Option<Vec<String>>,
+    /// Number of scenarios to run in parallel (1 = sequential).
+    pub parallel: usize,
+    /// Maximum total cost in USD. If exceeded, remaining scenarios are skipped.
+    pub max_total_cost_usd: Option<f64>,
 }
 
 impl Default for BenchmarkConfig {
@@ -52,6 +56,8 @@ impl Default for BenchmarkConfig {
             filter: None,
             category_filter: None,
             tags_filter: None,
+            parallel: 1,
+            max_total_cost_usd: None,
         }
     }
 }

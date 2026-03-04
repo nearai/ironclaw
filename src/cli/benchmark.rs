@@ -35,6 +35,14 @@ pub struct BenchmarkCommand {
     /// Save results as the new baseline
     #[arg(long)]
     pub update_baseline: bool,
+
+    /// Number of scenarios to run in parallel (default: 1 = sequential)
+    #[arg(long, default_value = "1")]
+    pub parallel: usize,
+
+    /// Maximum total cost in USD across all scenarios; abort remaining if exceeded
+    #[arg(long)]
+    pub max_cost: Option<f64>,
 }
 
 pub async fn run_benchmark_command(cmd: &BenchmarkCommand) -> anyhow::Result<()> {
@@ -57,6 +65,8 @@ pub async fn run_benchmark_command(cmd: &BenchmarkCommand) -> anyhow::Result<()>
         filter: cmd.scenario.clone(),
         category_filter: None,
         tags_filter: cmd.tags.clone(),
+        parallel: cmd.parallel,
+        max_total_cost_usd: cmd.max_cost,
     };
 
     let run_result = run_all_bench(&bench_config, llm)
