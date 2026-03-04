@@ -2674,7 +2674,10 @@ mod tests {
             vec![],
         ));
 
-        // Insert a flow keyed by raw nonce "test_nonce" (without instance prefix)
+        // Insert a flow keyed by raw nonce "test_nonce" (without instance prefix).
+        // Use an expired flow so the handler exits before attempting a real HTTP
+        // token exchange — we only need to verify that the instance prefix was
+        // stripped and the flow was found by the raw nonce.
         let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
@@ -2692,8 +2695,8 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
-            // Not expired
-            created_at: std::time::Instant::now(),
+            // Expired — handler will reject after lookup (no network I/O)
+            created_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
         };
 
         ext_mgr
@@ -2722,13 +2725,12 @@ mod tests {
             .expect("body");
         let html = String::from_utf8_lossy(&body);
 
-        // The flow was found (stripped prefix matched) but token exchange will fail
-        // since example.com/token isn't real. The important thing is we didn't get
-        // "unknown or expired state" — the flow was successfully looked up.
-        // The error should mention the tool name, not "IronClaw" (generic error).
+        // The flow was found (stripped prefix matched) but is expired, so the
+        // handler returns an error page with the tool's display name — proving
+        // that the instance prefix was stripped and the flow was looked up.
         assert!(
-            html.contains("Test Tool") || html.contains("Authorization Failed"),
-            "html was: {}",
+            html.contains("Test Tool") && html.contains("Authorization Failed"),
+            "Expected error page with tool name, html was: {}",
             &html[..html.len().min(500)]
         );
 

@@ -690,7 +690,7 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 /// State for an in-progress OAuth flow, keyed by CSRF `state` parameter.
 ///
 /// Created by `start_wasm_oauth()` and consumed by the web gateway's
-/// `/auth/callback` handler when running in hosted mode.
+/// `/oauth/callback` handler when running in hosted mode.
 pub struct PendingOAuthFlow {
     /// Extension name (e.g., "google_calendar").
     pub extension_name: String,
@@ -825,6 +825,11 @@ pub async fn exchange_via_proxy(
     code_verifier: Option<&str>,
     access_token_field: &str,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    if gateway_token.is_empty() {
+        return Err(OAuthCallbackError::Io(
+            "Gateway auth token is required for proxy token exchange".to_string(),
+        ));
+    }
     let exchange_url = format!("{}/oauth/exchange", proxy_url.trim_end_matches('/'));
 
     let client = reqwest::Client::builder()

@@ -104,7 +104,7 @@ pub struct ExtensionManager {
     ///
     /// Keyed by CSRF `state` parameter. Populated in `start_wasm_oauth()`
     /// when running in gateway mode, consumed by the web gateway's
-    /// `/auth/callback` handler.
+    /// `/oauth/callback` handler.
     pending_oauth_flows: crate::cli::oauth_defaults::PendingOAuthRegistry,
     /// Gateway auth token for authenticating with the platform token exchange proxy.
     /// Read once at construction from `GATEWAY_AUTH_TOKEN` env var.
@@ -241,7 +241,7 @@ impl ExtensionManager {
 
     /// Returns the pending OAuth flow registry for sharing with the web gateway.
     ///
-    /// The gateway's `/auth/callback` handler uses this to look up pending flows
+    /// The gateway's `/oauth/callback` handler uses this to look up pending flows
     /// by CSRF `state` parameter and complete the token exchange.
     pub fn pending_oauth_flows(&self) -> &crate::cli::oauth_defaults::PendingOAuthRegistry {
         &self.pending_oauth_flows
