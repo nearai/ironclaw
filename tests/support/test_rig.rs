@@ -468,8 +468,10 @@ impl TestRigBuilder {
             }
         });
 
-        // 11. Give the agent a moment to start its event loop.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // 11. Wait for the agent to call channel.start() (up to 5 seconds).
+        if let Some(rx) = test_channel.take_ready_rx().await {
+            let _ = tokio::time::timeout(Duration::from_secs(5), rx).await;
+        }
 
         TestRig {
             channel: test_channel,

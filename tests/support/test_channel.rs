@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
@@ -42,6 +42,10 @@ pub struct TestChannel {
     user_id: String,
     /// Shutdown signal: when set to `true`, signals the agent to stop.
     shutdown: Arc<AtomicBool>,
+    /// Sender half of the ready signal, fired when `start()` is called.
+    ready_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    /// Receiver half of the ready signal, taken by the test rig before awaiting.
+    ready_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
 }
 
 impl TestChannel {
@@ -53,6 +57,7 @@ impl TestChannel {
     /// Create a new TestChannel with a custom user ID.
     pub fn with_user_id(user_id: impl Into<String>) -> Self {
         let (tx, rx) = mpsc::channel(256);
+        let (ready_tx, ready_rx) = oneshot::channel();
         Self {
             tx,
             rx: Mutex::new(Some(rx)),
@@ -62,12 +67,22 @@ impl TestChannel {
             tool_timings: Arc::new(Mutex::new(Vec::new())),
             user_id: user_id.into(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            ready_tx: Arc::new(Mutex::new(Some(ready_tx))),
+            ready_rx: Arc::new(Mutex::new(Some(ready_rx))),
         }
     }
 
     /// Signal the channel (and any listening agent) to shut down.
     pub fn signal_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// Take the ready signal receiver. Returns `None` if already taken.
+    ///
+    /// The receiver resolves when the agent calls `start()` on this channel,
+    /// providing a race-free alternative to sleep-based startup waits.
+    pub async fn take_ready_rx(&self) -> Option<oneshot::Receiver<()>> {
+        self.ready_rx.lock().await.take()
     }
 
     /// Inject a user message into the channel stream.
@@ -196,6 +211,12 @@ impl Channel for TestChannel {
             })?;
 
         let stream = ReceiverStream::new(rx).boxed();
+
+        // Signal that the channel has started and the agent is ready.
+        if let Some(tx) = self.ready_tx.lock().await.take() {
+            let _ = tx.send(());
+        }
+
         Ok(stream)
     }
 
