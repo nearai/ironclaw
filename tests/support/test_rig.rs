@@ -106,6 +106,8 @@ pub struct TestRig {
     instrumented_llm: Arc<InstrumentedLlm>,
     /// When the rig was created (for wall-time measurement).
     start_time: Instant,
+    /// Maximum tool-call iterations per agentic loop (for count-based limit detection).
+    max_tool_iterations: usize,
     /// Handle to the background agent task (wrapped in Option so Drop can take it).
     agent_handle: Option<tokio::task::JoinHandle<()>>,
     /// Temp directory guard -- keeps the libSQL database file alive.
@@ -185,7 +187,6 @@ impl TestRig {
     /// scenario. The `turns` count is based on the number of captured responses.
     pub async fn collect_metrics(&self) -> TraceMetrics {
         let completed = self.tool_calls_completed();
-        let status_events = self.captured_status_events();
 
         // Build ToolInvocation records from ToolStarted/ToolCompleted pairs,
         // matching each completion with its captured timing data.
@@ -220,13 +221,9 @@ impl TestRig {
             })
             .collect();
 
-        // Detect if iteration limit was hit by checking for the status pattern:
-        // If max_tool_iterations was reached, the dispatcher forces a text response.
-        // We detect this by checking if the last status event before the response
-        // was a ToolCompleted and the response count matches expectations.
-        let hit_iteration_limit = status_events.iter().any(|s| {
-            matches!(s, StatusUpdate::Status(msg) if msg.contains("iteration") || msg.contains("limit"))
-        });
+        // Detect if iteration limit was hit by comparing completed tool-call count
+        // against the configured max_tool_iterations threshold.
+        let hit_iteration_limit = completed.len() >= self.max_tool_iterations;
 
         // Count turns as the number of captured responses.
         let responses = self.channel.captured_responses();
@@ -477,6 +474,7 @@ impl TestRigBuilder {
             channel: test_channel,
             instrumented_llm: instrumented,
             start_time: Instant::now(),
+            max_tool_iterations: self.max_tool_iterations,
             agent_handle: Some(agent_handle),
             _temp_dir: temp_dir,
         }
