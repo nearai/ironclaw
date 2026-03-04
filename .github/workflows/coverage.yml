@@ -38,8 +38,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-    env:
-      DATABASE_URL: ${{ matrix.has_postgres && 'postgres://postgres:postgres@localhost/ironclaw_test' || '' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -57,15 +55,20 @@ jobs:
       - name: Run database migrations
         if: matrix.has_postgres
         run: |
+          set -euo pipefail
           for f in migrations/V*.sql; do
             echo "Applying $f..."
-            psql -f "$f"
+            psql -v ON_ERROR_STOP=1 -f "$f"
           done
         env:
           PGHOST: localhost
           PGUSER: postgres
           PGPASSWORD: postgres
           PGDATABASE: ironclaw_test
+
+      - name: Set DATABASE_URL for postgres configs
+        if: matrix.has_postgres
+        run: echo "DATABASE_URL=postgres://postgres:postgres@localhost/ironclaw_test" >> "$GITHUB_ENV"
 
       - name: Generate coverage
         run: cargo llvm-cov ${{ matrix.flags }} --workspace --lcov --output-path lcov.info
