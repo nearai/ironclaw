@@ -9,10 +9,75 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
+use wasmtime::Store;
+use wasmtime::component::Linker;
 use wasmtime::{Config, Engine, OptLevel};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::limits::{FuelConfig, ResourceLimits};
+
+wasmtime::component::bindgen!({
+    path: "wit/tool.wit",
+    world: "sandboxed-tool",
+    async: false,
+    with: {},
+});
+
+struct MetadataStoreData {
+    wasi: WasiCtx,
+    table: ResourceTable,
+}
+
+impl MetadataStoreData {
+    fn new() -> Self {
+        Self {
+            wasi: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+        }
+    }
+}
+
+impl WasiView for MetadataStoreData {
+    fn ctx(&mut self) -> &mut WasiCtx {
+        &mut self.wasi
+    }
+
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.table
+    }
+}
+
+impl near::agent::host::Host for MetadataStoreData {
+    fn log(&mut self, _level: near::agent::host::LogLevel, _message: String) {}
+
+    fn now_millis(&mut self) -> u64 {
+        0
+    }
+
+    fn workspace_read(&mut self, _path: String) -> Option<String> {
+        None
+    }
+
+    fn http_request(
+        &mut self,
+        _method: String,
+        _url: String,
+        _headers_json: String,
+        _body: Option<Vec<u8>>,
+        _timeout_ms: Option<u32>,
+    ) -> Result<near::agent::host::HttpResponse, String> {
+        Err("http-request is unavailable during tool metadata extraction".to_string())
+    }
+
+    fn tool_invoke(&mut self, _alias: String, _params_json: String) -> Result<String, String> {
+        Err("tool-invoke is unavailable during tool metadata extraction".to_string())
+    }
+
+    fn secret_exists(&mut self, _name: String) -> bool {
+        false
+    }
+}
 
 /// Default epoch tick interval. Each tick increments the engine's epoch counter,
 /// which causes any store with an expired epoch deadline to trap.
@@ -206,11 +271,30 @@ impl WasmToolRuntime {
             let component = wasmtime::component::Component::new(&engine, &wasm_bytes)
                 .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
-            // We need to instantiate briefly to extract metadata.
-            // In a full implementation, we'd use WIT bindgen to get typed access.
-            // For now, we extract what we can from the component.
-            let description = extract_tool_description(&engine, &component)?;
-            let schema = extract_tool_schema(&engine, &component)?;
+            // Try to instantiate briefly to extract metadata from schema()/description().
+            // Some third-party tools may trap here; fall back to safe placeholder metadata
+            // so tool loading remains resilient.
+            let description = extract_tool_description(&engine, &component).unwrap_or_else(|e| {
+                tracing::warn!(
+                    tool = %name,
+                    error = %e,
+                    "Failed to extract WASM tool description; using fallback"
+                );
+                "WASM sandboxed tool".to_string()
+            });
+
+            let schema = extract_tool_schema(&engine, &component).unwrap_or_else(|e| {
+                tracing::warn!(
+                    tool = %name,
+                    error = %e,
+                    "Failed to extract WASM tool schema; using fallback"
+                );
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": true
+                })
+            });
 
             Ok::<_, WasmError>(PreparedModule {
                 name: name.clone(),
@@ -267,29 +351,45 @@ impl WasmToolRuntime {
 /// In a full implementation, this would use WIT bindgen to call the description() export.
 /// For now, we return a placeholder since we can't easily introspect without more setup.
 fn extract_tool_description(
-    _engine: &Engine,
-    _component: &wasmtime::component::Component,
+    engine: &Engine,
+    component: &wasmtime::component::Component,
 ) -> Result<String, WasmError> {
-    // TODO: Use WIT bindgen to properly extract description
-    // This requires instantiating with a linker, which needs host functions.
-    // For now, tools should have their description set externally.
-    Ok("WASM sandboxed tool".to_string())
+    let mut store = Store::new(engine, MetadataStoreData::new());
+    let mut linker = Linker::new(engine);
+    wasmtime_wasi::add_to_linker_sync(&mut linker)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+    near::agent::host::add_to_linker(&mut linker, |state| state)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+
+    let instance = SandboxedTool::instantiate(&mut store, component, &linker)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+    let iface = instance.near_agent_tool();
+    iface
+        .call_description(&mut store)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))
 }
 
 /// Extract tool schema from a compiled component.
 ///
 /// In a full implementation, this would use WIT bindgen to call the schema() export.
 fn extract_tool_schema(
-    _engine: &Engine,
-    _component: &wasmtime::component::Component,
+    engine: &Engine,
+    component: &wasmtime::component::Component,
 ) -> Result<serde_json::Value, WasmError> {
-    // TODO: Use WIT bindgen to properly extract schema
-    // For now, return a minimal schema that accepts any object.
-    Ok(serde_json::json!({
-        "type": "object",
-        "properties": {},
-        "additionalProperties": true
-    }))
+    let mut store = Store::new(engine, MetadataStoreData::new());
+    let mut linker = Linker::new(engine);
+    wasmtime_wasi::add_to_linker_sync(&mut linker)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+    near::agent::host::add_to_linker(&mut linker, |state| state)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+
+    let instance = SandboxedTool::instantiate(&mut store, component, &linker)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+    let iface = instance.near_agent_tool();
+    let schema_text = iface
+        .call_schema(&mut store)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+    serde_json::from_str(&schema_text).map_err(|e| WasmError::InvalidResponseJson(e.to_string()))
 }
 
 impl std::fmt::Debug for WasmToolRuntime {
