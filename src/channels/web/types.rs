@@ -268,6 +268,9 @@ pub struct MemoryWriteRequest {
     /// instead of replacing it.
     #[serde(default)]
     pub append: bool,
+    /// Skip privacy classification and write directly to the specified layer.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Serialize)]

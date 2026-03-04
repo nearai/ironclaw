@@ -7,6 +7,7 @@ use ironclaw::db::Database;
 use ironclaw::db::libsql::LibSqlBackend;
 use ironclaw::workspace::Workspace;
 use ironclaw::workspace::layer::{LayerSensitivity, MemoryLayer};
+use ironclaw::workspace::privacy::PatternPrivacyClassifier;
 
 async fn setup() -> (Arc<dyn Database>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create temp dir");
@@ -46,7 +47,7 @@ async fn write_to_private_layer() {
     let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
 
     let result = ws
-        .write_to_layer("private", "notes/test.md", "Private note")
+        .write_to_layer("private", "notes/test.md", "Private note", false)
         .await
         .expect("write should succeed");
     assert_eq!(result.document.content, "Private note");
@@ -60,7 +61,7 @@ async fn write_to_shared_layer() {
     let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
 
     let result = ws
-        .write_to_layer("shared", "plans/dinner.md", "Dinner Saturday at 6")
+        .write_to_layer("shared", "plans/dinner.md", "Dinner Saturday at 6", false)
         .await
         .expect("write should succeed");
     assert_eq!(result.document.content, "Dinner Saturday at 6");
@@ -74,7 +75,7 @@ async fn write_to_read_only_layer_fails() {
     let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
 
     let result = ws
-        .write_to_layer("reports", "notes/budget.md", "Some budget note")
+        .write_to_layer("reports", "notes/budget.md", "Some budget note", false)
         .await;
     assert!(result.is_err());
 }
@@ -85,23 +86,40 @@ async fn write_to_unknown_layer_fails() {
     let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
 
     let result = ws
-        .write_to_layer("nonexistent", "notes/test.md", "content")
+        .write_to_layer("nonexistent", "notes/test.md", "content", false)
         .await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn no_redirect_without_classifier() {
+    let (db, _dir) = setup().await;
+    let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
+
+    // Without a classifier, PII goes exactly where requested
+    let result = ws
+        .write_to_layer("shared", "notes/pii.md", "My SSN is 123-45-6789", false)
+        .await
+        .expect("write should succeed");
+    assert!(!result.redirected);
+    assert_eq!(result.actual_layer, "shared");
 }
 
 #[tokio::test]
 async fn sensitive_content_redirected_to_private() {
     let (db, _dir) = setup().await;
     let db_clone = db.clone();
-    let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
+    let ws = Workspace::new_with_db("alice", db)
+        .with_memory_layers(test_layers())
+        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new()));
 
-    // Write sensitive content to shared layer -- should be redirected
+    // Write content containing hard PII to shared layer -- should be redirected
     let result = ws
         .write_to_layer(
             "shared",
-            "notes/health.md",
-            "Started new medication for anxiety",
+            "notes/pii.md",
+            "My SSN is 123-45-6789",
+            false,
         )
         .await
         .expect("write should succeed (redirected)");
@@ -109,22 +127,19 @@ async fn sensitive_content_redirected_to_private() {
     // WriteResult should indicate redirect to private layer
     assert!(result.redirected, "Should be redirected");
     assert_eq!(result.actual_layer, "private");
-    assert_eq!(result.document.content, "Started new medication for anxiety");
+    assert_eq!(result.document.content, "My SSN is 123-45-6789");
 
     // Content should be in the private scope (alice), not the shared scope
-    let private_doc = ws.read("notes/health.md").await;
+    let private_doc = ws.read("notes/pii.md").await;
     assert!(
         private_doc.is_ok(),
         "Should find content in private scope (alice)"
     );
-    assert_eq!(
-        private_doc.unwrap().content,
-        "Started new medication for anxiety"
-    );
+    assert_eq!(private_doc.unwrap().content, "My SSN is 123-45-6789");
 
     // Verify content is NOT in the shared scope (same DB, different user_id)
     let ws_shared = Workspace::new_with_db("shared", db_clone);
-    let shared_doc = ws_shared.read("notes/health.md").await;
+    let shared_doc = ws_shared.read("notes/pii.md").await;
     assert!(
         shared_doc.is_err(),
         "Should NOT find content in shared scope"
@@ -150,13 +165,13 @@ async fn append_to_layer_works() {
     let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
 
     // Write initial content to a layer
-    ws.write_to_layer("private", "notes/log.md", "Entry one")
+    ws.write_to_layer("private", "notes/log.md", "Entry one", false)
         .await
         .expect("initial write should succeed");
 
     // Append to the same layer path
     let result = ws
-        .append_to_layer("private", "notes/log.md", "Entry two")
+        .append_to_layer("private", "notes/log.md", "Entry two", false)
         .await
         .expect("append should succeed");
 
@@ -175,7 +190,7 @@ async fn append_to_layer_works() {
 async fn sensitive_content_fails_without_private_layer() {
     let (db, _dir) = setup().await;
 
-    // Workspace with only shared layers (no private layer for redirect)
+    // Workspace with classifier but only shared layers (no private layer for redirect)
     let shared_only_layers = vec![
         MemoryLayer {
             name: "shared".into(),
@@ -184,14 +199,17 @@ async fn sensitive_content_fails_without_private_layer() {
             sensitivity: LayerSensitivity::Shared,
         },
     ];
-    let ws = Workspace::new_with_db("alice", db).with_memory_layers(shared_only_layers);
+    let ws = Workspace::new_with_db("alice", db)
+        .with_memory_layers(shared_only_layers)
+        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new()));
 
-    // Writing sensitive content should fail (no private layer to redirect to)
+    // Writing PII content should fail (no private layer to redirect to)
     let result = ws
         .write_to_layer(
             "shared",
-            "notes/health.md",
-            "Started new medication for anxiety",
+            "notes/pii.md",
+            "My SSN is 123-45-6789",
+            false,
         )
         .await;
     assert!(
@@ -203,21 +221,46 @@ async fn sensitive_content_fails_without_private_layer() {
 #[tokio::test]
 async fn append_sensitive_to_shared_redirects() {
     let (db, _dir) = setup().await;
-    let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
+    let ws = Workspace::new_with_db("alice", db)
+        .with_memory_layers(test_layers())
+        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new()));
 
-    // Append sensitive content to shared layer -- should be redirected
+    // Append PII content to shared layer -- should be redirected
     let result = ws
         .append_to_layer(
             "shared",
-            "notes/health.md",
-            "My doctor prescribed new medication",
+            "notes/pii.md",
+            "Card number is 4111 1111 1111 1111",
+            false,
         )
         .await
         .expect("append should succeed (redirected)");
 
     assert!(result.redirected, "Should be redirected");
     assert_eq!(result.actual_layer, "private");
-    assert!(result.document.content.contains("medication"));
+    assert!(result.document.content.contains("4111"));
+}
+
+#[tokio::test]
+async fn force_skips_privacy_redirect() {
+    let (db, _dir) = setup().await;
+    let ws = Workspace::new_with_db("alice", db)
+        .with_memory_layers(test_layers())
+        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new()));
+
+    // PII content with force=true should stay in shared layer
+    let result = ws
+        .write_to_layer(
+            "shared",
+            "notes/pii.md",
+            "My SSN is 123-45-6789",
+            true,
+        )
+        .await
+        .expect("write should succeed without redirect");
+
+    assert!(!result.redirected, "Should NOT be redirected with force=true");
+    assert_eq!(result.actual_layer, "shared");
 }
 
 #[tokio::test]
@@ -230,6 +273,7 @@ async fn search_finds_private_layer_content() {
         "private",
         "notes/private.md",
         "My private thought about waffles",
+        false,
     )
     .await
     .unwrap();
