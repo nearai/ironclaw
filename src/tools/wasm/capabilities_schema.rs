@@ -41,6 +41,18 @@ use crate::tools::wasm::{
 /// Root schema for a capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilitiesFile {
+    /// Human-readable description of what the tool does.
+    /// Used as the `Tool::description()` return value.
+    /// If omitted, a generic fallback is used (with a warning).
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// JSON Schema for the tool's input parameters.
+    /// Used as the `Tool::parameters_schema()` return value.
+    /// If omitted, a permissive fallback is used (with a warning).
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+
     /// HTTP request capability.
     #[serde(default)]
     pub http: Option<HttpCapabilitySchema>,
@@ -95,6 +107,8 @@ impl CapabilitiesFile {
     fn resolve_nested(mut self) -> Self {
         if let Some(inner) = self.capabilities.take() {
             let inner = inner.resolve_nested();
+            self.description = self.description.or(inner.description);
+            self.parameters = self.parameters.or(inner.parameters);
             self.http = self.http.or(inner.http);
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
@@ -1071,6 +1085,116 @@ mod tests {
         assert_eq!(
             http.allowlist[0].host, "preserved.example.com",
             "Empty inner capabilities should not clobber outer http"
+        );
+    }
+
+    // ── Tool description and parameters schema ──────────────────────────
+
+    #[test]
+    fn test_parse_description_and_parameters() {
+        let json = r#"{
+            "description": "Search the web using Brave Search API",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of results"
+                    }
+                },
+                "required": ["query"]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("Search the web using Brave Search API")
+        );
+        let params = caps.parameters.unwrap();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["query"].is_object());
+        assert_eq!(params["required"][0], "query");
+    }
+
+    #[test]
+    fn test_parse_description_only() {
+        let json = r#"{
+            "description": "A tool without explicit parameters schema"
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("A tool without explicit parameters schema")
+        );
+        assert!(caps.parameters.is_none());
+    }
+
+    #[test]
+    fn test_parse_without_description_or_parameters() {
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "api.example.com" }]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert!(
+            caps.description.is_none(),
+            "description should be None when not provided"
+        );
+        assert!(
+            caps.parameters.is_none(),
+            "parameters should be None when not provided"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_description_promoted() {
+        let json = r#"{
+            "capabilities": {
+                "description": "Inner tool description",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": { "type": "string" }
+                    },
+                    "required": ["input"]
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("Inner tool description"),
+            "description should be promoted from inner capabilities"
+        );
+        assert!(
+            caps.parameters.is_some(),
+            "parameters should be promoted from inner capabilities"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_outer_description_takes_precedence() {
+        let json = r#"{
+            "description": "Outer description wins",
+            "capabilities": {
+                "description": "Inner description loses"
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("Outer description wins"),
+            "Outer description should take precedence over inner"
         );
     }
 }

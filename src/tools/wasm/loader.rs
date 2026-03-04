@@ -120,25 +120,50 @@ impl WasmToolLoader {
         }
         let wasm_bytes = fs::read(wasm_path).await?;
 
-        // Read capabilities (optional) and extract OAuth refresh config
-        let (capabilities, oauth_refresh) = if let Some(cap_path) = capabilities_path {
-            if cap_path.exists() {
-                let cap_bytes = fs::read(cap_path).await?;
-                let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
-                    .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
-                let caps = cap_file.to_capabilities();
-                let oauth = resolve_oauth_refresh_config(&cap_file);
-                (caps, oauth)
+        // Read capabilities (optional) and extract OAuth refresh config,
+        // tool description, and parameter schema.
+        let (capabilities, oauth_refresh, description, schema) =
+            if let Some(cap_path) = capabilities_path {
+                if cap_path.exists() {
+                    let cap_bytes = fs::read(cap_path).await?;
+                    let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
+                        .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
+                    let caps = cap_file.to_capabilities();
+                    let oauth = resolve_oauth_refresh_config(&cap_file);
+                    let desc = cap_file.description.clone();
+                    let params = cap_file.parameters.clone();
+                    if desc.is_none() {
+                        tracing::warn!(
+                            tool = name,
+                            path = %cap_path.display(),
+                            "Capabilities file missing \"description\" field; \
+                             tool will use generic fallback description"
+                        );
+                    }
+                    if params.is_none() {
+                        tracing::warn!(
+                            tool = name,
+                            path = %cap_path.display(),
+                            "Capabilities file missing \"parameters\" field; \
+                             tool will accept any JSON input (permissive fallback)"
+                        );
+                    }
+                    (caps, oauth, desc, params)
+                } else {
+                    tracing::warn!(
+                        path = %cap_path.display(),
+                        "Capabilities file not found, using default (no permissions)"
+                    );
+                    (Capabilities::default(), None, None, None)
+                }
             } else {
                 tracing::warn!(
-                    path = %cap_path.display(),
-                    "Capabilities file not found, using default (no permissions)"
+                    tool = name,
+                    "No capabilities file for WASM tool; \
+                     tool will use generic fallback description and accept any JSON input"
                 );
-                (Capabilities::default(), None)
-            }
-        } else {
-            (Capabilities::default(), None)
-        };
+                (Capabilities::default(), None, None, None)
+            };
 
         // Register the tool
         self.registry
@@ -148,8 +173,8 @@ impl WasmToolLoader {
                 runtime: &self.runtime,
                 capabilities,
                 limits: None,
-                description: None,
-                schema: None,
+                description: description.as_deref(),
+                schema,
                 secrets_store: self.secrets_store.clone(),
                 oauth_refresh,
             })
