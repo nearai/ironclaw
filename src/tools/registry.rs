@@ -346,7 +346,7 @@ impl ToolRegistry {
         tracing::info!("Registered {} job management tools", job_tool_count);
     }
 
-    /// Register secret management tools (save, list, delete).
+    /// Register secret management tools (list, delete).
     ///
     /// These allow the LLM to persist API keys and tokens encrypted in the database.
     /// Values are never returned to the LLM; only names and metadata are exposed.

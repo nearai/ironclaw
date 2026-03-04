@@ -700,9 +700,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         // Run BeforeToolCall hook
         let params = {
             use crate::hooks::{HookError, HookEvent, HookOutcome};
+            let hook_params = redact_params(params, tool.sensitive_params());
             let event = HookEvent::ToolCall {
                 tool_name: tool_name.to_string(),
-                parameters: params.clone(),
+                parameters: hook_params,
                 user_id: job_ctx.user_id.clone(),
                 context: format!("job:{}", job_id),
             };

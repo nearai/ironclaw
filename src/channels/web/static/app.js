@@ -2202,18 +2202,18 @@ function submitConfigureModal(name, fields) {
       closeConfigureModal();
       if (res.success) {
         if (res.auth_url) {
-          // OAuth flow started — open consent popup
+          // OAuth flow started — open consent popup. The auth_completed SSE will
+          // not arrive immediately (it fires after OAuth callback), so show a toast now.
           showToast('Opening OAuth authorization for ' + name, 'info');
           window.open(res.auth_url, '_blank', 'width=600,height=700');
-        } else if (res.activated) {
-          showToast('Configured and activated ' + name, 'success');
-        } else {
-          showToast(res.message || 'Configuration saved but activation failed', 'warning');
+          loadExtensions();
         }
+        // For non-OAuth success: the server always broadcasts auth_completed SSE,
+        // which will show the toast and refresh extensions — no need to do it here too.
       } else {
         showToast(res.message || 'Configuration failed', 'error');
+        loadExtensions();
       }
-      loadExtensions();
     })
     .catch((err) => {
       btns.forEach(function(b) { b.disabled = false; });
