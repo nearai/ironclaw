@@ -9,7 +9,8 @@
         "prompt": "Enter your Telegram Bot API token (from @BotFather)",
         "optional": false
       }
-    ]
+    ],
+    "setup_url": "https://t.me/BotFather"
   },
   "capabilities": {
     "http": {

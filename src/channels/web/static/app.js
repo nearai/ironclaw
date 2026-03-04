@@ -874,7 +874,7 @@ function showAuthCard(data) {
 
   const tokenInput = document.createElement('input');
   tokenInput.type = 'password';
-  tokenInput.placeholder = 'Paste your API key or token';
+  tokenInput.placeholder = data.instructions || 'Paste your API key or token';
   tokenInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
   });
