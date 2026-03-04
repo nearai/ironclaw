@@ -90,6 +90,34 @@ impl ChannelCapabilitiesFile {
         serde_json::from_slice(bytes)
     }
 
+    /// Validate the capabilities file and emit warnings for common misconfigurations.
+    ///
+    /// Called once at load time to catch issues early. Warnings are emitted via
+    /// `tracing::warn` so they show up in startup logs without blocking loading.
+    pub fn validate(&self) {
+        // Check for short prompts in required_secrets
+        for secret in &self.setup.required_secrets {
+            if secret.prompt.len() < 30 {
+                tracing::warn!(
+                    channel = self.name,
+                    secret = secret.name,
+                    prompt = secret.prompt,
+                    "setup.required_secrets prompt is shorter than 30 chars — \
+                     consider a more descriptive prompt that tells the user where to find this value"
+                );
+            }
+        }
+
+        // Has required_secrets but no setup_url
+        if !self.setup.required_secrets.is_empty() && self.setup.setup_url.is_none() {
+            tracing::warn!(
+                channel = self.name,
+                "setup.required_secrets defined but no setup.setup_url — \
+                 user has no link to obtain credentials"
+            );
+        }
+    }
+
     /// Convert to runtime ChannelCapabilities.
     pub fn to_capabilities(&self) -> ChannelCapabilities {
         self.capabilities.to_channel_capabilities(&self.name)
@@ -262,6 +290,10 @@ pub struct SetupSchema {
     /// Placeholders like {secret_name} are replaced with actual values.
     #[serde(default)]
     pub validation_endpoint: Option<String>,
+
+    /// User-facing URL where they can create/manage credentials.
+    #[serde(default)]
+    pub setup_url: Option<String>,
 }
 
 /// Configuration for a secret required during setup.
@@ -604,6 +636,65 @@ mod tests {
     }
 
     // ── Category 5: Discord Capabilities Setup & Configuration ──────────
+
+    #[test]
+    fn test_validate_channel_short_prompt() {
+        // prompt < 30 chars — should not panic
+        let json = r#"{
+            "name": "test-channel",
+            "setup": {
+                "required_secrets": [
+                    { "name": "bot_token", "prompt": "Bot token" }
+                ],
+                "setup_url": "https://example.com"
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        // Should not panic; warning emitted for short prompt
+        file.validate();
+    }
+
+    #[test]
+    fn test_validate_channel_missing_setup_url() {
+        // required_secrets without setup_url — should not panic
+        let json = r#"{
+            "name": "test-channel",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "bot_token",
+                        "prompt": "Enter your bot token from the developer portal settings"
+                    }
+                ]
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        // Should not panic; warning emitted for missing setup_url
+        file.validate();
+    }
+
+    #[test]
+    fn test_validate_clean_channel() {
+        // Well-configured channel — should not panic or warn
+        let json = r#"{
+            "name": "good-channel",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "bot_token",
+                        "prompt": "Enter your bot token from https://example.com/bot-settings"
+                    }
+                ],
+                "setup_url": "https://example.com/bot-settings"
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        // Should not panic and emits no warnings
+        file.validate();
+    }
 
     #[test]
     fn test_discord_capabilities_has_public_key_secret() {

@@ -105,6 +105,56 @@ impl CapabilitiesFile {
         self
     }
 
+    /// Validate the capabilities file and emit warnings for common misconfigurations.
+    ///
+    /// Called once at load time to catch issues early. Warnings are emitted via
+    /// `tracing::warn` so they show up in startup logs without blocking loading.
+    pub fn validate(&self, name: &str) {
+        // setup.required_secrets present but no auth section → auth card won't display
+        if let Some(setup) = &self.setup {
+            if !setup.required_secrets.is_empty() && self.auth.is_none() {
+                tracing::warn!(
+                    tool = name,
+                    "setup.required_secrets defined but no 'auth' section — \
+                     chat-based auth card will not display for this tool"
+                );
+            }
+
+            // Check for short prompts
+            for secret in &setup.required_secrets {
+                if secret.prompt.len() < 30 {
+                    tracing::warn!(
+                        tool = name,
+                        secret = secret.name,
+                        prompt = secret.prompt,
+                        "setup.required_secrets prompt is shorter than 30 chars — \
+                         consider a more descriptive prompt that tells the user where to find this value"
+                    );
+                }
+            }
+        }
+
+        // Manual auth (no OAuth) checks
+        if let Some(auth) = &self.auth
+            && auth.oauth.is_none()
+        {
+            if auth.setup_url.is_none() {
+                tracing::warn!(
+                    tool = name,
+                    "auth section has no OAuth and no setup_url — \
+                     user has no link to obtain credentials"
+                );
+            }
+            if auth.instructions.is_none() {
+                tracing::warn!(
+                    tool = name,
+                    "auth section has no OAuth and no instructions — \
+                     user has no guidance on how to obtain credentials"
+                );
+            }
+        }
+    }
+
     /// Convert to runtime Capabilities.
     pub fn to_capabilities(&self) -> Capabilities {
         let mut caps = Capabilities::default();
@@ -1054,6 +1104,60 @@ mod tests {
             "setup should be promoted from inner capabilities"
         );
         assert_eq!(caps.setup.unwrap().required_secrets[0].name, "my_secret");
+    }
+
+    #[test]
+    fn test_validate_setup_without_auth_warns() {
+        // setup.required_secrets with no auth section — should not panic
+        let json = r#"{
+            "setup": {
+                "required_secrets": [
+                    { "name": "api_key", "prompt": "Enter your API key from the provider dashboard settings page" }
+                ]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        // Should not panic; warning is emitted via tracing
+        caps.validate("test-tool");
+    }
+
+    #[test]
+    fn test_validate_manual_auth_missing_fields() {
+        // auth without OAuth, missing setup_url and instructions
+        let json = r#"{
+            "auth": {
+                "secret_name": "my_api_key"
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        // Should not panic; warnings emitted for missing setup_url and instructions
+        caps.validate("test-tool");
+    }
+
+    #[test]
+    fn test_validate_clean_tool() {
+        // Well-configured tool with auth, setup_url, instructions, and good prompts
+        let json = r#"{
+            "auth": {
+                "secret_name": "my_api_key",
+                "setup_url": "https://example.com/api-keys",
+                "instructions": "Go to example.com/api-keys and create a new key"
+            },
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "my_api_key",
+                        "prompt": "Enter your API key from https://example.com/api-keys"
+                    }
+                ]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        // Should not panic and emits no warnings (has auth, setup_url, instructions, long prompt)
+        caps.validate("clean-tool");
     }
 
     #[test]
