@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -14,10 +14,40 @@ pub struct AuthState {
     pub token: String,
 }
 
+/// Whether query-string token auth is allowed for this request.
+///
+/// Only GET requests to SSE endpoints may use `?token=xxx`. This minimizes
+/// token-in-URL exposure on state-changing routes (POST/PUT/DELETE), where
+/// the token would leak via server logs, Referer headers, and browser history.
+///
+/// If you add a new SSE endpoint, add its path here.
+fn allows_query_token_auth(request: &Request) -> bool {
+    if request.method() != Method::GET {
+        return false;
+    }
+
+    matches!(
+        request.uri().path(),
+        "/api/chat/events" | "/api/logs/events"
+    )
+}
+
+/// Extract the `token` query parameter value, URL-decoded.
+fn query_token(request: &Request) -> Option<String> {
+    let query = request.uri().query()?;
+    url::form_urlencoded::parse(query.as_bytes()).find_map(|(k, v)| {
+        if k == "token" {
+            Some(v.into_owned())
+        } else {
+            None
+        }
+    })
+}
+
 /// Auth middleware that validates bearer token from header or query param.
 ///
 /// SSE connections can't set headers from `EventSource`, so we also accept
-/// `?token=xxx` as a query parameter.
+/// `?token=xxx` as a query parameter, but only on SSE endpoints.
 pub async fn auth_middleware(
     State(auth): State<AuthState>,
     headers: HeaderMap,
@@ -35,15 +65,12 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    // Fall back to query parameter for SSE EventSource (constant-time comparison)
-    if let Some(query) = request.uri().query() {
-        for pair in query.split('&') {
-            if let Some(token) = pair.strip_prefix("token=")
-                && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
-            {
-                return next.run(request).await;
-            }
-        }
+    // Fall back to query parameter, but only for SSE endpoints (constant-time comparison).
+    if allows_query_token_auth(&request)
+        && let Some(token) = query_token(&request)
+        && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
+    {
+        return next.run(request).await;
     }
 
     (StatusCode::UNAUTHORIZED, "Invalid or missing auth token").into_response()
@@ -62,24 +89,27 @@ mod tests {
         assert_eq!(cloned.token, "test-token");
     }
 
-    // === QA Plan - Web gateway auth tests ===
-
     use axum::Router;
     use axum::body::Body;
     use axum::middleware;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use tower::ServiceExt;
 
     async fn dummy_handler() -> &'static str {
         "ok"
     }
 
+    /// Router with SSE endpoints (query auth allowed) and non-SSE endpoints
+    /// (query auth rejected).
     fn test_app(token: &str) -> Router {
         let state = AuthState {
             token: token.to_string(),
         };
         Router::new()
-            .route("/test", get(dummy_handler))
+            .route("/api/chat/events", get(dummy_handler))
+            .route("/api/logs/events", get(dummy_handler))
+            .route("/api/chat/history", get(dummy_handler))
+            .route("/api/chat/send", post(dummy_handler))
             .layer(middleware::from_fn_with_state(state, auth_middleware))
     }
 
@@ -87,7 +117,7 @@ mod tests {
     async fn test_valid_bearer_token_passes() {
         let app = test_app("secret-token");
         let req = Request::builder()
-            .uri("/test")
+            .uri("/api/chat/events")
             .header("Authorization", "Bearer secret-token")
             .body(Body::empty())
             .unwrap();
@@ -99,7 +129,7 @@ mod tests {
     async fn test_invalid_bearer_token_rejected() {
         let app = test_app("secret-token");
         let req = Request::builder()
-            .uri("/test")
+            .uri("/api/chat/events")
             .header("Authorization", "Bearer wrong-token")
             .body(Body::empty())
             .unwrap();
@@ -108,10 +138,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_missing_auth_header_falls_through_to_query() {
+    async fn test_query_token_allowed_for_chat_events() {
         let app = test_app("secret-token");
         let req = Request::builder()
-            .uri("/test?token=secret-token")
+            .uri("/api/chat/events?token=secret-token")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -119,10 +149,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_param_invalid_token_rejected() {
+    async fn test_query_token_allowed_for_logs_events() {
         let app = test_app("secret-token");
         let req = Request::builder()
-            .uri("/test?token=wrong-token")
+            .uri("/api/logs/events?token=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_query_token_rejected_for_non_sse_get() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/api/chat/history?token=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_query_token_rejected_for_post() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/chat/send?token=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_query_token_invalid_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/api/chat/events?token=wrong-token")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -132,17 +196,32 @@ mod tests {
     #[tokio::test]
     async fn test_no_auth_at_all_rejected() {
         let app = test_app("secret-token");
-        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/api/chat/events")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn test_bearer_prefix_case_insensitive() {
-        // RFC 6750 Section 2.1: auth-scheme comparison must be case-insensitive.
+    async fn test_bearer_header_works_for_post() {
         let app = test_app("secret-token");
         let req = Request::builder()
-            .uri("/test")
+            .method(Method::POST)
+            .uri("/api/chat/send")
+            .header("Authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_prefix_case_insensitive() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/api/chat/events")
             .header("Authorization", "bearer secret-token")
             .body(Body::empty())
             .unwrap();
@@ -154,7 +233,7 @@ mod tests {
     async fn test_bearer_prefix_mixed_case() {
         let app = test_app("secret-token");
         let req = Request::builder()
-            .uri("/test")
+            .uri("/api/chat/events")
             .header("Authorization", "BEARER secret-token")
             .body(Body::empty())
             .unwrap();
@@ -166,7 +245,7 @@ mod tests {
     async fn test_empty_bearer_token_rejected() {
         let app = test_app("secret-token");
         let req = Request::builder()
-            .uri("/test")
+            .uri("/api/chat/events")
             .header("Authorization", "Bearer ")
             .body(Body::empty())
             .unwrap();
@@ -176,11 +255,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_with_whitespace_rejected() {
-        // Extra space after "Bearer " means the token value starts with a space,
-        // which should not match the expected token.
         let app = test_app("secret-token");
         let req = Request::builder()
-            .uri("/test")
+            .uri("/api/chat/events")
             .header("Authorization", "Bearer  secret-token")
             .body(Body::empty())
             .unwrap();
