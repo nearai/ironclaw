@@ -130,6 +130,7 @@ mod tests {
                 trace: sample_trace(),
                 response: "hello".to_string(),
                 error: None,
+                turn_metrics: Vec::new(),
             }],
         );
         let report = format_report(&run, None);
@@ -148,6 +149,7 @@ mod tests {
                 trace: sample_trace(),
                 response: "hello".to_string(),
                 error: None,
+                turn_metrics: Vec::new(),
             }],
         );
         let mut current_trace = sample_trace();
@@ -160,6 +162,7 @@ mod tests {
                 trace: current_trace,
                 response: "hello".to_string(),
                 error: None,
+                turn_metrics: Vec::new(),
             }],
         );
         let report = format_report(&current, Some(&baseline));

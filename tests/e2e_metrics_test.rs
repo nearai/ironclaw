@@ -188,6 +188,7 @@ mod tests {
                 .map(|r| r.content.clone())
                 .unwrap_or_default(),
             error: None,
+            turn_metrics: Vec::new(),
         };
 
         // Should serialize to valid JSON.
@@ -233,6 +234,7 @@ mod tests {
                 .map(|r| r.content.clone())
                 .unwrap_or_default(),
             error: None,
+            turn_metrics: Vec::new(),
         };
         let current_run = RunResult::from_scenarios("current-run", vec![current_scenario]);
 
@@ -250,6 +252,7 @@ mod tests {
             trace: baseline_trace,
             response: "baseline response".to_string(),
             error: None,
+            turn_metrics: Vec::new(),
         };
         let baseline_run = RunResult::from_scenarios("baseline-run", vec![baseline_scenario]);
 

@@ -61,6 +61,28 @@ pub struct ToolInvocation {
 }
 
 // ---------------------------------------------------------------------------
+// Per-turn metrics (multi-turn scenarios)
+// ---------------------------------------------------------------------------
+
+/// Per-turn metrics for multi-turn scenarios.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnMetrics {
+    pub turn_index: usize,
+    pub user_message: String,
+    pub wall_time_ms: u64,
+    pub llm_calls: u32,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub tool_calls: Vec<ToolInvocation>,
+    pub response: String,
+    pub assertions_passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_score: Option<u8>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub errors: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Scenario result
 // ---------------------------------------------------------------------------
 
@@ -78,6 +100,9 @@ pub struct ScenarioResult {
     /// Error message if the scenario failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Per-turn metrics for multi-turn scenarios.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub turn_metrics: Vec<TurnMetrics>,
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +332,7 @@ mod tests {
                 trace: sample_trace(100, 2, 50),
                 response: "ok".to_string(),
                 error: None,
+                turn_metrics: Vec::new(),
             },
             ScenarioResult {
                 scenario_id: "test_b".to_string(),
@@ -314,6 +340,7 @@ mod tests {
                 trace: sample_trace(200, 3, 80),
                 response: "fail".to_string(),
                 error: Some("assertion failed".to_string()),
+                turn_metrics: Vec::new(),
             },
         ];
         let run = RunResult::from_scenarios("run-1", scenarios);
@@ -332,6 +359,7 @@ mod tests {
                 trace: sample_trace(100, 2, 50),
                 response: "ok".to_string(),
                 error: None,
+                turn_metrics: Vec::new(),
             }],
         );
         let current = RunResult::from_scenarios(
@@ -343,6 +371,7 @@ mod tests {
                 trace: sample_trace(200, 2, 50),
                 response: "ok".to_string(),
                 error: None,
+                turn_metrics: Vec::new(),
             }],
         );
 
@@ -364,6 +393,7 @@ mod tests {
                 trace: sample_trace(200, 4, 100),
                 response: "ok".to_string(),
                 error: None,
+                turn_metrics: Vec::new(),
             }],
         );
         let current = RunResult::from_scenarios(
@@ -375,6 +405,7 @@ mod tests {
                 trace: sample_trace(100, 2, 50),
                 response: "ok".to_string(),
                 error: None,
+                turn_metrics: Vec::new(),
             }],
         );
 

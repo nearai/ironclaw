@@ -63,6 +63,14 @@ impl BenchChannel {
     pub async fn tool_timings(&self) -> Vec<(String, u64)> {
         self.tool_timings.lock().await.clone()
     }
+
+    /// Clear captured state for the next turn.
+    pub async fn clear_for_next_turn(&self) {
+        self.responses.lock().await.clear();
+        self.status_events.lock().await.clear();
+        self.tool_start_times.lock().await.clear();
+        self.tool_timings.lock().await.clear();
+    }
 }
 
 #[async_trait]
