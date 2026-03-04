@@ -18,42 +18,15 @@ IronClaw is built with security as a core principle:
 
 ## Defense Layers
 
-```mermaid
-flowchart TB
-    subgraph Input["Input Layer"]
-        Channels["Channels\nTUI, Web, Telegram, Webhook"]
-    end
+<Frame>
+  <img src="/assets/ironclaw-security.svg" alt="IronClaw Security Architecture Diagram" />
+</Frame>
 
-    subgraph Layer1["Layer 1: Safety"]
-        Sanitizer["Sanitizer"]
-        Validator["Validator"]
-        Policy["Policy Engine"]
-    end
+<Note>
+  [Download the Excalidraw file](/assets/ironclaw-security.excalidraw) to explore or edit this diagram.
+</Note>
 
-    subgraph Layer2["Layer 2: WASM Sandbox"]
-        Wasm["wasmtime\nMemory limits\nFuel metering"]
-    end
-
-    subgraph Layer3["Layer 3: Docker Sandbox"]
-        Docker["Container isolation\nNetwork proxy\nCredential injection"]
-    end
-
-    subgraph Layer4["Layer 4: Secrets"]
-        Crypto["AES-256-GCM\nOS keychain\nZero exposure"]
-    end
-
-    subgraph Output["Output Layer"]
-        LLM["LLM Provider"]
-    end
-
-    Channels --> Sanitizer
-    Sanitizer --> Validator
-    Validator --> Policy
-    Policy --> Wasm
-    Wasm --> Docker
-    Docker --> Crypto
-    Crypto --> LLM
-```
+The security architecture illustrates IronClaw's **defense in depth** approach with four independent protection layers that data flows through before reaching external services.
 
 ## The Four Defense Layers
 
@@ -108,6 +81,14 @@ Tool outputs are wrapped before reaching the LLM:
 </Note>
 
 ## Data Flow
+
+<Frame>
+  <img src="/assets/security-data-flow.svg" alt="Security Data Flow Diagram" />
+</Frame>
+
+<Note>
+  [Download the Excalidraw file](/assets/security-data-flow.excalidraw) to explore or edit this diagram.
+</Note>
 
 ```
 User Input

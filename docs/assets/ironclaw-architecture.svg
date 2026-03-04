@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1035" height="650" viewBox="0 -30 1035 650">
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#1e3a5f" />
+    </marker>
+  </defs>
+  <text x="600" y="52" font-family="sans-serif" font-size="32" fill="#1e40af" text-anchor="middle">IronClaw Architecture</text>
+  <text x="600" y="83" font-family="sans-serif" font-size="18" fill="#64748b" text-anchor="middle">Secure Personal AI Assistant</text>
+  <rect x="50" y="120" width="250" height="280" fill="#dbeafe" stroke="#1e3a5f" stroke-width="2" rx="8"/>
+  <text x="265" y="270.5" font-family="sans-serif" font-size="18" fill="#1e40af" text-anchor="middle">Input Channels</text>
+  <ellipse cx="175" cy="205" rx="75" ry="25" fill="#ffffff" stroke="#5B6FFF" stroke-width="2"/>
+  <text x="175" y="206" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">Web Gateway</text>
+  <ellipse cx="175" cy="265" rx="75" ry="25" fill="#ffffff" stroke="#5B6FFF" stroke-width="2"/>
+  <text x="175" y="266" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">Telegram</text>
+  <ellipse cx="175" cy="325" rx="75" ry="25" fill="#ffffff" stroke="#5B6FFF" stroke-width="2"/>
+  <text x="175" y="326" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">Terminal UI</text>
+  <ellipse cx="175" cy="385" rx="75" ry="25" fill="#ffffff" stroke="#5B6FFF" stroke-width="2"/>
+  <text x="175" y="386" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">HTTP Webhook</text>
+  <rect x="380" y="120" width="220" height="200" fill="#ddd6fe" stroke="#1e3a5f" stroke-width="2" rx="8"/>
+  <text x="580" y="230.5" font-family="sans-serif" font-size="18" fill="#6d28d9" text-anchor="middle">IronClaw Core</text>
+  <rect x="415" y="180" width="150" height="50" fill="#ffffff" stroke="#6d28d9" stroke-width="2" rx="8"/>
+  <text x="540" y="211.5" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">Agent Loop</text>
+  <rect x="415" y="240" width="150" height="50" fill="#ffffff" stroke="#6d28d9" stroke-width="2" rx="8"/>
+  <text x="535" y="271.5" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">Router</text>
+  <rect x="415" y="300" width="150" height="50" fill="#ffffff" stroke="#6d28d9" stroke-width="2" rx="8"/>
+  <text x="550" y="331.5" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">Scheduler</text>
+  <rect x="680" y="120" width="250" height="200" fill="#fef3c7" stroke="#1e3a5f" stroke-width="2" rx="8"/>
+  <text x="895" y="230.5" font-family="sans-serif" font-size="18" fill="#b45309" text-anchor="middle">Safety Layer</text>
+  <rect x="705" y="180" width="100" height="40" fill="#ffffff" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="795" y="204.5" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">Sanitizer</text>
+  <rect x="805" y="180" width="100" height="40" fill="#ffffff" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="895" y="204.5" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">Validator</text>
+  <rect x="705" y="235" width="100" height="40" fill="#ffffff" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="795" y="259.5" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">Policy</text>
+  <rect x="805" y="235" width="100" height="40" fill="#ffffff" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="895" y="258.5" font-family="sans-serif" font-size="11" fill="#374151" text-anchor="middle">Leak Detector</text>
+  <rect x="680" y="360" width="250" height="180" fill="#a7f3d0" stroke="#1e3a5f" stroke-width="2" rx="8"/>
+  <text x="895" y="460.5" font-family="sans-serif" font-size="18" fill="#047857" text-anchor="middle">Tool System</text>
+  <rect x="705" y="420" width="90" height="40" fill="#ffffff" stroke="#047857" stroke-width="2" rx="8"/>
+  <text x="785" y="444.5" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">Built-in</text>
+  <rect x="805" y="420" width="90" height="40" fill="#ffffff" stroke="#047857" stroke-width="2" rx="8"/>
+  <text x="885" y="444.5" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">WASM</text>
+  <rect x="755" y="480" width="100" height="40" fill="#ffffff" stroke="#047857" stroke-width="2" rx="8"/>
+  <text x="835" y="504.5" font-family="sans-serif" font-size="12" fill="#374151" text-anchor="middle">MCP</text>
+  <rect x="50" y="450" width="550" height="120" fill="#fed7aa" stroke="#1e3a5f" stroke-width="2" rx="8"/>
+  <text x="415" y="520.5" font-family="sans-serif" font-size="18" fill="#c2410c" text-anchor="middle">Persistent Memory</text>
+  <rect x="100" y="510" width="120" height="40" fill="#ffffff" stroke="#c2410c" stroke-width="2" rx="8"/>
+  <text x="200" y="536.5" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">Workspace</text>
+  <rect x="265" y="510" width="120" height="40" fill="#ffffff" stroke="#c2410c" stroke-width="2" rx="8"/>
+  <text x="355" y="536.5" font-family="sans-serif" font-size="14" fill="#374151" text-anchor="middle">Documents</text>
+  <rect x="430" y="510" width="120" height="40" fill="#ffffff" stroke="#c2410c" stroke-width="2" rx="8"/>
+  <text x="530" y="535.5" font-family="sans-serif" font-size="13" fill="#374151" text-anchor="middle">Hybrid Search</text>
+  <path d="M 250 205 L 380 205" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 250 265 L 380 265" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 250 325 L 380 325" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 250 385 L 380 385" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 600 220 L 680 220" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 805 320 L 805 360" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 680 450 L 600 450" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 490 320 L 490 450" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+</svg>

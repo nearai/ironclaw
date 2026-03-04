@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="610" viewBox="150 -30 700 610">
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#1e3a5f" />
+    </marker>
+  </defs>
+  <text x="600" y="52" font-family="sans-serif" font-size="32" fill="#1e40af" text-anchor="middle">Safety Layer Overview</text>
+  <rect x="200" y="80" width="400" height="450" fill="#fef3c7" stroke="#1e3a5f" stroke-width="2" rx="8"/>
+  <text x="500" y="315.5" font-family="sans-serif" font-size="18" fill="#b45309" text-anchor="middle">Safety Layer</text>
+  <rect x="250" y="140" width="300" height="80" fill="#ffffff" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="475" y="188.5" font-family="sans-serif" font-size="16" fill="#374151" text-anchor="middle">Validator</text>
+  <text x="580" y="197" font-family="sans-serif" font-size="12" fill="#64748b" text-anchor="middle">Length, encoding, forbidden patterns</text>
+  <rect x="250" y="240" width="300" height="80" fill="#ffffff" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="475" y="288.5" font-family="sans-serif" font-size="16" fill="#374151" text-anchor="middle">Sanitizer</text>
+  <text x="580" y="297" font-family="sans-serif" font-size="12" fill="#64748b" text-anchor="middle">Pattern detection, content escaping</text>
+  <rect x="250" y="340" width="300" height="80" fill="#ffffff" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="475" y="388.5" font-family="sans-serif" font-size="16" fill="#374151" text-anchor="middle">Policy Engine</text>
+  <text x="580" y="397" font-family="sans-serif" font-size="12" fill="#64748b" text-anchor="middle">Severity rules: Critical, High, Medium, Low</text>
+  <rect x="250" y="440" width="300" height="80" fill="#ffffff" stroke="#b45309" stroke-width="2" rx="8"/>
+  <text x="475" y="488.5" font-family="sans-serif" font-size="16" fill="#374151" text-anchor="middle">Leak Detector</text>
+  <text x="580" y="497" font-family="sans-serif" font-size="12" fill="#64748b" text-anchor="middle">15+ secret patterns: API keys, tokens, private keys</text>
+  <path d="M 400 220 L 400 240" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 400 320 L 400 340" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <path d="M 400 420 L 400 440" fill="none" stroke="#1e3a5f" stroke-width="2" marker-end="url(#arrowhead)"/>
+</svg>
