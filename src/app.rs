@@ -24,7 +24,7 @@ use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpSessionManager;
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
-use crate::workspace::{EmbeddingProvider, Workspace};
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -354,9 +354,12 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
+            let emb_cache_config = EmbeddingCacheConfig {
+                max_entries: self.config.embeddings.cache_size,
+            };
             let mut ws = Workspace::new_with_db("default", db.clone());
             if let Some(ref emb) = embeddings {
-                ws = ws.with_embeddings(emb.clone());
+                ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
             }
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));

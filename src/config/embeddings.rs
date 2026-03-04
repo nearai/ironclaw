@@ -23,6 +23,12 @@ pub struct EmbeddingsConfig {
     pub ollama_base_url: String,
     /// Embedding vector dimension. Inferred from the model name when not set explicitly.
     pub dimension: usize,
+    /// Maximum entries in the embedding LRU cache (default 10,000).
+    ///
+    /// Approximate raw embedding payload: `cache_size × dimension × 4 bytes`.
+    /// 10,000 × 1536 floats ≈ 58 MB (payload only; actual memory is higher
+    /// due to HashMap, String keys, and per-entry overhead).
+    pub cache_size: usize,
 }
 
 impl Default for EmbeddingsConfig {
@@ -36,6 +42,7 @@ impl Default for EmbeddingsConfig {
             model,
             ollama_base_url: "http://localhost:11434".to_string(),
             dimension,
+            cache_size: 10_000,
         }
     }
 }
@@ -74,6 +81,15 @@ impl EmbeddingsConfig {
 
         let enabled = parse_bool_env("EMBEDDING_ENABLED", settings.embeddings.enabled)?;
 
+        let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", 10_000usize)?;
+
+        if cache_size == 0 {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_CACHE_SIZE".to_string(),
+                message: "must be at least 1".to_string(),
+            });
+        }
+
         Ok(Self {
             enabled,
             provider,
@@ -81,6 +97,7 @@ impl EmbeddingsConfig {
             model,
             ollama_base_url,
             dimension,
+            cache_size,
         })
     }
 
@@ -163,6 +180,7 @@ mod tests {
             std::env::remove_var("EMBEDDING_PROVIDER");
             std::env::remove_var("EMBEDDING_MODEL");
             std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("EMBEDDING_CACHE_SIZE");
         }
     }
 
@@ -244,6 +262,32 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
+        }
+    }
+
+    #[test]
+    fn cache_size_zero_rejected() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_CACHE_SIZE", "0");
+        }
+
+        let settings = Settings::default();
+        let result = EmbeddingsConfig::resolve(&settings);
+        assert!(result.is_err(), "cache_size=0 should be rejected");
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("at least 1"),
+            "error should mention minimum: {err}"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_CACHE_SIZE");
         }
     }
 }
