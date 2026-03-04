@@ -98,6 +98,13 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server):
         # Prevent onboarding wizard from triggering
         "ONBOARD_COMPLETED": "true",
     }
+    # Forward LLVM coverage instrumentation env vars when present
+    # (allows cargo-llvm-cov to collect profraw data from E2E runs)
+    for key in ("LLVM_PROFILE_FILE", "CARGO_LLVM_COV", "CARGO_LLVM_COV_SHOW_ENV",
+                "CARGO_LLVM_COV_TARGET_DIR"):
+        val = os.environ.get(key)
+        if val is not None:
+            env[key] = val
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
