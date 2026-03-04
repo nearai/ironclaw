@@ -17,6 +17,12 @@ const MAX_EMITS_PER_EXECUTION: usize = 100;
 /// Maximum message content size (64 KB).
 const MAX_MESSAGE_CONTENT_SIZE: usize = 64 * 1024;
 
+/// Truncate a string to at most `max_bytes` without splitting UTF-8 code points.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    let end = crate::util::floor_char_boundary(s, max_bytes);
+    &s[..end]
+}
+
 /// A message emitted by a WASM channel to be sent to the agent.
 #[derive(Debug, Clone)]
 pub struct EmittedMessage {
@@ -194,7 +200,7 @@ impl ChannelHostState {
                 max = MAX_MESSAGE_CONTENT_SIZE,
                 "Message content too large, truncating"
             );
-            let mut truncated = msg.content[..MAX_MESSAGE_CONTENT_SIZE].to_string();
+            let mut truncated = truncate_utf8(&msg.content, MAX_MESSAGE_CONTENT_SIZE).to_string();
             truncated.push_str("... (truncated)");
             let msg = EmittedMessage {
                 content: truncated,
@@ -432,6 +438,7 @@ mod tests {
     use crate::channels::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
     use crate::channels::wasm::host::{
         ChannelEmitRateLimiter, ChannelHostState, EmittedMessage, MAX_EMITS_PER_EXECUTION,
+        MAX_MESSAGE_CONTENT_SIZE,
     };
 
     #[test]
@@ -488,6 +495,25 @@ mod tests {
 
         assert_eq!(state.emitted_count(), MAX_EMITS_PER_EXECUTION);
         assert_eq!(state.emits_dropped(), 1);
+    }
+
+    #[test]
+    fn test_emit_message_truncates_utf8_safely() {
+        let caps = ChannelCapabilities::for_channel("test");
+        let mut state = ChannelHostState::new("test", caps);
+
+        let prefix = "a".repeat(MAX_MESSAGE_CONTENT_SIZE - 1);
+        let content = format!("{}🙂suffix", prefix);
+        let msg = EmittedMessage::new("user123", content);
+
+        state.emit_message(msg).unwrap();
+        let messages = state.take_emitted_messages();
+        assert_eq!(messages.len(), 1);
+
+        let emitted = &messages[0].content;
+        assert!(emitted.starts_with(&prefix));
+        assert!(emitted.ends_with("... (truncated)"));
+        assert!(!emitted.contains("🙂"));
     }
 
     #[test]
