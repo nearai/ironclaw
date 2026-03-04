@@ -131,6 +131,18 @@ jobs:
           RUST_LOG: ironclaw=info
           RUST_BACKTRACE: "1"
 
+      - name: Verify profraw files exist
+        if: always()
+        run: |
+          echo "LLVM_PROFILE_FILE=${LLVM_PROFILE_FILE}"
+          echo "CARGO_LLVM_COV_TARGET_DIR=${CARGO_LLVM_COV_TARGET_DIR}"
+          profraw_count=$(find target/ -name '*.profraw' 2>/dev/null | wc -l)
+          echo "Found ${profraw_count} .profraw files under target/"
+          find target/ -name '*.profraw' 2>/dev/null || true
+          if [ "$profraw_count" -eq 0 ]; then
+            echo "::warning::No .profraw files found — coverage report will fail"
+          fi
+
       - name: Generate coverage report
         if: always()
         run: cargo llvm-cov report --lcov --output-path e2e-coverage.info
