@@ -436,23 +436,41 @@ impl Scheduler {
             .into());
         }
 
-        // Execute with per-tool timeout
+        // Execute with per-tool timeout and retry on transient errors.
+        // Budget == timeout is intentional: budget is the cooperative graceful exit,
+        // tokio timeout is the hard cancellation backstop.
         let tool_timeout = tool.execution_timeout();
-        let result =
-            tokio::time::timeout(tool_timeout, async { tool.execute(params, &job_ctx).await })
-                .await
-                .map_err(|_| {
-                    Error::Tool(crate::error::ToolError::Timeout {
-                        name: tool_name.to_string(),
-                        timeout: tool_timeout,
-                    })
-                })?
-                .map_err(|e| {
-                    Error::Tool(crate::error::ToolError::ExecutionFailed {
-                        name: tool_name.to_string(),
-                        reason: e.to_string(),
-                    })
-                })?;
+        let (timeout_result, retry_attempts, _elapsed) =
+            crate::tools::retry::execute_with_retry(tool.as_ref(), &params, &job_ctx).await;
+
+        let result = timeout_result.map_err(|_| {
+            if retry_attempts > 0 {
+                tracing::warn!(
+                    tool = %tool_name,
+                    retry_attempts,
+                    "Subtask tool call timed out after retries"
+                );
+            }
+            Error::Tool(crate::error::ToolError::Timeout {
+                name: tool_name.to_string(),
+                timeout: tool_timeout,
+            })
+        })?;
+
+        if retry_attempts > 0 {
+            tracing::debug!(
+                tool = %tool_name,
+                retry_attempts,
+                "Subtask tool call completed after retries"
+            );
+        }
+
+        let result = result.result.map_err(|e| {
+            Error::Tool(crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: e.to_string(),
+            })
+        })?;
 
         Ok(TaskOutput::new(result.result, start.elapsed()))
     }

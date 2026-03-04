@@ -740,14 +740,38 @@ pub(super) async fn execute_chat_tool_standalone(
         "Tool call started"
     );
 
-    // Execute with per-tool timeout
+    // Execute with per-tool timeout and retry on transient errors.
+    // Budget == timeout is intentional: budget is the cooperative graceful exit,
+    // tokio timeout is the hard cancellation backstop.
     let timeout = tool.execution_timeout();
-    let start = std::time::Instant::now();
-    let result = tokio::time::timeout(timeout, async {
-        tool.execute(params.clone(), job_ctx).await
-    })
-    .await;
-    let elapsed = start.elapsed();
+    let (timeout_result, retry_attempts, elapsed) =
+        crate::tools::retry::execute_with_retry(tool.as_ref(), params, job_ctx).await;
+
+    // Unpack the timeout + retry layers.
+    // retry_attempts is intentionally only logged here — this standalone chat
+    // path has no ActionRecord to persist the count into (unlike the worker path).
+    let result = match timeout_result {
+        Ok(outcome) => {
+            if retry_attempts > 0 {
+                tracing::debug!(
+                    tool = %tool_name,
+                    retry_attempts,
+                    "Tool call completed after retries"
+                );
+            }
+            Ok(outcome.result)
+        }
+        Err(_) => {
+            if retry_attempts > 0 {
+                tracing::warn!(
+                    tool = %tool_name,
+                    retry_attempts,
+                    "Tool call timed out after retries"
+                );
+            }
+            Err(())
+        }
+    };
 
     match &result {
         Ok(Ok(output)) => {
@@ -779,7 +803,7 @@ pub(super) async fn execute_chat_tool_standalone(
     }
 
     let result = result
-        .map_err(|_| crate::error::ToolError::Timeout {
+        .map_err(|()| crate::error::ToolError::Timeout {
             name: tool_name.to_string(),
             timeout,
         })?

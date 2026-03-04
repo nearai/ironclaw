@@ -617,6 +617,7 @@ mod tests {
             success: true,
             error: None,
             executed_at: chrono::Utc::now(),
+            retry_attempts: 0,
         };
         db.save_action(job_id, &action).await.expect("save action");
 
