@@ -1,0 +1,44 @@
+# Chutes.ai STT WASM Tool Manifest
+# Capability-based security configuration for speech-to-text
+
+[tool]
+name = "chutes_stt"
+version = "0.1.0"
+description = "Speech-to-text transcription via Chutes.ai Whisper API"
+author = "IronClaw"
+
+[permissions]
+# Read-only filesystem scopes
+fs_ro_scopes = [
+    "/agents/mentor/",        # Persona files
+    "/tmp/stt_input/",        # Temporary input files
+    "/tmp/",                  # General temp directory
+]
+
+# Read-write filesystem scopes
+fs_rw_scopes = [
+    "/tmp/stt_output/",       # Transcription output
+    "/tmp/stt_cache/",        # Cached transcriptions
+    "/tmp/",                  # General temp directory
+]
+
+# Network permissions - restricted to Chutes.ai only
+network_allowed_hosts = [
+    "llm.chutes.ai",
+]
+
+# Environment variables (must be provided by host)
+env_required = [
+    "CHUTES_API_KEY",
+]
+
+[resource_limits]
+max_memory_mb = 256
+max_execution_time_seconds = 30
+max_input_size_bytes = 26214400     # 25MB max audio input
+max_output_size_bytes = 1048576     # 1MB max transcription text
+
+[models]
+default = "openai/whisper-large-v3-turbo"
+fallback = "openai/whisper-large-v3"
+supported_formats = ["ogg", "wav", "mp3", "mp4", "webm", "flac", "m4a"]

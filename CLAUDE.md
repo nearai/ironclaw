@@ -1,8 +1,8 @@
-# IronClaw Development Guide
+# Lippyclaw Development Guide
 
 ## Project Overview
 
-**IronClaw** is a secure personal AI assistant that protects your data and expands its capabilities on the fly.
+**Lippyclaw** is a secure personal AI assistant that protects your data and expands its capabilities on the fly.
 
 ### Core Philosophy
 - **User-first security** - Your data stays yours, encrypted and local
@@ -42,7 +42,7 @@ cargo test
 cargo test test_name
 
 # Run with logging
-RUST_LOG=ironclaw=debug cargo run
+RUST_LOG=Lippyclaw=debug cargo run
 ```
 
 ## Project Structure
@@ -335,8 +335,8 @@ Environment variables (see `.env.example`):
 ```bash
 # Database backend (default: postgres)
 DATABASE_BACKEND=postgres               # or "libsql" / "turso"
-DATABASE_URL=postgres://user:pass@localhost/ironclaw
-LIBSQL_PATH=~/.ironclaw/ironclaw.db    # libSQL local path (default)
+DATABASE_URL=postgres://user:pass@localhost/Lippyclaw
+LIBSQL_PATH=~/.Lippyclaw/ironclaw.db    # libSQL local path (default)
 # LIBSQL_URL=libsql://xxx.turso.io    # Turso cloud (optional)
 # LIBSQL_AUTH_TOKEN=xxx                # Required with LIBSQL_URL
 
@@ -650,10 +650,10 @@ See `src/tools/README.md` for full tool architecture, adding new tools (built-in
 RUST_LOG=ironclaw=trace cargo run
 
 # Just the agent module
-RUST_LOG=ironclaw::agent=debug cargo run
+RUST_LOG=Lippyclaw::agent=debug cargo run
 
 # With HTTP request logging
-RUST_LOG=ironclaw=debug,tower_http=debug cargo run
+RUST_LOG=Lippyclaw=debug,tower_http=debug cargo run
 ```
 
 ## Module Specifications

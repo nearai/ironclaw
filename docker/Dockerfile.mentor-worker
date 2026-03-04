@@ -1,0 +1,63 @@
+# IronClaw Mentor Worker Dockerfile
+# Secure container for Mentor AI with read-only persona and voice sample
+
+FROM rust:1.75-slim as builder
+
+WORKDIR /build
+
+# Copy workspace
+COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+COPY tools-src/ tools-src/
+
+# Build WASM tools
+RUN apt-get update && apt-get install -y \
+    wasm-pack \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN wasm-pack build tools-src/chutes_stt --target web --release
+RUN wasm-pack build tools-src/chutes_tts --target web --release
+
+# Build mentor worker
+RUN cargo build --release --features mentor
+
+# Runtime image
+FROM debian:bookworm-slim
+
+# Create non-root user
+RUN groupadd -r mentor && useradd -r -g mentor mentor
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy built artifacts
+COPY --from=builder /build/target/release/ironclaw-worker /app/worker
+COPY --from=builder /build/tools-src/chutes_stt/pkg/ /app/tools/chutes_stt/
+COPY --from=builder /build/tools-src/chutes_tts/pkg/ /app/tools/chutes_tts/
+
+# Create directory structure
+RUN mkdir -p /agents/mentor /tmp /logs /workspace
+
+# Copy agent files with specific permissions
+COPY --chown=mentor:mentor --chmod=444 agents/mentor/persona.md /agents/mentor/persona.md
+COPY --chown=mentor:mentor --chmod=444 agents/mentor/skills.md /agents/mentor/skills.md
+COPY --chown=mentor:mentor --chmod=444 agents/mentor/master-voice.wav /agents/mentor/master-voice.wav
+
+# Set ownership
+RUN chown -R mentor:mentor /app /agents/mentor /tmp /logs
+
+# Switch to non-root user
+USER mentor
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD ["/app/worker", "--health"]
+
+# Entry point
+ENTRYPOINT ["/app/worker"]
+CMD ["--agent", "mentor"]

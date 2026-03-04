@@ -1,0 +1,58 @@
+# IronClaw Settings
+# Capability-based security configuration for agents and tools
+
+[agents.main_agent]
+description = "Main operational agent for code execution and file operations"
+fs_ro_scopes = ["/workspace/", "/tmp/", "/skills/"]
+fs_rw_scopes = ["/workspace/", "/tmp/", "/logs/"]
+network_allowed = true
+
+[agents.mentor]
+description = "Out-of-band auditor agent with read-only log access"
+fs_ro_scopes = ["/agents/mentor/", "/logs/", "/workspace/"]
+fs_rw_scopes = ["/agents/mentor/checkpoints/", "/tmp/"]
+network_allowed = false
+persona_file = "/agents/mentor/persona.md"
+skills_file = "/agents/mentor/skills.md"
+voice_sample = "/agents/mentor/master-voice.wav"
+
+[tools.chutes_stt]
+description = "Speech-to-text via Chutes.ai Whisper API"
+fs_ro_scopes = ["/agents/mentor/", "/tmp/stt_input/", "/tmp/"]
+fs_rw_scopes = ["/tmp/stt_output/", "/tmp/stt_cache/", "/tmp/"]
+network_hosts = ["llm.chutes.ai"]
+env_required = ["CHUTES_API_KEY"]
+max_memory_mb = 256
+max_execution_time_seconds = 30
+
+[tools.chutes_tts]
+description = "Text-to-speech with voice cloning via Chutes.ai"
+fs_ro_scopes = ["/agents/mentor/", "/tmp/tts_input/"]
+fs_rw_scopes = ["/tmp/tts_output/", "/tmp/tts_cache/", "/agents/mentor/checkpoints/"]
+network_hosts = ["llm.chutes.ai"]
+env_required = ["CHUTES_API_KEY"]
+max_memory_mb = 256
+max_execution_time_seconds = 30
+protected_files = [
+    { path = "/agents/mentor/master-voice.wav", read = true, write = false, delete = false, checksum_required = true }
+]
+
+[tools.telegram_wasm]
+description = "Telegram channel integration"
+fs_ro_scopes = ["/tmp/"]
+fs_rw_scopes = ["/tmp/telegram_cache/"]
+network_hosts = ["api.telegram.org"]
+env_required = ["TELEGRAM_BOT_TOKEN"]
+
+[duckdb]
+# Shared log database for agent communication
+shared_log_path = "/logs/agent_history.db"
+main_agent_write = true
+mentor_read_only = true
+
+[workspace]
+# Dual-workspace setup for Mentor isolation
+main_workspace = "/workspace/"
+mentor_workspace = "/agents/mentor/"
+# Read-only symlink from mentor to main logs
+mentor_log_symlink = "/agents/mentor/logs -> /logs/"

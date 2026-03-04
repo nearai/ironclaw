@@ -1,0 +1,53 @@
+# Chutes.ai TTS WASM Tool Manifest
+# Capability-based security configuration for voice cloning
+
+[tool]
+name = "chutes_tts"
+version = "0.1.0"
+description = "Text-to-speech with zero-shot voice cloning via Chutes.ai"
+author = "IronClaw"
+
+[permissions]
+# Read-only filesystem scopes
+fs_ro_scopes = [
+    "/agents/mentor/",        # Persona files and master voice sample
+    "/tmp/tts_input/",        # Temporary input files
+]
+
+# Read-write filesystem scopes
+fs_rw_scopes = [
+    "/tmp/tts_output/",       # Generated audio output
+    "/tmp/tts_cache/",        # Cached audio files
+    "/agents/mentor/checkpoints/",  # Checkpoint storage
+]
+
+# Network permissions - restricted to Chutes.ai only
+network_allowed_hosts = [
+    "llm.chutes.ai",
+]
+
+# Environment variables (must be provided by host)
+env_required = [
+    "CHUTES_API_KEY",
+]
+
+[resource_limits]
+max_memory_mb = 256
+max_execution_time_seconds = 30
+max_input_size_bytes = 10485760      # 10MB max audio input
+max_output_size_bytes = 10485760     # 10MB max audio output
+
+[voice_cloning]
+# Security settings for voice cloning
+protected_files = [
+    { path = "/agents/mentor/master-voice.wav", read = true, write = false, delete = false, checksum_required = true },
+]
+
+# Checksum verification for master voice sample
+# SHA256 of master-voice.wav (to be filled in after file is added)
+master_voice_checksum = ""
+
+[models]
+default = "sesame/csm-1b"
+fallback = "hexgrad/Kokoro-82M"
+supported_formats = ["wav", "mp3", "opus", "flac"]
