@@ -17,10 +17,16 @@
 //! - **Runtime**: Users can set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET
 //!   env vars, which take priority over built-in defaults.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+
+use crate::secrets::{CreateSecretParams, SecretsStore};
 
 // ── Built-in credentials ────────────────────────────────────────────────
 
@@ -121,6 +127,9 @@ pub enum OAuthCallbackError {
     #[error("Timed out waiting for authorization")]
     Timeout,
 
+    #[error("CSRF state mismatch: expected {expected}, got {actual}")]
+    StateMismatch { expected: String, actual: String },
+
     #[error("IO error: {0}")]
     Io(String),
 }
@@ -177,16 +186,22 @@ pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError>
 /// extracts the value of `param_name` (e.g., "code" or "token"), and shows a branded
 /// landing page using `display_name` (e.g., "Google", "Notion", "NEAR AI").
 ///
+/// When `expected_state` is `Some`, the callback's `state` query parameter is validated
+/// against it to prevent CSRF attacks. If the state doesn't match, the callback is
+/// rejected with an error page.
+///
 /// Times out after 5 minutes.
 pub async fn wait_for_callback(
     listener: TcpListener,
     path_prefix: &str,
     param_name: &str,
     display_name: &str,
+    expected_state: Option<&str>,
 ) -> Result<String, OAuthCallbackError> {
     let path_prefix = path_prefix.to_string();
     let param_name = param_name.to_string();
     let display_name = display_name.to_string();
+    let expected_state = expected_state.map(String::from);
 
     tokio::time::timeout(Duration::from_secs(300), async move {
         loop {
@@ -221,17 +236,29 @@ pub async fn wait_for_callback(
                     return Err(OAuthCallbackError::Denied);
                 }
 
-                // Look for the target parameter
-                for param in query.split('&') {
-                    let parts: Vec<&str> = param.splitn(2, '=').collect();
-                    if parts.len() == 2 && parts[0] == param_name {
-                        let value = urlencoding::decode(parts[1])
-                            .unwrap_or_else(|_| parts[1].into())
-                            .into_owned();
+                // Parse all query params into a map for validation
+                let params: HashMap<&str, String> = query
+                    .split('&')
+                    .filter_map(|p| {
+                        let mut parts = p.splitn(2, '=');
+                        let key = parts.next()?;
+                        let val = parts.next().unwrap_or("");
+                        Some((
+                            key,
+                            urlencoding::decode(val)
+                                .unwrap_or_else(|_| val.into())
+                                .into_owned(),
+                        ))
+                    })
+                    .collect();
 
-                        let html = landing_html(&display_name, true);
+                // Validate CSRF state parameter
+                if let Some(ref expected) = expected_state {
+                    let actual = params.get("state").cloned().unwrap_or_default();
+                    if actual != *expected {
+                        let html = landing_html(&display_name, false);
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\n\
+                            "HTTP/1.1 403 Forbidden\r\n\
                              Content-Type: text/html; charset=utf-8\r\n\
                              Connection: close\r\n\
                              \r\n\
@@ -239,10 +266,28 @@ pub async fn wait_for_callback(
                             html
                         );
                         let _ = socket.write_all(response.as_bytes()).await;
-                        let _ = socket.shutdown().await;
-
-                        return Ok(value);
+                        return Err(OAuthCallbackError::StateMismatch {
+                            expected: expected.clone(),
+                            actual,
+                        });
                     }
+                }
+
+                // Look for the target parameter
+                if let Some(value) = params.get(param_name.as_str()) {
+                    let html = landing_html(&display_name, true);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: text/html; charset=utf-8\r\n\
+                         Connection: close\r\n\
+                         \r\n\
+                         {}",
+                        html
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+
+                    return Ok(value.clone());
                 }
             }
 
@@ -271,7 +316,288 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-/// HTML landing page shown in the browser after an OAuth redirect.
+// ── Shared OAuth flow steps ─────────────────────────────────────────
+
+/// Response from the OAuth token exchange.
+pub struct OAuthTokenResponse {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<u64>,
+}
+
+/// Result of building an OAuth 2.0 authorization URL.
+pub struct OAuthUrlResult {
+    /// The full authorization URL to redirect the user to.
+    pub url: String,
+    /// PKCE code verifier (must be sent with the token exchange request).
+    pub code_verifier: Option<String>,
+    /// Random state parameter for CSRF protection (must be validated in callback).
+    pub state: String,
+}
+
+/// Build an OAuth 2.0 authorization URL with optional PKCE and CSRF state.
+///
+/// Returns an `OAuthUrlResult` containing the authorization URL, optional PKCE
+/// code verifier, and a random `state` parameter for CSRF protection. The caller
+/// must validate the `state` value in the callback before exchanging the code.
+pub fn build_oauth_url(
+    authorization_url: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &[String],
+    use_pkce: bool,
+    extra_params: &HashMap<String, String>,
+) -> OAuthUrlResult {
+    // Generate PKCE verifier and challenge
+    let (code_verifier, code_challenge) = if use_pkce {
+        let mut verifier_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut verifier_bytes);
+        let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+
+        (Some(verifier), Some(challenge))
+    } else {
+        (None, None)
+    };
+
+    // Generate random state for CSRF protection
+    let mut state_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut state_bytes);
+    let state = URL_SAFE_NO_PAD.encode(state_bytes);
+
+    // Build authorization URL
+    let mut auth_url = format!(
+        "{}?client_id={}&response_type=code&redirect_uri={}&state={}",
+        authorization_url,
+        urlencoding::encode(client_id),
+        urlencoding::encode(redirect_uri),
+        urlencoding::encode(&state),
+    );
+
+    if !scopes.is_empty() {
+        auth_url.push_str(&format!(
+            "&scope={}",
+            urlencoding::encode(&scopes.join(" "))
+        ));
+    }
+
+    if let Some(ref challenge) = code_challenge {
+        auth_url.push_str(&format!(
+            "&code_challenge={}&code_challenge_method=S256",
+            challenge
+        ));
+    }
+
+    for (key, value) in extra_params {
+        auth_url.push_str(&format!(
+            "&{}={}",
+            urlencoding::encode(key),
+            urlencoding::encode(value)
+        ));
+    }
+
+    OAuthUrlResult {
+        url: auth_url,
+        code_verifier,
+        state,
+    }
+}
+
+/// Exchange an OAuth authorization code for tokens.
+///
+/// POSTs to `token_url` with the authorization code and optional PKCE verifier.
+/// If `client_secret` is provided, uses HTTP Basic auth; otherwise includes
+/// `client_id` in the form body (for public clients).
+pub async fn exchange_oauth_code(
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: Option<&str>,
+    access_token_field: &str,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    let client = reqwest::Client::new();
+    let mut token_params = vec![
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+    ];
+
+    if let Some(verifier) = code_verifier {
+        token_params.push(("code_verifier", verifier.to_string()));
+    }
+
+    let mut request = client.post(token_url);
+
+    if let Some(secret) = client_secret {
+        request = request.basic_auth(client_id, Some(secret));
+    } else {
+        token_params.push(("client_id", client_id.to_string()));
+    }
+
+    let token_response = request
+        .form(&token_params)
+        .send()
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Token exchange request failed: {}", e)))?;
+
+    if !token_response.status().is_success() {
+        let status = token_response.status();
+        let body = token_response.text().await.unwrap_or_default();
+        return Err(OAuthCallbackError::Io(format!(
+            "Token exchange failed: {} - {}",
+            status, body
+        )));
+    }
+
+    let token_data: serde_json::Value = token_response
+        .json()
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to parse token response: {}", e)))?;
+
+    let access_token = token_data
+        .get(access_token_field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            // Log only the field names present, not values (which may contain tokens)
+            let fields: Vec<&str> = token_data
+                .as_object()
+                .map(|o| o.keys().map(|k| k.as_str()).collect())
+                .unwrap_or_default();
+            OAuthCallbackError::Io(format!(
+                "No '{}' field in token response (fields present: {:?})",
+                access_token_field, fields
+            ))
+        })?
+        .to_string();
+
+    let refresh_token = token_data
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
+
+    Ok(OAuthTokenResponse {
+        access_token,
+        refresh_token,
+        expires_in,
+    })
+}
+
+/// Store OAuth tokens (access + refresh) in the secrets store.
+///
+/// Also stores the granted scopes as `{secret_name}_scopes` so that scope
+/// expansion can be detected on subsequent activations.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_oauth_tokens(
+    store: &(dyn SecretsStore + Send + Sync),
+    user_id: &str,
+    secret_name: &str,
+    provider: Option<&str>,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    expires_in: Option<u64>,
+    scopes: &[String],
+) -> Result<(), OAuthCallbackError> {
+    let mut params = CreateSecretParams::new(secret_name, access_token);
+
+    if let Some(prov) = provider {
+        params = params.with_provider(prov);
+    }
+
+    if let Some(secs) = expires_in {
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        params = params.with_expiry(expires_at);
+    }
+
+    store
+        .create(user_id, params)
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to save token: {}", e)))?;
+
+    // Store refresh token separately (no expiry, it's long-lived)
+    if let Some(rt) = refresh_token {
+        let refresh_name = format!("{}_refresh_token", secret_name);
+        let mut refresh_params = CreateSecretParams::new(&refresh_name, rt);
+        if let Some(prov) = provider {
+            refresh_params = refresh_params.with_provider(prov);
+        }
+        store
+            .create(user_id, refresh_params)
+            .await
+            .map_err(|e| OAuthCallbackError::Io(format!("Failed to save refresh token: {}", e)))?;
+    }
+
+    // Store granted scopes for scope expansion detection
+    if !scopes.is_empty() {
+        let scopes_name = format!("{}_scopes", secret_name);
+        let scopes_value = scopes.join(" ");
+        let scopes_params = CreateSecretParams::new(&scopes_name, &scopes_value);
+        // Best-effort: scope tracking failure shouldn't block auth
+        let _ = store.create(user_id, scopes_params).await;
+    }
+
+    Ok(())
+}
+
+/// Validate an OAuth token against a tool's validation endpoint.
+///
+/// Sends a request to the configured endpoint with the token as a Bearer header.
+/// Returns `Ok(())` if the response status matches the expected success status,
+/// or an error with details if validation fails (wrong account, expired token, etc.).
+pub async fn validate_oauth_token(
+    token: &str,
+    validation: &crate::tools::wasm::ValidationEndpointSchema,
+) -> Result<(), OAuthCallbackError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
+
+    let request = match validation.method.to_uppercase().as_str() {
+        "POST" => client.post(&validation.url),
+        _ => client.get(&validation.url),
+    };
+
+    let mut request = request.header("Authorization", format!("Bearer {}", token));
+
+    // Add custom headers from the validation schema (e.g., Notion-Version)
+    for (key, value) in &validation.headers {
+        request = request.header(key, value);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Validation request failed: {}", e)))?;
+
+    if response.status().as_u16() == validation.success_status {
+        Ok(())
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let truncated: String = if body.len() > 200 {
+            let mut end = 200;
+            while end > 0 && !body.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &body[..end])
+        } else {
+            body
+        };
+        Err(OAuthCallbackError::Io(format!(
+            "Token validation failed: HTTP {} (expected {}): {}",
+            status, validation.success_status, truncated
+        )))
+    }
+}
+
+// ── Landing pages ───────────────────────────────────────────────────
+
 pub fn landing_html(provider_name: &str, success: bool) -> String {
     let safe_name = html_escape(provider_name);
     let (icon, heading, subtitle, accent) = if success {
@@ -511,5 +837,106 @@ mod tests {
         assert!(html.contains("IronClaw"));
         assert!(html.contains("#ef4444")); // red accent
         assert!(!html.contains("Connected"));
+    }
+
+    #[test]
+    fn test_build_oauth_url_basic() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let result = build_oauth_url(
+            "https://accounts.google.com/o/oauth2/auth",
+            "my-client-id",
+            "http://localhost:9876/callback",
+            &["openid".to_string(), "email".to_string()],
+            false,
+            &HashMap::new(),
+        );
+
+        assert!(
+            result
+                .url
+                .starts_with("https://accounts.google.com/o/oauth2/auth?")
+        );
+        assert!(result.url.contains("client_id=my-client-id"));
+        assert!(result.url.contains("response_type=code"));
+        assert!(result.url.contains("redirect_uri="));
+        assert!(result.url.contains("scope=openid%20email"));
+        assert!(result.url.contains("state="));
+        assert!(result.code_verifier.is_none());
+        assert!(!result.state.is_empty());
+    }
+
+    #[test]
+    fn test_build_oauth_url_with_pkce() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let result = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "http://localhost:9876/callback",
+            &[],
+            true,
+            &HashMap::new(),
+        );
+
+        assert!(result.url.contains("code_challenge="));
+        assert!(result.url.contains("code_challenge_method=S256"));
+        assert!(result.code_verifier.is_some());
+        let verifier = result.code_verifier.unwrap();
+        assert!(!verifier.is_empty());
+    }
+
+    #[test]
+    fn test_build_oauth_url_with_extra_params() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let mut extra = HashMap::new();
+        extra.insert("access_type".to_string(), "offline".to_string());
+        extra.insert("prompt".to_string(), "consent".to_string());
+
+        let result = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "http://localhost:9876/callback",
+            &["read".to_string()],
+            false,
+            &extra,
+        );
+
+        assert!(result.url.contains("access_type=offline"));
+        assert!(result.url.contains("prompt=consent"));
+    }
+
+    #[test]
+    fn test_build_oauth_url_state_is_unique() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let result1 = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client",
+            "http://localhost:9876/callback",
+            &[],
+            false,
+            &HashMap::new(),
+        );
+        let result2 = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client",
+            "http://localhost:9876/callback",
+            &[],
+            false,
+            &HashMap::new(),
+        );
+
+        // State should be different each time (random)
+        assert_ne!(result1.state, result2.state);
     }
 }

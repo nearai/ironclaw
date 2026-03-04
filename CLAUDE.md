@@ -321,6 +321,8 @@ cargo check --all-features                           # all features
 ```
 Dead code behind the wrong `#[cfg]` gate will only show up when building with a single feature.
 
+**Regression test with every fix:** Every bug fix must include a test that would have caught the bug. Add a `#[test]` or `#[tokio::test]` that reproduces the original failure. Exempt: changes limited to `src/channels/web/static/` or `.md` files. Use `[skip-regression-check]` in commit message or PR label if genuinely not feasible. The `commit-msg` hook and CI workflow enforce this automatically.
+
 **Zero clippy warnings policy:** Fix ALL clippy warnings before committing, including pre-existing ones in files you didn't change. Never leave warnings behind — treat `cargo clippy` output as a zero-tolerance gate.
 
 **Mechanical verification before committing:** Run these checks on changed files before committing:
@@ -328,6 +330,7 @@ Dead code behind the wrong `#[cfg]` gate will only show up when building with a 
 - `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
 - `grep -rn 'super::' <files>` -- use `crate::` imports
 - If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
+- Fix commits must include regression tests (enforced by `commit-msg` hook; bypass with `[skip-regression-check]`)
 
 ## Configuration
 

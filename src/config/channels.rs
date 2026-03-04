@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use secrecy::SecretString;
@@ -18,8 +19,9 @@ pub struct ChannelsConfig {
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
     pub wasm_channels_enabled: bool,
-    /// Telegram owner user ID. When set, the bot only responds to this user.
-    pub telegram_owner_id: Option<i64>,
+    /// Per-channel owner user IDs. When set, the channel only responds to this user.
+    /// Key: channel name (e.g., "telegram"), Value: owner user ID.
+    pub wasm_channel_owner_ids: HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,14 +182,20 @@ impl ChannelsConfig {
                 .map(PathBuf::from)
                 .unwrap_or_else(default_channels_dir),
             wasm_channels_enabled: parse_bool_env("WASM_CHANNELS_ENABLED", true)?,
-            telegram_owner_id: optional_env("TELEGRAM_OWNER_ID")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e: std::num::ParseIntError| ConfigError::InvalidValue {
-                    key: "TELEGRAM_OWNER_ID".to_string(),
-                    message: format!("must be an integer: {e}"),
-                })?
-                .or(settings.channels.telegram_owner_id),
+            wasm_channel_owner_ids: {
+                let mut ids = settings.channels.wasm_channel_owner_ids.clone();
+                // Backwards compat: TELEGRAM_OWNER_ID env var
+                if let Some(id_str) = optional_env("TELEGRAM_OWNER_ID")? {
+                    let id: i64 = id_str.parse().map_err(|e: std::num::ParseIntError| {
+                        ConfigError::InvalidValue {
+                            key: "TELEGRAM_OWNER_ID".to_string(),
+                            message: format!("must be an integer: {e}"),
+                        }
+                    })?;
+                    ids.insert("telegram".to_string(), id);
+                }
+                ids
+            },
         })
     }
 }

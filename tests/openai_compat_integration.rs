@@ -191,6 +191,7 @@ async fn start_test_server_with_provider(
         store: None,
         job_manager: None,
         prompt_queue: None,
+        scheduler: None,
         user_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
@@ -201,7 +202,6 @@ async fn start_test_server_with_provider(
         registry_entries: Vec::new(),
         cost_guard: None,
         startup_time: std::time::Instant::now(),
-        restart_requested: std::sync::atomic::AtomicBool::new(false),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -680,6 +680,7 @@ async fn test_no_llm_provider_returns_503() {
         store: None,
         job_manager: None,
         prompt_queue: None,
+        scheduler: None,
         user_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
@@ -690,7 +691,6 @@ async fn test_no_llm_provider_returns_503() {
         registry_entries: Vec::new(),
         cost_guard: None,
         startup_time: std::time::Instant::now(),
-        restart_requested: std::sync::atomic::AtomicBool::new(false),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
