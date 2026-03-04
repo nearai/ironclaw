@@ -1,6 +1,6 @@
 //! Human-readable benchmark reports.
 
-use crate::benchmark::metrics::{compare_runs, RunResult};
+use crate::benchmark::metrics::{RunResult, compare_runs};
 
 /// Format a comparison report between baseline and current run.
 pub fn format_report(current: &RunResult, baseline: Option<&RunResult>) -> String {

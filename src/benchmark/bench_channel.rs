@@ -53,9 +53,7 @@ impl BenchChannel {
             .await
             .iter()
             .filter_map(|s| match s {
-                StatusUpdate::ToolCompleted { name, success } => {
-                    Some((name.clone(), *success))
-                }
+                StatusUpdate::ToolCompleted { name, success } => Some((name.clone(), *success)),
                 _ => None,
             })
             .collect()
@@ -74,10 +72,15 @@ impl Channel for BenchChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        let rx = self.rx.lock().await.take().ok_or(ChannelError::StartupFailed {
-            name: "benchmark".to_string(),
-            reason: "start() already called".to_string(),
-        })?;
+        let rx = self
+            .rx
+            .lock()
+            .await
+            .take()
+            .ok_or(ChannelError::StartupFailed {
+                name: "benchmark".to_string(),
+                reason: "start() already called".to_string(),
+            })?;
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Box::pin(stream))
     }

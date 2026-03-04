@@ -60,11 +60,7 @@ pub fn load_scenarios(config: &BenchmarkConfig) -> Result<Vec<Scenario>, String>
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| format!("Failed to read scenarios dir: {e}"))?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "json")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .collect();
     entries.sort_by_key(|e| e.file_name());
 
@@ -197,9 +193,7 @@ pub async fn run_scenario(
     };
 
     // 8. Create and spawn agent.
-    let agent = Agent::new(
-        agent_config, deps, channels, None, None, None, None, None,
-    );
+    let agent = Agent::new(agent_config, deps, channels, None, None, None, None, None);
     let agent_handle = tokio::spawn(async move {
         if let Err(e) = agent.run().await {
             tracing::debug!("[benchmark] Agent exited: {e}");
@@ -243,7 +237,13 @@ pub async fn run_scenario(
         .map(|(name, success)| {
             let duration_ms = timing_map
                 .get_mut(name)
-                .and_then(|v| if v.is_empty() { None } else { Some(v.remove(0)) })
+                .and_then(|v| {
+                    if v.is_empty() {
+                        None
+                    } else {
+                        Some(v.remove(0))
+                    }
+                })
                 .unwrap_or(0);
             ToolInvocation {
                 name: name.clone(),
@@ -317,8 +317,7 @@ pub async fn run_all(
             scenario.id,
             scenario.category
         );
-        let result =
-            run_scenario(scenario, Arc::clone(&llm), config.global_timeout_secs).await;
+        let result = run_scenario(scenario, Arc::clone(&llm), config.global_timeout_secs).await;
 
         let status = if result.passed { "PASS" } else { "FAIL" };
         tracing::info!(
@@ -332,10 +331,7 @@ pub async fn run_all(
         results.push(result);
     }
 
-    let run_id = format!(
-        "bench-{}",
-        chrono::Utc::now().format("%Y%m%d-%H%M%S")
-    );
+    let run_id = format!("bench-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
     let mut run_result = RunResult::from_scenarios(run_id, results);
     if let Some(hash) = git_commit_hash() {
         run_result = run_result.with_commit_hash(hash);

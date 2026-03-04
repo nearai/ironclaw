@@ -306,7 +306,11 @@ mod tests {
                 let content = std::fs::read_to_string(&path).unwrap();
                 let scenarios: Vec<Scenario> = serde_json::from_str(&content)
                     .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()));
-                assert!(!scenarios.is_empty(), "Empty scenario file: {}", path.display());
+                assert!(
+                    !scenarios.is_empty(),
+                    "Empty scenario file: {}",
+                    path.display()
+                );
                 for s in &scenarios {
                     assert!(!s.id.is_empty(), "Empty scenario ID in {}", path.display());
                     assert!(!s.input.is_empty(), "Empty input in scenario {}", s.id);
