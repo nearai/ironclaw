@@ -990,8 +990,7 @@ body {
 /* Chat input */
 .chat-input {
   display: flex;
-  padding: 12px 16px;
-  padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
+  padding: 12px 16px max(12px, env(safe-area-inset-bottom)) 16px;
   gap: 8px;
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
