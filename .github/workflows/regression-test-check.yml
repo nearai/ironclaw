@@ -1,0 +1,88 @@
+name: Regression Test Check
+
+on:
+  pull_request:
+
+jobs:
+  regression-test:
+    name: Regression test enforcement
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check for regression tests
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+
+          # --- 1. Is this a fix PR? Check title first, then commit messages ---
+          IS_FIX=false
+
+          if echo "$PR_TITLE" | grep -qiE '^(fix(\(.*\))?|hotfix|bugfix):'; then
+            IS_FIX=true
+          fi
+
+          if [ "$IS_FIX" = false ]; then
+            # Check commit messages on this PR
+            COMMITS=$(git log --format='%s' origin/${{ github.event.pull_request.base.ref }}..HEAD)
+            if echo "$COMMITS" | grep -qiE '^(fix(\(.*\))?|hotfix|bugfix):'; then
+              IS_FIX=true
+            fi
+          fi
+
+          if [ "$IS_FIX" = false ]; then
+            echo "Not a fix PR — skipping regression test check."
+            exit 0
+          fi
+
+          echo "Fix PR detected."
+
+          # --- 2. Skip label ---
+          if echo ",$PR_LABELS," | grep -qF ',skip-regression-check,'; then
+            echo "skip-regression-check label present — skipping."
+            exit 0
+          fi
+
+          # --- 3. Exempt static-only / docs-only changes ---
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD)
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No changed files — skipping."
+            exit 0
+          fi
+
+          ALL_EXEMPT=true
+          while IFS= read -r file; do
+            case "$file" in
+              src/channels/web/static/*) ;;
+              *.md) ;;
+              *) ALL_EXEMPT=false; break ;;
+            esac
+          done <<< "$CHANGED_FILES"
+
+          if [ "$ALL_EXEMPT" = true ]; then
+            echo "All changes are static assets or docs — skipping."
+            exit 0
+          fi
+
+          # --- 4. Look for test changes ---
+          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -U0 -- '*.rs')
+
+          if echo "$DIFF" | grep -qE '^\+.*(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|mod tests)'; then
+            echo "Test changes found in .rs files."
+            exit 0
+          fi
+
+          if echo "$CHANGED_FILES" | grep -qE '^tests/'; then
+            echo "Test file changes found under tests/."
+            exit 0
+          fi
+
+          # --- 5. No tests found ---
+          echo "::warning::This PR looks like a bug fix but contains no test changes. Every fix should include a regression test. Add a #[test] or #[tokio::test], or apply the 'skip-regression-check' label if not feasible."
+          exit 1

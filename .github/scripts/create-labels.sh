@@ -62,6 +62,9 @@ create "scope: ci"            "546E7A" "CI/CD workflows"
 create "scope: docs"          "78909C" "Documentation"
 create "scope: dependencies"  "90A4AE" "Dependency updates"
 
+echo "==> Creating workflow labels..."
+create "skip-regression-check" "9E9E9E" "Acknowledged: fix without regression test"
+
 echo "==> Creating contributor labels..."
 create "contributor: new"         "FFF9C4" "First-time contributor"
 create "contributor: regular"     "FFE082" "2-5 merged PRs"
