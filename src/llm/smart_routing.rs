@@ -408,6 +408,9 @@ pub fn score_complexity(prompt: &str) -> ScoreBreakdown {
 }
 
 /// Score with custom configuration (weights + domain keywords).
+///
+/// If you will call this repeatedly with the same config, prefer
+/// [`score_complexity_with_regex`] and pre-build the domain regex once.
 pub fn score_complexity_with_config(prompt: &str, config: &ScorerConfig) -> ScoreBreakdown {
     let domain_regex = match &config.domain_keywords {
         Some(custom) => {
@@ -417,6 +420,15 @@ pub fn score_complexity_with_config(prompt: &str, config: &ScorerConfig) -> Scor
         None => RE_DOMAIN_DEFAULT.clone(),
     };
     score_complexity_internal(prompt, &config.weights, &domain_regex)
+}
+
+/// Score with a pre-compiled domain regex (avoids rebuilding per call).
+pub fn score_complexity_with_regex(
+    prompt: &str,
+    weights: &ScorerWeights,
+    domain_regex: &Regex,
+) -> ScoreBreakdown {
+    score_complexity_internal(prompt, weights, domain_regex)
 }
 
 /// Internal scoring implementation.
@@ -451,7 +463,7 @@ fn score_complexity_internal(
         };
     }
 
-    // Token estimate (based on char count): <20 chars = 0, >500 chars = 100
+    // Token estimate (based on char count): <20 chars = 0, >=520 chars = 100
     let char_count = prompt.len();
     let token_score = ((char_count as i32 - 20).max(0) as f32 / 5.0).min(100.0) as u32;
     components.insert("token_estimate".to_string(), token_score);
@@ -677,6 +689,8 @@ pub struct SmartRoutingProvider {
     cheap: Arc<dyn LlmProvider>,
     config: SmartRoutingConfig,
     scorer_config: ScorerConfig,
+    /// Pre-compiled domain regex (built once at construction time).
+    domain_regex: Regex,
     stats: SmartRoutingStats,
 }
 
@@ -691,11 +705,19 @@ impl SmartRoutingProvider {
             weights: ScorerWeights::default(),
             domain_keywords: config.domain_keywords.clone(),
         };
+        let domain_regex = match &scorer_config.domain_keywords {
+            Some(custom) => {
+                let refs: Vec<&str> = custom.iter().map(|s| s.as_str()).collect();
+                build_domain_regex(&refs)
+            }
+            None => RE_DOMAIN_DEFAULT.clone(),
+        };
         Self {
             primary,
             cheap,
             config,
             scorer_config,
+            domain_regex,
             stats: SmartRoutingStats::new(),
         }
     }
@@ -712,7 +734,7 @@ impl SmartRoutingProvider {
 
     /// Classify the complexity of a request based on its last user message.
     ///
-    /// Uses pattern overrides first (fast-path), then falls back to the 13-dimension scorer.
+    /// Priority: explicit tier hints > pattern overrides > 13-dimension scorer.
     fn classify(&self, request: &CompletionRequest) -> TaskComplexity {
         let last_user_msg = request
             .messages
@@ -721,6 +743,31 @@ impl SmartRoutingProvider {
             .find(|m| m.role == Role::User)
             .map(|m| m.content.as_str())
             .unwrap_or("");
+
+        // Normalize: trim whitespace so anchored regexes and token scoring are consistent.
+        let last_user_msg = last_user_msg.trim();
+
+        // Highest priority: explicit tier hints (e.g. "[tier:flash]")
+        if let Some(caps) = RE_TIER_HINT.captures(last_user_msg) {
+            let tier_str = caps.get(1).expect("capture group 1 exists").as_str();
+            let tier = match tier_str.to_lowercase().as_str() {
+                "flash" => Tier::Flash,
+                "standard" => Tier::Standard,
+                "pro" => Tier::Pro,
+                "frontier" => Tier::Frontier,
+                other => {
+                    tracing::error!(tier = %other, "Unexpected tier in hint despite regex constraint");
+                    Tier::Standard
+                }
+            };
+            let complexity = TaskComplexity::from(tier);
+            tracing::debug!(
+                %tier,
+                ?complexity,
+                "Smart routing: explicit tier hint"
+            );
+            return complexity;
+        }
 
         // Fast-path: check pattern overrides
         for po in DEFAULT_OVERRIDES.iter() {
@@ -735,8 +782,12 @@ impl SmartRoutingProvider {
             }
         }
 
-        // Full 13-dimension scoring
-        let breakdown = score_complexity_with_config(last_user_msg, &self.scorer_config);
+        // Full 13-dimension scoring (uses pre-compiled domain regex)
+        let breakdown = score_complexity_with_regex(
+            last_user_msg,
+            &self.scorer_config.weights,
+            &self.domain_regex,
+        );
         let complexity = TaskComplexity::from(breakdown.tier);
         tracing::debug!(
             score = breakdown.total,
@@ -1575,5 +1626,53 @@ mod tests {
         let router = SmartRoutingProvider::new(primary, cheap, default_config());
         assert_eq!(router.model_name(), "sonnet");
         assert_eq!(router.active_model_name(), "sonnet");
+    }
+
+    #[tokio::test]
+    async fn tier_hint_overrides_pattern_override() {
+        // "[tier:flash] security audit review" has both a Flash tier hint and
+        // a Frontier pattern override. Tier hints should win.
+        let primary = Arc::new(StubLlm::new("primary").with_model_name("primary"));
+        let cheap = Arc::new(StubLlm::new("cheap").with_model_name("cheap"));
+
+        let router = SmartRoutingProvider::new(
+            primary.clone(),
+            cheap.clone(),
+            SmartRoutingConfig {
+                cascade_enabled: false,
+                ..default_config()
+            },
+        );
+
+        router
+            .complete(make_request("[tier:flash] security audit review"))
+            .await
+            .unwrap();
+
+        // Tier hint → Flash → Simple → cheap model
+        assert_eq!(cheap.calls(), 1);
+        assert_eq!(primary.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn trimmed_greeting_matches_override() {
+        // Trailing whitespace should not prevent the greeting override from matching.
+        let primary = Arc::new(StubLlm::new("primary").with_model_name("primary"));
+        let cheap = Arc::new(StubLlm::new("cheap").with_model_name("cheap"));
+
+        let router = SmartRoutingProvider::new(
+            primary.clone(),
+            cheap.clone(),
+            SmartRoutingConfig {
+                cascade_enabled: false,
+                ..default_config()
+            },
+        );
+
+        router.complete(make_request("  hello  \n")).await.unwrap();
+
+        // Should match greeting override → Flash → Simple → cheap model
+        assert_eq!(cheap.calls(), 1);
+        assert_eq!(primary.calls(), 0);
     }
 }

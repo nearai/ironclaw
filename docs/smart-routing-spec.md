@@ -97,6 +97,11 @@ Fast-path rules that bypass scoring for obvious cases:
 
 ### Configuration
 
+> **Note:** The current implementation supports smart routing via
+> `NEARAI_CHEAP_MODEL` and `SMART_ROUTING_CASCADE` env vars, plus
+> `domain_keywords` on `SmartRoutingConfig`. The full `llm.routing` YAML
+> schema below is the target design — not all knobs are wired yet.
+
 **Default (zero-config):**
 ```yaml
 llm:
@@ -104,7 +109,7 @@ llm:
     enabled: true  # default
 ```
 
-**Power user overrides:**
+**Power user overrides (target schema):**
 ```yaml
 llm:
   routing:
@@ -173,14 +178,14 @@ llm:
 
 ## Implementation Plan
 
-1. [ ] Port scorer to Rust (`src/llm/routing/scorer.rs`)
-2. [ ] Implement `RoutingProvider` wrapper (`src/llm/routing/mod.rs`)
-3. [ ] Extend config schema (`src/config.rs`)
-4. [ ] Wire into provider creation (`src/llm/mod.rs`)
-5. [ ] Add telemetry/logging
-6. [ ] Tests with real conversation samples
-7. [ ] Codex + Gemini security review
-8. [ ] Documentation update
+1. [x] Port scorer to Rust (`src/llm/smart_routing.rs`)
+2. [x] Implement router wrapper (`src/llm/smart_routing.rs`)
+3. [x] Extend config schema (`src/config.rs`)
+4. [x] Wire into provider creation (`src/llm/mod.rs`)
+5. [x] Add telemetry/logging
+6. [x] Tests with real conversation samples
+7. [x] Codex + Gemini security review
+8. [x] Documentation updated (this spec)
 
 ## Expected Outcomes
 
