@@ -191,6 +191,7 @@ impl<'de> Deserialize<'de> for LlmTrace {
     }
 }
 
+#[allow(dead_code)]
 impl LlmTrace {
     /// Create a trace from turns.
     pub fn new(model_name: impl Into<String>, turns: Vec<TraceTurn>) -> Self {
@@ -260,6 +261,7 @@ pub struct TraceLlm {
     captured_requests: Mutex<Vec<Vec<ChatMessage>>>,
 }
 
+#[allow(dead_code)]
 impl TraceLlm {
     /// Create from an in-memory trace.
     pub fn from_trace(trace: LlmTrace) -> Self {

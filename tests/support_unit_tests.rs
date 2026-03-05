@@ -147,6 +147,8 @@ mod test_channel_tests {
                 StatusUpdate::ToolCompleted {
                     name: "echo".to_string(),
                     success: true,
+                    error: None,
+                    parameters: None,
                 },
                 &metadata,
             )
@@ -157,7 +159,7 @@ mod test_channel_tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], StatusUpdate::ToolStarted { name } if name == "echo"));
         assert!(
-            matches!(&events[1], StatusUpdate::ToolCompleted { name, success } if name == "echo" && *success)
+            matches!(&events[1], StatusUpdate::ToolCompleted { name, success, .. } if name == "echo" && *success)
         );
     }
 
@@ -261,6 +263,8 @@ mod test_channel_tests {
                 StatusUpdate::ToolCompleted {
                     name: "echo".to_string(),
                     success: true,
+                    error: None,
+                    parameters: None,
                 },
                 &serde_json::Value::Null,
             )

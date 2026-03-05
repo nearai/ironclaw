@@ -1,10 +1,12 @@
 //! RAII cleanup guard for test directories and files.
 
 /// Removes listed paths when dropped, ensuring cleanup even on panic.
+#[allow(dead_code)]
 pub struct CleanupGuard {
     paths: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl CleanupGuard {
     pub fn new() -> Self {
         Self { paths: Vec::new() }
