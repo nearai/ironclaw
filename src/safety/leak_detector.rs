@@ -428,6 +428,13 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
+        // Groq API keys
+        LeakPattern {
+            name: "groq_api_key".to_string(),
+            regex: Regex::new(r"gsk_[a-zA-Z0-9]{48,}").unwrap(),
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
         // AWS Access Key ID
         LeakPattern {
             name: "aws_access_key".to_string(),
@@ -736,6 +743,16 @@ mod tests {
         let content = format!("Here's the key: {key}");
         let result = detector.scan(&content);
         assert!(!result.is_clean(), "Anthropic key not detected");
+        assert!(result.should_block);
+    }
+
+    #[test]
+    fn test_detect_groq_key() {
+        let detector = LeakDetector::new();
+        let key = format!("gsk_{}", "a".repeat(48));
+        let content = format!("Here's the key: {key}");
+        let result = detector.scan(&content);
+        assert!(!result.is_clean(), "Groq key not detected");
         assert!(result.should_block);
     }
 

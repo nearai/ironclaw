@@ -59,6 +59,7 @@ pub fn create_llm_provider(
         LlmBackend::Anthropic => create_anthropic_provider(config),
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
+        LlmBackend::Groq => create_groq_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
     }
 }
@@ -179,6 +180,37 @@ fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         oll.model
     );
     Ok(Arc::new(RigAdapter::new(model, &oll.model)))
+}
+
+fn create_groq_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let groq = config.groq.as_ref().ok_or_else(|| LlmError::AuthFailed {
+        provider: "groq".to_string(),
+    })?;
+
+    let api_key = groq
+        .api_key
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "groq".to_string(),
+        })?;
+
+    use rig::providers::openai;
+
+    // Groq fully implements the OpenAI Chat Completions API.
+    // Base URL is https://api.groq.com/openai/v1
+    let client: openai::CompletionsClient = openai::Client::builder()
+        .base_url("https://api.groq.com/openai/v1")
+        .api_key(api_key.expose_secret())
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "groq".to_string(),
+            reason: format!("Failed to create Groq client: {}", e),
+        })?
+        .completions_api();
+
+    let model = client.completion_model(&groq.model);
+    tracing::info!("Using Groq LPU inference (model: {})", groq.model);
+    Ok(Arc::new(RigAdapter::new(model, &groq.model)))
 }
 
 const TINFOIL_BASE_URL: &str = "https://inference.tinfoil.sh/v1";
@@ -471,6 +503,7 @@ mod tests {
             anthropic: None,
             ollama: None,
             openai_compatible: None,
+            groq: None,
             tinfoil: None,
         }
     }

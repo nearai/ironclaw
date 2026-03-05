@@ -24,6 +24,8 @@ pub enum LlmBackend {
     Ollama,
     /// Any OpenAI-compatible endpoint (e.g. vLLM, LiteLLM, Together)
     OpenAiCompatible,
+    /// Groq LPU inference
+    Groq,
     /// Tinfoil private inference
     Tinfoil,
 }
@@ -38,9 +40,10 @@ impl std::str::FromStr for LlmBackend {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
+            "groq" => Ok(Self::Groq),
             "tinfoil" => Ok(Self::Tinfoil),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, groq, tinfoil",
                 s
             )),
         }
@@ -55,6 +58,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Anthropic => write!(f, "anthropic"),
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
+            Self::Groq => write!(f, "groq"),
             Self::Tinfoil => write!(f, "tinfoil"),
         }
     }
@@ -72,6 +76,7 @@ impl LlmBackend {
             Self::Anthropic => "ANTHROPIC_MODEL",
             Self::Ollama => "OLLAMA_MODEL",
             Self::OpenAiCompatible => "LLM_MODEL",
+            Self::Groq => "GROQ_MODEL",
             Self::Tinfoil => "TINFOIL_MODEL",
         }
     }
@@ -113,6 +118,13 @@ pub struct OpenAiCompatibleConfig {
     pub extra_headers: Vec<(String, String)>,
 }
 
+/// Configuration for Groq LPU inference.
+#[derive(Debug, Clone)]
+pub struct GroqConfig {
+    pub api_key: Option<SecretString>,
+    pub model: String,
+}
+
 /// Configuration for Tinfoil private inference.
 #[derive(Debug, Clone)]
 pub struct TinfoilConfig {
@@ -138,6 +150,8 @@ pub struct LlmConfig {
     pub ollama: Option<OllamaConfig>,
     /// OpenAI-compatible config (populated when backend=openai_compatible)
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
+    /// Groq config (populated when backend=groq)
+    pub groq: Option<GroqConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
 }
@@ -350,6 +364,15 @@ impl LlmConfig {
             None
         };
 
+        let groq = if backend == LlmBackend::Groq {
+            let api_key = optional_env("GROQ_API_KEY")?
+                .map(SecretString::from);
+            let model = Self::resolve_model("GROQ_MODEL", settings, "llama-3.3-70b-versatile")?;
+            Some(GroqConfig { api_key, model })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -357,6 +380,7 @@ impl LlmConfig {
             anthropic,
             ollama,
             openai_compatible,
+            groq,
             tinfoil,
         })
     }
@@ -581,6 +605,69 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("OLLAMA_MODEL");
+        }
+    }
+
+    /// Clear all groq-related env vars.
+    fn clear_groq_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("GROQ_MODEL");
+        }
+    }
+
+    #[test]
+    fn groq_uses_selected_model_when_groq_model_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_groq_env();
+        // Set API key because it's required during parsing when backend=groq
+        unsafe {
+            std::env::set_var("GROQ_API_KEY", "test-key");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            selected_model: Some("llama-3.1-8b-instant".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let groq = cfg.groq.expect("groq config should be present");
+
+        assert_eq!(groq.model, "llama-3.1-8b-instant");
+
+        unsafe {
+            std::env::remove_var("GROQ_API_KEY");
+        }
+    }
+
+    #[test]
+    fn groq_model_env_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_groq_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("GROQ_API_KEY", "test-key");
+            std::env::set_var("GROQ_MODEL", "llama-3.3-70b-versatile");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("groq".to_string()),
+            selected_model: Some("llama-3.1-8b-instant".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let groq = cfg.groq.expect("groq config should be present");
+
+        assert_eq!(groq.model, "llama-3.3-70b-versatile");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("GROQ_MODEL");
         }
     }
 

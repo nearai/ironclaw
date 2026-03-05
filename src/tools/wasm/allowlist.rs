@@ -264,6 +264,7 @@ mod tests {
             EndpointPattern::host("api.anthropic.com")
                 .with_path_prefix("/v1/messages")
                 .with_methods(vec!["POST".to_string()]),
+            EndpointPattern::host("api.groq.com").with_path_prefix("/openai/v1/"),
             EndpointPattern::host("*.example.com"),
         ])
     }

@@ -544,6 +544,7 @@ INSERT OR IGNORE INTO leak_detection_patterns (id, name, pattern, severity, acti
     ('550e8400-e29b-41d4-a716-44665544000f', 'twilio_api_key', 'SK[a-fA-F0-9]{32}', 'high', 'block', 1, datetime('now')),
     ('550e8400-e29b-41d4-a716-446655440010', 'sendgrid_api_key', 'SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}', 'high', 'block', 1, datetime('now')),
     ('550e8400-e29b-41d4-a716-446655440011', 'mailchimp_api_key', '[a-f0-9]{32}-us[0-9]{1,2}', 'medium', 'block', 1, datetime('now')),
-    ('550e8400-e29b-41d4-a716-446655440012', 'high_entropy_hex', '(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])', 'medium', 'warn', 1, datetime('now'));
+    ('550e8400-e29b-41d4-a716-446655440012', 'high_entropy_hex', '(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])', 'medium', 'warn', 1, datetime('now')),
+    ('550e8400-e29b-41d4-a716-446655440013', 'groq_api_key', 'gsk_[a-zA-Z0-9]{48,}', 'critical', 'block', 1, datetime('now'));
 
 "#;

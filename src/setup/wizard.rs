@@ -799,6 +799,7 @@ impl SetupWizard {
                     "openai" => "OpenAI",
                     "ollama" => "Ollama (local)",
                     "openai_compatible" => "OpenAI-compatible endpoint",
+                    "groq" => "Groq LPU Inference",
                     other => other,
                 }
             };
@@ -807,7 +808,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "groq"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -821,6 +822,7 @@ impl SetupWizard {
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
+                    "groq" => return self.setup_groq().await,
                     _ => {
                         return Err(SetupError::Config(format!(
                             "Unhandled provider: {}",
@@ -847,6 +849,7 @@ impl SetupWizard {
             "OpenAI           - GPT models (direct API key)",
             "Ollama           - local models, no API key needed",
             "OpenRouter       - 200+ models via single API key",
+            "Groq             - Ultra-fast LPU inference (direct API key)",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
         ];
 
@@ -858,7 +861,8 @@ impl SetupWizard {
             2 => self.setup_openai().await?,
             3 => self.setup_ollama()?,
             4 => self.setup_openrouter().await?,
-            5 => self.setup_openai_compatible().await?,
+            5 => self.setup_groq().await?,
+            6 => self.setup_openai_compatible().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -1062,6 +1066,19 @@ impl SetupWizard {
         .await
     }
 
+    /// Groq provider setup.
+    async fn setup_groq(&mut self) -> Result<(), SetupError> {
+        self.setup_api_key_provider(
+            "groq",
+            "GROQ_API_KEY",
+            "llm_groq_api_key",
+            "Groq API key",
+            "https://console.groq.com/keys",
+            None,
+        )
+        .await
+    }
+
     /// OpenAI-compatible provider setup: base URL + optional API key.
     async fn setup_openai_compatible(&mut self) -> Result<(), SetupError> {
         self.settings.llm_backend = Some("openai_compatible".to_string());
@@ -1151,6 +1168,14 @@ impl SetupWizard {
                     .as_ref()
                     .map(|k| k.expose_secret().to_string());
                 let models = fetch_openai_models(cached.as_deref()).await;
+                self.select_from_model_list(&models)?;
+            }
+            "groq" => {
+                let cached = self
+                    .llm_api_key
+                    .as_ref()
+                    .map(|k| k.expose_secret().to_string());
+                let models = fetch_groq_models(cached.as_deref()).await;
                 self.select_from_model_list(&models)?;
             }
             "ollama" => {
@@ -1277,6 +1302,7 @@ impl SetupWizard {
             anthropic: None,
             ollama: None,
             openai_compatible: None,
+            groq: None,
             tinfoil: None,
         };
 
@@ -2532,6 +2558,75 @@ async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> 
                 return static_defaults;
             }
             sort_openai_models(&mut models);
+            models
+        }
+        Err(_) => static_defaults,
+    }
+}
+
+/// Fetch models from the Groq API.
+///
+/// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
+async fn fetch_groq_models(cached_key: Option<&str>) -> Vec<(String, String)> {
+    let static_defaults = vec![
+        (
+            "llama-3.3-70b-versatile".into(),
+            "Llama 3.3 70B Versatile (default, fast)".into(),
+        ),
+        (
+            "llama-3.1-8b-instant".into(),
+            "Llama 3.1 8B Instant".into(),
+        ),
+        ("gpt-oss-120b".into(), "OpenAI GPT-OSS 120B".into()),
+    ];
+
+    let api_key = cached_key
+        .map(String::from)
+        .or_else(|| std::env::var("GROQ_API_KEY").ok())
+        .filter(|k| !k.is_empty());
+
+    let api_key = match api_key {
+        Some(k) => k,
+        None => return static_defaults,
+    };
+
+    let client = reqwest::Client::new();
+    let resp = match client
+        .get("https://api.groq.com/openai/v1/models")
+        .bearer_auth(&api_key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return static_defaults,
+    };
+
+    #[derive(serde::Deserialize)]
+    struct ModelEntry {
+        id: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ModelsResponse {
+        data: Vec<ModelEntry>,
+    }
+
+    match resp.json::<ModelsResponse>().await {
+        Ok(body) => {
+            let mut models: Vec<(String, String)> = body
+                .data
+                .into_iter()
+                .filter(|m| !m.id.contains("whisper")) // filter out audio models
+                .map(|m| {
+                    let label = m.id.clone();
+                    (m.id, label)
+                })
+                .collect();
+            if models.is_empty() {
+                return static_defaults;
+            }
+            // Sort models alphabetically
+            models.sort_by(|a, b| a.1.cmp(&b.1));
             models
         }
         Err(_) => static_defaults,

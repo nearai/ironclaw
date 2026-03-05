@@ -67,6 +67,17 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         | "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
 
+        // Groq
+        "llama-3.1-8b-instant" => Some((dec!(0.00000005), dec!(0.00000008))),
+        "llama-3.3-70b-versatile" => Some((dec!(0.00000059), dec!(0.00000079))),
+        "llama-4-scout-17b-16e-instruct" => Some((dec!(0.00000011), dec!(0.00000034))),
+        "llama-prompt-guard-2-22m" => Some((dec!(0.00000003), dec!(0.00000003))),
+        "llama-prompt-guard-2-86m" => Some((dec!(0.00000004), dec!(0.00000004))),
+        "gpt-oss-120b" => Some((dec!(0.00000015), dec!(0.0000006))),
+        "gpt-oss-20b" | "gpt-oss-safeguard-20b" => Some((dec!(0.000000075), dec!(0.0000003))),
+        "kimi-k2-instruct-0905" => Some((dec!(0.000001), dec!(0.000003))),
+        "qwen3-32b" => Some((dec!(0.00000029), dec!(0.00000059))),
+
         // Ollama / local models -- free
         _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
 

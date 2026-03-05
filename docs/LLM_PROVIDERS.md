@@ -12,6 +12,7 @@ configurations.
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
 | Ollama | `ollama` | No | Local inference |
+| Groq | `groq` | `GROQ_API_KEY` | Fast LPU inference |
 | OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | Fireworks AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
@@ -65,6 +66,24 @@ OLLAMA_MODEL=llama3.2
 ```
 
 Pull a model first: `ollama pull llama3.2`
+
+---
+
+## Groq (LPU Inference)
+
+Groq provides ultra-fast inference for open-source models (Llama 3, GPT-OSS).
+
+```env
+LLM_BACKEND=groq
+GROQ_API_KEY=gsk-...
+```
+
+Popular models:
+
+- Llama 3.3 70B: `llama-3.3-70b-versatile`
+- OpenAI GPT-OSS 120B: `gpt-oss-120b`
+
+Get your API key at [console.groq.com/keys](https://console.groq.com/keys).
 
 ---
 
