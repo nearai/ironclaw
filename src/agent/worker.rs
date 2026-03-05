@@ -18,8 +18,8 @@ use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::ToolRegistry;
 use crate::tools::rate_limiter::RateLimitResult;
+use crate::tools::{ToolRegistry, redact_params};
 
 /// Shared dependencies for worker execution.
 ///
@@ -700,9 +700,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         // Run BeforeToolCall hook
         let params = {
             use crate::hooks::{HookError, HookEvent, HookOutcome};
+            let hook_params = redact_params(params, tool.sensitive_params());
             let event = HookEvent::ToolCall {
                 tool_name: tool_name.to_string(),
-                parameters: params.clone(),
+                parameters: hook_params,
                 user_id: job_ctx.user_id.clone(),
                 context: format!("job:{}", job_id),
             };
@@ -758,9 +759,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .into());
         }
 
+        // Redact sensitive parameter values (e.g. secret_save's "value") before
+        // they touch any observability or audit path.
+        let safe_params = redact_params(&params, tool.sensitive_params());
         tracing::debug!(
             tool = %tool_name,
-            params = %params,
+            params = %safe_params,
             job = %job_id,
             "Tool call started"
         );
@@ -812,7 +816,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 match deps
                     .context_manager
                     .update_memory(job_id, |mem| {
-                        let rec = mem.create_action(tool_name, params.clone()).succeed(
+                        let rec = mem.create_action(tool_name, safe_params.clone()).succeed(
                             output_str.clone(),
                             output.result.clone(),
                             elapsed,
@@ -834,7 +838,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .context_manager
                     .update_memory(job_id, |mem| {
                         let rec = mem
-                            .create_action(tool_name, params.clone())
+                            .create_action(tool_name, safe_params.clone())
                             .fail(e.to_string(), elapsed);
                         mem.record_action(rec.clone());
                         rec
@@ -853,7 +857,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .context_manager
                     .update_memory(job_id, |mem| {
                         let rec = mem
-                            .create_action(tool_name, params.clone())
+                            .create_action(tool_name, safe_params.clone())
                             .fail("Execution timeout", elapsed);
                         mem.record_action(rec.clone());
                         rec

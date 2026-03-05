@@ -331,6 +331,10 @@ impl AppBuilder {
         };
         tools.register_builtin_tools();
 
+        if let Some(ref ss) = self.secrets_store {
+            tools.register_secrets_tools(Arc::clone(ss));
+        }
+
         // Create embeddings provider using the unified method
         let embeddings = self
             .config
