@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Channel System
 
-> Updated: 2026-03-05 | Version: v0.14.0
+> Updated: 2026-03-05 | Version: v0.15.0
 
 ---
 
@@ -111,7 +111,13 @@ pub struct OutgoingResponse {
 pub enum StatusUpdate {
     Thinking(String),
     ToolStarted { name: String },
-    ToolCompleted { name: String, success: bool },
+    ToolCompleted {
+        name: String,
+        success: bool,
+        error: Option<String>,       // populated on failure; omitted when null
+        parameters: Option<String>,  // serialized params; omitted when null
+        thread_id: Option<String>,   // omitted when null
+    },
     ToolResult { name: String, preview: String },
     StreamChunk(String),
     Status(String),
@@ -468,9 +474,12 @@ pub async fn auth_middleware(
 
 Key points:
 
-- Both `Authorization: Bearer <token>` header and `?token=<token>` query parameter
-  are accepted. The query-param fallback exists because the browser `EventSource`
-  API cannot set custom headers.
+- `Authorization: Bearer <token>` header is accepted on all protected endpoints.
+- `?token=<token>` query-parameter auth is **restricted to SSE and WebSocket
+  endpoints only** (`/api/chat/events`, `/api/logs/events`, `/api/chat/ws`) and
+  only on GET requests (`auth.rs:allows_query_token_auth`). The query-param
+  fallback exists because the browser `EventSource` API cannot set custom headers;
+  all other endpoints (e.g. POST `/api/chat/send`) reject query-token auth with 401.
 - All comparisons use `subtle::ConstantTimeEq` to prevent timing attacks.
 - If `GATEWAY_AUTH_TOKEN` is not set in the environment, `GatewayChannel::new()`
   generates a random 32-character alphanumeric token and prints it to the console
@@ -509,6 +518,8 @@ Static routes (`/`, `/style.css`, `/app.js`, `/favicon.ico`) and `/api/health` a
 | GET | `/api/jobs/{id}/files/read` | Yes | `?path=string` | `{path,content}` | Read job project file |
 
 > **v0.14.0 (#491):** Job endpoints now list both sandbox jobs (spawned by `ContainerJobManager`) and agent jobs (long-running LLM tasks tracked in the DB). Both types appear in list/summary/detail views with unified status normalization.
+>
+> **v0.15.0 (#499):** The web UI job list now resets correctly when a restart operation fails. Previously, a failed restart call could leave the UI in an inconsistent state (still showing the old job as pending restart). The handler now returns an error response that the UI uses to revert the optimistic update.
 
 | GET | `/api/logs/events` | Yes | — | SSE stream | Live tracing log stream |
 | GET | `/api/logs/level` | Yes | — | `{"level":"string"}` | Read effective global log level |
@@ -543,6 +554,7 @@ Static routes (`/`, `/style.css`, `/app.js`, `/favicon.ico`) and `/api/health` a
 | GET | `/api/gateway/status` | Yes | — | Status info | Gateway health + connection counts; v0.10.0 adds a token usage and cost tracker displayed in this popover, updated in real time as the agent processes messages |
 | POST | `/v1/chat/completions` | Yes | OpenAI format | OpenAI format | OpenAI-compatible completions |
 | GET | `/v1/models` | Yes | — | OpenAI models list | List available models |
+| GET | `/oauth/callback` | No | `?state=…&code=…` | Redirect | OAuth provider redirect target; routes callbacks through web gateway for hosted instances (#555) |
 | GET | `/` | No | — | HTML | Browser UI entry point |
 | GET | `/style.css` | No | — | CSS | Stylesheet |
 | GET | `/app.js` | No | — | JavaScript | SPA bundle |
@@ -852,18 +864,15 @@ or populate `allow_from` with an allowlist of phone numbers.
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `CLI_ENABLED` | `true` | Enable the REPL channel. **Set `false` for service mode** to prevent immediate EOF shutdown when stdin is `/dev/null`. |
-| `HTTP_ENABLED` | `false` | Enable HTTP webhook channel |
-| `HTTP_HOST` | `127.0.0.1` | Webhook listen address |
-| `HTTP_PORT` | `3000` | Webhook listen port |
+| `HTTP_HOST` | `0.0.0.0` | Webhook listen address. Setting `HTTP_HOST` or `HTTP_PORT` enables the HTTP channel |
+| `HTTP_PORT` | `8080` | Webhook listen port |
 | `HTTP_WEBHOOK_SECRET` | — | Required shared secret for webhook authentication (constant-time checked) |
 | `HTTP_USER_ID` | `http` | User identity assigned to webhook messages |
-| `GATEWAY_ENABLED` | `false` | Enable web gateway channel |
+| `GATEWAY_ENABLED` | `true` | Enable web gateway channel |
 | `GATEWAY_HOST` | `127.0.0.1` | Gateway listen address |
 | `GATEWAY_PORT` | `3000` | Gateway listen port |
 | `GATEWAY_AUTH_TOKEN` | auto-generated | Bearer token for all protected API endpoints. If unset, a random 32-char token is generated and logged at startup. Strongly recommended to set explicitly for repeatable deployments. |
 | `GATEWAY_USER_ID` | `default` | User identity for messages sent through the gateway |
-| `WHATSAPP_ACCESS_TOKEN` | — | WhatsApp Cloud API access token (Meta Developer Portal). Required to enable the WhatsApp WASM channel. |
-| `WHATSAPP_VERIFY_TOKEN` | auto-generated | Webhook verify token used during Meta endpoint registration. Auto-generated (32 chars) if unset. |
 
 ### Service Mode Example
 
@@ -881,8 +890,9 @@ GATEWAY_PORT=3000
 GATEWAY_AUTH_TOKEN=change-me-to-a-strong-random-token
 
 # Enable HTTP webhook for external integrations (optional)
-HTTP_ENABLED=true
-HTTP_PORT=3000
+# HTTP channel is enabled by setting HTTP_HOST or HTTP_PORT.
+HTTP_HOST=0.0.0.0
+HTTP_PORT=8080
 HTTP_WEBHOOK_SECRET=change-me-to-a-webhook-secret
 ```
 
@@ -971,11 +981,27 @@ Status updates (debug-gated):
 |---|---|
 | `ApprovalNeeded` | Always sent — formatted prompt |
 | `ToolStarted` | Debug mode only — "○ Running tool: {name}" |
-| `ToolCompleted` | Debug mode only — "✓/✗ Tool '{name}' completed" |
+| `ToolCompleted` | Debug mode only — "✓/✗ Tool '{name}' completed". The `error` field is populated (non-null) when the tool execution failed; omitted when `null` (`skip_serializing_if = "Option::is_none"`). The same `error` string is stored in `TurnToolCall.error` (persisted in the session turn history) and exposed in `/api/chat/history` as `ToolCallInfo.error` (#490). |
 | `JobStarted` | Always sent — job ID + browse URL |
 | `AuthRequired` | Always sent — extension name + auth URL |
 | `AuthCompleted` | Always sent — auth success/failure |
 | `ToolResult` | Debug mode only — output preview (≤500 chars) |
+
+**Sandbox job streaming events** (emitted by the worker/Claude Code bridge inside Docker containers; forwarded to all web gateway clients via the same SSE broadcast):
+
+| SSE Event type | Fields | Description |
+|---|---|---|
+| `job_message` | `job_id`, `role`, `content` | An assistant or user message from inside a sandbox job |
+| `job_tool_use` | `job_id`, `tool_name`, `input` | A tool invocation made by the in-container worker |
+| `job_tool_result` | `job_id`, `tool_name`, `output` | Result of an in-container tool call |
+| `job_status` | `job_id`, `message` | Status/progress update from a running sandbox job |
+| `job_result` | `job_id`, `status`, `session_id?` | Final outcome of a sandbox job; `session_id` omitted when null |
+
+**Extension status event:**
+
+| SSE Event type | Fields | Description |
+|---|---|---|
+| `extension_status` | `extension_name`, `status`, `message?` | WASM channel activation status change; `message` omitted when null |
 
 ### 9.4 Safety Limits
 

@@ -1,6 +1,6 @@
 # IronClaw Agent Runtime System — Deep Dive
 
-**Version:** v0.14.0
+**Version:** v0.15.0
 **Source tree:** `src/agent/` (21 files)
 **Last updated:** 2026-03-05
 
@@ -288,6 +288,8 @@ text response in the final assistant turn terminates the loop. This blocks
 prompt injection via malicious tool return values.
 
 **SSE Event Broadcasting (v0.14.0)**: Each worker event is broadcast in real-time via `SseEvent` to the web gateway's SSE channel for live UI updates. Event types: `JobMessage` (assistant/user turns), `JobToolUse` (tool invocations), `JobToolResult` (tool outputs), `JobStatus` (progress updates), `JobResult` (completion). `WorkerDeps` carries an `sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>` for this purpose.
+
+**Response stripping (v0.15.0, `dispatcher.rs:strip_internal_tool_call_text()`, #497):** Before returning a text response to the caller, the agentic loop strips internal `[Called tool …]` and `[Tool … returned: …]` marker lines. These markers are inserted by provider-level message flattening (e.g. NEAR AI converts `tool_calls` assistant turns to plain text for API compatibility) and can leak into the user-visible response when the LLM echoes them back. Lines matching `[Called tool <name>(...)]` or `[Tool <name> returned: …]` are filtered out; all other content is preserved unchanged.
 
 ### 5.4 Parallel Tool Dispatch — Three Phases
 

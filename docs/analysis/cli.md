@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — CLI Interface
 
-> Updated: 2026-03-05 | Version: v0.14.0
+> Updated: 2026-03-05 | Version: v0.15.0
 
 ## 1. Overview
 
@@ -14,7 +14,7 @@ ironclaw [OPTIONS] [SUBCOMMAND]
 
 | Flag | Description |
 |------|-------------|
-| `--version` | Print the version and exit. As of v0.13.0, `ironclaw --version` is officially supported and outputs `ironclaw 0.13.0` (version from Cargo.toml). |
+| `--version` | Print the version and exit. Added in v0.12.0; it outputs the installed package version (for this baseline: `ironclaw 0.15.0`, from Cargo.toml). |
 | `--cli-only` | Run in interactive CLI mode only, disabling other channels (HTTP, WASM) |
 | `--no-db` | Skip database connection (useful for testing or offline use) |
 | `-m, --message <MSG>` | Single-message mode: send one message and exit |
@@ -47,14 +47,22 @@ The full command tree derived from `src/cli/mod.rs` and `src/app.rs`:
 | `ironclaw config path` | Show where settings are stored (database or disk) |
 | `ironclaw tool install <PATH>` | Install a WASM tool from source directory or `.wasm` file |
 | `ironclaw tool install --name <NAME>` | Override the tool name during install |
+| `ironclaw tool install --capabilities <PATH>` | Use a specific `capabilities.json` path instead of auto-detection |
+| `ironclaw tool install --target <PATH>` | Install into a custom tools directory |
+| `ironclaw tool install --release <BOOL>` | Build in release mode (`true` by default) |
 | `ironclaw tool install --skip-build` | Install without recompiling (use existing artifact) |
 | `ironclaw tool install --force` | Overwrite an already-installed tool |
 | `ironclaw tool list` | List all installed WASM tools |
+| `ironclaw tool list --dir <PATH>` | List tools from a specific directory |
 | `ironclaw tool list --verbose` | Show detailed info including hash and capabilities |
 | `ironclaw tool remove <NAME>` | Remove an installed WASM tool |
+| `ironclaw tool remove --dir <PATH>` | Remove tool from a specific directory |
 | `ironclaw tool info <NAME>` | Show details and capabilities for a specific tool |
+| `ironclaw tool info --dir <PATH>` | Read tool info from a specific directory |
 | `ironclaw tool auth <NAME>` | Configure authentication for a WASM tool (OAuth or manual) |
+| `ironclaw tool auth --dir <PATH>` | Read auth config from a specific tools directory |
 | `ironclaw tool setup <NAME>` | Configure required secrets for a tool interactively |
+| `ironclaw tool setup --user <ID>` | Store required tool secrets for a specific user ID |
 | `ironclaw registry list` | List available extensions in the local registry |
 | `ironclaw registry list --kind <tool\|channel>` | Filter by extension kind |
 | `ironclaw registry list --tag <TAG>` | Filter by tag (e.g., `default`, `google`) |

@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Tunnels & Mobile Pairing
 
-> Updated: 2026-03-05 | Version: v0.14.0
+> Updated: 2026-03-05 | Version: v0.15.0
 
 ## 1. Overview
 
@@ -231,6 +231,8 @@ The `channel` name is normalized to lowercase and path-unsafe characters (`\`, `
 **Rate limiting on approve:** Failed approval attempts are tracked per channel. After 10 failed attempts within a 5-minute window (`PAIRING_APPROVE_RATE_LIMIT = 10`, `PAIRING_APPROVE_RATE_WINDOW_SECS = 300`), further approve calls return `PairingStoreError::ApproveRateLimited`. This limits brute-force guessing of pairing codes.
 
 **File locking:** `upsert_request()` and `approve()` use `fs4::FileExt::lock_exclusive()` to prevent concurrent writers from corrupting the JSON files. The lock is released immediately after the write is complete and `sync_all()` has been called.
+
+**Path error handling (v0.15.0, #515):** All `.parent()` calls on file paths now use `ok_or_else(|| PairingStoreError::InvalidPath(...))` instead of `.unwrap()`. This prevents panics when the store is initialized with a path that has no parent component, returning a proper error instead of crashing the process.
 
 **Case-insensitive code matching:** `approve()` normalizes both the stored code and the input to uppercase before comparing, so users can type codes in any case.
 

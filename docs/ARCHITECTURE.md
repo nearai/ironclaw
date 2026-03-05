@@ -1,6 +1,6 @@
 # IronClaw — Master Architecture Document
 
-> Updated: 2026-03-05 (v0.14.0) | Comprehensive reference for contributors
+> Updated: 2026-03-05 (v0.15.0) | Comprehensive reference for contributors
 
 ---
 
@@ -814,11 +814,11 @@ File counts for each module directory (`.rs` files only, excluding tests in sepa
 | Module | Directory | `.rs` Files |
 |--------|-----------|------------|
 | `agent` | `src/agent/` | 21 |
-| `channels` | `src/channels/` | 34 |
+| `channels` | `src/channels/` | 36 |
 | `cli` | `src/cli/` | 12 |
 | `config` | `src/config/` | 17 |
 | `context` | `src/context/` | 4 |
-| `db` | `src/db/` | 11 |
+| `db` | `src/db/` | 12 |
 | `estimation` | `src/estimation/` | 5 |
 | `evaluation` | `src/evaluation/` | 3 |
 | `extensions` | `src/extensions/` | 4 |
@@ -830,17 +830,17 @@ File counts for each module directory (`.rs` files only, excluding tests in sepa
 | `pairing` | `src/pairing/` | 2 |
 | `registry` | `src/registry/` | 6 |
 | `safety` | `src/safety/` | 6 |
-| `sandbox` | `src/sandbox/` | 9 |
+| `sandbox` | `src/sandbox/` | 10 |
 | `secrets` | `src/secrets/` | 5 |
 | `setup` | `src/setup/` | 4 |
 | `skills` | `src/skills/` | 7 |
-| `tools` | `src/tools/` | 41 |
+| `tools` | `src/tools/` | 46 |
 | `tunnel` | `src/tunnel/` | 6 |
 | `worker` | `src/worker/` | 5 |
 | `workspace` | `src/workspace/` | 7 |
 | **Top-level files** | `src/*.rs` | 11 (`main.rs`, `lib.rs`, `app.rs`, `bootstrap.rs`, `service.rs`, `error.rs`, `settings.rs`, `util.rs`, `boot_screen.rs`, `testing.rs`, `tracing_fmt.rs`) |
 
-> **Note**: File counts are pinned to the `v0.13.0` release tag snapshot. The tools module includes 13 files in `builtin/`, 13 files in `wasm/`, plus builder/mcp support modules.
+> **Note**: File counts are pinned to the `v0.15.0` release tag snapshot. They reflect `src/**.rs` at tag `v0.15.0`.
 
 The `tools` module is one of the largest modules, reflecting the breadth of the tool system: built-ins, a full WASM runtime, an MCP client, a software builder, and the registry/trait definitions. The `channels` module includes REPL, web gateway, HTTP, Signal (added v0.12.0), and WASM channel runtime implementations.
 
@@ -874,4 +874,4 @@ The `tools` module is one of the largest modules, reflecting the breadth of the 
 
 ---
 
-*Document generated from source code inspection of IronClaw v0.13.0 (`src/` directory). For module-level specifications, see `src/setup/README.md`, `src/workspace/README.md`, and `src/tools/README.md`.*
+*Document generated from source code inspection of IronClaw v0.15.0 (`src/` directory). For module-level specifications, see `src/setup/README.md`, `src/workspace/README.md`, and `src/tools/README.md`.*

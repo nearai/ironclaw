@@ -1,6 +1,6 @@
 # LLM Provider Configuration
 
-> Version baseline: IronClaw v0.14.0 (`v0.14.0` tag snapshot)
+> Version baseline: IronClaw v0.15.0 (`v0.15.0` tag snapshot)
 
 IronClaw defaults to NEAR AI for model access, but supports any OpenAI-compatible
 endpoint as well as Anthropic and Ollama directly. This guide covers the most common
@@ -10,11 +10,11 @@ configurations.
 
 | Provider | Backend value | Requires API key | Notes |
 |---|---|---|---|
-| NEAR AI | `nearai` | OAuth (browser) | Default; multi-model |
+| NEAR AI | `nearai` | Optional (`NEARAI_API_KEY`) | Default; OAuth/session auth by default, API-key mode also supported |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
 | Ollama | `ollama` | No | Local inference |
-| OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models; dedicated wizard preset (v0.12.0) |
+| OpenRouter | `openai_compatible` | `LLM_API_KEY` | 200+ models (wizard text; platform catalog varies); dedicated wizard preset (v0.12.0) |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | Fireworks AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | vLLM / LiteLLM | `openai_compatible` | Optional | Self-hosted |
@@ -26,7 +26,8 @@ configurations.
 ## NEAR AI (default)
 
 No additional configuration required. On first run, `ironclaw onboard` opens a browser
-for OAuth authentication. Credentials are saved to `~/.ironclaw/session.json`.
+for OAuth authentication. Session credentials are saved to `NEARAI_SESSION_PATH` (defaults
+to `~/.ironclaw/session.json`, resolved via base-dir helpers).
 
 ```env
 NEARAI_MODEL=zai-org/GLM-latest        # Default if unset: zai-org/GLM-latest
@@ -90,7 +91,7 @@ provider's OpenAI-compatible endpoint and `LLM_API_KEY` to your API key.
 
 ### OpenRouter
 
-[OpenRouter](https://openrouter.ai) routes to 300+ models from a single API key.
+[OpenRouter](https://openrouter.ai) routes to a large cross-provider model catalog from a single API key.
 
 As of v0.12.0, the setup wizard includes **OpenRouter** as a dedicated preset option (not just 'OpenAI-compatible'). Select **OpenRouter** during `ironclaw onboard` to have the base URL automatically configured as `https://openrouter.ai/api/v1`.
 
@@ -215,12 +216,13 @@ The model name is configured in the following step.
 
 ## Smart Routing (Cost Optimization)
 
-Smart routing automatically selects the cheapest model capable of answering a query, reducing costs without sacrificing quality.
+Smart routing uses a configured cheap model (`NEARAI_CHEAP_MODEL`) plus heuristic complexity checks to route simple prompts to cheap-model inference and complex prompts to the primary model.
 
 ```env
-LLM_BACKEND=openai                 # Primary (capable) provider
-NEARAI_CHEAP_MODEL=gpt-4o-mini    # Or any cheap model identifier
-SMART_ROUTING_CASCADE=true         # Retry with primary if cheap model is uncertain
+LLM_BACKEND=nearai                         # Smart routing applies to NearAI backend
+NEARAI_MODEL=zai-org/GLM-latest           # Primary (capable) model
+NEARAI_CHEAP_MODEL=zai-org/GLM-latest     # Set to a cheaper model when available
+SMART_ROUTING_CASCADE=true                # Retry with primary if cheap model is uncertain
 ```
 
-Simple queries (greetings, yes/no questions) are routed to the cheap model. Complex queries (code, reasoning, multi-step) use the primary model. With `SMART_ROUTING_CASCADE=true`, uncertain cheap-model responses are escalated to the primary model automatically.
+Simple queries (greetings, yes/no questions) are routed to the configured cheap model. Complex queries (code, reasoning, multi-step) use the primary model. With `SMART_ROUTING_CASCADE=true`, uncertain cheap-model responses are escalated to the primary model automatically.

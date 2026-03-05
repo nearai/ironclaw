@@ -1,6 +1,6 @@
 # Building WASM Channels
 
-> Version baseline: IronClaw v0.14.0 (`v0.14.0` tag snapshot)
+> Version baseline: IronClaw v0.15.0 (`v0.15.0` tag snapshot)
 
 This guide covers how to build WASM channel modules for IronClaw.
 
@@ -224,7 +224,7 @@ When the WASM channel makes an HTTP request to a matching host, the ironclaw run
 | `query_param` | URL query parameter | `{"type": "query_param", "name": "api_key"}` |
 | `url_path` | URL path placeholder replacement | `{"type": "url_path", "placeholder": "USER_ID"}` |
 
-### OAuth Credential Injection (v0.14.0)
+### OAuth Credential Injection (v0.15.0)
 
 WASM tools can declare OAuth 2.0 flows in the capabilities file under the `auth.oauth` section:
 
@@ -363,7 +363,7 @@ mkdir -p ~/.ironclaw/channels
 cp channels-src/telegram/telegram.wasm channels-src/telegram/telegram.capabilities.json ~/.ironclaw/channels/
 ```
 
-**Note**: The main IronClaw binary bundles `telegram.wasm` via `include_bytes!`. When modifying the Telegram channel source, run `./channels-src/telegram/build.sh` **before** building the main crate, so the updated WASM is included.
+**Note**: The main IronClaw build compiles Telegram channel artifacts via `build.rs`, but does not embed `telegram.wasm` with `include_bytes!`. Manual `./channels-src/telegram/build.sh` is optional (useful for direct channel-only iteration).
 
 ### Other Channels
 

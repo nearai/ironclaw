@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Safety & Sandbox Security Model
 
-> Updated: 2026-03-05 | Version: v0.14.0
+> Updated: 2026-03-05 | Version: v0.15.0
 
 ## 1. Overview
 
