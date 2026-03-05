@@ -53,6 +53,9 @@ impl AgentConfig {
             max_actions_per_hour: None,
             max_tool_iterations: 10,
             auto_approve_tools: true,
+            batching_enabled: false,
+            batching_window_ms: 5000,
+            batching_max_messages: 5,
         }
     }
 
