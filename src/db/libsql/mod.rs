@@ -301,8 +301,14 @@ impl Database for LibSqlBackend {
                 tracing::debug!("libSQL replicator flushed at frame {}", frame_no);
                 Ok(())
             }
-            Ok(None) => Ok(()),
-            Err(libsql::Error::SyncNotSupported(_)) => Ok(()),
+            Ok(None) => {
+                tracing::debug!("No libSQL replicator to flush, skipping shutdown sync");
+                Ok(())
+            }
+            Err(libsql::Error::SyncNotSupported(_)) => {
+                tracing::debug!("libSQL sync not supported, skipping flush on shutdown");
+                Ok(())
+            }
             Err(error) => Err(DatabaseError::from(error)),
         }
     }
