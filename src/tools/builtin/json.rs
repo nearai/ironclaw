@@ -55,23 +55,23 @@ impl Tool for JsonTool {
         let operation = require_str(&params, "operation")?;
 
         // Resolve data: from stash (via source_tool_call_id) or from params
-        let data = if let Some(ref_id) = params.get("source_tool_call_id").and_then(|v| v.as_str())
-        {
-            let stash = ctx.tool_output_stash.read().await;
-            let full_output = stash.get(ref_id).ok_or_else(|| {
-                ToolError::InvalidParameters(format!(
-                    "no tool output found for call ID '{}'. Available IDs: {:?}",
-                    ref_id,
-                    stash.keys().collect::<Vec<_>>()
-                ))
-            })?;
-            // Parse the stashed output as JSON, or wrap as string
-            serde_json::from_str::<serde_json::Value>(full_output)
-                .unwrap_or_else(|_| serde_json::Value::String(full_output.clone()))
-        } else {
-            require_param(&params, "data")?.clone()
-        };
-        let data = &data;
+        let data_value =
+            if let Some(ref_id) = params.get("source_tool_call_id").and_then(|v| v.as_str()) {
+                let stash = ctx.tool_output_stash.read().await;
+                let full_output = stash.get(ref_id).ok_or_else(|| {
+                    ToolError::InvalidParameters(format!(
+                        "no tool output found for call ID '{}'. Available IDs: {:?}",
+                        ref_id,
+                        stash.keys().collect::<Vec<_>>()
+                    ))
+                })?;
+                // Parse the stashed output as JSON, or wrap as string
+                serde_json::from_str::<serde_json::Value>(full_output)
+                    .unwrap_or_else(|_| serde_json::Value::String(full_output.clone()))
+            } else {
+                require_param(&params, "data")?.clone()
+            };
+        let data = &data_value;
 
         let result = match operation {
             "parse" => {
