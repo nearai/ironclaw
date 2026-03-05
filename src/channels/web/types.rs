@@ -102,6 +102,17 @@ pub struct ApprovalRequest {
 // --- SSE Event Types ---
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ToolDecisionSsePayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    pub tool_name: String,
+    pub rationale: String,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_group: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum SseEvent {
     #[serde(rename = "response")]
@@ -141,6 +152,15 @@ pub enum SseEvent {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
+    },
+    #[serde(rename = "reasoning_update")]
+    ReasoningUpdate {
+        session_id: String,
+        thread_id: String,
+        turn_number: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        narrative: Option<String>,
+        tool_decisions: Vec<ToolDecisionSsePayload>,
     },
     #[serde(rename = "status")]
     Status {
@@ -207,12 +227,23 @@ pub enum SseEvent {
         tool_name: String,
         output: String,
     },
+    #[serde(rename = "job_reasoning")]
+    JobReasoning {
+        job_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        narrative: Option<String>,
+        tool_decisions: Vec<ToolDecisionSsePayload>,
+    },
     #[serde(rename = "job_status")]
     JobStatus { job_id: String, message: String },
     #[serde(rename = "job_result")]
     JobResult {
         job_id: String,
         status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        success: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
@@ -660,6 +691,7 @@ impl WsServerMessage {
             SseEvent::ToolCompleted { .. } => "tool_completed",
             SseEvent::ToolResult { .. } => "tool_result",
             SseEvent::StreamChunk { .. } => "stream_chunk",
+            SseEvent::ReasoningUpdate { .. } => "reasoning_update",
             SseEvent::Status { .. } => "status",
             SseEvent::JobStarted { .. } => "job_started",
             SseEvent::ApprovalNeeded { .. } => "approval_needed",
@@ -670,6 +702,7 @@ impl WsServerMessage {
             SseEvent::JobMessage { .. } => "job_message",
             SseEvent::JobToolUse { .. } => "job_tool_use",
             SseEvent::JobToolResult { .. } => "job_tool_result",
+            SseEvent::JobReasoning { .. } => "job_reasoning",
             SseEvent::JobStatus { .. } => "job_status",
             SseEvent::JobResult { .. } => "job_result",
             SseEvent::ExtensionStatus { .. } => "extension_status",

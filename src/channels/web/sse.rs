@@ -130,6 +130,7 @@ impl SseManager {
                     SseEvent::ToolCompleted { .. } => "tool_completed",
                     SseEvent::ToolResult { .. } => "tool_result",
                     SseEvent::StreamChunk { .. } => "stream_chunk",
+                    SseEvent::ReasoningUpdate { .. } => "reasoning_update",
                     SseEvent::Status { .. } => "status",
                     SseEvent::ApprovalNeeded { .. } => "approval_needed",
                     SseEvent::AuthRequired { .. } => "auth_required",
@@ -139,10 +140,11 @@ impl SseManager {
                     SseEvent::JobMessage { .. } => "job_message",
                     SseEvent::JobToolUse { .. } => "job_tool_use",
                     SseEvent::JobToolResult { .. } => "job_tool_result",
+                    SseEvent::JobReasoning { .. } => "job_reasoning",
                     SseEvent::JobStatus { .. } => "job_status",
                     SseEvent::JobResult { .. } => "job_result",
-                    SseEvent::Heartbeat => "heartbeat",
                     SseEvent::ExtensionStatus { .. } => "extension_status",
+                    SseEvent::Heartbeat => "heartbeat",
                 };
                 Ok(Event::default().event(event_type).data(data))
             });
