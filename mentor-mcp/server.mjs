@@ -381,6 +381,33 @@ const normalizeMentorReply = (raw) => {
   return "I hit a formatting issue. Please retry.";
 };
 
+const speechFallbackText = "Keep risk tight, take profit, and stay disciplined.";
+
+const toSpeakableText = (input) => {
+  if (typeof input !== "string") {
+    return speechFallbackText;
+  }
+
+  let text = input;
+  text = text.replace(/```[\s\S]*?```/g, " ");
+  text = text.replace(/`[^`]*`/g, " ");
+  text = text.replace(/!\[[^\]]*]\(([^)]+)\)/g, " ");
+  text = text.replace(/\[([^\]]+)]\(([^)]+)\)/g, "$1");
+  text = text.replace(/^\s{0,3}#{1,6}\s+/gm, "");
+  text = text.replace(/^\s{0,3}>\s?/gm, "");
+  text = text.replace(/^\s*([-*+•]|\d+[.)])\s+/gm, "");
+  text = text.replace(/\*\*(.*?)\*\*/g, "$1");
+  text = text.replace(/\*(.*?)\*/g, "$1");
+  text = text.replace(/__(.*?)__/g, "$1");
+  text = text.replace(/_(.*?)_/g, "$1");
+  text = text.replace(/~~(.*?)~~/g, "$1");
+  text = text.replace(/https?:\/\/\S+/gi, " ");
+  text = text.replace(/[\\`*_~#>|[\]{}]/g, " ");
+  text = text.replace(/\s+/g, " ").trim();
+
+  return text || speechFallbackText;
+};
+
 const extractAudioBufferFromPayload = async (payload) => {
   const audioBase64 = findStringByCandidates(payload, [
     "audio_base64",
@@ -988,13 +1015,14 @@ const synthesizeMentorSpeech = async (text) => {
     throw new Error("Mentor voice is disabled (ENABLE_MENTOR_VOICE=false).");
   }
 
+  const speakableText = toSpeakableText(text);
   let audio;
   let backendUsed = "csm";
   let outputExtension = "mp3";
 
   if (activeVoiceProvider === "fish") {
     await bootstrapVoiceContext();
-    audio = await synthesizeWithFish(text);
+    audio = await synthesizeWithFish(speakableText);
     backendUsed = mentorFishReferenceId.trim() ? "fish_reference" : "fish";
     outputExtension = mentorFishFormat || "mp3";
   } else {
@@ -1009,14 +1037,14 @@ const synthesizeMentorSpeech = async (text) => {
     const contextText = await bootstrapVoiceContext();
     const sampleAudio = await readFile(mentorVoiceSamplePath);
     try {
-      audio = await synthesizeWithCloneModel(text, contextText, sampleAudio);
+      audio = await synthesizeWithCloneModel(speakableText, contextText, sampleAudio);
     } catch (error) {
       if (!mentorEnableKokoroFallback) {
         throw error;
       }
 
       backendUsed = "kokoro_fallback";
-      audio = await synthesizeWithKokoro(text);
+      audio = await synthesizeWithKokoro(speakableText);
     }
   }
 
@@ -1045,7 +1073,7 @@ const handleMentorChat = async (args) => {
   const persona = await loadPersona();
   const history = await getSessionHistory(sessionId);
   const voiceModeInstruction = parsed.voiceReply
-    ? "Voice mode policy: reply in 1-3 short sentences (max ~45 words), witty and practical, no rambling, no markup wrappers."
+    ? "Voice mode policy: reply in 1-3 short sentences (max ~45 words), witty and practical, no rambling, plain text only. Never use markdown, bullet points, asterisks, code blocks, hashtags, or special wrapper characters."
     : "";
 
   const messages = [
@@ -1069,13 +1097,14 @@ const handleMentorChat = async (args) => {
   ];
 
   const reply = await callMentorLlm(messages);
+  const outputReply = parsed.voiceReply ? toSpeakableText(reply) : reply;
   await appendSessionTurn(sessionId, "user", parsed.message);
-  await appendSessionTurn(sessionId, "assistant", reply);
+  await appendSessionTurn(sessionId, "assistant", outputReply);
 
   let voiceArtifact;
   let voiceBackend;
   if (parsed.voiceReply) {
-    const result = await synthesizeMentorSpeech(reply);
+    const result = await synthesizeMentorSpeech(outputReply);
     voiceArtifact = result.outputPath;
     voiceBackend = result.backendUsed;
   }
@@ -1083,7 +1112,7 @@ const handleMentorChat = async (args) => {
   return {
     sessionId,
     mentor: mentorName,
-    reply,
+    reply: outputReply,
     voiceArtifact,
     voiceBackend,
   };
