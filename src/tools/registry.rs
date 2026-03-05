@@ -805,6 +805,9 @@ mod tests {
         let defs = registry.tool_definitions().await;
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[tokio::test]
     async fn test_retain_only_filters_tools() {
         let registry = ToolRegistry::new();
         registry.register_builtin_tools();
