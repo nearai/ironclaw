@@ -1,0 +1,21 @@
+{
+  "model_name": "spot-smoke-greeting",
+  "expects": {
+    "response_matches": "(?i)(hello|hi|hey|assistant|agent|help)",
+    "max_tool_calls": 0,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "Hello"
+      },
+      "response": {
+        "type": "text",
+        "content": "Hello! I'm your AI assistant. I can help you with tasks, answer questions, search your memory, and more. How can I help you today?",
+        "input_tokens": 50,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

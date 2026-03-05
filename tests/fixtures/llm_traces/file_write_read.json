@@ -1,0 +1,54 @@
+{
+  "model_name": "test-file-tools",
+  "expects": {
+    "tools_used": ["write_file", "read_file"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "write"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_write_file_1",
+            "name": "write_file",
+            "arguments": {
+              "path": "/tmp/ironclaw_e2e_test/hello.txt",
+              "content": "Hello, E2E test!"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_read_file_1",
+            "name": "read_file",
+            "arguments": {
+              "path": "/tmp/ironclaw_e2e_test/hello.txt"
+            }
+          }
+        ],
+        "input_tokens": 150,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I wrote 'Hello, E2E test!' and read it back successfully.",
+        "input_tokens": 200,
+        "output_tokens": 20
+      }
+    }
+  ]
+}
