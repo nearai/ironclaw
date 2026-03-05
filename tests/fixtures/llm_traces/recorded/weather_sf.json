@@ -1,0 +1,54 @@
+{
+  "model_name": "recorded-weather-sf",
+  "expects": {
+    "response_contains": ["San Francisco", "Weather"],
+    "tools_used": ["http"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "memory_snapshot": [
+    {
+      "path": "IDENTITY.md",
+      "content": "# Identity\n\nName: Alfred\nNature: A secure personal AI assistant\n\nEdit this file to give your agent a custom name and personality."
+    }
+  ],
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "check weather in SF today"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "check weather in SF today"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_11acdd18a2324b06a8610054",
+            "name": "http",
+            "arguments": {
+              "method": "GET",
+              "url": "https://wttr.in/San%20Francisco?format=j1"
+            }
+          }
+        ],
+        "input_tokens": 82100,
+        "output_tokens": 71
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "check weather in SF today"
+      },
+      "response": {
+        "type": "text",
+        "content": "**San Francisco Weather Today** ☀️\n\n**Current Conditions (as of 8:00 AM)**\n- **Temperature:** 9°C (49°F)\n- **Feels Like:** 8°C (46°F)\n- **Conditions:** Sunny ☀️\n- **Humidity:** 71%\n- **Wind:** N at 11 km/h (7 mph)\n- **UV Index:** 3 (Moderate)\n- **Visibility:** 16 km (9 miles)\n\n---\n\n**Today's Forecast (Thursday, March 5, 2026)**\n- **High:** 22°C (71°F) 🌡️\n- **Low:** 8°C (47°F)\n- **Sunrise:** 6:35 AM | **Sunset:** 6:07 PM\n- **Conditions:** Clear and sunny all day\n- **Rain:** 0% chance\n\n---\n\n**Summary:** Beautiful sunny day ahead! Clear skies all day with temperatures warming up nicely. Perfect weather for outdoor activities. No rain expected. 🌤️",
+        "input_tokens": 93290,
+        "output_tokens": 489
+      }
+    }
+  ]
+}

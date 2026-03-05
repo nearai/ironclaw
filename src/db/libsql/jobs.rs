@@ -118,6 +118,7 @@ impl JobStore for LibSqlBackend {
                     metadata: serde_json::Value::Null,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                     http_interceptor: None,
+                    tool_output_stash: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
                 }))
             }
             None => Ok(None),

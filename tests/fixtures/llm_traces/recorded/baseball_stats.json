@@ -1,0 +1,76 @@
+{
+  "model_name": "recorded-baseball-stats",
+  "expects": {
+    "response_contains": ["baseball"],
+    "tools_used": ["http", "json"],
+    "tools_order": ["http", "json"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "memory_snapshot": [
+    {
+      "path": "IDENTITY.md",
+      "content": "# Identity\n\nName: Alfred\nNature: A secure personal AI assistant\n\nEdit this file to give your agent a custom name and personality."
+    }
+  ],
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "what are latest baseball stats?"
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "baseball stats"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_baseball_http_01",
+            "name": "http",
+            "arguments": {
+              "method": "GET",
+              "url": "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
+            }
+          }
+        ],
+        "input_tokens": 5000,
+        "output_tokens": 50
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "baseball stats"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_baseball_json_02",
+            "name": "json",
+            "arguments": {
+              "operation": "query",
+              "source_tool_call_id": "call_baseball_http_01",
+              "path": "body.leagues[0].name"
+            }
+          }
+        ],
+        "input_tokens": 6000,
+        "output_tokens": 60
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "baseball stats"
+      },
+      "response": {
+        "type": "text",
+        "content": "Here are the latest **baseball** stats from the MLB scoreboard:\n\n- **League:** Major League Baseball\n- **Season:** 2026\n\nThe ESPN API returned the current scoreboard data. The response was large but I was able to query the full output using the json tool's source_tool_call_id feature to access the untruncated data.",
+        "input_tokens": 7000,
+        "output_tokens": 100
+      }
+    }
+  ]
+}
