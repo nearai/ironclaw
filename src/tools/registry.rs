@@ -192,7 +192,7 @@ impl ToolRegistry {
                 parameters: tool.parameters_schema(),
             })
             .collect();
-        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         defs
     }
 
