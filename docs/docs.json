@@ -78,6 +78,7 @@
         "tab": "Gateway & Ops",
         "groups": [
           { "group": "Web Gateway", "pages": ["channels/web-gateway", "ops/api", "ops/websocket-sse"] },
+          { "group": "UI Reference", "pages": ["ui-reference/chat", "ui-reference/skills", "ui-reference/memory", "ui-reference/routines", "ui-reference/extensions", "ui-reference/settings"] },
           { "group": "Security", "pages": ["security/index", "security/safety-layer", "security/secrets", "security/sandbox"] },
           { "group": "Configuration", "pages": ["setup/configuration", "setup/database"] },
           { "group": "Monitoring", "pages": ["ops/logging"] }

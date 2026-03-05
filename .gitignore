@@ -22,3 +22,6 @@ bench-results/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+node_modules/
+.env.screenshots
+

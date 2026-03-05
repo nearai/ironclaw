@@ -1,0 +1,15 @@
+{
+  "name": "ironclaw-docs-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:list": "playwright test --list",
+    "test:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.42.0",
+    "dotenv": "^16.0.0",
+    "typescript": "^5.3.0"
+  }
+}
