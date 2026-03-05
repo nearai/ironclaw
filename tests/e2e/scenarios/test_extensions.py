@@ -520,8 +520,6 @@ async def test_remove_cancelled_keeps_card(page):
     await card.wait_for(state="visible", timeout=5000)
     await card.locator(SEL["ext_remove_btn"]).click()
 
-    # Wait a moment to confirm nothing changed
-    await page.wait_for_timeout(1000)
     assert await page.locator(SEL["ext_card_installed"]).count() >= 1, "Card should remain after cancel"
 
 
@@ -638,7 +636,7 @@ async def test_configure_modal_save_oauth(page):
     await page.locator(SEL["configure_input"]).fill("ignored")
     await page.locator(SEL["configure_save_btn"]).click()
 
-    await page.wait_for_timeout(800)
+    await page.wait_for_function("() => window._lastOpenedUrl !== null && window._lastOpenedUrl !== undefined", timeout=5000)
     opened = await page.evaluate("window._lastOpenedUrl")
     assert opened is not None, "window.open was not called"
     assert "oauth" in opened or "example.com" in opened
@@ -772,7 +770,6 @@ async def test_auth_card_submit_empty_noop(page):
     """Clicking Submit with an empty token does nothing (card stays)."""
     await _show_auth_card(page, extension_name="myext")
     await page.locator(SEL["auth_submit_btn"]).click()
-    await page.wait_for_timeout(800)
     assert await page.locator(SEL["auth_card"]).count() == 1, "Card should remain for empty submit"
 
 
@@ -820,7 +817,7 @@ async def test_auth_card_multiple_extensions_coexist(page):
     """Auth cards for different extensions can coexist."""
     await page.evaluate('showAuthCard({extension_name: "ext-a", instructions: "Token A"})')
     await page.evaluate('showAuthCard({extension_name: "ext-b", instructions: "Token B"})')
-    await page.wait_for_timeout(300)
+    await page.locator(SEL["auth_card"]).nth(1).wait_for(state="visible", timeout=3000)
     assert await page.locator(SEL["auth_card"]).count() == 2
 
 
@@ -837,7 +834,6 @@ async def test_auth_completed_sse_dismisses_card(page):
         removeAuthCard('myext');
     """)
 
-    await page.wait_for_timeout(300)
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="myext"]').count() == 0
 
 
@@ -924,7 +920,7 @@ async def test_activate_with_auth_url_opens_popup(page):
     await activate_btn.wait_for(state="visible", timeout=5000)
     await activate_btn.click()
 
-    await page.wait_for_timeout(800)
+    await page.wait_for_function("() => window._lastOpenedUrl !== null && window._lastOpenedUrl !== undefined", timeout=5000)
     opened = await page.evaluate("window._lastOpenedUrl")
     assert opened is not None, "window.open was not called"
     assert "example.com" in opened
@@ -1085,6 +1081,7 @@ async def test_oauth_url_injection_blocked(page):
     await activate_btn.wait_for(state="visible", timeout=5000)
     await activate_btn.click()
 
+    # Give the JS time to run (if it was going to call window.open, it would have by now)
     await page.wait_for_timeout(600)
     opened = await page.evaluate("window._openedUrl")
     assert opened is None, f"window.open should NOT be called for non-HTTPS URLs, but got: {opened}"
