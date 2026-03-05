@@ -40,8 +40,8 @@ User Message
          │ tier
          ▼
 ┌──────────────────┐
-│  Model Selection │  ← Config maps tier → model (e.g., flash → "haiku-latest")
-└────────┬─────────┘
+│  Model Selection │  ← Currently: cheap provider (Flash/Standard/Pro) vs primary (Frontier)
+└────────┬─────────┘    Target: per-tier model mapping via config
          │
          ▼
     LLM Provider

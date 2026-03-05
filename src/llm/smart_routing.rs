@@ -238,7 +238,13 @@ pub struct ScorerConfig {
 }
 
 /// Build a domain regex from a keyword list, with fallback on invalid patterns.
+///
+/// An empty keyword list falls back to the default keywords so scoring
+/// doesn't break when `domain_keywords: Some(vec![])` is configured.
 fn build_domain_regex(keywords: &[&str]) -> Regex {
+    if keywords.is_empty() {
+        return RE_DOMAIN_DEFAULT.clone();
+    }
     let pattern = format!(r"(?i)\b({})\b", keywords.join("|"));
     Regex::new(&pattern).unwrap_or_else(|e| {
         tracing::warn!(error = %e, "Invalid domain keywords pattern, using minimal fallback");
@@ -360,10 +366,13 @@ static DEFAULT_OVERRIDES: LazyLock<Vec<PatternOverride>> = LazyLock::new(|| {
             .expect("greeting pattern is valid"),
             tier: Tier::Flash,
         },
-        // Flash tier: quick lookups
+        // Flash tier: quick lookups (end-anchored to avoid matching complex questions
+        // like "What time complexity is merge sort?")
         PatternOverride {
-            regex: Regex::new(r"(?i)^what.*(time|date|day|weather)")
-                .expect("lookup pattern is valid"),
+            regex: Regex::new(
+                r"(?i)^what(?:'s|\s+is)?\s+(?:the\s+)?(time|date|day|weather)\b(?:\s+(?:is\s+it|today|now|in\s+\S+))?[?.!]*$",
+            )
+            .expect("lookup pattern is valid"),
             tier: Tier::Flash,
         },
         // Frontier tier: security audits
@@ -1374,6 +1383,48 @@ mod tests {
         let req = CompletionRequest::new(vec![ChatMessage::user("What time is it?")]);
         let complexity = provider.classify(&req);
         assert_eq!(complexity, TaskComplexity::Simple);
+    }
+
+    #[test]
+    fn pattern_override_time_does_not_match_complex_questions() {
+        // The quick-lookup override regex should NOT match "What time complexity..."
+        // because it's end-anchored. Verify the regex itself doesn't fire.
+        let overrides = &*DEFAULT_OVERRIDES;
+        let lookup_override = overrides
+            .iter()
+            .find(|po| po.tier == Tier::Flash && po.regex.as_str().contains("time"))
+            .expect("time lookup override exists");
+
+        assert!(
+            !lookup_override
+                .regex
+                .is_match("What time complexity is merge sort?"),
+            "Time override should not match 'What time complexity is merge sort?'"
+        );
+        // But it should still match actual time lookups
+        assert!(lookup_override.regex.is_match("What time is it?"));
+        assert!(lookup_override.regex.is_match("what's the date today?"));
+    }
+
+    #[test]
+    fn empty_domain_keywords_uses_defaults() {
+        // An empty custom keywords list should fall back to defaults, not produce
+        // a broken regex that matches empty strings everywhere.
+        let config = ScorerConfig {
+            domain_keywords: Some(vec![]),
+            ..ScorerConfig::default()
+        };
+        let result = score_complexity_with_config("deploy kubernetes to mainnet", &config);
+        // Should still detect domain keywords via the default fallback
+        assert!(
+            result
+                .components
+                .get("domain_specific")
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "Empty custom keywords should fall back to defaults"
+        );
     }
 
     // -----------------------------------------------------------------------
