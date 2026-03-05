@@ -630,4 +630,56 @@ mod tests {
             "model name with dot must not be truncated"
         );
     }
+
+    /// Clear all nvidia-related env vars.
+    fn clear_nvidia_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("NVIDIA_MODEL");
+        }
+    }
+
+    #[test]
+    fn nvidia_uses_selected_model_when_nvidia_model_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_nvidia_env();
+
+        let settings = Settings {
+            llm_backend: Some("nvidia".to_string()),
+            selected_model: Some("meta/llama-3.1-405b-instruct".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let nvidia = cfg.nvidia.expect("nvidia config should be present");
+
+        assert_eq!(nvidia.model, "meta/llama-3.1-405b-instruct");
+    }
+
+    #[test]
+    fn nvidia_model_env_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_nvidia_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("NVIDIA_MODEL", "nvidia/nemotron-4-340b-instruct");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("nvidia".to_string()),
+            selected_model: Some("meta/llama-3.1-405b-instruct".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let nvidia = cfg.nvidia.expect("nvidia config should be present");
+
+        assert_eq!(nvidia.model, "nvidia/nemotron-4-340b-instruct");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NVIDIA_MODEL");
+        }
+    }
 }

@@ -466,7 +466,7 @@ pub fn build_provider_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LlmBackend, NearAiConfig};
+    use crate::config::{LlmBackend, NearAiConfig, NvidiaConfig};
     use std::path::PathBuf;
 
     fn test_nearai_config() -> NearAiConfig {
@@ -538,5 +538,19 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_create_llm_provider_fails_for_nvidia_without_key() {
+        let mut config = test_llm_config();
+        config.backend = LlmBackend::Nvidia;
+        config.nvidia = Some(NvidiaConfig {
+            api_key: None,
+            model: "test-model".to_string(),
+        });
+
+        let session = Arc::new(SessionManager::new(crate::llm::session::SessionConfig::default()));
+        let result = create_llm_provider(&config, session);
+        assert!(matches!(result, Err(LlmError::AuthFailed { .. })));
     }
 }
