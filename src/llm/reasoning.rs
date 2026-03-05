@@ -335,8 +335,9 @@ impl Reasoning {
 
         let response = self.llm.complete(request).await?;
 
-        // Parse the plan from the response
-        self.parse_plan(&response.content)
+        // Clean reasoning model artifacts before parsing JSON
+        let cleaned = clean_response(&response.content);
+        self.parse_plan(&cleaned)
     }
 
     /// Select the best tool for the current situation.
@@ -429,7 +430,9 @@ Respond in JSON format:
 
         let response = self.llm.complete(request).await?;
 
-        self.parse_evaluation(&response.content)
+        // Clean reasoning model artifacts before parsing JSON
+        let cleaned = clean_response(&response.content);
+        self.parse_evaluation(&cleaned)
     }
 
     /// Generate a response to a user message.
@@ -1216,8 +1219,15 @@ fn strip_thinking_tags_regex(text: &str, code_regions: &[CodeRegion]) -> String 
     }
 
     // Strict mode: if still inside an unclosed thinking tag, discard trailing text
+    // BUT preserve any <final> block embedded in the discarded region
     if !in_thinking {
         result.push_str(&text[last_index..]);
+    } else {
+        let trailing = &text[last_index..];
+        let trailing_regions = find_code_regions(trailing);
+        if let Some(final_content) = extract_final_content(trailing, &trailing_regions) {
+            result.push_str(&final_content);
+        }
     }
 
     result
@@ -1840,5 +1850,58 @@ That's my plan."#;
         let calls = recover_tool_calls_from_content(content, &tools);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "tool_list");
+    }
+
+    // ---- plan/evaluate bypass clean_response (Bug #564-2) ----
+
+    #[test]
+    fn test_clean_response_strips_think_before_json_plan() {
+        let raw = r#"<think>I need to plan the steps carefully...</think>{"steps": [{"description": "Step 1", "tool": "search", "expected_outcome": "results"}], "reasoning": "Simple plan"}"#;
+        let cleaned = clean_response(raw);
+        // After cleaning, the JSON should be parseable
+        let json_str = extract_json(&cleaned).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert!(parsed.get("steps").is_some());
+    }
+
+    #[test]
+    fn test_clean_response_strips_think_before_json_evaluation() {
+        let raw = r#"<think>Let me evaluate whether this was successful...</think>{"success": true, "confidence": 0.95, "reasoning": "Task completed", "issues": [], "suggestions": []}"#;
+        let cleaned = clean_response(raw);
+        let json_str = extract_json(&cleaned).unwrap();
+        let eval: SuccessEvaluation = serde_json::from_str(json_str).unwrap();
+        assert!(eval.success);
+        assert_eq!(eval.confidence, 0.95);
+    }
+
+    // ---- Unclosed think before final (Bug #564-3) ----
+
+    #[test]
+    fn test_unclosed_think_before_final() {
+        assert_eq!(
+            clean_response("<think>reasoning no close tag <final>actual answer</final>"),
+            "actual answer"
+        );
+    }
+
+    #[test]
+    fn test_unclosed_thinking_before_final() {
+        assert_eq!(
+            clean_response("<thinking>long reasoning... <final>the real answer</final>"),
+            "the real answer"
+        );
+    }
+
+    #[test]
+    fn test_unclosed_think_before_final_with_prefix() {
+        assert_eq!(
+            clean_response("Hello <think>reasoning <final>world</final>"),
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn test_unclosed_think_no_final_still_discards() {
+        assert_eq!(clean_response("Hello <thinking>this never closes"), "Hello");
     }
 }
