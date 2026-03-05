@@ -187,11 +187,11 @@ impl Agent {
             // Inject a nudge message when approaching the iteration limit so the
             // LLM is aware it should produce a final answer on the next turn.
             if iteration == nudge_at {
-                context_messages.push(ChatMessage::user(
-                    "[System: You are approaching the tool call limit. \
+                context_messages.push(ChatMessage::system(
+                    "You are approaching the tool call limit. \
                      Provide your best final answer on the next response \
                      using the information you have gathered so far. \
-                     Do not call any more tools.]",
+                     Do not call any more tools.",
                 ));
             }
 
