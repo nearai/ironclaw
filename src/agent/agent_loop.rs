@@ -633,6 +633,10 @@ impl Agent {
 
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
+        tracing::debug!(
+            "[agent_loop] Parsed submission: {:?}",
+            std::any::type_name_of_val(&submission)
+        );
 
         // Hook: BeforeInbound — allow hooks to modify or reject user input
         if let Submission::UserInput { ref content } = submission {
@@ -717,6 +721,27 @@ impl Agent {
                     .await
             }
             Submission::SystemCommand { command, args } => {
+                tracing::debug!(
+                    "[agent_loop] SystemCommand: command={}, channel={}",
+                    command,
+                    message.channel
+                );
+                // Authorization check: restart is only available via web interface (gateway channel)
+                if command == "restart" && message.channel != "gateway" {
+                    tracing::warn!(
+                        "[agent_loop] Restart rejected: not from gateway channel (from: {})",
+                        message.channel
+                    );
+                    return Ok(Some(
+                        "Restart is only available through the web interface with explicit user confirmation. \
+                         Use the Restart button in the UI."
+                            .to_string(),
+                    ));
+                }
+                tracing::debug!(
+                    "[agent_loop] Calling handle_system_command for command={}",
+                    command
+                );
                 self.handle_system_command(&command, &args).await
             }
             Submission::Undo => self.process_undo(session, thread_id).await,

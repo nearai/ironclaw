@@ -68,14 +68,6 @@ impl Agent {
                 self.handle_help_job(&message.user_id, &job_id).await?
             }
             MessageIntent::Command { command, args } => {
-                // Authorization check for restart command
-                if command == "restart" && message.channel != "web" {
-                    return Ok(SubmissionResult::error(
-                        "Restart is only available through the web interface with explicit user confirmation. \
-                         Use the Restart button in the UI.",
-                    ));
-                }
-
                 match self.handle_command(&command, &args).await? {
                     Some(s) => s,
                     None => return Ok(SubmissionResult::Ok { message: None }), // Shutdown signal
@@ -517,15 +509,39 @@ impl Agent {
             "ping" => Ok(SubmissionResult::response("pong!")),
 
             "restart" => {
+                tracing::info!("[commands::restart] Restart command received");
                 // Authorization check is done in handle_job_or_command before reaching here.
+                // Environment check: restart is only available in Docker containers
+                let in_docker = std::env::var("IRONCLAW_IN_DOCKER")
+                    .map(|v| v.to_lowercase() == "true")
+                    .unwrap_or(false);
+
+                tracing::debug!("[commands::restart] IRONCLAW_IN_DOCKER={}", in_docker);
+
+                if !in_docker {
+                    tracing::warn!(
+                        "[commands::restart] Restart rejected: not in Docker environment"
+                    );
+                    return Ok(SubmissionResult::error(
+                        "Restart is not available in this environment. \
+                         The IRONCLAW_IN_DOCKER environment variable must be set to 'true' for Docker deployments."
+                            .to_string(),
+                    ));
+                }
+
                 // Trigger the restart tool via a system job with metadata requesting the tool
                 let metadata = serde_json::json!({
                     "tools": ["restart"]
                 });
+                tracing::info!("[commands::restart] Dispatching job to execute restart tool");
                 let _job_id = self
                     .scheduler
                     .dispatch_job("system", "Restart", "Execute restart tool", Some(metadata))
                     .await?;
+                tracing::info!(
+                    "[commands::restart] Job dispatched successfully, job_id={:?}",
+                    _job_id
+                );
                 Ok(SubmissionResult::response(
                     "Restart initiated. Process will exit cleanly and restart shortly.",
                 ))

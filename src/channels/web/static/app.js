@@ -14,6 +14,7 @@ let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
 let isRestarting = false; // Track if we're currently restarting
+let restartEnabled = false; // Track if restart is available in this deployment
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
@@ -196,6 +197,11 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     completeToolCard(data.name, data.success);
+
+    // Show restart modal only when the restart tool succeeds
+    if (data.name.toLowerCase() === 'restart' && data.success) {
+      setTimeout(() => tryShowRestartModal(), 500);
+    }
   });
 
   eventSource.addEventListener('tool_result', (e) => {
@@ -333,6 +339,18 @@ function enableChatInput() {
   // no-op: input and send button are always enabled
 }
 
+/// Update restart button visibility based on deployment environment
+function updateRestartButtonVisibility() {
+  const restartBtn = document.getElementById('restart-btn');
+  if (restartBtn) {
+    if (restartEnabled) {
+      restartBtn.style.display = 'flex';
+    } else {
+      restartBtn.style.display = 'none';
+    }
+  }
+}
+
 function triggerRestart() {
   if (!currentThreadId) {
     alert('Please start a conversation first');
@@ -367,6 +385,7 @@ function confirmRestart() {
   loaderEl.style.display = 'flex';
 
   // Send restart command via chat
+  console.log('[confirmRestart] Sending /restart command to server');
   apiFetch('/api/chat/send', {
     method: 'POST',
     body: {
@@ -374,8 +393,11 @@ function confirmRestart() {
       thread_id: currentThreadId,
     },
   })
+    .then((response) => {
+      console.log('[confirmRestart] API call succeeded, response:', response);
+    })
     .catch((err) => {
-      console.error('Restart request failed:', err);
+      console.error('[confirmRestart] Restart request failed:', err);
       addMessage('system', 'Restart failed: ' + err.message);
       isRestarting = false;
       restartBtn.disabled = false;
@@ -633,11 +655,6 @@ function removeActivityThinking() {
 }
 
 function addToolCard(name) {
-  // Detect restart tool execution and show modal
-  if (name.toLowerCase() === 'restart') {
-    setTimeout(() => tryShowRestartModal(), 1000);
-  }
-
   // Hide thinking instead of destroying — it may reappear between tool rounds
   if (_activityThinking) _activityThinking.style.display = 'none';
   const group = getOrCreateActivityGroup();
@@ -3228,6 +3245,10 @@ function shortModelName(model) {
 
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
+    // Update restart availability based on deployment environment
+    restartEnabled = data.restart_enabled || false;
+    updateRestartButtonVisibility();
+
     var popover = document.getElementById('gateway-popover');
     var html = '';
 

@@ -14,6 +14,7 @@ impl SubmissionParser {
     pub fn parse(content: &str) -> Submission {
         let trimmed = content.trim();
         let lower = trimmed.to_lowercase();
+        tracing::debug!("[SubmissionParser::parse] Parsing input: {:?}", trimmed);
 
         // Control commands (exact match or prefix)
         if lower == "/undo" {
@@ -92,6 +93,7 @@ impl SubmissionParser {
             };
         }
         if lower == "/restart" {
+            tracing::debug!("[SubmissionParser::parse] Recognized /restart command");
             return Submission::SystemCommand {
                 command: "restart".to_string(),
                 args: vec![],
