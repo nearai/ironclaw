@@ -239,6 +239,23 @@ pub trait Tool: Send + Sync {
         ToolDomain::Orchestrator
     }
 
+    /// Parameter names whose values must be redacted before logging, hooks, and approvals.
+    ///
+    /// The agent framework replaces these parameter values with `"[REDACTED]"` before:
+    /// - Writing to debug logs
+    /// - Storing in `ActionRecord` (in-memory job history)
+    /// - Recording in `TurnToolCall` (session state)
+    /// - Sending to `BeforeToolCall` hooks
+    /// - Displaying in the approval UI
+    ///
+    /// **The `execute()` method still receives the original, unredacted parameters.**
+    /// Redaction only applies to the observability and audit paths, not execution.
+    ///
+    /// Use this for tools that accept plaintext secrets as parameters (e.g. `secret_save`).
+    fn sensitive_params(&self) -> &[&str] {
+        &[]
+    }
+
     /// Per-invocation rate limit for this tool.
     ///
     /// Return `Some(config)` to throttle how often this tool can be called per user.
@@ -285,6 +302,33 @@ pub fn require_param<'a>(
     params
         .get(name)
         .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
+}
+
+/// Replace sensitive parameter values with `"[REDACTED]"`.
+///
+/// Returns a new JSON value with the specified keys replaced. Non-object params
+/// and unknown keys are passed through unchanged. The original value is cloned
+/// only if there are sensitive params to redact; otherwise it is cloned once
+/// (cheap — callers own the result).
+///
+/// Used by the agent framework before logging, hook dispatch, approval display,
+/// and `ActionRecord` storage so plaintext secrets never reach those paths.
+pub fn redact_params(params: &serde_json::Value, sensitive: &[&str]) -> serde_json::Value {
+    if sensitive.is_empty() {
+        return params.clone();
+    }
+    let mut redacted = params.clone();
+    if let Some(obj) = redacted.as_object_mut() {
+        for key in sensitive {
+            if obj.contains_key(*key) {
+                obj.insert(
+                    (*key).to_string(),
+                    serde_json::Value::String("[REDACTED]".into()),
+                );
+            }
+        }
+    }
+    redacted
 }
 
 /// Lenient runtime validation of a tool's `parameters_schema()`.
@@ -498,6 +542,37 @@ mod tests {
         assert!(!ApprovalRequirement::Never.is_required());
         assert!(ApprovalRequirement::UnlessAutoApproved.is_required());
         assert!(ApprovalRequirement::Always.is_required());
+    }
+
+    #[test]
+    fn test_redact_params_replaces_sensitive_key() {
+        let params = serde_json::json!({"name": "openai_key", "value": "sk-secret"});
+        let redacted = redact_params(&params, &["value"]);
+        assert_eq!(redacted["name"], "openai_key");
+        assert_eq!(redacted["value"], "[REDACTED]");
+        // Original unchanged
+        assert_eq!(params["value"], "sk-secret");
+    }
+
+    #[test]
+    fn test_redact_params_empty_sensitive_is_noop() {
+        let params = serde_json::json!({"name": "key", "value": "secret"});
+        let redacted = redact_params(&params, &[]);
+        assert_eq!(redacted, params);
+    }
+
+    #[test]
+    fn test_redact_params_missing_key_is_noop() {
+        let params = serde_json::json!({"name": "key"});
+        let redacted = redact_params(&params, &["value"]);
+        assert_eq!(redacted, params);
+    }
+
+    #[test]
+    fn test_redact_params_non_object_is_passthrough() {
+        let params = serde_json::json!("just a string");
+        let redacted = redact_params(&params, &["value"]);
+        assert_eq!(redacted, params);
     }
 
     #[test]

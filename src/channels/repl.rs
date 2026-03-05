@@ -466,7 +466,7 @@ impl Channel for ReplChannel {
             StatusUpdate::ToolStarted { name } => {
                 eprintln!("  \x1b[33m\u{25CB} {name}\x1b[0m");
             }
-            StatusUpdate::ToolCompleted { name, success } => {
+            StatusUpdate::ToolCompleted { name, success, .. } => {
                 if success {
                     eprintln!("  \x1b[32m\u{25CF} {name}\x1b[0m");
                 } else {

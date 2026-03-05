@@ -159,10 +159,10 @@ pub async fn memory_search_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let hits: Vec<SearchHit> = results
-        .iter()
+        .into_iter()
         .map(|r| SearchHit {
-            path: r.document_id.to_string(),
-            content: r.content.clone(),
+            path: r.document_path,
+            content: r.content,
             score: r.score as f64,
         })
         .collect();

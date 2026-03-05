@@ -15,7 +15,7 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::{LlmProvider, SessionManager};
+use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
@@ -48,6 +48,7 @@ pub struct AppComponents {
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    pub recording_handle: Option<Arc<RecordingLlm>>,
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
@@ -70,6 +71,9 @@ pub struct AppBuilder {
     // Accumulated state
     db: Option<Arc<dyn Database>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+
+    // Test overrides
+    llm_override: Option<Arc<dyn LlmProvider>>,
 
     // Backend-specific handles needed by secrets store
     #[cfg(feature = "postgres")]
@@ -99,6 +103,7 @@ impl AppBuilder {
             log_broadcaster,
             db: None,
             secrets_store: None,
+            llm_override: None,
             #[cfg(feature = "postgres")]
             pg_pool: None,
             #[cfg(feature = "libsql")]
@@ -106,11 +111,26 @@ impl AppBuilder {
         }
     }
 
+    /// Inject a pre-created database, skipping `init_database()`.
+    pub fn with_database(&mut self, db: Arc<dyn Database>) {
+        self.db = Some(db);
+    }
+
+    /// Inject a pre-created LLM provider, skipping `init_llm()`.
+    pub fn with_llm(&mut self, llm: Arc<dyn LlmProvider>) {
+        self.llm_override = Some(llm);
+    }
+
     /// Phase 1: Initialize database backend.
     ///
     /// Creates the database connection, runs migrations, reloads config
     /// from DB, attaches DB to session manager, and cleans up stale jobs.
     pub async fn init_database(&mut self) -> Result<(), anyhow::Error> {
+        if self.db.is_some() {
+            tracing::debug!("Database already provided, skipping init_database()");
+            return Ok(());
+        }
+
         if self.flags.no_db {
             tracing::warn!("Running without database connection");
             return Ok(());
@@ -297,10 +317,17 @@ impl AppBuilder {
     #[allow(clippy::type_complexity)]
     pub fn init_llm(
         &self,
-    ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), anyhow::Error> {
-        let (llm, cheap_llm) =
+    ) -> Result<
+        (
+            Arc<dyn LlmProvider>,
+            Option<Arc<dyn LlmProvider>>,
+            Option<Arc<RecordingLlm>>,
+        ),
+        anyhow::Error,
+    > {
+        let (llm, cheap_llm, recording_handle) =
             crate::llm::build_provider_chain(&self.config.llm, self.session.clone())?;
-        Ok((llm, cheap_llm))
+        Ok((llm, cheap_llm, recording_handle))
     }
 
     /// Phase 4: Initialize safety, tools, embeddings, and workspace.
@@ -330,6 +357,10 @@ impl AppBuilder {
             Arc::new(ToolRegistry::new())
         };
         tools.register_builtin_tools();
+
+        if let Some(ref ss) = self.secrets_store {
+            tools.register_secrets_tools(Arc::clone(ss));
+        }
 
         // Create embeddings provider using the unified method
         let embeddings = self
@@ -649,7 +680,11 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        let (llm, cheap_llm) = self.init_llm()?;
+        let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
+            (llm, None, None)
+        } else {
+            self.init_llm()?
+        };
         let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
@@ -665,18 +700,14 @@ impl AppBuilder {
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
-            match ws.seed_if_empty().await {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("Failed to seed workspace: {}", e);
-                }
-            }
-
-            // Import workspace files from disk if WORKSPACE_IMPORT_DIR is set.
+            // Import workspace files from disk FIRST if WORKSPACE_IMPORT_DIR is set.
             // This lets Docker images / deployment scripts ship customized
             // workspace templates (e.g., AGENTS.md, TOOLS.md) that override
             // the generic seeds. Only imports files that don't already exist
             // in the database — never overwrites user edits.
+            //
+            // Runs before seed_if_empty() so that custom templates take priority
+            // over generic seeds. seed_if_empty() then fills any remaining gaps.
             if let Ok(import_dir) = std::env::var("WORKSPACE_IMPORT_DIR") {
                 let import_path = std::path::Path::new(&import_dir);
                 match ws.import_from_directory(import_path).await {
@@ -691,6 +722,13 @@ impl AppBuilder {
                             e
                         );
                     }
+                }
+            }
+
+            match ws.seed_if_empty().await {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to seed workspace: {}", e);
                 }
             }
 
@@ -758,6 +796,7 @@ impl AppBuilder {
             skill_registry,
             skill_catalog,
             cost_guard,
+            recording_handle,
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,

@@ -169,6 +169,18 @@ impl ToolRegistry {
         self.tools.read().await.keys().cloned().collect()
     }
 
+    /// Retain only tools whose names are in the given allowlist.
+    ///
+    /// If `names` is empty, this is a no-op (all tools are kept).
+    pub async fn retain_only(&self, names: &[&str]) {
+        if names.is_empty() {
+            return;
+        }
+        let names_set: std::collections::HashSet<&str> = names.iter().copied().collect();
+        let mut tools = self.tools.write().await;
+        tools.retain(|k, _| names_set.contains(k.as_str()));
+    }
+
     /// Get the number of registered tools.
     pub fn count(&self) -> usize {
         self.tools.try_read().map(|t| t.len()).unwrap_or(0)
@@ -344,6 +356,20 @@ impl ToolRegistry {
         }
 
         tracing::info!("Registered {} job management tools", job_tool_count);
+    }
+
+    /// Register secret management tools (list, delete).
+    ///
+    /// These allow the LLM to persist API keys and tokens encrypted in the database.
+    /// Values are never returned to the LLM; only names and metadata are exposed.
+    pub fn register_secrets_tools(
+        &self,
+        store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) {
+        use crate::tools::builtin::{SecretDeleteTool, SecretListTool};
+        self.register_sync(Arc::new(SecretListTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(SecretDeleteTool::new(store)));
+        tracing::info!("Registered 2 secret management tools (list, delete)");
     }
 
     /// Register extension management tools (search, install, auth, activate, list, remove).
@@ -768,5 +794,28 @@ mod tests {
         for handle in handles {
             handle.await.expect("task should not panic");
         }
+    }
+  
+    #[tokio::test]
+    async fn test_retain_only_filters_tools() {
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+        let all = registry.list().await;
+        assert!(all.len() > 2, "expected multiple built-in tools");
+        registry.retain_only(&["echo", "time"]).await;
+        let remaining = registry.list().await;
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&"echo".to_string()));
+        assert!(remaining.contains(&"time".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_retain_only_empty_is_noop() {
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+        let before = registry.list().await.len();
+        registry.retain_only(&[]).await;
+        let after = registry.list().await.len();
+        assert_eq!(before, after);
     }
 }

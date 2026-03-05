@@ -30,6 +30,26 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
+    /// Create a test-friendly config without reading env vars.
+    #[cfg(feature = "libsql")]
+    pub fn for_testing() -> Self {
+        Self {
+            name: "test-rig".to_string(),
+            max_parallel_jobs: 1,
+            job_timeout: Duration::from_secs(30),
+            stuck_threshold: Duration::from_secs(300),
+            repair_check_interval: Duration::from_secs(3600),
+            max_repair_attempts: 0,
+            use_planning: false,
+            session_idle_timeout: Duration::from_secs(3600),
+            allow_local_tools: true,
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: None,
+            max_tool_iterations: 10,
+            auto_approve_tools: true,
+        }
+    }
+
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         Ok(Self {
             name: parse_optional_env("AGENT_NAME", settings.agent.name.clone())?,

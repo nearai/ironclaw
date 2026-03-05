@@ -1,0 +1,91 @@
+{
+  "model_name": "advanced-workspace-search",
+  "expects": {
+    "tools_used": ["memory_write", "memory_search"],
+    "response_contains": ["march 10", "marcus"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "save" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mw1",
+            "name": "memory_write",
+            "arguments": {
+              "content": "Database migration scheduled for March 10th. Downtime window: 2am-4am EST. DBA: Marcus.",
+              "target": "ops/db-migration.md",
+              "append": false
+            }
+          }
+        ],
+        "input_tokens": 120,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mw2",
+            "name": "memory_write",
+            "arguments": {
+              "content": "Frontend redesign kickoff on March 12th. Lead: Priya. Framework: SolidJS.",
+              "target": "projects/frontend-redesign.md",
+              "append": false
+            }
+          }
+        ],
+        "input_tokens": 180,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mw3",
+            "name": "memory_write",
+            "arguments": {
+              "content": "Security audit results: 2 critical findings in auth module, 5 medium in API layer. Deadline to fix: March 20th.",
+              "target": "security/audit-q1.md",
+              "append": false
+            }
+          }
+        ],
+        "input_tokens": 240,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ms1",
+            "name": "memory_search",
+            "arguments": {
+              "query": "database migration downtime schedule",
+              "limit": 3
+            }
+          }
+        ],
+        "input_tokens": 300,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The database migration is scheduled for March 10th with a downtime window of 2am-4am EST. Marcus is the DBA handling it.",
+        "input_tokens": 380,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

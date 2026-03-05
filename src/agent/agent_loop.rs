@@ -75,6 +75,8 @@ pub struct AgentDeps {
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     /// SSE broadcast sender for live job event streaming to the web gateway.
     pub sse_tx: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// HTTP interceptor for trace recording/replay.
+    pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
 }
 
 /// The main agent that coordinates all components.
