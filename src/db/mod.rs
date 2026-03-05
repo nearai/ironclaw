@@ -419,4 +419,11 @@ pub trait Database:
 {
     /// Run schema migrations for this backend.
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
+
+    /// Shutdown hook for backend-specific drain/flush behavior.
+    ///
+    /// Default implementation is a no-op so existing backends remain compatible.
+    async fn shutdown(&self) -> Result<(), DatabaseError> {
+        Ok(())
+    }
 }
