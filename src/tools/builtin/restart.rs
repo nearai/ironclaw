@@ -117,15 +117,31 @@ impl Tool for RestartTool {
         //
         // - Future improvement: implement graceful shutdown with CancellationToken
         //   to properly drain Axum, close DB connections, and checkpoint jobs.
+        // Check if restart is disabled (e.g., in tests). This allows tests to verify
+        // parameter parsing and output without actually terminating the process.
+        let restart_disabled = std::env::var("IRONCLAW_DISABLE_RESTART")
+            .map(|v| {
+                let v = v.to_lowercase();
+                v == "1" || v == "true"
+            })
+            .unwrap_or(false);
+
         tracing::info!(
-            "[RestartTool::execute] Spawning background task to exit in {} seconds",
-            delay
+            "[RestartTool::execute] Spawning background task to exit in {} seconds (disabled={})",
+            delay,
+            restart_disabled
         );
         tokio::spawn(async move {
             tracing::info!("[RestartTool] Sleeping for {} seconds before exit", delay);
             tokio::time::sleep(Duration::from_secs(delay)).await;
-            tracing::warn!("[RestartTool] Calling std::process::exit(0) NOW");
-            std::process::exit(0);
+            if !restart_disabled {
+                tracing::warn!("[RestartTool] Calling std::process::exit(0) NOW");
+                std::process::exit(0);
+            } else {
+                tracing::info!(
+                    "[RestartTool] Exit disabled (IRONCLAW_DISABLE_RESTART set), skipping std::process::exit(0)"
+                );
+            }
         });
 
         let msg = format!(

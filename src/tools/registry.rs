@@ -158,7 +158,17 @@ impl ToolRegistry {
 
     /// Get a tool by name.
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.read().await.get(name).cloned()
+        let tools = self.tools.read().await;
+        if let Some(tool) = tools.get(name) {
+            return Some(Arc::clone(tool));
+        }
+        // Special case: RestartTool is not in the public registry by default.
+        // It's only made available when explicitly requested (e.g., via /restart command).
+        // This prevents the LLM from autonomously invoking restart.
+        if name == "restart" {
+            return Some(Arc::new(RestartTool));
+        }
+        None
     }
 
     /// Check if a tool exists.
@@ -200,11 +210,24 @@ impl ToolRegistry {
         let tools = self.tools.read().await;
         names
             .iter()
-            .filter_map(|name| tools.get(*name))
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
+            .filter_map(|name| {
+                // Special case: RestartTool is not in the public registry by default.
+                // It's only made available when explicitly requested (e.g., via /restart command).
+                // This prevents the LLM from autonomously invoking restart.
+                if *name == "restart" && !tools.contains_key(*name) {
+                    // Dynamically create a definition for restart if requested
+                    let tool = RestartTool;
+                    return Some(ToolDefinition {
+                        name: tool.name().to_string(),
+                        description: tool.description().to_string(),
+                        parameters: tool.parameters_schema(),
+                    });
+                }
+                tools.get(*name).map(|tool| ToolDefinition {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters: tool.parameters_schema(),
+                })
             })
             .collect()
     }
@@ -221,7 +244,9 @@ impl ToolRegistry {
         }
         self.register_sync(Arc::new(http));
         self.register_sync(Arc::new(WebFetchTool::new()));
-        self.register_sync(Arc::new(RestartTool));
+        // Note: RestartTool is not registered here. It's only made available when explicitly
+        // requested via job metadata (e.g., when /restart command is executed with proper authorization).
+        // This prevents the LLM from autonomously invoking restart.
 
         tracing::info!("Registered {} built-in tools", self.count());
     }

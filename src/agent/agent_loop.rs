@@ -726,23 +726,9 @@ impl Agent {
                     command,
                     message.channel
                 );
-                // Authorization check: restart is only available via web interface (gateway channel)
-                if command == "restart" && message.channel != "gateway" {
-                    tracing::warn!(
-                        "[agent_loop] Restart rejected: not from gateway channel (from: {})",
-                        message.channel
-                    );
-                    return Ok(Some(
-                        "Restart is only available through the web interface with explicit user confirmation. \
-                         Use the Restart button in the UI."
-                            .to_string(),
-                    ));
-                }
-                tracing::debug!(
-                    "[agent_loop] Calling handle_system_command for command={}",
-                    command
-                );
-                self.handle_system_command(&command, &args).await
+                // Authorization checks (including restart channel check) are enforced in handle_system_command
+                self.handle_system_command(&command, &args, &message.channel)
+                    .await
             }
             Submission::Undo => self.process_undo(session, thread_id).await,
             Submission::Redo => self.process_redo(session, thread_id).await,

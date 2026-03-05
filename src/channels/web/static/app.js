@@ -133,6 +133,110 @@ function apiFetch(path, options) {
   });
 }
 
+// --- Restart Feature ---
+
+let isRestarting = false; // Track if we're currently restarting
+let restartEnabled = false; // Track if restart is available in this deployment
+
+function triggerRestart() {
+  if (!currentThreadId) {
+    alert('Please start a conversation first');
+    return;
+  }
+
+  // Show the confirmation modal
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'flex';
+}
+
+function confirmRestart() {
+  if (!currentThreadId) {
+    alert('Please start a conversation first');
+    return;
+  }
+
+  // Hide confirmation modal
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'none';
+
+  const restartBtn = document.getElementById('restart-btn');
+  const restartIcon = document.getElementById('restart-icon');
+
+  // Mark as restarting
+  isRestarting = true;
+  restartBtn.disabled = true;
+  if (restartIcon) restartIcon.classList.add('spinning');
+
+  // Show progress modal
+  const loaderEl = document.getElementById('restart-loader');
+  loaderEl.style.display = 'flex';
+
+  // Send restart command via chat
+  console.log('[confirmRestart] Sending /restart command to server');
+  apiFetch('/api/chat/send', {
+    method: 'POST',
+    body: {
+      content: '/restart',
+      thread_id: currentThreadId,
+    },
+  })
+    .then((response) => {
+      console.log('[confirmRestart] API call succeeded, response:', response);
+    })
+    .catch((err) => {
+      console.error('[confirmRestart] Restart request failed:', err);
+      addMessage('system', 'Restart failed: ' + err.message);
+      isRestarting = false;
+      restartBtn.disabled = false;
+      if (restartIcon) restartIcon.classList.remove('spinning');
+      loaderEl.style.display = 'none';
+    });
+}
+
+function cancelRestart() {
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'none';
+}
+
+function tryShowRestartModal() {
+  // Defensive callback for when restart is detected in messages.
+  if (!isRestarting) {
+    isRestarting = true;
+    const restartBtn = document.getElementById('restart-btn');
+    const restartIcon = document.getElementById('restart-icon');
+    restartBtn.disabled = true;
+    if (restartIcon) restartIcon.classList.add('spinning');
+
+    // Show progress modal
+    const loaderEl = document.getElementById('restart-loader');
+    loaderEl.style.display = 'flex';
+  }
+}
+
+function updateRestartButtonVisibility() {
+  const restartBtn = document.getElementById('restart-btn');
+  if (restartBtn) {
+    restartBtn.style.display = restartEnabled ? 'block' : 'none';
+  }
+}
+
+function startGatewayStatusPolling() {
+  fetchGatewayStatus();
+  // Poll every 5 seconds
+  setInterval(fetchGatewayStatus, 5000);
+}
+
+function fetchGatewayStatus() {
+  apiFetch('/api/gateway/status')
+    .then((data) => {
+      restartEnabled = data.restart_enabled || false;
+      updateRestartButtonVisibility();
+    })
+    .catch((err) => {
+      console.warn('[gateway status] Failed to fetch:', err);
+    });
+}
+
 // --- SSE ---
 
 function connectSSE() {
@@ -143,6 +247,18 @@ function connectSSE() {
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
     document.getElementById('sse-status').textContent = 'Connected';
+
+    // If we were restarting, close the modal and reset button now that server is back
+    if (isRestarting) {
+      const loaderEl = document.getElementById('restart-loader');
+      if (loaderEl) loaderEl.style.display = 'none';
+      const restartBtn = document.getElementById('restart-btn');
+      const restartIcon = document.getElementById('restart-icon');
+      if (restartBtn) restartBtn.disabled = false;
+      if (restartIcon) restartIcon.classList.remove('spinning');
+      isRestarting = false;
+    }
+
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
       loadHistory();
@@ -163,6 +279,11 @@ function connectSSE() {
     enableChatInput();
     // Refresh thread list so new titles appear after first message
     loadThreads();
+
+    // Show restart modal if the response indicates restart was initiated
+    if (data.content && data.content.toLowerCase().includes('restart initiated')) {
+      setTimeout(() => tryShowRestartModal(), 500);
+    }
   });
 
   eventSource.addEventListener('thinking', (e) => {

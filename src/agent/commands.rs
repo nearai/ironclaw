@@ -68,7 +68,10 @@ impl Agent {
                 self.handle_help_job(&message.user_id, &job_id).await?
             }
             MessageIntent::Command { command, args } => {
-                match self.handle_command(&command, &args).await? {
+                match self
+                    .handle_command(&command, &args, &message.channel)
+                    .await?
+                {
                     Some(s) => s,
                     None => return Ok(SubmissionResult::Ok { message: None }), // Shutdown signal
                 }
@@ -466,6 +469,7 @@ impl Agent {
         &self,
         command: &str,
         args: &[String],
+        channel: &str,
     ) -> Result<SubmissionResult, Error> {
         match command {
             "help" => Ok(SubmissionResult::response(concat!(
@@ -510,7 +514,18 @@ impl Agent {
 
             "restart" => {
                 tracing::info!("[commands::restart] Restart command received");
-                // Authorization check is done in handle_job_or_command before reaching here.
+                // Channel authorization check: restart is only available via web interface
+                if channel != "gateway" {
+                    tracing::warn!(
+                        "[commands::restart] Restart rejected: not from gateway channel (from: {})",
+                        channel
+                    );
+                    return Ok(SubmissionResult::error(
+                        "Restart is only available through the web interface with explicit user confirmation. \
+                         Use the Restart button in the UI."
+                            .to_string(),
+                    ));
+                }
                 // Environment check: restart is only available in Docker containers
                 let in_docker = std::env::var("IRONCLAW_IN_DOCKER")
                     .map(|v| v.to_lowercase() == "true")
@@ -529,22 +544,34 @@ impl Agent {
                     ));
                 }
 
-                // Trigger the restart tool via a system job with metadata requesting the tool
-                let metadata = serde_json::json!({
-                    "tools": ["restart"]
-                });
-                tracing::info!("[commands::restart] Dispatching job to execute restart tool");
-                let _job_id = self
-                    .scheduler
-                    .dispatch_job("system", "Restart", "Execute restart tool", Some(metadata))
-                    .await?;
-                tracing::info!(
-                    "[commands::restart] Job dispatched successfully, job_id={:?}",
-                    _job_id
-                );
-                Ok(SubmissionResult::response(
-                    "Restart initiated. Process will exit cleanly and restart shortly.",
-                ))
+                // Execute restart tool directly (don't dispatch as a job for LLM planning)
+                // This ensures the tool runs immediately without LLM involvement
+                use crate::tools::Tool;
+                let tool = crate::tools::builtin::RestartTool;
+                let params = serde_json::json!({});
+
+                // Create a minimal JobContext for the tool
+                let dummy_ctx =
+                    crate::context::JobContext::with_user("system", "Restart", "Graceful restart");
+
+                match tool.execute(params, &dummy_ctx).await {
+                    Ok(output) => {
+                        tracing::info!("[commands::restart] RestartTool executed successfully");
+                        // Extract text from the ToolOutput result
+                        let response = match output.result {
+                            serde_json::Value::String(s) => s,
+                            _ => output.result.to_string(),
+                        };
+                        Ok(SubmissionResult::response(response))
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "[commands::restart] RestartTool execution failed: {:?}",
+                            e
+                        );
+                        Ok(SubmissionResult::error(format!("Restart failed: {}", e)))
+                    }
+                }
             }
 
             "version" => Ok(SubmissionResult::response(format!(
@@ -784,10 +811,11 @@ impl Agent {
         &self,
         command: &str,
         args: &[String],
+        channel: &str,
     ) -> Result<Option<String>, Error> {
         // System commands are now handled directly via Submission::SystemCommand,
         // but the router may still send us unknown /commands.
-        match self.handle_system_command(command, args).await? {
+        match self.handle_system_command(command, args, channel).await? {
             SubmissionResult::Response { content } => Ok(Some(content)),
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
