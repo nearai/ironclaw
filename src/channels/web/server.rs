@@ -192,7 +192,9 @@ pub async fn start_server(
             })?;
 
     // Public routes (no auth)
-    let public = Router::new().route("/api/health", get(health_handler));
+    let public = Router::new()
+        .route("/api/health", get(health_handler))
+        .route("/oauth/callback", get(oauth_callback_handler));
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -424,6 +426,180 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
+/// Return an OAuth error landing page response.
+fn oauth_error_page(label: &str) -> axum::response::Response {
+    let html = crate::cli::oauth_defaults::landing_html(label, false);
+    axum::response::Html(html).into_response()
+}
+
+/// OAuth callback handler for the web gateway.
+///
+/// This is a PUBLIC route (no Bearer token required) because OAuth providers
+/// redirect the user's browser here. The `state` query parameter correlates
+/// the callback with a pending OAuth flow registered by `start_wasm_oauth()`.
+///
+/// Used on hosted instances where `IRONCLAW_OAUTH_CALLBACK_URL` points to
+/// the gateway (e.g., `https://kind-deer.agent1.near.ai/oauth/callback`).
+/// Local/desktop mode continues to use the TCP listener on port 9876.
+async fn oauth_callback_handler(
+    State(state): State<Arc<GatewayState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    use crate::cli::oauth_defaults;
+
+    // Check for error from OAuth provider (e.g., user denied consent)
+    if let Some(error) = params.get("error") {
+        let description = params
+            .get("error_description")
+            .cloned()
+            .unwrap_or_else(|| error.clone());
+        return oauth_error_page(&description);
+    }
+
+    let state_param = match params.get("state") {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => return oauth_error_page("IronClaw"),
+    };
+
+    let code = match params.get("code") {
+        Some(c) if !c.is_empty() => c.clone(),
+        _ => return oauth_error_page("IronClaw"),
+    };
+
+    // Look up the pending flow by CSRF state (atomic remove prevents replay)
+    let ext_mgr = match state.extension_manager.as_ref() {
+        Some(mgr) => mgr,
+        None => return oauth_error_page("IronClaw"),
+    };
+
+    // Strip instance prefix from state for registry lookup.
+    // Platform nginx sends `state=instance:nonce` but flows are keyed by nonce only.
+    let lookup_key = oauth_defaults::strip_instance_prefix(&state_param);
+
+    let flow = ext_mgr
+        .pending_oauth_flows()
+        .write()
+        .await
+        .remove(lookup_key);
+
+    let flow = match flow {
+        Some(f) => f,
+        None => {
+            tracing::warn!(
+                state = %state_param,
+                lookup_key = %lookup_key,
+                "OAuth callback received with unknown or expired state"
+            );
+            return oauth_error_page("IronClaw");
+        }
+    };
+
+    // Check flow expiry (5 minutes, matching TCP listener timeout)
+    if flow.created_at.elapsed() > oauth_defaults::OAUTH_FLOW_EXPIRY {
+        tracing::warn!(
+            extension = %flow.extension_name,
+            "OAuth flow expired"
+        );
+        return oauth_error_page(&flow.display_name);
+    }
+
+    // Exchange the authorization code for tokens.
+    // Use the platform exchange proxy when configured (keeps client_secret off container),
+    // otherwise call the provider's token URL directly.
+    let exchange_proxy_url = std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL").ok();
+
+    let result: Result<(), String> = async {
+        let token_response = if let Some(ref proxy_url) = exchange_proxy_url {
+            let gateway_token = flow.gateway_token.as_deref().unwrap_or_default();
+            oauth_defaults::exchange_via_proxy(
+                proxy_url,
+                gateway_token,
+                &code,
+                &flow.redirect_uri,
+                flow.code_verifier.as_deref(),
+                &flow.access_token_field,
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        } else {
+            oauth_defaults::exchange_oauth_code(
+                &flow.token_url,
+                &flow.client_id,
+                flow.client_secret.as_deref(),
+                &code,
+                &flow.redirect_uri,
+                flow.code_verifier.as_deref(),
+                &flow.access_token_field,
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        };
+
+        // Validate the token before storing (catches wrong account, etc.)
+        if let Some(ref validation) = flow.validation_endpoint {
+            oauth_defaults::validate_oauth_token(&token_response.access_token, validation)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
+        // Store tokens encrypted in the secrets store
+        oauth_defaults::store_oauth_tokens(
+            flow.secrets.as_ref(),
+            &flow.user_id,
+            &flow.secret_name,
+            flow.provider.as_deref(),
+            &token_response.access_token,
+            token_response.refresh_token.as_deref(),
+            token_response.expires_in,
+            &flow.scopes,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+    .await;
+
+    let (success, message) = match &result {
+        Ok(()) => (
+            true,
+            format!("{} authenticated successfully", flow.display_name),
+        ),
+        Err(e) => (
+            false,
+            format!("{} authentication failed: {}", flow.display_name, e),
+        ),
+    };
+
+    match &result {
+        Ok(()) => {
+            tracing::info!(
+                extension = %flow.extension_name,
+                "OAuth completed successfully via gateway callback"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                extension = %flow.extension_name,
+                error = %e,
+                "OAuth failed via gateway callback"
+            );
+        }
+    }
+
+    // Broadcast SSE event to notify the web UI
+    if let Some(ref sender) = flow.sse_sender {
+        let _ = sender.send(SseEvent::AuthCompleted {
+            extension_name: flow.extension_name,
+            success,
+            message,
+        });
+    }
+
+    let html = oauth_defaults::landing_html(&flow.display_name, success);
+    axum::response::Html(html).into_response()
+}
+
 // --- Chat handlers ---
 
 async fn chat_send_handler(
@@ -566,7 +742,7 @@ async fn chat_auth_token_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if result.status == "authenticated" {
+    if result.is_authenticated() {
         // Auto-activate so tools are available immediately
         let msg = match ext_mgr.activate(&req.extension_name).await {
             Ok(r) => format!(
@@ -594,13 +770,14 @@ async fn chat_auth_token_handler(
         // Re-emit auth_required for retry
         state.sse.broadcast(SseEvent::AuthRequired {
             extension_name: req.extension_name.clone(),
-            instructions: result.instructions.clone(),
-            auth_url: result.auth_url.clone(),
-            setup_url: result.setup_url.clone(),
+            instructions: result.instructions().map(String::from),
+            auth_url: result.auth_url().map(String::from),
+            setup_url: result.setup_url().map(String::from),
         });
         Ok(Json(ActionResponse::fail(
             result
-                .instructions
+                .instructions()
+                .map(String::from)
                 .unwrap_or_else(|| "Invalid token".to_string()),
         )))
     }
@@ -1346,12 +1523,9 @@ async fn extensions_install_handler(
                 // configured (e.g., built-in providers). We only surface an auth_url
                 // when the extension reports it is awaiting authorization.
                 match ext_mgr.auth(&req.name, None).await {
-                    Ok(auth_result)
-                        if auth_result.auth_url.is_some()
-                            && auth_result.status == "awaiting_authorization" =>
-                    {
+                    Ok(auth_result) if auth_result.auth_url().is_some() => {
                         // Scope expansion or initial OAuth: user needs to authorize
-                        resp.auth_url = auth_result.auth_url;
+                        resp.auth_url = auth_result.auth_url().map(String::from);
                     }
                     _ => {}
                 }
@@ -1380,10 +1554,9 @@ async fn extensions_activate_handler(
             // Initial OAuth setup is triggered via save_setup_secrets.
             let mut resp = ActionResponse::ok(result.message);
             if let Ok(auth_result) = ext_mgr.auth(&name, None).await
-                && auth_result.auth_url.is_some()
-                && auth_result.status == "awaiting_authorization"
+                && auth_result.auth_url().is_some()
             {
-                resp.auth_url = auth_result.auth_url;
+                resp.auth_url = auth_result.auth_url().map(String::from);
             }
             Ok(Json(resp))
         }
@@ -1399,7 +1572,7 @@ async fn extensions_activate_handler(
 
             // Activation failed due to auth; try authenticating first.
             match ext_mgr.auth(&name, None).await {
-                Ok(auth_result) if auth_result.status == "authenticated" => {
+                Ok(auth_result) if auth_result.is_authenticated() => {
                     // Auth succeeded, retry activation.
                     match ext_mgr.activate(&name).await {
                         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
@@ -1410,13 +1583,13 @@ async fn extensions_activate_handler(
                     // Auth in progress (OAuth URL or awaiting manual token).
                     let mut resp = ActionResponse::fail(
                         auth_result
-                            .instructions
-                            .clone()
+                            .instructions()
+                            .map(String::from)
                             .unwrap_or_else(|| format!("'{}' requires authentication.", name)),
                     );
-                    resp.auth_url = auth_result.auth_url;
-                    resp.awaiting_token = Some(auth_result.awaiting_token);
-                    resp.instructions = auth_result.instructions;
+                    resp.auth_url = auth_result.auth_url().map(String::from);
+                    resp.awaiting_token = Some(auth_result.is_awaiting_token());
+                    resp.instructions = auth_result.instructions().map(String::from);
                     Ok(Json(resp))
                 }
                 Err(auth_err) => Ok(Json(ActionResponse::fail(format!(
@@ -1606,6 +1779,13 @@ async fn extensions_setup_submit_handler(
 
     match ext_mgr.save_setup_secrets(&name, &req.secrets).await {
         Ok(result) => {
+            // Broadcast auth_completed so the chat UI can dismiss any in-progress
+            // auth card or setup modal that was triggered by tool_auth/tool_activate.
+            state.sse.broadcast(SseEvent::AuthCompleted {
+                extension_name: name.clone(),
+                success: true,
+                message: result.message.clone(),
+            });
             let mut resp = ActionResponse::ok(result.message);
             resp.activated = Some(result.activated);
             resp.auth_url = result.auth_url;
@@ -2251,5 +2431,344 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    // --- OAuth callback handler tests ---
+
+    /// Build a minimal `GatewayState` for testing the OAuth callback handler.
+    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: SseManager::new(),
+            workspace: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: ext_mgr,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            user_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            scheduler: None,
+            chat_rate_limiter: RateLimiter::new(30, 60),
+            registry_entries: vec![],
+            cost_guard: None,
+            startup_time: std::time::Instant::now(),
+        })
+    }
+
+    /// Build a test router with just the OAuth callback route.
+    fn test_oauth_router(state: Arc<GatewayState>) -> Router {
+        Router::new()
+            .route("/oauth/callback", get(oauth_callback_handler))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_missing_params() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/oauth/callback")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Authorization Failed"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_error_from_provider() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = test_gateway_state(None);
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/oauth/callback?error=access_denied&error_description=access_denied")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Authorization Failed"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_unknown_state() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // Build an ExtensionManager so the handler can look up flows
+        let secrets = Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+            crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                "test-key-at-least-32-chars-long!!".to_string(),
+            ))
+            .expect("crypto"),
+        )));
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+
+        let ext_mgr = Arc::new(ExtensionManager::new(
+            mcp_sm,
+            secrets,
+            tool_registry,
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/wasm_tools"),
+            std::path::PathBuf::from("/tmp/wasm_channels"),
+            None,
+            "test".to_string(),
+            None,
+            vec![],
+        ));
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/oauth/callback?code=test_code&state=unknown_state_value")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Authorization Failed"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_expired_flow() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    "test-key-at-least-32-chars-long!!".to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+
+        let ext_mgr = Arc::new(ExtensionManager::new(
+            mcp_sm,
+            secrets.clone(),
+            tool_registry,
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/wasm_tools"),
+            std::path::PathBuf::from("/tmp/wasm_channels"),
+            None,
+            "test".to_string(),
+            None,
+            vec![],
+        ));
+
+        // Insert an expired flow (created 10 minutes ago)
+        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "test_tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "test_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "test".to_string(),
+            secrets,
+            sse_sender: None,
+            gateway_token: None,
+            created_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
+        };
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("expired_state".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/oauth/callback?code=test_code&state=expired_state")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        // Expired flow → error landing page
+        assert!(html.contains("Authorization Failed"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_no_extension_manager() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // No extension manager set → graceful error
+        let state = test_gateway_state(None);
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/oauth/callback?code=test_code&state=some_state")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Authorization Failed"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_strips_instance_prefix() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    "test-key-at-least-32-chars-long!!".to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+
+        let ext_mgr = Arc::new(ExtensionManager::new(
+            mcp_sm,
+            secrets.clone(),
+            tool_registry,
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/wasm_tools"),
+            std::path::PathBuf::from("/tmp/wasm_channels"),
+            None,
+            "test".to_string(),
+            None,
+            vec![],
+        ));
+
+        // Insert a flow keyed by raw nonce "test_nonce" (without instance prefix).
+        // Use an expired flow so the handler exits before attempting a real HTTP
+        // token exchange — we only need to verify that the instance prefix was
+        // stripped and the flow was found by the raw nonce.
+        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "test_tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "test_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "test".to_string(),
+            secrets,
+            sse_sender: None,
+            gateway_token: None,
+            // Expired — handler will reject after lookup (no network I/O)
+            created_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
+        };
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+
+        // Send callback with instance prefix: "myinstance:test_nonce"
+        // The handler should strip "myinstance:" and find the flow keyed by "test_nonce"
+        let req = axum::http::Request::builder()
+            .uri("/oauth/callback?code=fake_code&state=myinstance:test_nonce")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+
+        // The flow was found (stripped prefix matched) but is expired, so the
+        // handler returns an error landing page. The flow being consumed from
+        // the registry (checked below) proves the prefix was stripped correctly.
+        assert!(
+            html.contains("Authorization Failed"),
+            "Expected error page, html was: {}",
+            &html[..html.len().min(500)]
+        );
+
+        // Verify the flow was consumed (removed from registry)
+        assert!(
+            ext_mgr
+                .pending_oauth_flows()
+                .read()
+                .await
+                .get("test_nonce")
+                .is_none()
+        );
     }
 }

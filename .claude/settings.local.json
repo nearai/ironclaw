@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(rustup:*)",
+      "Bash(wc:*)",
+      "Bash(du:*)",
+      "Bash(grep -c \"#\\\\[test\\\\]\" src/**/*.rs)",
+      "Bash(ls:*)",
+      "Bash(chmod +x:*)",
+      "Bash(node:*)",
+      "Bash(gh pr:*)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(cat:*)",
+      "Bash(git merge:*)",
+      "Bash(git checkout:*)",
+      "Bash(git:*)"
+    ]
+  }
+}

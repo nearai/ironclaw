@@ -1,0 +1,105 @@
+# Dockerfile for testing the restart tool feature
+#
+# This image includes the restart loop entrypoint that detects clean exits (code 0)
+# and automatically restarts the process. Perfect for testing the restart tool.
+#
+# Build:
+#   docker build -f Dockerfile.restart-test -t ironclaw:restart-test .
+#
+# Run:
+#   docker run --env-file .env -p 3001:3001 ironclaw:restart-test
+#
+# Test restart tool:
+#   curl -X POST http://localhost:3001/api/jobs \
+#     -H "Authorization: Bearer changeme" \
+#     -H "Content-Type: application/json" \
+#     -d '{"message":"restart test","tools":["restart"]}'
+
+# Stage 1: Build
+FROM rust:1.92-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev cmake gcc g++ \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add wasm32-wasip2 \
+    && cargo install wasm-tools
+
+WORKDIR /app
+
+# Copy manifests first for layer caching
+COPY Cargo.toml Cargo.lock ./
+
+# Copy source and supporting files
+COPY build.rs build.rs
+COPY src/ src/
+COPY tests/ tests/
+COPY migrations/ migrations/
+COPY registry/ registry/
+COPY channels-src/ channels-src/
+COPY wit/ wit/
+
+RUN cargo build --release --bin ironclaw
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 bash \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /app/migrations /app/migrations
+
+# Non-root user
+RUN useradd -m -u 1000 -s /bin/bash ironclaw
+USER ironclaw
+
+EXPOSE 3001
+
+ENV RUST_LOG=ironclaw=info
+
+# Entrypoint restart loop: detects clean exit (code 0) and restarts automatically
+COPY --chown=ironclaw:ironclaw <<'ENTRYPOINT_SCRIPT' /entrypoint.sh
+#!/bin/bash
+set -e
+
+# Configuration for restart loop
+IRONCLAW_MAX_FAILURES=${IRONCLAW_MAX_FAILURES:-10}
+IRONCLAW_RESTART_DELAY=${IRONCLAW_RESTART_DELAY:-5}
+
+failure_count=0
+
+echo "=== IronClaw Restart Loop Entrypoint ==="
+echo "Max failures: $IRONCLAW_MAX_FAILURES"
+echo "Restart delay: ${IRONCLAW_RESTART_DELAY}s"
+echo ""
+
+while true; do
+    attempt=$((failure_count + 1))
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting IronClaw (attempt $attempt/$IRONCLAW_MAX_FAILURES)"
+
+    if ironclaw "$@"; then
+        # Clean exit with code 0 - reset failure counter and restart
+        exit_code=0
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Clean exit (code $exit_code), restarting in ${IRONCLAW_RESTART_DELAY}s..."
+        failure_count=0
+        sleep "$IRONCLAW_RESTART_DELAY"
+    else
+        # Non-zero exit - increment failure counter
+        exit_code=$?
+        failure_count=$((failure_count + 1))
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Process exited with code $exit_code (failure $failure_count/$IRONCLAW_MAX_FAILURES)"
+
+        if [ $failure_count -ge $IRONCLAW_MAX_FAILURES ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Max failures reached, exiting permanently."
+            exit 1
+        fi
+
+        sleep "$IRONCLAW_RESTART_DELAY"
+    fi
+done
+ENTRYPOINT_SCRIPT
+
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh", "--no-onboard"]

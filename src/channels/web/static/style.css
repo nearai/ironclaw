@@ -831,6 +831,10 @@ body {
   border-color: rgba(230, 76, 76, 0.3);
 }
 
+.activity-tool-card[data-status="fail"] .activity-tool-name {
+  color: var(--danger);
+}
+
 .activity-tool-header {
   display: flex;
   align-items: center;
