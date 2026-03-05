@@ -15,7 +15,6 @@ pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
 
-
 pub use echo::EchoTool;
 pub use extension_tools::{
     ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,

@@ -391,7 +391,8 @@ impl Tool for HttpTool {
         }
 
         // Determine if this is a simple GET (eligible for redirect following).
-        let is_simple_get = method.eq_ignore_ascii_case("GET") && headers_vec.is_empty() && body_bytes.is_none();
+        let is_simple_get =
+            method.eq_ignore_ascii_case("GET") && headers_vec.is_empty() && body_bytes.is_none();
 
         // Execute request, optionally following redirects for simple GETs.
         let response = if is_simple_get {
@@ -751,10 +752,7 @@ mod tests {
             "method": "GET",
             "url": "https://api.example.com/data"
         });
-        assert_eq!(
-            tool.requires_approval(&params),
-            ApprovalRequirement::Never
-        );
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
     }
 
     #[test]
@@ -885,10 +883,7 @@ mod tests {
             "url": "https://example.com",
             "headers": {}
         });
-        assert_eq!(
-            tool.requires_approval(&params),
-            ApprovalRequirement::Never
-        );
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
 
         // Empty array — still a plain GET
         let params = serde_json::json!({
@@ -896,10 +891,7 @@ mod tests {
             "url": "https://example.com",
             "headers": []
         });
-        assert_eq!(
-            tool.requires_approval(&params),
-            ApprovalRequirement::Never
-        );
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
     }
 
     // ── Credential registry approval tests ─────────────────────────────
@@ -955,10 +947,7 @@ mod tests {
             "method": "GET",
             "url": "https://api.example.com/data"
         });
-        assert_eq!(
-            tool.requires_approval(&params),
-            ApprovalRequirement::Never
-        );
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
 
         // POST with no credentials → UnlessAutoApproved
         let params = serde_json::json!({
