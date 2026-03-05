@@ -60,6 +60,7 @@ pub fn create_llm_provider(
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
+        LlmBackend::Nvidia => create_nvidia_provider(config),
     }
 }
 
@@ -208,6 +209,32 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
     let model = client.completion_model(&tf.model);
     tracing::info!("Using Tinfoil private inference (model: {})", tf.model);
     Ok(Arc::new(RigAdapter::new(model, &tf.model)))
+}
+
+fn create_nvidia_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let nv = config.nvidia.as_ref().ok_or_else(|| LlmError::AuthFailed {
+        provider: "nvidia".to_string(),
+    })?;
+
+    let api_key = nv.api_key.as_ref().ok_or_else(|| LlmError::AuthFailed {
+        provider: "nvidia".to_string(),
+    })?;
+
+    use rig::providers::openai;
+
+    let client: openai::CompletionsClient = openai::Client::builder()
+        .base_url("https://integrate.api.nvidia.com/v1")
+        .api_key(api_key.expose_secret())
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "nvidia".to_string(),
+            reason: format!("Failed to create NVIDIA NIM client: {}", e),
+        })?
+        .completions_api();
+
+    let model = client.completion_model(&nv.model);
+    tracing::info!("Using NVIDIA NIM API (model: {})", nv.model);
+    Ok(Arc::new(RigAdapter::new(model, &nv.model)))
 }
 
 fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -472,6 +499,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            nvidia: None,
         }
     }
 

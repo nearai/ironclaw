@@ -67,6 +67,16 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         | "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
 
+        // NVIDIA NIM API models (overrides is_local_model below)
+        "llama-3.1-405b-instruct" => Some((dec!(0.000002), dec!(0.000002))),
+        "llama-3.3-70b-instruct" => Some((dec!(0.0000006), dec!(0.0000006))),
+        "llama-3.1-8b-instruct" => Some((dec!(0.0000002), dec!(0.0000002))),
+        "mixtral-8x22b-instruct-v0.1" => Some((dec!(0.0000009), dec!(0.0000009))),
+        "gemma-2-9b-it" => Some((dec!(0.0000002), dec!(0.0000002))),
+        "phi-3-mini-128k-instruct" | "phi-3-mini-4k-instruct" => {
+            Some((dec!(0.0000001), dec!(0.0000001)))
+        }
+
         // Ollama / local models -- free
         _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
 

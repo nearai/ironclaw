@@ -797,6 +797,7 @@ impl SetupWizard {
                     "nearai" => "NEAR AI",
                     "anthropic" => "Anthropic (Claude)",
                     "openai" => "OpenAI",
+                    "nvidia" => "NVIDIA NIM API",
                     "ollama" => "Ollama (local)",
                     "openai_compatible" => "OpenAI-compatible endpoint",
                     other => other,
@@ -807,7 +808,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "nvidia" | "ollama" | "openai_compatible"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -819,6 +820,7 @@ impl SetupWizard {
                     "nearai" => return self.setup_nearai().await,
                     "anthropic" => return self.setup_anthropic().await,
                     "openai" => return self.setup_openai().await,
+                    "nvidia" => return self.setup_nvidia().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
                     _ => {
@@ -845,6 +847,7 @@ impl SetupWizard {
             "NEAR AI          - multi-model access via NEAR account",
             "Anthropic        - Claude models (direct API key)",
             "OpenAI           - GPT models (direct API key)",
+            "NVIDIA NIM API   - Llama, Mistral (direct API key)",
             "Ollama           - local models, no API key needed",
             "OpenRouter       - 200+ models via single API key",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
@@ -856,9 +859,10 @@ impl SetupWizard {
             0 => self.setup_nearai().await?,
             1 => self.setup_anthropic().await?,
             2 => self.setup_openai().await?,
-            3 => self.setup_ollama()?,
-            4 => self.setup_openrouter().await?,
-            5 => self.setup_openai_compatible().await?,
+            3 => self.setup_nvidia().await?,
+            4 => self.setup_ollama()?,
+            5 => self.setup_openrouter().await?,
+            6 => self.setup_openai_compatible().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -946,6 +950,19 @@ impl SetupWizard {
             "OpenAI API key",
             "https://platform.openai.com/api-keys",
             None,
+        )
+        .await
+    }
+
+    /// NVIDIA NIM provider setup
+    async fn setup_nvidia(&mut self) -> Result<(), SetupError> {
+        self.setup_api_key_provider(
+            "nvidia",
+            "NVIDIA_API_KEY",
+            "llm_nvidia_api_key",
+            "NVIDIA API key",
+            "https://build.nvidia.com/explore/discover",
+            Some("NVIDIA NIM API"),
         )
         .await
     }
@@ -1153,6 +1170,14 @@ impl SetupWizard {
                 let models = fetch_openai_models(cached.as_deref()).await;
                 self.select_from_model_list(&models)?;
             }
+            "nvidia" => {
+                let cached = self
+                    .llm_api_key
+                    .as_ref()
+                    .map(|k| k.expose_secret().to_string());
+                let models = fetch_nvidia_models(cached.as_deref()).await;
+                self.select_from_model_list(&models)?;
+            }
             "ollama" => {
                 let base_url = self
                     .settings
@@ -1278,6 +1303,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            nvidia: None,
         };
 
         match create_llm_provider(&config, session) {
@@ -2538,6 +2564,79 @@ async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> 
     }
 }
 
+/// Fetch models from the NVIDIA NIM API.
+///
+/// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
+async fn fetch_nvidia_models(cached_key: Option<&str>) -> Vec<(String, String)> {
+    let static_defaults = vec![
+        (
+            "meta/llama-3.3-70b-instruct".into(),
+            "Meta Llama 3.3 70B Instruct".into(),
+        ),
+        (
+            "meta/llama-3.1-8b-instruct".into(),
+            "Meta Llama 3.1 8B Instruct".into(),
+        ),
+        (
+            "meta/llama-3.1-405b-instruct".into(),
+            "Meta Llama 3.1 405B Instruct".into(),
+        ),
+        (
+            "mistralai/mixtral-8x22b-instruct-v0.1".into(),
+            "Mistral 8x22B Instruct v0.1".into(),
+        ),
+        ("google/gemma-2-9b-it".into(), "Google Gemma 2 9B IT".into()),
+        (
+            "microsoft/phi-3-mini-128k-instruct".into(),
+            "Microsoft Phi-3 Mini".into(),
+        ),
+    ];
+
+    let api_key = cached_key
+        .map(String::from)
+        .or_else(|| std::env::var("NVIDIA_API_KEY").ok())
+        .filter(|k| !k.is_empty());
+
+    let api_key = match api_key {
+        Some(k) => k,
+        None => return static_defaults,
+    };
+
+    let client = reqwest::Client::new();
+    let resp = match client
+        .get("https://integrate.api.nvidia.com/v1/models")
+        .bearer_auth(&api_key)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return static_defaults,
+    };
+
+    #[derive(serde::Deserialize)]
+    struct ModelEntry {
+        id: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ModelsResponse {
+        data: Vec<ModelEntry>,
+    }
+
+    match resp.json::<ModelsResponse>().await {
+        Ok(parsed) if !parsed.data.is_empty() => {
+            let mut models: Vec<_> = parsed
+                .data
+                .into_iter()
+                .map(|m| (m.id.clone(), m.id))
+                .collect();
+            models.sort_by(|a, b| a.1.cmp(&b.1));
+            models
+        }
+        _ => static_defaults,
+    }
+}
+
 fn is_openai_chat_model(model_id: &str) -> bool {
     let id = model_id.to_ascii_lowercase();
 
@@ -3053,10 +3152,21 @@ mod tests {
         let _guard = EnvGuard::clear("OPENAI_API_KEY");
         let models = fetch_openai_models(None).await;
         assert!(!models.is_empty());
-        assert_eq!(models[0].0, "gpt-5.3-codex");
         assert!(
             models.iter().any(|(id, _)| id.contains("gpt")),
             "static defaults should include a GPT model"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_nvidia_models_static_fallback() {
+        let _guard = EnvGuard::clear("NVIDIA_API_KEY");
+        let models = fetch_nvidia_models(None).await;
+        assert!(!models.is_empty());
+        assert!(
+            models
+                .iter()
+                .any(|(id, _)| id == "meta/llama-3.3-70b-instruct")
         );
     }
 

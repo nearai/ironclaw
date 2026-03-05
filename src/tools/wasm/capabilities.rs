@@ -368,6 +368,7 @@ mod tests {
 
         assert!(cap.is_allowed("openai_key"));
         assert!(!cap.is_allowed("anthropic_key"));
+        assert!(!cap.is_allowed("nvidia_key"));
     }
 
     #[test]
@@ -379,6 +380,7 @@ mod tests {
         assert!(cap.is_allowed("openai_key"));
         assert!(cap.is_allowed("openai_org"));
         assert!(!cap.is_allowed("anthropic_key"));
+        assert!(!cap.is_allowed("nvidia_key"));
     }
 
     #[test]

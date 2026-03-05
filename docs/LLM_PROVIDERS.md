@@ -68,6 +68,20 @@ Pull a model first: `ollama pull llama3.2`
 
 ---
 
+## NVIDIA NIM API
+
+[NVIDIA NIM API](https://build.nvidia.com) provides high-performance access to open models on NVIDIA infrastructure (Llama, Mistral, Gemma, Phi).
+
+```env
+LLM_BACKEND=nvidia
+NVIDIA_MODEL=meta/llama-3.3-70b-instruct
+NVIDIA_API_KEY=nvapi-...
+```
+
+Popular models: `meta/llama-3.3-70b-instruct`, `meta/llama-3.1-405b-instruct`, `mistralai/mixtral-8x22b-instruct-v0.1`
+
+---
+
 ## OpenAI-Compatible Endpoints
 
 All providers below use `LLM_BACKEND=openai_compatible`. Set `LLM_BASE_URL` to the

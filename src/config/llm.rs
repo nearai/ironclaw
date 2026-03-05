@@ -26,6 +26,8 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// NVIDIA NIM API
+    Nvidia,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -39,8 +41,9 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "nvidia" | "nvidia_nim" | "nim" => Ok(Self::Nvidia),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil, nvidia",
                 s
             )),
         }
@@ -56,6 +59,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::Nvidia => write!(f, "nvidia"),
         }
     }
 }
@@ -73,6 +77,7 @@ impl LlmBackend {
             Self::Ollama => "OLLAMA_MODEL",
             Self::OpenAiCompatible => "LLM_MODEL",
             Self::Tinfoil => "TINFOIL_MODEL",
+            Self::Nvidia => "NVIDIA_MODEL",
         }
     }
 }
@@ -120,6 +125,13 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Configuration for NVIDIA NIM API.
+#[derive(Debug, Clone)]
+pub struct NvidiaConfig {
+    pub api_key: Option<SecretString>,
+    pub model: String,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -140,6 +152,8 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// NVIDIA NIM config (populated when backend=nvidia)
+    pub nvidia: Option<NvidiaConfig>,
 }
 
 /// NEAR AI configuration.
@@ -350,6 +364,15 @@ impl LlmConfig {
             None
         };
 
+        let nvidia = if backend == LlmBackend::Nvidia {
+            let api_key = optional_env("NVIDIA_API_KEY")?.map(SecretString::from);
+            let model =
+                Self::resolve_model("NVIDIA_MODEL", settings, "meta/llama-3.3-70b-instruct")?;
+            Some(NvidiaConfig { api_key, model })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -358,6 +381,7 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            nvidia,
         })
     }
 }

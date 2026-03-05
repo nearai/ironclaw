@@ -428,6 +428,13 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
+        // NVIDIA NIM API: "nvapi-" followed by 64 chars
+        LeakPattern {
+            name: "nvidia_api_key".to_string(),
+            regex: Regex::new(r"nvapi-[A-Za-z0-9_]{64}\b").unwrap(),
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
         // AWS Access Key ID
         LeakPattern {
             name: "aws_access_key".to_string(),
