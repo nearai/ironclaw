@@ -533,7 +533,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)
 - ✅ Hooks system (core lifecycle hooks + bundled/plugin/workspace hooks + outbound webhooks)
 
-### P2 - Medium Priorit
+### P2 - Medium Priority
 
 - ❌ Media handling (images, PDFs)
 - ✅ Ollama/local model support (via rig::providers::ollama)

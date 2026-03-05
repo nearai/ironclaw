@@ -549,7 +549,9 @@ mod tests {
             model: "test-model".to_string(),
         });
 
-        let session = Arc::new(SessionManager::new(crate::llm::session::SessionConfig::default()));
+        let session = Arc::new(SessionManager::new(
+            crate::llm::session::SessionConfig::default(),
+        ));
         let result = create_llm_provider(&config, session);
         assert!(matches!(result, Err(LlmError::AuthFailed { .. })));
     }
