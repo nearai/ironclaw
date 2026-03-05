@@ -1,5 +1,11 @@
 {
   "model_name": "test-memory-cycle",
+  "expects": {
+    "tools_used": ["memory_write", "memory_tree", "memory_read", "memory_search"],
+    "all_tools_succeeded": true,
+    "tool_results_contain": { "memory_read": "answer is 42" },
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": { "last_user_message_contains": "memory" },

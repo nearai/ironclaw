@@ -13,7 +13,6 @@ mod tests {
 
     use ironclaw::channels::StatusUpdate;
 
-    use crate::support::assertions::assert_all_tools_succeeded;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -29,14 +28,19 @@ mod tests {
         ))
         .expect("failed to load status_events_tool_chain.json");
 
-        let rig = TestRigBuilder::new().with_trace(trace).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
 
         rig.send_message("Run the tool chain").await;
-        let _responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
 
+        // Declarative expects from fixture (tools_used, all_tools_succeeded, min_responses).
+        rig.verify_trace_expects(&trace, &responses);
+
+        // Extra: event ordering checks (not expressible as expects).
         let events = rig.captured_status_events();
-
-        // Extract ToolStarted and ToolCompleted events in order.
         let tool_events: Vec<&StatusUpdate> = events
             .iter()
             .filter(|e| {
@@ -47,7 +51,6 @@ mod tests {
             })
             .collect();
 
-        // We expect at least 3 tool starts and 3 tool completions.
         let starts: Vec<&str> = tool_events
             .iter()
             .filter_map(|e| match e {
@@ -98,23 +101,12 @@ mod tests {
             }
         }
 
-        // All starts should be consumed.
         assert!(
             pending_starts.is_empty(),
             "ToolStarted without matching ToolCompleted: {pending_starts:?}"
         );
 
-        // Verify expected tool names (fixture uses echo calls only).
-        assert!(
-            starts.contains(&"echo"),
-            "Expected echo in tool starts, got: {starts:?}"
-        );
-
-        // Verify all completions were successful.
-        let completed = rig.tool_calls_completed();
-        assert_all_tools_succeeded(&completed);
-
-        // Metrics should reflect 4 LLM calls.
+        // Extra: metrics checks.
         let metrics = rig.collect_metrics().await;
         assert!(
             metrics.llm_calls >= 4,
@@ -145,15 +137,10 @@ mod tests {
 
         let events = rig.captured_status_events();
 
-        // The agent should emit at least one Thinking or Status event
-        // during message processing.
         let has_processing_event = events
             .iter()
             .any(|e| matches!(e, StatusUpdate::Thinking(_) | StatusUpdate::Status(_)));
 
-        // Note: Whether Thinking events are emitted depends on the agent
-        // implementation. This test documents current behavior rather than
-        // asserting a hard requirement.
         if !has_processing_event {
             eprintln!(
                 "[INFO] No Thinking/Status events captured. \

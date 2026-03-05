@@ -1,5 +1,10 @@
 {
   "model_name": "test-list-dir",
+  "expects": {
+    "tools_used": ["list_dir"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": { "last_user_message_contains": "list" },

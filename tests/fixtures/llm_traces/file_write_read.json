@@ -1,5 +1,10 @@
 {
   "model_name": "test-file-tools",
+  "expects": {
+    "tools_used": ["write_file", "read_file"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": {

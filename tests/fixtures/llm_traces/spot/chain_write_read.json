@@ -1,5 +1,12 @@
 {
   "model_name": "spot-chain-write-read",
+  "expects": {
+    "tools_used": ["write_file", "read_file"],
+    "response_contains": ["ironclaw spot check"],
+    "all_tools_succeeded": true,
+    "tool_results_contain": { "read_file": "ironclaw spot check" },
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": {

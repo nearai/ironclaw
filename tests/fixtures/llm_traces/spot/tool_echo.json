@@ -1,5 +1,11 @@
 {
   "model_name": "spot-tool-echo",
+  "expects": {
+    "tools_used": ["echo"],
+    "response_contains": ["Spot check passed"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": {

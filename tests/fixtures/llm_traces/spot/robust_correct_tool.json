@@ -1,5 +1,11 @@
 {
   "model_name": "spot-robust-correct-tool",
+  "expects": {
+    "tools_used": ["echo"],
+    "tools_not_used": ["shell", "time"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": {

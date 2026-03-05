@@ -1,5 +1,11 @@
 {
   "model_name": "spot-tool-json",
+  "expects": {
+    "tools_used": ["json"],
+    "response_contains": ["key", "value"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": {

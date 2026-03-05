@@ -1,5 +1,11 @@
 {
   "model_name": "spot-memory-save-recall",
+  "expects": {
+    "tools_used": ["write_file", "read_file"],
+    "response_contains": ["Bob", "frontend", "April 15"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": {

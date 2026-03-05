@@ -1,5 +1,9 @@
 {
   "model_name": "advanced-steering",
+  "expects": {
+    "tools_used": ["write_file"],
+    "all_tools_succeeded": true
+  },
   "turns": [
     {
       "user_input": "Write hello to /tmp/ironclaw_steer_test.txt",

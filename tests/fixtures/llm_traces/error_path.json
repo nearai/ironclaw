@@ -1,5 +1,9 @@
 {
   "model_name": "test-error-path",
+  "expects": {
+    "tools_used": ["read_file"],
+    "min_responses": 1
+  },
   "steps": [
     {
       "response": {

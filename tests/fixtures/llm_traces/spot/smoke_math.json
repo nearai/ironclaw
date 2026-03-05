@@ -1,5 +1,10 @@
 {
   "model_name": "spot-smoke-math",
+  "expects": {
+    "response_contains": ["1081"],
+    "max_tool_calls": 0,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": {

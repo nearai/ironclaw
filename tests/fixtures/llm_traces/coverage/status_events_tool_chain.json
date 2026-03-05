@@ -1,5 +1,10 @@
 {
   "model_name": "test-status-events",
+  "expects": {
+    "tools_used": ["echo"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "response": {

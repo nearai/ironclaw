@@ -1,5 +1,11 @@
 {
   "model_name": "advanced-workspace-search",
+  "expects": {
+    "tools_used": ["memory_write", "memory_search"],
+    "response_contains": ["march 10", "marcus"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": { "last_user_message_contains": "save" },

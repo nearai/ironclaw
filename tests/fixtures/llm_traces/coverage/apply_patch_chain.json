@@ -1,5 +1,10 @@
 {
   "model_name": "test-apply-patch",
+  "expects": {
+    "tools_used": ["write_file", "apply_patch", "read_file"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": { "last_user_message_contains": "patch" },

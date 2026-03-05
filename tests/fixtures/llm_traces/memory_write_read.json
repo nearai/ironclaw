@@ -1,5 +1,10 @@
 {
   "model_name": "test-memory-flow",
+  "expects": {
+    "tools_used": ["memory_write"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": {

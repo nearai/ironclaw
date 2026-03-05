@@ -1,5 +1,10 @@
 {
   "model_name": "spot-smoke-greeting",
+  "expects": {
+    "response_matches": "(?i)(hello|hi|hey|assistant|agent|help)",
+    "max_tool_calls": 0,
+    "min_responses": 1
+  },
   "steps": [
     {
       "request_hint": {

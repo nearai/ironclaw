@@ -301,6 +301,30 @@ impl TestRig {
         all_responses
     }
 
+    /// Verify top-level `expects` from a trace against already-captured data.
+    ///
+    /// Call this after `send_message()` + `wait_for_responses()` for flat-format
+    /// traces. For multi-turn traces, use `run_and_verify_trace()` instead.
+    pub fn verify_trace_expects(&self, trace: &LlmTrace, responses: &[OutgoingResponse]) {
+        use crate::support::assertions::verify_expects;
+
+        if trace.expects.is_empty() {
+            return;
+        }
+        let response_strings: Vec<String> = responses.iter().map(|r| r.content.clone()).collect();
+        let started = self.tool_calls_started();
+        let completed = self.tool_calls_completed();
+        let results = self.tool_results();
+        verify_expects(
+            &trace.expects,
+            &response_strings,
+            &started,
+            &completed,
+            &results,
+            "top-level",
+        );
+    }
+
     /// Signal the channel to shut down and abort the background agent task.
     pub fn shutdown(mut self) {
         self.channel.signal_shutdown();

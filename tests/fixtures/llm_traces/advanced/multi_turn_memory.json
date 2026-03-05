@@ -1,5 +1,9 @@
 {
   "model_name": "advanced-multi-turn-memory",
+  "expects": {
+    "tools_used": ["memory_write", "memory_search"],
+    "all_tools_succeeded": true
+  },
   "turns": [
     {
       "user_input": "Please remember: Project Zenith deadline is June 1st, 2026. Lead is Dana. Stack is Rust + WASM.",
