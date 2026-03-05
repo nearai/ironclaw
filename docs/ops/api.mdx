@@ -30,6 +30,7 @@ For remote deployments, replace with your reverse proxy domain (e.g., `https://i
 |--------|----------|-------------|
 | `GET` | `/api/status` | Agent status, version, uptime, active job count |
 | `GET` | `/api/health` | Liveness check — returns `200 OK` if the gateway is up |
+| `GET` | `/api/gateway/status` | Gateway connection status and channel details |
 
 ### GET /api/status
 
@@ -55,19 +56,24 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/status | jq 
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/chat` | Submit a message; returns a streaming response or job ID |
-| `GET` | `/api/sessions` | List all conversation sessions |
-| `GET` | `/api/sessions/:id` | Get a session with its message history |
-| `DELETE` | `/api/sessions/:id` | Delete a session and its history |
+| `POST` | `/api/chat/send` | Submit a message; returns a streaming response or job ID |
+| `POST` | `/api/chat/approval` | Approve or deny a pending tool execution |
+| `POST` | `/api/chat/auth-token` | Complete OAuth token flow |
+| `POST` | `/api/chat/auth-cancel` | Cancel pending OAuth flow |
+| `GET` | `/api/chat/events` | SSE stream of chat events (job updates, messages) |
+| `GET` | `/api/chat/ws` | WebSocket endpoint for real-time chat |
+| `GET` | `/api/chat/history` | Get message history for a session |
+| `GET` | `/api/chat/threads` | List all conversation threads |
+| `POST` | `/api/chat/thread/new` | Create a new conversation thread |
 
-### POST /api/chat
+### POST /api/chat/send
 
 ```bash
 curl -s -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message": "Summarize the last 3 jobs", "session_id": "default"}' \
-  http://localhost:3000/api/chat
+  http://localhost:3000/api/chat/send
 ```
 
 **Request body:**
@@ -91,6 +97,39 @@ curl -s -X POST \
 }
 ```
 
+### GET /api/chat/threads
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/chat/threads | jq .
+```
+
+**Response:**
+
+```json
+{
+  "threads": [
+    {
+      "id": "default",
+      "name": "Default",
+      "created_at": "2024-01-15T10:00:00Z",
+      "updated_at": "2024-01-15T12:30:00Z",
+      "message_count": 42
+    }
+  ]
+}
+```
+
+### POST /api/chat/approval
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"job_id": "job_01j9abc123", "approved": true}' \
+  http://localhost:3000/api/chat/approval
+```
+
 ---
 
 ## Jobs
@@ -98,10 +137,14 @@ curl -s -X POST \
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/jobs` | List jobs (supports `?status=`, `?limit=`, `?offset=`) |
-| `POST` | `/api/jobs` | Create a new job directly |
+| `GET` | `/api/jobs/summary` | Get job statistics summary |
 | `GET` | `/api/jobs/:id` | Get job details and current state |
-| `DELETE` | `/api/jobs/:id` | Delete a completed job record |
 | `POST` | `/api/jobs/:id/cancel` | Cancel a running job |
+| `POST` | `/api/jobs/:id/restart` | Restart a completed or failed job |
+| `POST` | `/api/jobs/:id/prompt` | Send a follow-up prompt to a running job |
+| `GET` | `/api/jobs/:id/events` | Get job event history |
+| `GET` | `/api/jobs/:id/files/list` | List files in the job's sandbox |
+| `GET` | `/api/jobs/:id/files/read` | Read a file from the job's sandbox |
 
 ### GET /api/jobs
 
@@ -141,12 +184,77 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 }
 ```
 
+### GET /api/jobs/summary
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/jobs/summary | jq .
+```
+
+**Response:**
+
+```json
+{
+  "total": 47,
+  "by_status": {
+    "pending": 2,
+    "running": 3,
+    "completed": 35,
+    "failed": 5,
+    "cancelled": 2
+  }
+}
+```
+
 ### POST /api/jobs/:id/cancel
 
 ```bash
 curl -s -X POST \
   -H "Authorization: Bearer $TOKEN" \
   http://localhost:3000/api/jobs/job_01j9abc123/cancel
+```
+
+### POST /api/jobs/:id/restart
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/jobs/job_01j9abc123/restart
+```
+
+### POST /api/jobs/:id/prompt
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Also check the tests directory"}' \
+  http://localhost:3000/api/jobs/job_01j9abc123/prompt
+```
+
+### GET /api/jobs/:id/files/list
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/jobs/job_01j9abc123/files/list | jq .
+```
+
+**Response:**
+
+```json
+{
+  "files": [
+    {"path": "/workspace/main.rs", "size": 1234, "is_dir": false},
+    {"path": "/workspace/src", "size": 0, "is_dir": true}
+  ]
+}
+```
+
+### GET /api/jobs/:id/files/read
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3000/api/jobs/job_01j9abc123/files/read?path=/workspace/main.rs" | jq .
 ```
 
 ---
@@ -157,7 +265,10 @@ curl -s -X POST \
 |--------|----------|-------------|
 | `GET` | `/api/memory/search` | Hybrid search (FTS + vector) across workspace memory |
 | `GET` | `/api/memory/tree` | Browse the workspace file tree |
-| `GET` | `/api/memory/:path` | Read a memory document by path |
+| `GET` | `/api/memory/list` | List memory documents with pagination |
+| `GET` | `/api/memory/read` | Read a memory document by path |
+| `POST` | `/api/memory/write` | Write a new memory document |
+| `GET` | `/api/memory/:path` | Read a memory document by path (alternative) |
 | `PUT` | `/api/memory/:path` | Write or update a memory document |
 | `DELETE` | `/api/memory/:path` | Delete a memory document |
 
@@ -176,6 +287,23 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | `limit` | integer | Max results (default: 10) |
 | `semantic` | boolean | Include semantic/vector results (default: true, requires embeddings) |
 
+### GET /api/memory/tree
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3000/api/memory/tree?path=/" | jq .
+```
+
+### POST /api/memory/write
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"path": "context/notes.md", "content": "# Notes\n\nSome notes here."}' \
+  http://localhost:3000/api/memory/write
+```
+
 ### PUT /api/memory/:path
 
 ```bash
@@ -193,11 +321,14 @@ curl -s -X PUT \
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/routines` | List all routines |
+| `GET` | `/api/routines/summary` | Get routine statistics summary |
 | `POST` | `/api/routines` | Create a new routine |
 | `GET` | `/api/routines/:id` | Get a routine by ID |
 | `PUT` | `/api/routines/:id` | Update a routine |
 | `DELETE` | `/api/routines/:id` | Delete a routine |
-| `GET` | `/api/routines/:id/history` | Execution history for a routine |
+| `POST` | `/api/routines/:id/trigger` | Manually trigger a routine |
+| `POST` | `/api/routines/:id/toggle` | Enable or disable a routine |
+| `GET` | `/api/routines/:id/runs` | Get execution history for a routine |
 
 ### POST /api/routines
 
@@ -212,6 +343,24 @@ curl -s -X POST \
     "enabled": true
   }' \
   http://localhost:3000/api/routines
+```
+
+### POST /api/routines/:id/trigger
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/routines/routine_01j9abc123/trigger
+```
+
+### POST /api/routines/:id/toggle
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}' \
+  http://localhost:3000/api/routines/routine_01j9abc123/toggle
 ```
 
 ---
@@ -249,10 +398,26 @@ curl -s -X POST \
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/extensions` | List installed extensions (MCP servers, WASM modules) |
+| `GET` | `/api/extensions/tools` | List tools provided by extensions |
+| `GET` | `/api/extensions/registry` | List available extensions from registry |
 | `POST` | `/api/extensions/install` | Install an extension from URL or registry |
 | `POST` | `/api/extensions/:id/auth` | Configure authentication for an extension |
 | `POST` | `/api/extensions/:id/activate` | Activate an installed extension |
 | `DELETE` | `/api/extensions/:id` | Uninstall an extension |
+
+### GET /api/extensions/registry
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/extensions/registry | jq .
+```
+
+### GET /api/extensions/tools
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/extensions/tools | jq .
+```
 
 ---
 
@@ -294,7 +459,10 @@ Secret values are write-only. The `GET /api/secrets` endpoint returns only secre
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/settings` | Get all user settings as a key-value map |
+| `GET` | `/api/settings/:key` | Get a specific setting |
 | `PUT` | `/api/settings` | Update one or more settings |
+| `GET` | `/api/settings/export` | Export all settings as JSON |
+| `POST` | `/api/settings/import` | Import settings from JSON |
 
 ### PUT /api/settings
 
@@ -306,19 +474,50 @@ curl -s -X PUT \
   http://localhost:3000/api/settings
 ```
 
+### GET /api/settings/export
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/settings/export > settings.json
+```
+
+### POST /api/settings/import
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @settings.json \
+  http://localhost:3000/api/settings/import
+```
+
 ---
 
 ## Logs
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/logs` | SSE stream of live log events (see [WebSocket & SSE](/ops/websocket-sse)) |
+| `GET` | `/api/logs/events` | SSE stream of live log events |
+| `GET` | `/api/logs/level` | Get current log level |
+| `PUT` | `/api/logs/level` | Set log level dynamically |
+
+### GET /api/logs/events
 
 ```bash
 curl -N \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept: text/event-stream" \
-  http://localhost:3000/api/logs
+  http://localhost:3000/api/logs/events
+```
+
+### PUT /api/logs/level
+
+```bash
+curl -s -X PUT \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"level": "debug"}' \
+  http://localhost:3000/api/logs/level
 ```
 
 ---
@@ -329,6 +528,59 @@ curl -N \
 |--------|----------|-------------|
 | `GET` | `/api/channels` | List all configured channels and their enabled status |
 | `GET` | `/api/channels/:id/status` | Connection status for a specific channel |
+
+---
+
+## Pairing
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/pairing/:channel` | List pairing codes for a channel type |
+| `POST` | `/api/pairing/:channel` | Create a new pairing code |
+
+### GET /api/pairing/:channel
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/pairing/telegram | jq .
+```
+
+---
+
+## OAuth
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/oauth/callback` | OAuth callback handler for channel authentication |
+
+---
+
+## OpenAI Compatibility
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/v1/models` | List available models |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions |
+
+### GET /v1/models
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/v1/models | jq .
+```
+
+### POST /v1/chat/completions
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }' \
+  http://localhost:3000/v1/chat/completions
+```
 
 ---
 
@@ -363,10 +615,10 @@ curl -N \
   <Card title="WebSocket & SSE" icon="radio" href="/ops/websocket-sse">
     Real-time streaming for job updates and log tailing
   </Card>
+  <Card title="Orchestrator API" icon="server" href="/ops/orchestrator">
+    Internal worker API for sandbox containers
+  </Card>
   <Card title="Logging" icon="file-text" href="/ops/logging">
     RUST_LOG, journalctl, and cost tracking
-  </Card>
-  <Card title="Configuration" icon="settings" href="/setup/configuration">
-    Full environment variable reference
   </Card>
 </CardGroup>
