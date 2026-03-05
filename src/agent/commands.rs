@@ -43,22 +43,39 @@ fn format_count(n: u64, suffix: &str) -> String {
 }
 
 fn mentor_error_summary(error: &str) -> String {
+    let detail = error.replace('\n', " ");
+    let detail = detail.trim();
+    let detail = if detail.len() > 220 {
+        format!("{}...", &detail[..220])
+    } else {
+        detail.to_string()
+    };
+
     let lower = error.to_lowercase();
     if lower.contains("timeout") || lower.contains("timed out") {
-        "mcp_transport_error: Mentor MCP transport timeout. Text fallback is active.".to_string()
+        format!(
+            "mcp_transport_error: Mentor MCP transport timeout. Text fallback is active. cause={detail}"
+        )
     } else if lower.contains("invalid params") || lower.contains("schema") {
-        "mcp_schema_error: Mentor tool schema error. Check mentor MCP argument contract."
-            .to_string()
+        format!(
+            "mcp_schema_error: Mentor tool schema error. Check mentor MCP argument contract. cause={detail}"
+        )
     } else if lower.contains("transcribe") || lower.contains("whisper") {
-        "stt_backend_error: Voice STT backend error while processing the voice note.".to_string()
+        format!(
+            "stt_backend_error: Voice STT backend error while processing the voice note. cause={detail}"
+        )
     } else if lower.contains("speak")
         || lower.contains("voice")
         || lower.contains("kokoro")
         || lower.contains("csm")
     {
-        "tts_backend_error: Voice TTS backend error. Text fallback is active.".to_string()
+        format!(
+            "tts_backend_error: Voice TTS backend error. Text fallback is active. cause={detail}"
+        )
     } else if lower.contains("telegram") || lower.contains("sendvoice") {
-        "telegram_api_error: Telegram delivery error while sending voice response.".to_string()
+        format!(
+            "telegram_api_error: Telegram delivery error while sending voice response. cause={detail}"
+        )
     } else {
         format!("Mentor error: {}", error)
     }
