@@ -153,4 +153,43 @@ mod trace_format_tests {
         let e = TraceExpects::default();
         assert!(e.is_empty());
     }
+
+    /// Flat steps with UserInput markers are split into multiple turns.
+    #[test]
+    fn recorded_multi_turn_splits_at_user_input() {
+        let json = r#"{
+            "model_name": "test",
+            "steps": [
+                { "response": { "type": "user_input", "content": "hello" } },
+                { "response": { "type": "text", "content": "hi", "input_tokens": 10, "output_tokens": 5 } },
+                { "response": { "type": "user_input", "content": "bye" } },
+                { "response": { "type": "text", "content": "goodbye", "input_tokens": 20, "output_tokens": 5 } }
+            ]
+        }"#;
+        let trace: LlmTrace = serde_json::from_str(json).unwrap();
+        assert_eq!(trace.turns.len(), 2);
+        assert_eq!(trace.turns[0].user_input, "hello");
+        assert_eq!(trace.turns[0].steps.len(), 1);
+        assert_eq!(trace.turns[1].user_input, "bye");
+        assert_eq!(trace.turns[1].steps.len(), 1);
+    }
+
+    /// Steps before the first UserInput get placeholder input.
+    #[test]
+    fn steps_before_first_user_input_get_placeholder() {
+        let json = r#"{
+            "model_name": "test",
+            "steps": [
+                { "response": { "type": "text", "content": "preamble", "input_tokens": 5, "output_tokens": 3 } },
+                { "response": { "type": "user_input", "content": "hello" } },
+                { "response": { "type": "text", "content": "hi", "input_tokens": 10, "output_tokens": 5 } }
+            ]
+        }"#;
+        let trace: LlmTrace = serde_json::from_str(json).unwrap();
+        assert_eq!(trace.turns.len(), 2);
+        assert_eq!(trace.turns[0].user_input, "(test input)");
+        assert_eq!(trace.turns[0].steps.len(), 1);
+        assert_eq!(trace.turns[1].user_input, "hello");
+        assert_eq!(trace.turns[1].steps.len(), 1);
+    }
 }

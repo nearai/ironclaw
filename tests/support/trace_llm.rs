@@ -18,8 +18,15 @@ use ironclaw::llm::{
     ToolCompletionRequest, ToolCompletionResponse,
 };
 
+// Re-export shared types from recording module so existing test code can
+// still import them from here.
+pub use ironclaw::llm::recording::{
+    ExpectedToolResult, HttpExchange, HttpExchangeRequest, HttpExchangeResponse,
+    MemorySnapshotEntry, RequestHint, TraceResponse, TraceStep, TraceToolCall,
+};
+
 // ---------------------------------------------------------------------------
-// Trace types
+// Trace types (test-only wrappers around shared recording types)
 // ---------------------------------------------------------------------------
 
 /// A single turn in a trace: one user message and the LLM response steps that follow.
@@ -36,7 +43,7 @@ pub struct TraceTurn {
 ///
 /// Each turn pairs a user message with the LLM response steps that follow it.
 /// For JSON backward compatibility, traces with a flat top-level `"steps"` array
-/// (no `"turns"`) are deserialized as a single turn with a placeholder user message.
+/// (no `"turns"`) are deserialized into turns by splitting at `UserInput` boundaries.
 ///
 /// Recorded traces (from `RecordingLlm`) may also include `memory_snapshot`,
 /// `http_exchanges`, and `user_input` response steps.
@@ -58,48 +65,6 @@ pub struct LlmTrace {
     #[serde(skip)]
     #[allow(dead_code)]
     pub steps: Vec<TraceStep>,
-}
-
-/// A memory document captured at recording start.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemorySnapshotEntry {
-    pub path: String,
-    pub content: String,
-}
-
-/// A recorded HTTP request/response pair.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpExchange {
-    pub request: HttpExchangeRequest,
-    pub response: HttpExchangeResponse,
-}
-
-/// The request side of an HTTP exchange.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpExchangeRequest {
-    pub method: String,
-    pub url: String,
-    #[serde(default)]
-    pub headers: Vec<(String, String)>,
-    #[serde(default)]
-    pub body: Option<String>,
-}
-
-/// The response side of an HTTP exchange.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpExchangeResponse {
-    pub status: u16,
-    #[serde(default)]
-    pub headers: Vec<(String, String)>,
-    pub body: String,
-}
-
-/// Recorded tool result for regression checking during replay.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExpectedToolResult {
-    pub tool_call_id: String,
-    pub name: String,
-    pub content: String,
 }
 
 /// Declarative expectations for a trace or turn.
@@ -179,17 +144,37 @@ impl<'de> Deserialize<'de> for LlmTrace {
         let turns = if !raw.turns.is_empty() {
             raw.turns
         } else if !raw.steps.is_empty() {
-            // Filter out user_input steps for the turn's playable steps.
-            let playable: Vec<TraceStep> = raw
-                .steps
-                .into_iter()
-                .filter(|s| !matches!(s.response, TraceResponse::UserInput { .. }))
-                .collect();
-            vec![TraceTurn {
-                user_input: "(test input)".to_string(),
-                steps: playable,
-                expects: TraceExpects::default(),
-            }]
+            // Split flat steps at UserInput boundaries into turns.
+            let mut turns = Vec::new();
+            let mut current_input = "(test input)".to_string();
+            let mut current_steps: Vec<TraceStep> = Vec::new();
+
+            for step in raw.steps {
+                if let TraceResponse::UserInput { ref content } = step.response {
+                    // Flush accumulated steps as a turn (if any).
+                    if !current_steps.is_empty() {
+                        turns.push(TraceTurn {
+                            user_input: current_input.clone(),
+                            steps: std::mem::take(&mut current_steps),
+                            expects: TraceExpects::default(),
+                        });
+                    }
+                    current_input = content.clone();
+                } else {
+                    current_steps.push(step);
+                }
+            }
+
+            // Flush remaining steps.
+            if !current_steps.is_empty() {
+                turns.push(TraceTurn {
+                    user_input: current_input,
+                    steps: current_steps,
+                    expects: TraceExpects::default(),
+                });
+            }
+
+            turns
         } else {
             vec![]
         };
@@ -254,60 +239,6 @@ impl LlmTrace {
             .filter(|s| !matches!(s.response, TraceResponse::UserInput { .. }))
             .collect()
     }
-}
-
-/// A single step in a trace, pairing an optional request hint with a response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TraceStep {
-    /// Optional hint for soft-validating the incoming request.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_hint: Option<RequestHint>,
-    /// The canned response to return for this step.
-    pub response: TraceResponse,
-    /// Tool results that appeared since the previous step (for replay verification).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub expected_tool_results: Vec<ExpectedToolResult>,
-}
-
-/// Hints for soft-validating a request against expectations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequestHint {
-    /// If set, the last user message should contain this substring.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_user_message_contains: Option<String>,
-    /// If set, the message list should have at least this many messages.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_message_count: Option<usize>,
-}
-
-/// A canned response -- text, tool calls, or a user_input marker.
-///
-/// `UserInput` steps are metadata markers emitted by `RecordingLlm` to record
-/// what the user said. They do **not** correspond to LLM calls and are filtered
-/// out before replay.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TraceResponse {
-    Text {
-        content: String,
-        input_tokens: u32,
-        output_tokens: u32,
-    },
-    ToolCalls {
-        tool_calls: Vec<TraceToolCall>,
-        input_tokens: u32,
-        output_tokens: u32,
-    },
-    /// Marker for a user message (recording only — skipped during replay).
-    UserInput { content: String },
-}
-
-/// A single tool call in a trace response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TraceToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
