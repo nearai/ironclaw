@@ -7,10 +7,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod advanced {
-    use std::sync::Arc;
     use std::time::Duration;
-
-    use ironclaw::tools::ToolRegistry;
 
     use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
@@ -22,13 +19,6 @@ mod advanced {
     );
     const TIMEOUT: Duration = Duration::from_secs(15);
 
-    fn tools_with_file_support() -> Arc<ToolRegistry> {
-        let registry = Arc::new(ToolRegistry::new());
-        registry.register_builtin_tools();
-        registry.register_dev_tools();
-        registry
-    }
-
     // -----------------------------------------------------------------------
     // 1. Multi-turn memory coherence
     // -----------------------------------------------------------------------
@@ -38,7 +28,6 @@ mod advanced {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/multi_turn_memory.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_workspace(true)
             .build()
             .await;
 
@@ -69,7 +58,6 @@ mod advanced {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/steering.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_tools(tools_with_file_support())
             .build()
             .await;
 
@@ -107,11 +95,7 @@ mod advanced {
         let _ = std::fs::remove_file("/tmp/ironclaw_recovery_test.txt");
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_error_recovery.json")).unwrap();
-        let rig = TestRigBuilder::new()
-            .with_trace(trace)
-            .with_tools(tools_with_file_support())
-            .build()
-            .await;
+        let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         rig.send_message("Write 'recovered successfully' to a file for me.")
             .await;
@@ -154,11 +138,7 @@ mod advanced {
         std::fs::create_dir_all(test_dir).unwrap();
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/long_tool_chain.json")).unwrap();
-        let rig = TestRigBuilder::new()
-            .with_trace(trace)
-            .with_tools(tools_with_file_support())
-            .build()
-            .await;
+        let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         rig.send_message(
             "Create a daily log at /tmp/ironclaw_chain_test/log.md, \
@@ -216,7 +196,6 @@ mod advanced {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/workspace_search.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_workspace(true)
             .build()
             .await;
 

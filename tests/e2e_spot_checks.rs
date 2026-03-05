@@ -9,10 +9,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod spot_tests {
-    use std::sync::Arc;
     use std::time::Duration;
-
-    use ironclaw::tools::ToolRegistry;
 
     use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
@@ -24,14 +21,6 @@ mod spot_tests {
     );
     const TIMEOUT: Duration = Duration::from_secs(15);
 
-    /// Build a ToolRegistry with both builtin and dev (file) tools.
-    fn tools_with_file_support() -> Arc<ToolRegistry> {
-        let registry = Arc::new(ToolRegistry::new());
-        registry.register_builtin_tools();
-        registry.register_dev_tools();
-        registry
-    }
-
     // -----------------------------------------------------------------------
     // Smoke tests -- no tools expected
     // -----------------------------------------------------------------------
@@ -39,7 +28,10 @@ mod spot_tests {
     #[tokio::test]
     async fn spot_smoke_greeting() {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/smoke_greeting.json")).unwrap();
-        let rig = TestRigBuilder::new().with_trace(trace.clone()).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
 
         rig.send_message("Hello! Introduce yourself briefly.").await;
         let responses = rig.wait_for_responses(1, TIMEOUT).await;
@@ -51,7 +43,10 @@ mod spot_tests {
     #[tokio::test]
     async fn spot_smoke_math() {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/smoke_math.json")).unwrap();
-        let rig = TestRigBuilder::new().with_trace(trace.clone()).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
 
         rig.send_message("What is 47 * 23? Reply with just the number.")
             .await;
@@ -68,7 +63,10 @@ mod spot_tests {
     #[tokio::test]
     async fn spot_tool_echo() {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_echo.json")).unwrap();
-        let rig = TestRigBuilder::new().with_trace(trace.clone()).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
 
         rig.send_message("Use the echo tool to repeat the message: 'Spot check passed'")
             .await;
@@ -81,7 +79,10 @@ mod spot_tests {
     #[tokio::test]
     async fn spot_tool_json() {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_json.json")).unwrap();
-        let rig = TestRigBuilder::new().with_trace(trace.clone()).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
 
         rig.send_message("Parse this json for me: {\"key\": \"value\"}")
             .await;
@@ -103,7 +104,6 @@ mod spot_tests {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/chain_write_read.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_tools(tools_with_file_support())
             .build()
             .await;
 
@@ -131,7 +131,10 @@ mod spot_tests {
     #[tokio::test]
     async fn spot_robust_no_tool() {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/robust_no_tool.json")).unwrap();
-        let rig = TestRigBuilder::new().with_trace(trace.clone()).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
 
         rig.send_message("What is the capital of France? Answer directly without using any tools.")
             .await;
@@ -144,7 +147,10 @@ mod spot_tests {
     #[tokio::test]
     async fn spot_robust_correct_tool() {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/robust_correct_tool.json")).unwrap();
-        let rig = TestRigBuilder::new().with_trace(trace.clone()).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .build()
+            .await;
 
         rig.send_message("Please echo the word 'deterministic output'")
             .await;
@@ -166,7 +172,6 @@ mod spot_tests {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/memory_save_recall.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_tools(tools_with_file_support())
             .build()
             .await;
 

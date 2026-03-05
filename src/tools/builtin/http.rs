@@ -348,7 +348,9 @@ impl Tool for HttpTool {
             method: method.to_uppercase(),
             url: parsed_url.to_string(),
             headers: headers_vec.clone(),
-            body: body_bytes.as_ref().map(|b| String::from_utf8_lossy(b).into_owned()),
+            body: body_bytes
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).into_owned()),
         };
 
         // Check HTTP interceptor (replay mode returns pre-recorded response)
@@ -432,17 +434,20 @@ impl Tool for HttpTool {
 
         // Record the HTTP exchange if interceptor is present (recording mode)
         if let Some(ref interceptor) = ctx.http_interceptor {
-            let resp_headers: Vec<(String, String)> = headers.iter()
+            let resp_headers: Vec<(String, String)> = headers
+                .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            interceptor.after_response(
-                &intercept_req,
-                &crate::llm::recording::HttpExchangeResponse {
-                    status,
-                    headers: resp_headers,
-                    body: body_text.clone(),
-                },
-            ).await;
+            interceptor
+                .after_response(
+                    &intercept_req,
+                    &crate::llm::recording::HttpExchangeResponse {
+                        status,
+                        headers: resp_headers,
+                        body: body_text.clone(),
+                    },
+                )
+                .await;
         }
 
         #[cfg(feature = "html-to-markdown")]

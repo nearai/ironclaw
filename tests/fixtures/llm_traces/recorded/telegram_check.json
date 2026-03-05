@@ -2,9 +2,9 @@
   "model_name": "recorded-telegram-check",
   "expects": {
     "response_contains": ["Telegram", "connected"],
-    "tools_used": ["echo"],
+    "tools_used": ["tool_list"],
     "all_tools_succeeded": true,
-    "tool_results_contain": { "echo": "Checking telegram" },
+    "tool_results_contain": { "tool_list": "extensions" },
     "min_responses": 1
   },
   "memory_snapshot": [
@@ -29,9 +29,9 @@
         "tool_calls": [
           {
             "id": "call_606cd198d48546909babbfdc",
-            "name": "echo",
+            "name": "tool_list",
             "arguments": {
-              "message": "Checking telegram connection status..."
+              "include_available": false
             }
           }
         ],
@@ -46,8 +46,8 @@
       "expected_tool_results": [
         {
           "tool_call_id": "call_606cd198d48546909babbfdc",
-          "name": "echo",
-          "content": "Checking telegram connection status..."
+          "name": "tool_list",
+          "content": "extensions"
         }
       ],
       "response": {

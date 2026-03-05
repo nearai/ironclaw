@@ -72,6 +72,9 @@ pub struct AppBuilder {
     db: Option<Arc<dyn Database>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 
+    // Test overrides
+    llm_override: Option<Arc<dyn LlmProvider>>,
+
     // Backend-specific handles needed by secrets store
     #[cfg(feature = "postgres")]
     pg_pool: Option<deadpool_postgres::Pool>,
@@ -100,6 +103,7 @@ impl AppBuilder {
             log_broadcaster,
             db: None,
             secrets_store: None,
+            llm_override: None,
             #[cfg(feature = "postgres")]
             pg_pool: None,
             #[cfg(feature = "libsql")]
@@ -107,11 +111,26 @@ impl AppBuilder {
         }
     }
 
+    /// Inject a pre-created database, skipping `init_database()`.
+    pub fn with_database(&mut self, db: Arc<dyn Database>) {
+        self.db = Some(db);
+    }
+
+    /// Inject a pre-created LLM provider, skipping `init_llm()`.
+    pub fn with_llm(&mut self, llm: Arc<dyn LlmProvider>) {
+        self.llm_override = Some(llm);
+    }
+
     /// Phase 1: Initialize database backend.
     ///
     /// Creates the database connection, runs migrations, reloads config
     /// from DB, attaches DB to session manager, and cleans up stale jobs.
     pub async fn init_database(&mut self) -> Result<(), anyhow::Error> {
+        if self.db.is_some() {
+            tracing::debug!("Database already provided, skipping init_database()");
+            return Ok(());
+        }
+
         if self.flags.no_db {
             tracing::warn!("Running without database connection");
             return Ok(());
@@ -657,7 +676,11 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        let (llm, cheap_llm, recording_handle) = self.init_llm()?;
+        let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
+            (llm, None, None)
+        } else {
+            self.init_llm()?
+        };
         let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.

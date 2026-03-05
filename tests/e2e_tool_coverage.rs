@@ -8,10 +8,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
-
-    use ironclaw::tools::ToolRegistry;
 
     use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
@@ -24,13 +21,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("failed to create test directory");
         dir
-    }
-
-    fn all_tools() -> Arc<ToolRegistry> {
-        let registry = Arc::new(ToolRegistry::new());
-        registry.register_builtin_tools();
-        registry.register_dev_tools();
-        registry
     }
 
     // -----------------------------------------------------------------------
@@ -47,7 +37,6 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_tools(all_tools())
             .build()
             .await;
 
@@ -89,7 +78,6 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_tools(all_tools())
             .build()
             .await;
 
@@ -119,7 +107,6 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_tools(all_tools())
             .build()
             .await;
 
@@ -147,7 +134,6 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_tools(all_tools())
             .build()
             .await;
 
@@ -190,7 +176,6 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_workspace(true)
             .build()
             .await;
 

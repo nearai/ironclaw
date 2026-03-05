@@ -123,12 +123,20 @@ pub fn verify_expects(
     let joined = responses.join("\n");
 
     if !expects.response_contains.is_empty() {
-        let needles: Vec<&str> = expects.response_contains.iter().map(|s| s.as_str()).collect();
+        let needles: Vec<&str> = expects
+            .response_contains
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert_response_contains(&joined, &needles);
     }
 
     if !expects.response_not_contains.is_empty() {
-        let forbidden: Vec<&str> = expects.response_not_contains.iter().map(|s| s.as_str()).collect();
+        let forbidden: Vec<&str> = expects
+            .response_not_contains
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert_response_not_contains(&joined, &forbidden);
     }
 
@@ -160,9 +168,7 @@ pub fn verify_expects(
 
     // tool_results_contain
     for (tool_name, substring) in &expects.tool_results_contain {
-        let found = results
-            .iter()
-            .find(|(name, _)| name == tool_name);
+        let found = results.iter().find(|(name, _)| name == tool_name);
         assert!(
             found.is_some(),
             "[{label}] tool_results_contain: no result for tool \"{tool_name}\", got: {results:?}"

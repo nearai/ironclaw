@@ -120,9 +120,7 @@ pub enum TraceResponse {
     },
     /// Marker for a user message that triggered subsequent LLM calls.
     /// Not an LLM response — replay providers must skip these.
-    UserInput {
-        content: String,
-    },
+    UserInput { content: String },
 }
 
 /// A tool call in a trace step.
@@ -158,17 +156,10 @@ pub trait HttpInterceptor: Send + Sync + std::fmt::Debug {
     ///
     /// Return `Some(response)` to short-circuit (replay mode).
     /// Return `None` to let the real request proceed (recording mode).
-    async fn before_request(
-        &self,
-        request: &HttpExchangeRequest,
-    ) -> Option<HttpExchangeResponse>;
+    async fn before_request(&self, request: &HttpExchangeRequest) -> Option<HttpExchangeResponse>;
 
     /// Called after a real HTTP request completes (recording mode only).
-    async fn after_response(
-        &self,
-        request: &HttpExchangeRequest,
-        response: &HttpExchangeResponse,
-    );
+    async fn after_response(&self, request: &HttpExchangeRequest, response: &HttpExchangeResponse);
 }
 
 /// Records HTTP exchanges during a live session.
@@ -198,19 +189,12 @@ impl RecordingHttpInterceptor {
 
 #[async_trait]
 impl HttpInterceptor for RecordingHttpInterceptor {
-    async fn before_request(
-        &self,
-        _request: &HttpExchangeRequest,
-    ) -> Option<HttpExchangeResponse> {
+    async fn before_request(&self, _request: &HttpExchangeRequest) -> Option<HttpExchangeResponse> {
         // Recording mode: let the real request proceed
         None
     }
 
-    async fn after_response(
-        &self,
-        request: &HttpExchangeRequest,
-        response: &HttpExchangeResponse,
-    ) {
+    async fn after_response(&self, request: &HttpExchangeRequest, response: &HttpExchangeResponse) {
         self.exchanges.lock().await.push(HttpExchange {
             request: request.clone(),
             response: response.clone(),
@@ -237,10 +221,7 @@ impl ReplayingHttpInterceptor {
 
 #[async_trait]
 impl HttpInterceptor for ReplayingHttpInterceptor {
-    async fn before_request(
-        &self,
-        request: &HttpExchangeRequest,
-    ) -> Option<HttpExchangeResponse> {
+    async fn before_request(&self, request: &HttpExchangeRequest) -> Option<HttpExchangeResponse> {
         let mut queue = self.exchanges.lock().await;
         if let Some(exchange) = queue.pop_front() {
             // Soft-check: warn if the request doesn't match
@@ -292,11 +273,7 @@ pub struct RecordingLlm {
 
 impl RecordingLlm {
     /// Wrap a provider for recording.
-    pub fn new(
-        inner: Arc<dyn LlmProvider>,
-        output_path: PathBuf,
-        model_name: String,
-    ) -> Self {
+    pub fn new(inner: Arc<dyn LlmProvider>, output_path: PathBuf, model_name: String) -> Self {
         Self {
             inner,
             steps: Mutex::new(Vec::new()),
@@ -393,8 +370,7 @@ impl RecordingLlm {
             http_exchanges,
             steps: steps.clone(),
         };
-        let json = serde_json::to_string_pretty(&trace)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(&trace).map_err(std::io::Error::other)?;
         tokio::fs::write(&self.output_path, json).await?;
         tracing::info!(
             steps = steps.len(),
@@ -592,10 +568,14 @@ mod tests {
         assert_eq!(steps.len(), 2);
 
         // First step: user_input
-        assert!(matches!(&steps[0].response, TraceResponse::UserInput { content } if content == "Hello!"));
+        assert!(
+            matches!(&steps[0].response, TraceResponse::UserInput { content } if content == "Hello!")
+        );
 
         // Second step: text response
-        assert!(matches!(&steps[1].response, TraceResponse::Text { content, .. } if content == "hello back"));
+        assert!(
+            matches!(&steps[1].response, TraceResponse::Text { content, .. } if content == "hello back")
+        );
     }
 
     #[tokio::test]
@@ -663,7 +643,10 @@ mod tests {
         // Step 1: text response
         // Step 2: text response (no new user_input since no new user messages)
         assert_eq!(steps.len(), 3);
-        assert!(matches!(&steps[0].response, TraceResponse::UserInput { .. }));
+        assert!(matches!(
+            &steps[0].response,
+            TraceResponse::UserInput { .. }
+        ));
         assert!(matches!(&steps[1].response, TraceResponse::Text { .. }));
         assert!(matches!(&steps[2].response, TraceResponse::Text { .. }));
     }
@@ -729,25 +712,32 @@ mod tests {
         let recorder = RecordingLlm::new(stub, path.clone(), "flush-test".to_string());
 
         // Simulate a memory snapshot
-        recorder.memory_snapshot.lock().await.push(MemorySnapshotEntry {
-            path: "context/test.md".to_string(),
-            content: "test content".to_string(),
-        });
+        recorder
+            .memory_snapshot
+            .lock()
+            .await
+            .push(MemorySnapshotEntry {
+                path: "context/test.md".to_string(),
+                content: "test content".to_string(),
+            });
 
         // Simulate an HTTP exchange
-        recorder.http_interceptor.after_response(
-            &HttpExchangeRequest {
-                method: "GET".to_string(),
-                url: "https://api.example.com/data".to_string(),
-                headers: Vec::new(),
-                body: None,
-            },
-            &HttpExchangeResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: r#"{"ok": true}"#.to_string(),
-            },
-        ).await;
+        recorder
+            .http_interceptor
+            .after_response(
+                &HttpExchangeRequest {
+                    method: "GET".to_string(),
+                    url: "https://api.example.com/data".to_string(),
+                    headers: Vec::new(),
+                    body: None,
+                },
+                &HttpExchangeResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: r#"{"ok": true}"#.to_string(),
+                },
+            )
+            .await;
 
         let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
         recorder.complete(request).await.unwrap();
@@ -801,21 +791,19 @@ mod tests {
 
     #[tokio::test]
     async fn replaying_http_interceptor_returns_recorded_responses() {
-        let exchanges = vec![
-            HttpExchange {
-                request: HttpExchangeRequest {
-                    method: "GET".to_string(),
-                    url: "https://api.example.com/data".to_string(),
-                    headers: Vec::new(),
-                    body: None,
-                },
-                response: HttpExchangeResponse {
-                    status: 200,
-                    headers: Vec::new(),
-                    body: r#"{"items": []}"#.to_string(),
-                },
+        let exchanges = vec![HttpExchange {
+            request: HttpExchangeRequest {
+                method: "GET".to_string(),
+                url: "https://api.example.com/data".to_string(),
+                headers: Vec::new(),
+                body: None,
             },
-        ];
+            response: HttpExchangeResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: r#"{"items": []}"#.to_string(),
+            },
+        }];
         let interceptor = ReplayingHttpInterceptor::new(exchanges);
 
         // First request: returns recorded response

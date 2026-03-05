@@ -8,10 +8,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
-
-    use ironclaw::tools::ToolRegistry;
 
     use crate::support::assertions::assert_all_tools_succeeded;
     use crate::support::cleanup::CleanupGuard;
@@ -24,13 +21,6 @@ mod tests {
     fn setup_test_dir() {
         let _ = std::fs::remove_dir_all(TEST_DIR);
         std::fs::create_dir_all(TEST_DIR).expect("failed to create test directory");
-    }
-
-    fn tools_with_file_support() -> Arc<ToolRegistry> {
-        let registry = Arc::new(ToolRegistry::new());
-        registry.register_builtin_tools();
-        registry.register_dev_tools();
-        registry
     }
 
     /// Verify that metrics are collected from a simple text-only trace.
@@ -105,11 +95,7 @@ mod tests {
         ))
         .expect("failed to load file_write_read.json");
 
-        let rig = TestRigBuilder::new()
-            .with_trace(trace)
-            .with_tools(tools_with_file_support())
-            .build()
-            .await;
+        let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         rig.send_message("Please write a greeting to a file and read it back.")
             .await;

@@ -299,9 +299,7 @@ pub enum TraceResponse {
         output_tokens: u32,
     },
     /// Marker for a user message (recording only — skipped during replay).
-    UserInput {
-        content: String,
-    },
+    UserInput { content: String },
 }
 
 /// A single tool call in a trace response.

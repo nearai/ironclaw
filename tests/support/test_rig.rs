@@ -12,16 +12,14 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 
-use ironclaw::agent::cost_guard::{CostGuard, CostGuardConfig};
 use ironclaw::agent::{Agent, AgentDeps};
+use ironclaw::app::{AppBuilder, AppBuilderFlags};
+use ironclaw::channels::web::log_layer::LogBroadcaster;
 use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-use ironclaw::config::{AgentConfig, SafetyConfig, SkillsConfig};
+use ironclaw::config::Config;
 use ironclaw::db::Database;
 use ironclaw::error::ChannelError;
-use ironclaw::hooks::HookRegistry;
-use ironclaw::llm::LlmProvider;
-use ironclaw::safety::SafetyLayer;
-use ironclaw::tools::ToolRegistry;
+use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
 
 use crate::support::instrumented_llm::InstrumentedLlm;
 use crate::support::metrics::{ToolInvocation, TraceMetrics};
@@ -352,9 +350,7 @@ impl Drop for TestRig {
 pub struct TestRigBuilder {
     trace: Option<LlmTrace>,
     llm: Option<Arc<dyn LlmProvider>>,
-    tools: Option<Arc<ToolRegistry>>,
     max_tool_iterations: usize,
-    enable_workspace: bool,
     injection_check: bool,
 }
 
@@ -364,9 +360,7 @@ impl TestRigBuilder {
         Self {
             trace: None,
             llm: None,
-            tools: None,
             max_tool_iterations: 10,
-            enable_workspace: false,
             injection_check: false,
         }
     }
@@ -383,25 +377,9 @@ impl TestRigBuilder {
         self
     }
 
-    /// Override the tool registry.
-    pub fn with_tools(mut self, tools: Arc<ToolRegistry>) -> Self {
-        self.tools = Some(tools);
-        self
-    }
-
     /// Set the maximum number of tool iterations per agentic loop invocation.
     pub fn with_max_tool_iterations(mut self, n: usize) -> Self {
         self.max_tool_iterations = n;
-        self
-    }
-
-    /// Enable workspace and memory tools in the test rig.
-    ///
-    /// When enabled, the rig creates a `Workspace` backed by the same libSQL
-    /// database and registers memory tools (memory_write, memory_read,
-    /// memory_search, memory_tree).
-    pub fn with_workspace(mut self, enable: bool) -> Self {
-        self.enable_workspace = enable;
         self
     }
 
@@ -416,6 +394,9 @@ impl TestRigBuilder {
     }
 
     /// Build the test rig, creating a real agent and spawning it in the background.
+    ///
+    /// Uses `AppBuilder::build_all()` to get the same component set as the real
+    /// binary, with only the LLM swapped for TraceLlm.
     ///
     /// Requires the `libsql` feature for the embedded test database.
     #[cfg(feature = "libsql")]
@@ -433,15 +414,27 @@ impl TestRigBuilder {
             .run_migrations()
             .await
             .expect("failed to run migrations");
-        let db: Arc<dyn Database> = Arc::new(backend);
+        let db: Arc<dyn ironclaw::db::Database> = Arc::new(backend);
 
-        // 2. Create LLM provider and wrap with InstrumentedLlm.
+        // 2. Build Config::for_testing().
+        let skills_dir = temp_dir.path().join("skills");
+        let installed_skills_dir = temp_dir.path().join("installed_skills");
+        let _ = std::fs::create_dir_all(&skills_dir);
+        let _ = std::fs::create_dir_all(&installed_skills_dir);
+        let mut config = Config::for_testing(db_path, skills_dir, installed_skills_dir);
+        config.agent.max_tool_iterations = self.max_tool_iterations;
+        config.safety.injection_check_enabled = self.injection_check;
+
+        // 3. Create SessionManager + LogBroadcaster.
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let log_broadcaster = Arc::new(LogBroadcaster::new());
+
+        // 4. Create TraceLlm + InstrumentedLlm.
         let base_llm: Arc<dyn LlmProvider> = if let Some(llm) = self.llm {
             llm
         } else if let Some(trace) = self.trace {
             Arc::new(TraceLlm::from_trace(trace))
         } else {
-            // Default: single-step text trace.
             let trace = LlmTrace::single_turn(
                 "test-rig-default",
                 "(default)",
@@ -460,99 +453,66 @@ impl TestRigBuilder {
         let instrumented = Arc::new(InstrumentedLlm::new(base_llm));
         let llm: Arc<dyn LlmProvider> = Arc::clone(&instrumented) as Arc<dyn LlmProvider>;
 
-        // 3. Create tool registry and optional workspace.
-        let enable_workspace = self.enable_workspace;
-        let workspace = if enable_workspace {
-            Some(Arc::new(ironclaw::workspace::Workspace::new_with_db(
-                "test-user",
-                Arc::clone(&db),
-            )))
-        } else {
-            None
-        };
+        // 5. Build AppComponents via AppBuilder with injected DB and LLM.
+        let mut builder = AppBuilder::new(
+            config,
+            AppBuilderFlags::default(),
+            None,
+            session,
+            log_broadcaster,
+        );
+        builder.with_database(Arc::clone(&db));
+        builder.with_llm(llm);
+        let components = builder
+            .build_all()
+            .await
+            .expect("AppBuilder::build_all() failed in test rig");
 
-        let tools = self.tools.unwrap_or_else(|| {
-            let t = Arc::new(ToolRegistry::new());
-            t.register_builtin_tools();
-            if let Some(ref ws) = workspace {
-                t.register_memory_tools(Arc::clone(ws));
-            }
-            t
-        });
-
-        // 4. Create SafetyLayer (injection check configurable via builder).
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: self.injection_check,
-        }));
-
-        // 5. Create other deps.
-        let hooks = Arc::new(HookRegistry::new());
-        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig {
-            max_cost_per_day_cents: None,
-            max_actions_per_hour: None,
-        }));
-
+        // 6. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
-            store: Some(Arc::clone(&db)),
-            llm,
-            cheap_llm: None,
-            safety,
-            tools,
-            workspace,
-            extension_manager: None,
-            skill_registry: None,
-            skill_catalog: None,
-            skills_config: SkillsConfig::default(),
-            hooks,
-            cost_guard,
+            store: components.db,
+            llm: components.llm,
+            cheap_llm: components.cheap_llm,
+            safety: components.safety,
+            tools: components.tools,
+            workspace: components.workspace,
+            extension_manager: components.extension_manager,
+            skill_registry: components.skill_registry,
+            skill_catalog: components.skill_catalog,
+            skills_config: components.config.skills.clone(),
+            hooks: components.hooks,
+            cost_guard: components.cost_guard,
             sse_tx: None,
             http_interceptor: None,
         };
 
-        // 6. Create TestChannel (Arc) and TestChannelHandle.
+        // 7. Create TestChannel and ChannelManager.
         let test_channel = Arc::new(TestChannel::new());
         let handle = TestChannelHandle::new(Arc::clone(&test_channel));
-
-        // 7. Create ChannelManager and add the handle.
         let channel_manager = ChannelManager::new();
         channel_manager.add(Box::new(handle)).await;
         let channels = Arc::new(channel_manager);
 
-        // 8. Create test-friendly AgentConfig.
-        let config = AgentConfig {
-            name: "test-rig".to_string(),
-            max_parallel_jobs: 1,
-            job_timeout: Duration::from_secs(30),
-            stuck_threshold: Duration::from_secs(300),
-            repair_check_interval: Duration::from_secs(3600), // Very high -- no repair in tests.
-            max_repair_attempts: 0,
-            use_planning: false,
-            session_idle_timeout: Duration::from_secs(3600),
-            allow_local_tools: true,
-            max_cost_per_day_cents: None,
-            max_actions_per_hour: None,
-            max_tool_iterations: self.max_tool_iterations,
-            auto_approve_tools: true,
-        };
-
-        // 9. Create Agent.
+        // 8. Create Agent.
         let agent = Agent::new(
-            config, deps, channels, None, // heartbeat_config
+            components.config.agent.clone(),
+            deps,
+            channels,
+            None, // heartbeat_config
             None, // hygiene_config
             None, // routine_config
             None, // context_manager
             None, // session_manager
         );
 
-        // 10. Spawn agent in background task.
+        // 9. Spawn agent in background task.
         let agent_handle = tokio::spawn(async move {
             if let Err(e) = agent.run().await {
                 eprintln!("[TestRig] Agent exited with error: {e}");
             }
         });
 
-        // 11. Wait for the agent to call channel.start() (up to 5 seconds).
+        // 10. Wait for the agent to call channel.start() (up to 5 seconds).
         if let Some(rx) = test_channel.take_ready_rx().await {
             let _ = tokio::time::timeout(Duration::from_secs(5), rx).await;
         }

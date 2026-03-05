@@ -77,14 +77,21 @@ mod trace_format_tests {
         assert_eq!(trace.expects.all_tools_succeeded, Some(true));
         assert_eq!(trace.expects.min_responses, Some(1));
         assert_eq!(
-            trace.expects.tool_results_contain.get("echo").map(|s| s.as_str()),
+            trace
+                .expects
+                .tool_results_contain
+                .get("echo")
+                .map(|s| s.as_str()),
             Some("greeting")
         );
 
         // Round-trip: serialize back and deserialize again.
         let serialized = serde_json::to_string(&trace).unwrap();
         let trace2: LlmTrace = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(trace2.expects.response_contains, trace.expects.response_contains);
+        assert_eq!(
+            trace2.expects.response_contains,
+            trace.expects.response_contains
+        );
         assert_eq!(trace2.expects.tools_used, trace.expects.tools_used);
     }
 

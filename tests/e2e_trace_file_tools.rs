@@ -6,10 +6,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
-
-    use ironclaw::tools::ToolRegistry;
 
     use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
@@ -22,13 +19,6 @@ mod tests {
     fn setup_test_dir() {
         let _ = std::fs::remove_dir_all(TEST_DIR);
         std::fs::create_dir_all(TEST_DIR).expect("failed to create test directory");
-    }
-
-    fn tools_with_file_support() -> Arc<ToolRegistry> {
-        let registry = Arc::new(ToolRegistry::new());
-        registry.register_builtin_tools();
-        registry.register_dev_tools();
-        registry
     }
 
     #[tokio::test]
@@ -44,7 +34,6 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_tools(tools_with_file_support())
             .build()
             .await;
 

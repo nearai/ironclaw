@@ -23,7 +23,6 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_workspace(true)
             .build()
             .await;
 
