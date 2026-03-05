@@ -9,10 +9,10 @@ on:
       - "tests/e2e/**"
 
 jobs:
-  e2e:
-    name: Browser E2E
+  # ── Step 1: compile once ──────────────────────────────────────────────────
+  build:
+    name: Build ironclaw (libsql)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -25,8 +25,43 @@ jobs:
             ~/.cargo/registry
           key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build ironclaw (libsql)
+      - name: Build
         run: cargo build --no-default-features --features libsql
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironclaw-e2e-binary
+          path: target/debug/ironclaw
+          retention-days: 1
+
+  # ── Step 2: run test slices in parallel ───────────────────────────────────
+  test:
+    name: E2E (${{ matrix.group }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: core
+            files: "tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py tests/e2e/scenarios/test_sse_reconnect.py tests/e2e/scenarios/test_html_injection.py"
+          - group: features
+            files: "tests/e2e/scenarios/test_skills.py tests/e2e/scenarios/test_tool_approval.py"
+          - group: extensions
+            files: "tests/e2e/scenarios/test_extensions.py"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ironclaw-e2e-binary
+          path: target/debug/
+
+      - name: Make binary executable
+        run: chmod +x target/debug/ironclaw
 
       - uses: actions/setup-python@v5
         with:
@@ -38,13 +73,26 @@ jobs:
           pip install -e .
           playwright install --with-deps chromium
 
-      - name: Run E2E tests
-        run: pytest tests/e2e/ -v -x --timeout=120
+      - name: Run E2E tests (${{ matrix.group }})
+        run: pytest ${{ matrix.files }} -v --timeout=120
 
       - name: Upload screenshots on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-screenshots
+          name: e2e-screenshots-${{ matrix.group }}
           path: tests/e2e/screenshots/
           if-no-files-found: ignore
+
+  # ── Roll-up for branch protection ────────────────────────────────────────
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [test]
+    steps:
+      - run: |
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "One or more E2E jobs failed"
+            exit 1
+          fi
