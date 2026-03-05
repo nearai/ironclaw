@@ -30,3 +30,4 @@ node_modules/
 # docs
 .env.screenshots
 
+.last-run.json
