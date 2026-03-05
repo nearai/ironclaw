@@ -57,6 +57,10 @@ impl MultiAuthState {
     /// TLS are high-entropy random strings where timing attacks are
     /// infeasible, and the prior O(N) iteration leaked more timing
     /// information by short-circuiting on the first match.
+    ///
+    /// For network-exposed deployments, place a reverse proxy (nginx,
+    /// Caddy, etc.) with its own auth layer in front of the gateway
+    /// rather than exposing token auth directly to the internet.
     pub fn authenticate(&self, candidate: &str) -> Option<&UserIdentity> {
         self.tokens.get(candidate)
     }
