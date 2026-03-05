@@ -1,5 +1,4 @@
-> **First-time setup**: Customize this file for your project. Prompt the user to customize this file for their project.
-> For Mintlify product knowledge (components, configuration, writing standards),
+> **Note**: For Mintlify product knowledge (components, configuration, writing standards),
 > install the Mintlify skill: `npx skills add https://mintlify.com/docs`
 
 # Documentation project instructions
@@ -14,12 +13,15 @@
 
 ## Terminology
 
-{/* Add product-specific terms and preferred usage */}
-{/* Example: Use "workspace" not "project", "member" not "user" */}
+- Use "agent" not "bot" for the AI assistant
+- Use "channel" for input methods (TUI, web gateway, webhook)
+- Use "job" for individual tasks the agent executes
+- Use "skill" for SKILL.md prompt extensions
+- Use "routine" for scheduled or reactive tasks
+- Use "workspace" for the persistent memory system
+- Use "sandbox" for Docker container execution environment
 
 ## Style preferences
-
-{/* Add any project-specific style rules below */}
 
 - Use active voice and second person ("you")
 - Keep sentences concise — one idea per sentence
@@ -29,5 +31,6 @@
 
 ## Content boundaries
 
-{/* Define what should and shouldn't be documented */}
-{/* Example: Don't document internal admin features */}
+- Document user-facing features, configuration, and public APIs
+- Don't document internal admin features or implementation details
+- Focus on what users need to know to use IronClaw effectively

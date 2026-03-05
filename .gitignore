@@ -25,3 +25,4 @@ bench-results/
 node_modules/
 .env.screenshots
 
+.last-run.json

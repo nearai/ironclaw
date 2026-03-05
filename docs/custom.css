@@ -1,7 +1,6 @@
-/* Navbar logo sizing */
-#navbar img,
-nav img[alt="IronClaw"],
-header img {
-  height: 36px !important;
-  width: auto !important;
+/* Navbar logo sizing - more specific selector without !important */
+#navbar > a > img,
+nav > a > img[alt="IronClaw"] {
+  height: 36px;
+  width: auto;
 }
