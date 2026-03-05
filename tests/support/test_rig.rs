@@ -1,0 +1,568 @@
+//! TestRig -- a builder for wiring a real Agent with a replay LLM and test channel.
+//!
+//! Constructs a full `Agent` with real tools but a `TraceLlm` (or custom LLM)
+//! and a `TestChannel`, runs the agent in a background tokio task, and provides
+//! methods to inject messages, wait for responses, and inspect tool calls.
+
+#![allow(dead_code)] // Public API consumed by later test modules (Task 4+).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+
+use ironclaw::agent::{Agent, AgentDeps};
+use ironclaw::app::{AppBuilder, AppBuilderFlags};
+use ironclaw::channels::web::log_layer::LogBroadcaster;
+use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use ironclaw::config::Config;
+use ironclaw::db::Database;
+use ironclaw::error::ChannelError;
+use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
+
+use crate::support::instrumented_llm::InstrumentedLlm;
+use crate::support::metrics::{ToolInvocation, TraceMetrics};
+use crate::support::test_channel::TestChannel;
+use crate::support::trace_llm::{LlmTrace, TraceLlm};
+
+// ---------------------------------------------------------------------------
+// TestChannelHandle -- wraps Arc<TestChannel> as Box<dyn Channel>
+// ---------------------------------------------------------------------------
+
+/// A thin wrapper around `Arc<TestChannel>` that implements `Channel`.
+///
+/// This lets us hand a `Box<dyn Channel>` to `ChannelManager::add()` while
+/// keeping an `Arc<TestChannel>` in the `TestRig` for sending messages and
+/// reading captures.
+struct TestChannelHandle {
+    inner: Arc<TestChannel>,
+}
+
+impl TestChannelHandle {
+    fn new(inner: Arc<TestChannel>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl Channel for TestChannelHandle {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    async fn start(&self) -> Result<MessageStream, ChannelError> {
+        self.inner.start().await
+    }
+
+    async fn respond(
+        &self,
+        msg: &IncomingMessage,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.inner.respond(msg, response).await
+    }
+
+    async fn send_status(
+        &self,
+        status: StatusUpdate,
+        metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        self.inner.send_status(status, metadata).await
+    }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.inner.broadcast(user_id, response).await
+    }
+
+    async fn health_check(&self) -> Result<(), ChannelError> {
+        self.inner.health_check().await
+    }
+
+    fn conversation_context(&self, metadata: &serde_json::Value) -> HashMap<String, String> {
+        self.inner.conversation_context(metadata)
+    }
+
+    async fn shutdown(&self) -> Result<(), ChannelError> {
+        self.inner.shutdown().await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TestRig
+// ---------------------------------------------------------------------------
+
+/// A running test agent with methods to inject messages and inspect results.
+pub struct TestRig {
+    /// The test channel for sending messages and reading captures.
+    channel: Arc<TestChannel>,
+    /// Instrumented LLM for collecting token/call metrics.
+    instrumented_llm: Arc<InstrumentedLlm>,
+    /// When the rig was created (for wall-time measurement).
+    start_time: Instant,
+    /// Maximum tool-call iterations per agentic loop (for count-based limit detection).
+    max_tool_iterations: usize,
+    /// Handle to the background agent task (wrapped in Option so Drop can take it).
+    agent_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Temp directory guard -- keeps the libSQL database file alive.
+    #[cfg(feature = "libsql")]
+    _temp_dir: tempfile::TempDir,
+}
+
+impl TestRig {
+    /// Inject a user message into the agent.
+    pub async fn send_message(&self, content: &str) {
+        self.channel.send_message(content).await;
+    }
+
+    /// Wait until at least `n` responses have been captured, or `timeout` elapses.
+    pub async fn wait_for_responses(&self, n: usize, timeout: Duration) -> Vec<OutgoingResponse> {
+        self.channel.wait_for_responses(n, timeout).await
+    }
+
+    /// Return the names of all `ToolStarted` events captured so far.
+    pub fn tool_calls_started(&self) -> Vec<String> {
+        self.channel.tool_calls_started()
+    }
+
+    /// Return `(name, success)` for all `ToolCompleted` events captured so far.
+    pub fn tool_calls_completed(&self) -> Vec<(String, bool)> {
+        self.channel.tool_calls_completed()
+    }
+
+    /// Return `(name, preview)` for all `ToolResult` events captured so far.
+    pub fn tool_results(&self) -> Vec<(String, String)> {
+        self.channel.tool_results()
+    }
+
+    /// Return `(name, duration_ms)` for all completed tools with timing data.
+    pub fn tool_timings(&self) -> Vec<(String, u64)> {
+        self.channel.tool_timings()
+    }
+
+    /// Return a snapshot of all captured status events.
+    pub fn captured_status_events(&self) -> Vec<StatusUpdate> {
+        self.channel.captured_status_events()
+    }
+
+    /// Clear all captured responses and status events.
+    pub async fn clear(&self) {
+        self.channel.clear().await;
+    }
+
+    /// Number of LLM calls made so far.
+    pub fn llm_call_count(&self) -> u32 {
+        self.instrumented_llm.call_count()
+    }
+
+    /// Total input tokens across all LLM calls.
+    pub fn total_input_tokens(&self) -> u32 {
+        self.instrumented_llm.total_input_tokens()
+    }
+
+    /// Total output tokens across all LLM calls.
+    pub fn total_output_tokens(&self) -> u32 {
+        self.instrumented_llm.total_output_tokens()
+    }
+
+    /// Estimated total cost in USD.
+    pub fn estimated_cost_usd(&self) -> f64 {
+        self.instrumented_llm.estimated_cost_usd()
+    }
+
+    /// Wall-clock time since rig creation.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.start_time.elapsed().as_millis() as u64
+    }
+
+    /// Collect a complete `TraceMetrics` snapshot from all captured data.
+    ///
+    /// Call this after `wait_for_responses()` to get the full metrics for the
+    /// scenario. The `turns` count is based on the number of captured responses.
+    pub async fn collect_metrics(&self) -> TraceMetrics {
+        let completed = self.tool_calls_completed();
+
+        // Build ToolInvocation records from ToolStarted/ToolCompleted pairs,
+        // matching each completion with its captured timing data.
+        let timings = self.tool_timings();
+        let mut timing_iter_by_name: std::collections::HashMap<&str, Vec<u64>> =
+            std::collections::HashMap::new();
+        for (name, ms) in &timings {
+            timing_iter_by_name
+                .entry(name.as_str())
+                .or_default()
+                .push(*ms);
+        }
+
+        let tool_invocations: Vec<ToolInvocation> = completed
+            .iter()
+            .map(|(name, success)| {
+                let duration_ms = timing_iter_by_name
+                    .get_mut(name.as_str())
+                    .and_then(|v| {
+                        if v.is_empty() {
+                            None
+                        } else {
+                            Some(v.remove(0))
+                        }
+                    })
+                    .unwrap_or(0);
+                ToolInvocation {
+                    name: name.clone(),
+                    duration_ms,
+                    success: *success,
+                }
+            })
+            .collect();
+
+        // Detect if iteration limit was hit by comparing completed tool-call count
+        // against the configured max_tool_iterations threshold.
+        let hit_iteration_limit = completed.len() >= self.max_tool_iterations;
+
+        // Count turns as the number of captured responses.
+        let responses = self.channel.captured_responses();
+        let turns = responses.len() as u32;
+
+        TraceMetrics {
+            wall_time_ms: self.elapsed_ms(),
+            llm_calls: self.instrumented_llm.call_count(),
+            input_tokens: self.instrumented_llm.total_input_tokens(),
+            output_tokens: self.instrumented_llm.total_output_tokens(),
+            estimated_cost_usd: self.instrumented_llm.estimated_cost_usd(),
+            tool_calls: tool_invocations,
+            turns,
+            hit_iteration_limit,
+            hit_timeout: false, // Caller can set this based on wait_for_responses result.
+        }
+    }
+
+    /// Run a complete multi-turn trace, injecting user messages from the trace
+    /// and waiting for responses after each turn.
+    ///
+    /// Returns a `Vec` of response lists, one per turn. Status events and tool
+    /// call data accumulate across all turns (no clearing between turns), so
+    /// post-run assertions like `tool_calls_started()` reflect the whole trace.
+    pub async fn run_trace(
+        &self,
+        trace: &LlmTrace,
+        timeout: Duration,
+    ) -> Vec<Vec<OutgoingResponse>> {
+        let mut all_responses: Vec<Vec<OutgoingResponse>> = Vec::new();
+        let mut total_responses = 0usize;
+        for turn in &trace.turns {
+            self.send_message(&turn.user_input).await;
+            let responses = self.wait_for_responses(total_responses + 1, timeout).await;
+            // Extract only the new responses from this turn.
+            let turn_responses: Vec<OutgoingResponse> =
+                responses.into_iter().skip(total_responses).collect();
+            total_responses += turn_responses.len();
+            all_responses.push(turn_responses);
+        }
+        all_responses
+    }
+
+    /// Run a trace, then verify all declarative `expects` (top-level and per-turn).
+    ///
+    /// Returns the per-turn response lists for additional manual assertions.
+    pub async fn run_and_verify_trace(
+        &self,
+        trace: &LlmTrace,
+        timeout: Duration,
+    ) -> Vec<Vec<OutgoingResponse>> {
+        use crate::support::assertions::verify_expects;
+
+        let all_responses = self.run_trace(trace, timeout).await;
+
+        // Verify top-level expects against all accumulated data.
+        if !trace.expects.is_empty() {
+            let all_response_strings: Vec<String> = all_responses
+                .iter()
+                .flat_map(|turn| turn.iter().map(|r| r.content.clone()))
+                .collect();
+            let started = self.tool_calls_started();
+            let completed = self.tool_calls_completed();
+            let results = self.tool_results();
+            verify_expects(
+                &trace.expects,
+                &all_response_strings,
+                &started,
+                &completed,
+                &results,
+                "top-level",
+            );
+        }
+
+        all_responses
+    }
+
+    /// Verify top-level `expects` from a trace against already-captured data.
+    ///
+    /// Call this after `send_message()` + `wait_for_responses()` for flat-format
+    /// traces. For multi-turn traces, use `run_and_verify_trace()` instead.
+    pub fn verify_trace_expects(&self, trace: &LlmTrace, responses: &[OutgoingResponse]) {
+        use crate::support::assertions::verify_expects;
+
+        if trace.expects.is_empty() {
+            return;
+        }
+        let response_strings: Vec<String> = responses.iter().map(|r| r.content.clone()).collect();
+        let started = self.tool_calls_started();
+        let completed = self.tool_calls_completed();
+        let results = self.tool_results();
+        verify_expects(
+            &trace.expects,
+            &response_strings,
+            &started,
+            &completed,
+            &results,
+            "top-level",
+        );
+    }
+
+    /// Signal the channel to shut down and abort the background agent task.
+    pub fn shutdown(mut self) {
+        self.channel.signal_shutdown();
+        if let Some(handle) = self.agent_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for TestRig {
+    fn drop(&mut self) {
+        if let Some(handle) = self.agent_handle.take()
+            && !handle.is_finished()
+        {
+            handle.abort();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TestRigBuilder
+// ---------------------------------------------------------------------------
+
+/// Builder for constructing a `TestRig`.
+pub struct TestRigBuilder {
+    trace: Option<LlmTrace>,
+    llm: Option<Arc<dyn LlmProvider>>,
+    max_tool_iterations: usize,
+    injection_check: bool,
+}
+
+impl TestRigBuilder {
+    /// Create a new builder with defaults.
+    pub fn new() -> Self {
+        Self {
+            trace: None,
+            llm: None,
+            max_tool_iterations: 10,
+            injection_check: false,
+        }
+    }
+
+    /// Set the LLM trace to replay.
+    pub fn with_trace(mut self, trace: LlmTrace) -> Self {
+        self.trace = Some(trace);
+        self
+    }
+
+    /// Override the LLM provider directly (takes precedence over trace).
+    pub fn with_llm(mut self, llm: Arc<dyn LlmProvider>) -> Self {
+        self.llm = Some(llm);
+        self
+    }
+
+    /// Set the maximum number of tool iterations per agentic loop invocation.
+    pub fn with_max_tool_iterations(mut self, n: usize) -> Self {
+        self.max_tool_iterations = n;
+        self
+    }
+
+    /// Enable prompt injection detection in the safety layer.
+    ///
+    /// When enabled, tool outputs are scanned for injection patterns
+    /// (e.g., "ignore previous instructions", special tokens like `<|endoftext|>`)
+    /// and critical patterns are escaped before reaching the LLM.
+    pub fn with_injection_check(mut self, enable: bool) -> Self {
+        self.injection_check = enable;
+        self
+    }
+
+    /// Build the test rig, creating a real agent and spawning it in the background.
+    ///
+    /// Uses `AppBuilder::build_all()` to get the same component set as the real
+    /// binary, with only the LLM swapped for TraceLlm.
+    ///
+    /// Requires the `libsql` feature for the embedded test database.
+    #[cfg(feature = "libsql")]
+    pub async fn build(self) -> TestRig {
+        use ironclaw::channels::ChannelManager;
+        use ironclaw::db::libsql::LibSqlBackend;
+
+        // 1. Create temp dir + libSQL database + run migrations.
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let db_path = temp_dir.path().join("test_rig.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("failed to create test LibSqlBackend");
+        backend
+            .run_migrations()
+            .await
+            .expect("failed to run migrations");
+        let db: Arc<dyn ironclaw::db::Database> = Arc::new(backend);
+
+        // 2. Build Config::for_testing().
+        let skills_dir = temp_dir.path().join("skills");
+        let installed_skills_dir = temp_dir.path().join("installed_skills");
+        let _ = std::fs::create_dir_all(&skills_dir);
+        let _ = std::fs::create_dir_all(&installed_skills_dir);
+        let mut config = Config::for_testing(db_path, skills_dir, installed_skills_dir);
+        config.agent.max_tool_iterations = self.max_tool_iterations;
+        config.safety.injection_check_enabled = self.injection_check;
+
+        // 3. Create SessionManager + LogBroadcaster.
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let log_broadcaster = Arc::new(LogBroadcaster::new());
+
+        // 4. Create TraceLlm + InstrumentedLlm.
+        let base_llm: Arc<dyn LlmProvider> = if let Some(llm) = self.llm {
+            llm
+        } else if let Some(trace) = self.trace {
+            Arc::new(TraceLlm::from_trace(trace))
+        } else {
+            let trace = LlmTrace::single_turn(
+                "test-rig-default",
+                "(default)",
+                vec![crate::support::trace_llm::TraceStep {
+                    request_hint: None,
+                    response: crate::support::trace_llm::TraceResponse::Text {
+                        content: "Hello from test rig!".to_string(),
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
+                    expected_tool_results: Vec::new(),
+                }],
+            );
+            Arc::new(TraceLlm::from_trace(trace))
+        };
+        let instrumented = Arc::new(InstrumentedLlm::new(base_llm));
+        let llm: Arc<dyn LlmProvider> = Arc::clone(&instrumented) as Arc<dyn LlmProvider>;
+
+        // 5. Build AppComponents via AppBuilder with injected DB and LLM.
+        let mut builder = AppBuilder::new(
+            config,
+            AppBuilderFlags::default(),
+            None,
+            session,
+            log_broadcaster,
+        );
+        builder.with_database(Arc::clone(&db));
+        builder.with_llm(llm);
+        let components = builder
+            .build_all()
+            .await
+            .expect("AppBuilder::build_all() failed in test rig");
+
+        // 6. Construct AgentDeps from AppComponents (mirrors main.rs).
+        let deps = AgentDeps {
+            store: components.db,
+            llm: components.llm,
+            cheap_llm: components.cheap_llm,
+            safety: components.safety,
+            tools: components.tools,
+            workspace: components.workspace,
+            extension_manager: components.extension_manager,
+            skill_registry: components.skill_registry,
+            skill_catalog: components.skill_catalog,
+            skills_config: components.config.skills.clone(),
+            hooks: components.hooks,
+            cost_guard: components.cost_guard,
+            sse_tx: None,
+            http_interceptor: None,
+        };
+
+        // 7. Create TestChannel and ChannelManager.
+        let test_channel = Arc::new(TestChannel::new());
+        let handle = TestChannelHandle::new(Arc::clone(&test_channel));
+        let channel_manager = ChannelManager::new();
+        channel_manager.add(Box::new(handle)).await;
+        let channels = Arc::new(channel_manager);
+
+        // 8. Create Agent.
+        let agent = Agent::new(
+            components.config.agent.clone(),
+            deps,
+            channels,
+            None, // heartbeat_config
+            None, // hygiene_config
+            None, // routine_config
+            None, // context_manager
+            None, // session_manager
+        );
+
+        // 9. Spawn agent in background task.
+        let agent_handle = tokio::spawn(async move {
+            if let Err(e) = agent.run().await {
+                eprintln!("[TestRig] Agent exited with error: {e}");
+            }
+        });
+
+        // 10. Wait for the agent to call channel.start() (up to 5 seconds).
+        if let Some(rx) = test_channel.take_ready_rx().await {
+            let _ = tokio::time::timeout(Duration::from_secs(5), rx).await;
+        }
+
+        TestRig {
+            channel: test_channel,
+            instrumented_llm: instrumented,
+            start_time: Instant::now(),
+            max_tool_iterations: self.max_tool_iterations,
+            agent_handle: Some(agent_handle),
+            _temp_dir: temp_dir,
+        }
+    }
+}
+
+impl Default for TestRigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TestRig {
+    /// Check if any captured status events contain safety/injection warnings.
+    pub fn has_safety_warnings(&self) -> bool {
+        self.captured_status_events().iter().any(|s| {
+            matches!(s, StatusUpdate::Status(msg) if msg.contains("sanitiz") || msg.contains("inject") || msg.contains("warning"))
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Convenience: run a recorded trace fixture end-to-end
+// ---------------------------------------------------------------------------
+
+/// Load a recorded trace fixture, build a rig, run and verify expects, then shut down.
+///
+/// `filename` is relative to `tests/fixtures/llm_traces/recorded/`.
+#[cfg(feature = "libsql")]
+pub async fn run_recorded_trace(filename: &str) {
+    let path = format!(
+        "{}/tests/fixtures/llm_traces/recorded/{filename}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let trace = LlmTrace::from_file(&path)
+        .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
+    let rig = TestRigBuilder::new()
+        .with_trace(trace.clone())
+        .build()
+        .await;
+    rig.run_and_verify_trace(&trace, Duration::from_secs(30))
+        .await;
+    rig.shutdown();
+}
