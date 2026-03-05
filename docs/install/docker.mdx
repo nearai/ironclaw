@@ -30,7 +30,7 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -p 3000:3000 \
   -p 8080:8080 \
-  ironclaw/ironclaw:latest
+  nearai/ironclaw:latest
 ```
 
 ## Docker Compose
@@ -42,7 +42,7 @@ version: '3.8'
 
 services:
   ironclaw:
-    image: ironclaw/ironclaw:latest
+    image: nearai/ironclaw:latest
     container_name: ironclaw
     restart: unless-stopped
 
@@ -118,7 +118,7 @@ docker run -d \
   -v ~/.ironclaw:/home/ironclaw/.ironclaw \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -p 3000:3000 \
-  ironclaw/ironclaw:latest
+  nearai/ironclaw:latest
 ```
 
 See [Configuration Reference](/setup/configuration) for all options.
@@ -192,7 +192,7 @@ server {
 
 ```bash
 # Pull latest image
-docker pull ironclaw/ironclaw:latest
+docker pull nearai/ironclaw:latest
 
 # Recreate container
 docker stop ironclaw
@@ -202,7 +202,7 @@ docker run -d \
   -v ~/.ironclaw:/home/ironclaw/.ironclaw \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -p 3000:3000 \
-  ironclaw/ironclaw:latest
+  nearai/ironclaw:latest
 
 # Or with docker-compose
 docker-compose pull
