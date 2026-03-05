@@ -1008,7 +1008,11 @@ mod tests {
         assert_eq!(registry.count(), 1);
 
         registry.retain_only(&[]);
-        assert_eq!(registry.count(), 1, "empty retain_only should keep all skills");
+        assert_eq!(
+            registry.count(),
+            1,
+            "empty retain_only should keep all skills"
+        );
     }
 
     #[test]
