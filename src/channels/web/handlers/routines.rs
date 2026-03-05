@@ -475,7 +475,7 @@ pub async fn webhook_trigger_handler(
     );
 
     // We impersonate the routine's owner to ensure it runs with correct permissions
-    let msg = IncomingMessage::new("webhook", &routine.user_id, content).with_thread(thread_id);
+    let msg = IncomingMessage::new("gateway", &routine.user_id, content).with_thread(thread_id);
 
     let tx_guard = state.msg_tx.read().await;
     let tx = tx_guard.as_ref().ok_or((
