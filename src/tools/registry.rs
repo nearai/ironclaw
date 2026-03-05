@@ -181,6 +181,18 @@ impl ToolRegistry {
         self.tools.read().await.keys().cloned().collect()
     }
 
+    /// Retain only tools whose names are in the given allowlist.
+    ///
+    /// If `names` is empty, this is a no-op (all tools are kept).
+    pub async fn retain_only(&self, names: &[&str]) {
+        if names.is_empty() {
+            return;
+        }
+        let names_set: std::collections::HashSet<&str> = names.iter().copied().collect();
+        let mut tools = self.tools.write().await;
+        tools.retain(|k, _| names_set.contains(k.as_str()));
+    }
+
     /// Get the number of registered tools.
     pub fn count(&self) -> usize {
         self.tools.try_read().map(|t| t.len()).unwrap_or(0)
@@ -772,5 +784,28 @@ mod tests {
             .to_string();
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
+    }
+
+    #[tokio::test]
+    async fn test_retain_only_filters_tools() {
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+        let all = registry.list().await;
+        assert!(all.len() > 2, "expected multiple built-in tools");
+        registry.retain_only(&["echo", "time"]).await;
+        let remaining = registry.list().await;
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&"echo".to_string()));
+        assert!(remaining.contains(&"time".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_retain_only_empty_is_noop() {
+        let registry = ToolRegistry::new();
+        registry.register_builtin_tools();
+        let before = registry.list().await.len();
+        registry.retain_only(&[]).await;
+        let after = registry.list().await.len();
+        assert_eq!(before, after);
     }
 }

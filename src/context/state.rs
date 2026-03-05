@@ -9,6 +9,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::llm::recording::HttpInterceptor;
+
 /// State of a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,6 +148,14 @@ pub struct JobContext {
     /// Wrapped in `Arc` for cheap cloning on every tool invocation.
     #[serde(skip)]
     pub extra_env: Arc<HashMap<String, String>>,
+    /// Optional HTTP interceptor for trace recording/replay.
+    ///
+    /// When set, tools that make outgoing HTTP requests should check this
+    /// interceptor before sending real requests. During recording, the
+    /// interceptor captures request/response pairs. During replay, it
+    /// returns pre-recorded responses.
+    #[serde(skip)]
+    pub http_interceptor: Option<Arc<dyn HttpInterceptor>>,
 }
 
 impl JobContext {
@@ -182,6 +192,7 @@ impl JobContext {
             repair_attempts: 0,
             transitions: Vec::new(),
             extra_env: Arc::new(HashMap::new()),
+            http_interceptor: None,
             metadata: serde_json::Value::Null,
         }
     }
