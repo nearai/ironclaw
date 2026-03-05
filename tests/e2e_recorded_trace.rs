@@ -17,18 +17,14 @@ mod recorded_trace_tests {
     }
 
     /// Recorded trace: weather query for San Francisco.
-    /// Hits live wttr.in API — run with `--ignored` to include.
     #[tokio::test]
-    #[ignore]
     async fn recorded_weather_sf() {
         run_recorded_trace("weather_sf.json").await;
     }
 
     /// Recorded trace: baseball stats with large HTTP response exercising
     /// tool_output_stash + source_tool_call_id for untruncated data access.
-    /// Hits live ESPN API — run with `--ignored` to include.
     #[tokio::test]
-    #[ignore]
     async fn recorded_baseball_stats() {
         run_recorded_trace("baseball_stats.json").await;
     }
