@@ -652,6 +652,17 @@ async fn async_main() -> anyhow::Result<()> {
         ext_mgr.set_sse_sender(sender.clone()).await;
     }
 
+    // Snapshot memory for trace recording before the agent starts
+    if let Some(ref recorder) = components.recording_handle
+        && let Some(ref ws) = components.workspace
+    {
+        recorder.snapshot_memory(ws).await;
+    }
+
+    let http_interceptor = components
+        .recording_handle
+        .as_ref()
+        .map(|r| r.http_interceptor());
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -666,6 +677,7 @@ async fn async_main() -> anyhow::Result<()> {
         hooks: components.hooks,
         cost_guard: components.cost_guard,
         sse_tx: sse_sender,
+        http_interceptor,
     };
 
     let agent = Agent::new(
@@ -685,6 +697,13 @@ async fn async_main() -> anyhow::Result<()> {
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+
+    // Flush LLM trace recording if enabled
+    if let Some(ref recorder) = components.recording_handle
+        && let Err(e) = recorder.flush().await
+    {
+        tracing::warn!("Failed to write LLM trace: {}", e);
+    }
 
     if let Some(ref mut server) = webhook_server {
         server.shutdown().await;

@@ -15,7 +15,7 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::{LlmProvider, SessionManager};
+use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
@@ -48,6 +48,7 @@ pub struct AppComponents {
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    pub recording_handle: Option<Arc<RecordingLlm>>,
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
@@ -297,10 +298,17 @@ impl AppBuilder {
     #[allow(clippy::type_complexity)]
     pub fn init_llm(
         &self,
-    ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), anyhow::Error> {
-        let (llm, cheap_llm) =
+    ) -> Result<
+        (
+            Arc<dyn LlmProvider>,
+            Option<Arc<dyn LlmProvider>>,
+            Option<Arc<RecordingLlm>>,
+        ),
+        anyhow::Error,
+    > {
+        let (llm, cheap_llm, recording_handle) =
             crate::llm::build_provider_chain(&self.config.llm, self.session.clone())?;
-        Ok((llm, cheap_llm))
+        Ok((llm, cheap_llm, recording_handle))
     }
 
     /// Phase 4: Initialize safety, tools, embeddings, and workspace.
@@ -649,7 +657,7 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        let (llm, cheap_llm) = self.init_llm()?;
+        let (llm, cheap_llm, recording_handle) = self.init_llm()?;
         let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
@@ -761,6 +769,7 @@ impl AppBuilder {
             skill_registry,
             skill_catalog,
             cost_guard,
+            recording_handle,
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,

@@ -394,6 +394,7 @@ impl TestRigBuilder {
                         input_tokens: 10,
                         output_tokens: 5,
                     },
+                    expected_tool_results: Vec::new(),
                 }],
             );
             Arc::new(TraceLlm::from_trace(trace))
@@ -448,6 +449,7 @@ impl TestRigBuilder {
             hooks,
             cost_guard,
             sse_tx: None,
+            http_interceptor: None,
         };
 
         // 6. Create TestChannel (Arc) and TestChannelHandle.
@@ -546,6 +548,7 @@ mod tests {
                     input_tokens: 50,
                     output_tokens: 15,
                 },
+                expected_tool_results: Vec::new(),
             }],
         );
 

@@ -14,6 +14,7 @@ mod nearai_chat;
 mod provider;
 mod reasoning;
 pub mod response_cache;
+pub mod recording;
 pub mod retry;
 mod rig_adapter;
 pub mod session;
@@ -30,6 +31,7 @@ pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
     TokenUsage, ToolSelection, is_silent_reply,
 };
+pub use recording::RecordingLlm;
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
@@ -314,7 +316,14 @@ pub fn create_cheap_llm_provider(
 pub fn build_provider_chain(
     config: &LlmConfig,
     session: Arc<SessionManager>,
-) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), LlmError> {
+) -> Result<
+    (
+        Arc<dyn LlmProvider>,
+        Option<Arc<dyn LlmProvider>>,
+        Option<Arc<RecordingLlm>>,
+    ),
+    LlmError,
+> {
     let llm = create_llm_provider(config, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
 
@@ -427,13 +436,21 @@ pub fn build_provider_chain(
         llm
     };
 
+    // 6. Recording (trace capture for replay testing)
+    let recording_handle = RecordingLlm::from_env(llm.clone());
+    let llm: Arc<dyn LlmProvider> = if let Some(ref recorder) = recording_handle {
+        Arc::clone(recorder) as Arc<dyn LlmProvider>
+    } else {
+        llm
+    };
+
     // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
     let cheap_llm = create_cheap_llm_provider(config, session)?;
     if let Some(ref cheap) = cheap_llm {
         tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
     }
 
-    Ok((llm, cheap_llm))
+    Ok((llm, cheap_llm, recording_handle))
 }
 
 #[cfg(test)]

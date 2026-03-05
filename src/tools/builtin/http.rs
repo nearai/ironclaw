@@ -245,7 +245,7 @@ impl Tool for HttpTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -311,7 +311,7 @@ impl Tool for HttpTool {
             let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(host);
             for mapping in &matched {
                 match store
-                    .get_decrypted(&_ctx.user_id, &mapping.secret_name)
+                    .get_decrypted(&ctx.user_id, &mapping.secret_name)
                     .await
                 {
                     Ok(secret) => {
@@ -342,6 +342,29 @@ impl Tool for HttpTool {
         detector
             .scan_http_request(parsed_url.as_str(), &headers_vec, body_bytes.as_deref())
             .map_err(|e| ToolError::NotAuthorized(format!("{}", e)))?;
+
+        // Build the interceptor request descriptor for recording/replay
+        let intercept_req = crate::llm::recording::HttpExchangeRequest {
+            method: method.to_uppercase(),
+            url: parsed_url.to_string(),
+            headers: headers_vec.clone(),
+            body: body_bytes.as_ref().map(|b| String::from_utf8_lossy(b).into_owned()),
+        };
+
+        // Check HTTP interceptor (replay mode returns pre-recorded response)
+        if let Some(ref interceptor) = ctx.http_interceptor
+            && let Some(recorded) = interceptor.before_request(&intercept_req).await
+        {
+            let headers: HashMap<String, String> = recorded.headers.iter().cloned().collect();
+            let body: serde_json::Value = serde_json::from_str(&recorded.body)
+                .unwrap_or_else(|_| serde_json::Value::String(recorded.body.clone()));
+            let result = serde_json::json!({
+                "status": recorded.status,
+                "headers": headers,
+                "body": body
+            });
+            return Ok(ToolOutput::success(result, start.elapsed()).with_raw(recorded.body));
+        }
 
         // Execute request
         let response = request.send().await.map_err(|e| {
@@ -406,6 +429,21 @@ impl Tool for HttpTool {
         let body_bytes = bytes::Bytes::from(body);
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
+
+        // Record the HTTP exchange if interceptor is present (recording mode)
+        if let Some(ref interceptor) = ctx.http_interceptor {
+            let resp_headers: Vec<(String, String)> = headers.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            interceptor.after_response(
+                &intercept_req,
+                &crate::llm::recording::HttpExchangeResponse {
+                    status,
+                    headers: resp_headers,
+                    body: body_text.clone(),
+                },
+            ).await;
+        }
 
         #[cfg(feature = "html-to-markdown")]
         let body_text = if is_html_response(&headers) {

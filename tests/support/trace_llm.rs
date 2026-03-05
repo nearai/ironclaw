@@ -34,10 +34,65 @@ pub struct TraceTurn {
 /// Each turn pairs a user message with the LLM response steps that follow it.
 /// For JSON backward compatibility, traces with a flat top-level `"steps"` array
 /// (no `"turns"`) are deserialized as a single turn with a placeholder user message.
+///
+/// Recorded traces (from `RecordingLlm`) may also include `memory_snapshot`,
+/// `http_exchanges`, and `user_input` response steps.
 #[derive(Debug, Clone, Serialize)]
 pub struct LlmTrace {
     pub model_name: String,
     pub turns: Vec<TraceTurn>,
+    /// Workspace memory documents captured before the recording session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_snapshot: Vec<MemorySnapshotEntry>,
+    /// HTTP exchanges recorded during the session, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_exchanges: Vec<HttpExchange>,
+    /// Raw steps before turn conversion (populated only for recorded traces).
+    /// Used by `playable_steps()` for recorded-format inspection.
+    #[serde(skip)]
+    pub steps: Vec<TraceStep>,
+}
+
+/// A memory document captured at recording start.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySnapshotEntry {
+    pub path: String,
+    pub content: String,
+}
+
+/// A recorded HTTP request/response pair.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpExchange {
+    pub request: HttpExchangeRequest,
+    pub response: HttpExchangeResponse,
+}
+
+/// The request side of an HTTP exchange.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpExchangeRequest {
+    pub method: String,
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// The response side of an HTTP exchange.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpExchangeResponse {
+    pub status: u16,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+/// Recorded tool result for regression checking during replay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedToolResult {
+    pub tool_call_id: String,
+    pub name: String,
+    pub content: String,
 }
 
 /// Raw deserialization helper -- accepts either `turns` or flat `steps`.
@@ -48,6 +103,10 @@ struct RawLlmTrace {
     steps: Vec<TraceStep>,
     #[serde(default)]
     turns: Vec<TraceTurn>,
+    #[serde(default)]
+    memory_snapshot: Vec<MemorySnapshotEntry>,
+    #[serde(default)]
+    http_exchanges: Vec<HttpExchange>,
 }
 
 impl<'de> Deserialize<'de> for LlmTrace {
@@ -56,12 +115,20 @@ impl<'de> Deserialize<'de> for LlmTrace {
         D: serde::Deserializer<'de>,
     {
         let raw = RawLlmTrace::deserialize(deserializer)?;
+        // Keep the raw steps for `playable_steps()` inspection.
+        let raw_steps = raw.steps.clone();
         let turns = if !raw.turns.is_empty() {
             raw.turns
         } else if !raw.steps.is_empty() {
+            // Filter out user_input steps for the turn's playable steps.
+            let playable: Vec<TraceStep> = raw
+                .steps
+                .into_iter()
+                .filter(|s| !matches!(s.response, TraceResponse::UserInput { .. }))
+                .collect();
             vec![TraceTurn {
                 user_input: "(test input)".to_string(),
-                steps: raw.steps,
+                steps: playable,
             }]
         } else {
             vec![]
@@ -69,6 +136,9 @@ impl<'de> Deserialize<'de> for LlmTrace {
         Ok(LlmTrace {
             model_name: raw.model_name,
             turns,
+            memory_snapshot: raw.memory_snapshot,
+            http_exchanges: raw.http_exchanges,
+            steps: raw_steps,
         })
     }
 }
@@ -79,6 +149,9 @@ impl LlmTrace {
         Self {
             model_name: model_name.into(),
             turns,
+            memory_snapshot: Vec::new(),
+            http_exchanges: Vec::new(),
+            steps: Vec::new(),
         }
     }
 
@@ -94,6 +167,9 @@ impl LlmTrace {
                 user_input: user_input.into(),
                 steps,
             }],
+            memory_snapshot: Vec::new(),
+            http_exchanges: Vec::new(),
+            steps: Vec::new(),
         }
     }
 
@@ -102,6 +178,16 @@ impl LlmTrace {
         let contents = std::fs::read_to_string(path)?;
         let trace: Self = serde_json::from_str(&contents)?;
         Ok(trace)
+    }
+
+    /// Return only the playable steps from the raw steps (text + tool_calls),
+    /// skipping `user_input` markers. Only meaningful for recorded traces that
+    /// were deserialized from a flat `steps` array.
+    pub fn playable_steps(&self) -> Vec<&TraceStep> {
+        self.steps
+            .iter()
+            .filter(|s| !matches!(s.response, TraceResponse::UserInput { .. }))
+            .collect()
     }
 }
 
@@ -113,6 +199,9 @@ pub struct TraceStep {
     pub request_hint: Option<RequestHint>,
     /// The canned response to return for this step.
     pub response: TraceResponse,
+    /// Tool results that appeared since the previous step (for replay verification).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_tool_results: Vec<ExpectedToolResult>,
 }
 
 /// Hints for soft-validating a request against expectations.
@@ -126,7 +215,11 @@ pub struct RequestHint {
     pub min_message_count: Option<usize>,
 }
 
-/// A canned response -- either plain text or tool calls.
+/// A canned response -- text, tool calls, or a user_input marker.
+///
+/// `UserInput` steps are metadata markers emitted by `RecordingLlm` to record
+/// what the user said. They do **not** correspond to LLM calls and are filtered
+/// out before replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TraceResponse {
@@ -139,6 +232,10 @@ pub enum TraceResponse {
         tool_calls: Vec<TraceToolCall>,
         input_tokens: u32,
         output_tokens: u32,
+    },
+    /// Marker for a user message (recording only — skipped during replay).
+    UserInput {
+        content: String,
     },
 }
 
@@ -292,6 +389,12 @@ impl LlmProvider for TraceLlm {
                          use complete_with_tools() instead"
                     .to_string(),
             }),
+            TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: "TraceLlm::complete() encountered a user_input step; \
+                         these should have been filtered out during construction"
+                    .to_string(),
+            }),
         }
     }
 
@@ -333,6 +436,12 @@ impl LlmProvider for TraceLlm {
                     finish_reason: FinishReason::ToolUse,
                 })
             }
+            TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {
+                provider: self.model_name.clone(),
+                reason: "TraceLlm::complete_with_tools() encountered a user_input step; \
+                         these should have been filtered out during construction"
+                    .to_string(),
+            }),
         }
     }
 }
@@ -353,6 +462,7 @@ mod tests {
                 input_tokens,
                 output_tokens,
             },
+            expected_tool_results: Vec::new(),
         }
     }
 
@@ -364,6 +474,7 @@ mod tests {
                 input_tokens: input,
                 output_tokens: output,
             },
+            expected_tool_results: Vec::new(),
         }
     }
 
@@ -498,6 +609,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+                expected_tool_results: Vec::new(),
             }],
         );
         let llm = TraceLlm::from_trace(trace);
@@ -527,6 +639,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+                expected_tool_results: Vec::new(),
             }],
         );
         let llm = TraceLlm::from_trace(trace);

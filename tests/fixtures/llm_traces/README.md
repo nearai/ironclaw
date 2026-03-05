@@ -2,6 +2,8 @@
 
 Trace fixtures are JSON files that script LLM behavior for deterministic E2E testing. The `TraceLlm` provider (`tests/support/trace_llm.rs`) replays these canned responses in order, allowing tests to exercise the full agent loop -- tool dispatch, safety layer, context accumulation -- without calling a real LLM.
 
+Traces can be **hand-written** or **recorded** from a live session using the `RecordingLlm` wrapper (`src/llm/recording.rs`). Recorded traces include additional fields (memory snapshots, HTTP exchanges, expected tool results) that enable fully deterministic replay.
+
 ## Trace Format
 
 A trace is a model name and a list of **turns**. Each turn pairs a user message with the LLM response steps that follow it.
@@ -61,8 +63,30 @@ For backward compatibility, traces with a top-level `"steps"` array (no `"turns"
 ```json
 {
   "model_name": "descriptive-name",
+  "memory_snapshot": [
+    { "path": "context/vision.md", "content": "..." }
+  ],
+  "http_exchanges": [
+    {
+      "request": { "method": "GET", "url": "https://api.example.com/data", "headers": [], "body": null },
+      "response": { "status": 200, "headers": [], "body": "{\"result\": 42}" }
+    }
+  ],
   "steps": [
-    { "response": { "type": "text", "content": "Hello", "input_tokens": 10, "output_tokens": 5 } }
+    { "response": { "type": "text", "content": "Hello", "input_tokens": 10, "output_tokens": 5 } },
+    {
+      "response": { "type": "user_input", "content": "What time is it?" }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "optional substring",
+        "min_message_count": 1
+      },
+      "expected_tool_results": [
+        { "tool_call_id": "call_time_1", "name": "time", "content": "14:30:00" }
+      ],
+      "response": { "..." }
+    }
   ]
 }
 ```
@@ -71,10 +95,12 @@ For backward compatibility, traces with a top-level `"steps"` array (no `"turns"
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `model_name` | string | yes | Identifier returned by `LlmProvider::model_name()`. Convention: `{category}-{scenario}`. |
+| `model_name` | string | yes | Identifier returned by `LlmProvider::model_name()`. Convention: `{category}-{scenario}` (e.g. `spot-smoke-greeting`, `advanced-tool-error-recovery`). |
 | `turns` | array | yes* | List of turns. Each turn has `user_input` (string) and `steps` (array of response steps). |
+| `memory_snapshot` | array | no | Workspace memory documents captured before the recording session. Replay should restore these before running the trace. Each entry has `path` (string) and `content` (string). |
+| `http_exchanges` | array | no | HTTP request/response pairs recorded during the session, in order. During replay, the `ReplayingHttpInterceptor` returns these instead of making real HTTP requests. |
 
-*Or `steps` for the legacy flat format (deserialized as a single turn).
+*Or `steps` for the legacy flat format (deserialized as a single turn with a placeholder user message). Legacy `steps` are ordered: each `complete()` or `complete_with_tools()` call consumes the next `text`/`tool_calls` step. `user_input` steps are metadata markers and must be skipped during replay. If LLM calls exceed the number of playable steps, `TraceLlm` returns an error.
 
 ### Turn fields
 
@@ -89,6 +115,7 @@ For backward compatibility, traces with a top-level `"steps"` array (no `"turns"
 |-------|------|----------|-------------|
 | `request_hint` | object | no | Soft validation against the incoming request. Mismatches log a warning but do **not** fail the call. |
 | `response` | object | yes | The canned response for this step. |
+| `expected_tool_results` | array | no | Tool results that appeared in the message context since the previous step. During replay, the test harness can compare actual `Role::Tool` messages against these to verify tool output hasn't changed (regression detection). Each entry has `tool_call_id`, `name`, and `content`. |
 
 ### Request hints
 
@@ -163,9 +190,32 @@ Returns a `ToolCompletionResponse` with `FinishReason::ToolUse`. The agent loop 
 | `name` | string | Must match a registered tool name (e.g. `echo`, `write_file`, `read_file`, `memory_write`, `shell`). |
 | `arguments` | object | Tool parameters as JSON. Must conform to the tool's `parameters_schema()`. |
 
+#### `user_input` -- user message marker (recording only)
+
+```json
+{
+  "type": "user_input",
+  "content": "What time is it?"
+}
+```
+
+A metadata marker recording what the user said. This does **not** correspond to an LLM call. During replay, `TraceLlm` must skip `user_input` steps and only consume `text`/`tool_calls` steps. These steps are emitted by `RecordingLlm` when it detects new `Role::User` messages between LLM calls.
+
 ### Token counts
 
-Every response includes `input_tokens` and `output_tokens`. These are synthetic values for cost tracking -- set them to reasonable estimates for your scenario.
+Every `text` and `tool_calls` response includes `input_tokens` and `output_tokens`. These are synthetic values for cost tracking -- set them to reasonable estimates for your scenario. `user_input` steps do not have token counts.
+
+### Expected tool results
+
+When present on a step, `expected_tool_results` lists the tool output that appeared in the message context before this LLM call. Each entry has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tool_call_id` | string | The `id` of the tool call that produced this result. |
+| `name` | string | The tool name. |
+| `content` | string | The full tool result content as it appeared in the message context. |
+
+During replay, after tools execute and before returning the canned LLM response, the test harness should compare actual tool results against these entries. A content mismatch indicates a tool behavior change (regression).
 
 ## What gets mocked vs. what runs for real
 
@@ -173,6 +223,8 @@ Every response includes `input_tokens` and `output_tokens`. These are synthetic 
 |-----------|---------|-------|
 | LLM responses | Yes | `TraceLlm` replays canned responses from the trace |
 | Tool execution | **No** | Real tools run: file I/O, memory ops, shell commands all execute |
+| Outgoing HTTP (from tools) | **Depends** | Mocked when `http_exchanges` present and `ReplayingHttpInterceptor` is wired; real otherwise |
+| Memory/workspace | **Depends** | Pre-seeded from `memory_snapshot` if present; real workspace operations otherwise |
 | Safety layer | **No** | Sanitizer, validator, policy, leak detector all run |
 | Context/message accumulation | **No** | Messages accumulate naturally across turns |
 | Token counting | Partial | Uses synthetic counts from the trace |
@@ -324,3 +376,96 @@ assert!(!all_responses[1].is_empty(), "Turn 2: no response");
 ```
 
 For legacy flat traces or when you need fine-grained control, use `send_message()` + `wait_for_responses()` directly.
+
+## Recording traces from live sessions
+
+Instead of hand-writing traces, you can record them from a real LLM session using the `RecordingLlm` wrapper (`src/llm/recording.rs`). This captures everything needed for deterministic replay: user inputs, LLM responses, memory state, HTTP exchanges, and tool results.
+
+### Environment variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `IRONCLAW_RECORD_TRACE` | yes | — | Set to any non-empty value to enable recording. |
+| `IRONCLAW_TRACE_OUTPUT` | no | `./trace_{timestamp}.json` | Output file path for the recorded trace. |
+| `IRONCLAW_TRACE_MODEL_NAME` | no | `recorded-{model}` | The `model_name` field in the trace JSON. |
+
+### Usage
+
+```bash
+# Record a trace (writes to ./trace_20260304T120000.json)
+IRONCLAW_RECORD_TRACE=1 cargo run
+
+# Custom output path
+IRONCLAW_RECORD_TRACE=1 IRONCLAW_TRACE_OUTPUT=my_trace.json cargo run
+
+# Custom model name
+IRONCLAW_RECORD_TRACE=1 IRONCLAW_TRACE_MODEL_NAME=regression-auth-flow cargo run
+```
+
+Run the agent normally, interact with it, then quit. The trace file is written on shutdown.
+
+### What gets recorded
+
+1. **Memory snapshot** -- all workspace documents are captured before the agent starts, saved in `memory_snapshot`.
+2. **User inputs** -- new `Role::User` messages detected between LLM calls are emitted as `user_input` steps.
+3. **LLM responses** -- every `complete()`/`complete_with_tools()` response is saved as a `text` or `tool_calls` step with `request_hint`.
+4. **Tool results** -- new `Role::Tool` messages between LLM calls are captured in `expected_tool_results` on the next step.
+5. **HTTP exchanges** -- all outgoing HTTP requests from tools are recorded via the `HttpInterceptor` and saved in `http_exchanges`.
+
+### Using a recorded trace for replay
+
+A recorded trace is a superset of the hand-written format. To use it:
+
+1. The replay provider (`TraceLlm`) must skip `user_input` steps -- they are metadata markers, not LLM responses.
+2. If `memory_snapshot` is present, restore workspace documents before running the trace.
+3. If `http_exchanges` is present, wire a `ReplayingHttpInterceptor` into `JobContext.http_interceptor` so tools get pre-recorded HTTP responses instead of making real requests.
+4. If `expected_tool_results` is present on a step, compare actual tool output against recorded values before returning the canned LLM response.
+
+### Example recorded trace
+
+```json
+{
+  "model_name": "recorded-claude-3-5-sonnet",
+  "memory_snapshot": [
+    { "path": "context/vision.md", "content": "# Vision\nBuild a secure AI assistant." }
+  ],
+  "http_exchanges": [
+    {
+      "request": { "method": "GET", "url": "https://api.example.com/time" },
+      "response": { "status": 200, "body": "{\"time\": \"14:30\"}" }
+    }
+  ],
+  "steps": [
+    {
+      "response": { "type": "user_input", "content": "What time is it?" }
+    },
+    {
+      "request_hint": { "last_user_message_contains": "What time is it?", "min_message_count": 2 },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          { "id": "call_http_1", "name": "http", "arguments": { "url": "https://api.example.com/time" } }
+        ],
+        "input_tokens": 60,
+        "output_tokens": 20
+      }
+    },
+    {
+      "request_hint": { "min_message_count": 4 },
+      "expected_tool_results": [
+        { "tool_call_id": "call_http_1", "name": "http", "content": "{\"status\":200,\"body\":{\"time\":\"14:30\"}}" }
+      ],
+      "response": {
+        "type": "text",
+        "content": "The current time is 2:30 PM.",
+        "input_tokens": 80,
+        "output_tokens": 15
+      }
+    }
+  ]
+}
+```
+
+### Backward compatibility
+
+Recorded traces are backward-compatible with hand-written traces. All new fields (`memory_snapshot`, `http_exchanges`, `expected_tool_results`, `user_input` steps) are optional and default to empty. Existing hand-written traces work unchanged.

@@ -733,8 +733,9 @@ impl Agent {
             }
 
             // Execute the approved tool and continue the loop
-            let job_ctx =
+            let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+            job_ctx.http_interceptor = self.deps.http_interceptor.clone();
 
             let _ = self
                 .channels
