@@ -534,7 +534,7 @@ impl Repository {
             Vec::new()
         };
 
-        Ok(reciprocal_rank_fusion(fts_results, vector_results, config))
+        Ok(fuse_results(fts_results, vector_results, config))
     }
 
     /// FTS search across multiple user scopes.
@@ -550,7 +550,8 @@ impl Repository {
         let rows = conn
             .query(
                 r#"
-                SELECT c.id as chunk_id, c.document_id, c.content,
+                SELECT c.id as chunk_id, c.document_id, d.path as document_path,
+                       c.content,
                        ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) as rank
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
@@ -572,6 +573,7 @@ impl Repository {
             .map(|(i, row)| RankedResult {
                 chunk_id: row.get("chunk_id"),
                 document_id: row.get("document_id"),
+                document_path: row.get("document_path"),
                 content: row.get("content"),
                 rank: (i + 1) as u32,
             })
@@ -592,8 +594,8 @@ impl Repository {
         let rows = conn
             .query(
                 r#"
-                SELECT c.id as chunk_id, c.document_id, c.content,
-                       1 - (c.embedding <=> $3) as similarity
+                SELECT c.id as chunk_id, c.document_id, d.path as document_path,
+                       c.content, 1 - (c.embedding <=> $3) as similarity
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
                 WHERE d.user_id = ANY($1::text[]) AND d.agent_id IS NOT DISTINCT FROM $2
@@ -614,6 +616,7 @@ impl Repository {
             .map(|(i, row)| RankedResult {
                 chunk_id: row.get("chunk_id"),
                 document_id: row.get("document_id"),
+                document_path: row.get("document_path"),
                 content: row.get("content"),
                 rank: (i + 1) as u32,
             })

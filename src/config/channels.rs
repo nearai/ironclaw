@@ -350,6 +350,7 @@ mod tests {
             port: 3000,
             auth_token: Some("tok-abc".to_string()),
             user_id: "default".to_string(),
+            workspace_read_scopes: vec![],
             memory_layers: vec![],
         };
         assert_eq!(cfg.host, "127.0.0.1");
@@ -365,6 +366,7 @@ mod tests {
             port: 3001,
             auth_token: None,
             user_id: "anon".to_string(),
+            workspace_read_scopes: vec![],
             memory_layers: vec![],
         };
         assert!(cfg.auth_token.is_none());
