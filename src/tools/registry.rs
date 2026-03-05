@@ -357,6 +357,20 @@ impl ToolRegistry {
         tracing::info!("Registered {} job management tools", job_tool_count);
     }
 
+    /// Register secret management tools (list, delete).
+    ///
+    /// These allow the LLM to persist API keys and tokens encrypted in the database.
+    /// Values are never returned to the LLM; only names and metadata are exposed.
+    pub fn register_secrets_tools(
+        &self,
+        store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) {
+        use crate::tools::builtin::{SecretDeleteTool, SecretListTool};
+        self.register_sync(Arc::new(SecretListTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(SecretDeleteTool::new(store)));
+        tracing::info!("Registered 2 secret management tools (list, delete)");
+    }
+
     /// Register extension management tools (search, install, auth, activate, list, remove).
     ///
     /// These allow the LLM to manage MCP servers and WASM tools through conversation.

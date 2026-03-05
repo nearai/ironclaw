@@ -15,6 +15,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::tools::redact_params;
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
@@ -323,14 +324,25 @@ impl Agent {
                         )
                         .await;
 
-                    // Record tool calls in the thread
+                    // Record tool calls in the thread with sensitive params redacted.
+                    // Look up each tool's sensitive_params before acquiring the session lock.
                     {
+                        let mut redacted_args: Vec<serde_json::Value> =
+                            Vec::with_capacity(tool_calls.len());
+                        for tc in &tool_calls {
+                            let safe = if let Some(tool) = self.tools().get(&tc.name).await {
+                                redact_params(&tc.arguments, tool.sensitive_params())
+                            } else {
+                                tc.arguments.clone()
+                            };
+                            redacted_args.push(safe);
+                        }
                         let mut sess = session.lock().await;
                         if let Some(thread) = sess.threads.get_mut(&thread_id)
                             && let Some(turn) = thread.last_turn_mut()
                         {
-                            for tc in &tool_calls {
-                                turn.record_tool_call(&tc.name, tc.arguments.clone());
+                            for (tc, safe_args) in tool_calls.iter().zip(redacted_args) {
+                                turn.record_tool_call(&tc.name, safe_args);
                             }
                         }
                     }
@@ -359,11 +371,22 @@ impl Agent {
                     for (idx, original_tc) in tool_calls.iter().enumerate() {
                         let mut tc = original_tc.clone();
 
+                        // Fetch the tool upfront so we can redact sensitive params
+                        // before they touch hooks or approval display.
+                        let tool_opt = self.tools().get(&tc.name).await;
+                        let sensitive = tool_opt
+                            .as_ref()
+                            .map(|t| t.sensitive_params())
+                            .unwrap_or(&[]);
+
                         // Hook: BeforeToolCall (runs before approval so hooks can
-                        // modify parameters — approval is checked on final params)
+                        // modify parameters — approval is checked on final params).
+                        // Hooks receive redacted params so sensitive values are not
+                        // exposed to hook handlers or their logs.
+                        let hook_params = redact_params(&tc.arguments, sensitive);
                         let event = crate::hooks::HookEvent::ToolCall {
                             tool_name: tc.name.clone(),
-                            parameters: tc.arguments.clone(),
+                            parameters: hook_params,
                             user_id: message.user_id.clone(),
                             context: "chat".to_string(),
                         };
@@ -390,8 +413,20 @@ impl Agent {
                             }
                             Ok(crate::hooks::HookOutcome::Continue {
                                 modified: Some(new_params),
-                            }) => match serde_json::from_str(&new_params) {
-                                Ok(parsed) => tc.arguments = parsed,
+                            }) => match serde_json::from_str::<serde_json::Value>(&new_params) {
+                                Ok(mut parsed) => {
+                                    // Restore original sensitive param values so a hook
+                                    // cannot overwrite them (they were sent as [REDACTED]).
+                                    if let Some(obj) = parsed.as_object_mut() {
+                                        for key in sensitive {
+                                            if let Some(orig_val) = original_tc.arguments.get(*key)
+                                            {
+                                                obj.insert((*key).to_string(), orig_val.clone());
+                                            }
+                                        }
+                                    }
+                                    tc.arguments = parsed;
+                                }
                                 Err(e) => {
                                     tracing::warn!(
                                         tool = %tc.name,
@@ -406,7 +441,7 @@ impl Agent {
                         // Check if tool requires approval on the final (post-hook)
                         // parameters. Skipped when auto_approve_tools is set.
                         if !self.config.auto_approve_tools
-                            && let Some(tool) = self.tools().get(&tc.name).await
+                            && let Some(tool) = tool_opt
                         {
                             use crate::tools::ApprovalRequirement;
                             let needs_approval = match tool.requires_approval(&tc.arguments) {
@@ -453,14 +488,17 @@ impl Agent {
                                 .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                                 .await;
 
+                            let disp_tool = self.tools().get(&tc.name).await;
                             let _ = self
                                 .channels
                                 .send_status(
                                     &message.channel,
-                                    StatusUpdate::ToolCompleted {
-                                        name: tc.name.clone(),
-                                        success: result.is_ok(),
-                                    },
+                                    StatusUpdate::tool_completed(
+                                        tc.name.clone(),
+                                        &result,
+                                        &tc.arguments,
+                                        disp_tool.as_deref(),
+                                    ),
                                     &message.metadata,
                                 )
                                 .await;
@@ -501,13 +539,16 @@ impl Agent {
                                 )
                                 .await;
 
+                                let par_tool = tools.get(&tc.name).await;
                                 let _ = channels
                                     .send_status(
                                         &channel,
-                                        StatusUpdate::ToolCompleted {
-                                            name: tc.name.clone(),
-                                            success: result.is_ok(),
-                                        },
+                                        StatusUpdate::tool_completed(
+                                            tc.name.clone(),
+                                            &result,
+                                            &tc.arguments,
+                                            par_tool.as_deref(),
+                                        ),
                                         &metadata,
                                     )
                                     .await;
@@ -677,10 +718,15 @@ impl Agent {
 
                     // Handle approval if a tool needed it
                     if let Some((approval_idx, tc, tool)) = approval_needed {
+                        // Show redacted params in the approval UI — the user already knows
+                        // the sensitive value (they provided it); showing it again is
+                        // unnecessary and creates a leakage path through channel logs.
+                        let display_params = redact_params(&tc.arguments, tool.sensitive_params());
                         let pending = PendingApproval {
                             request_id: Uuid::new_v4(),
                             tool_name: tc.name.clone(),
                             parameters: tc.arguments.clone(),
+                            display_parameters: display_params,
                             description: tool.description().to_string(),
                             tool_call_id: tc.id.clone(),
                             context_messages: context_messages.clone(),
@@ -740,9 +786,10 @@ pub(super) async fn execute_chat_tool_standalone(
         .into());
     }
 
+    let safe_params = redact_params(params, tool.sensitive_params());
     tracing::debug!(
         tool = %tool_name,
-        params = %params,
+        params = %safe_params,
         "Tool call started"
     );
 
@@ -1125,6 +1172,7 @@ mod tests {
             request_id: uuid::Uuid::new_v4(),
             tool_name: "shell".to_string(),
             parameters: serde_json::json!({"command": "echo hi"}),
+            display_parameters: serde_json::json!({"command": "echo hi"}),
             description: "Run shell command".to_string(),
             tool_call_id: "call_1".to_string(),
             context_messages: vec![],

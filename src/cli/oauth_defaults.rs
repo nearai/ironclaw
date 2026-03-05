@@ -18,6 +18,7 @@
 //!   env vars, which take priority over built-in defaults.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -25,6 +26,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 
 use crate::secrets::{CreateSecretParams, SecretsStore};
 
@@ -683,6 +685,219 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
     )
 }
 
+// ── Gateway callback support ─────────────────────────────────────────
+
+/// State for an in-progress OAuth flow, keyed by CSRF `state` parameter.
+///
+/// Created by `start_wasm_oauth()` and consumed by the web gateway's
+/// `/oauth/callback` handler when running in hosted mode.
+pub struct PendingOAuthFlow {
+    /// Extension name (e.g., "google_calendar").
+    pub extension_name: String,
+    /// Human-readable display name (e.g., "Google Calendar").
+    pub display_name: String,
+    /// OAuth token exchange URL.
+    pub token_url: String,
+    /// OAuth client ID.
+    pub client_id: String,
+    /// OAuth client secret (optional for PKCE-only flows).
+    pub client_secret: Option<String>,
+    /// The redirect_uri used in the authorization request.
+    pub redirect_uri: String,
+    /// PKCE code verifier (must match the code_challenge sent in the auth URL).
+    pub code_verifier: Option<String>,
+    /// Field name in token response containing the access token.
+    pub access_token_field: String,
+    /// Secret name for storage (e.g., "google_oauth_token").
+    pub secret_name: String,
+    /// Provider hint (e.g., "google").
+    pub provider: Option<String>,
+    /// Token validation endpoint (optional).
+    pub validation_endpoint: Option<crate::tools::wasm::ValidationEndpointSchema>,
+    /// Scopes that were requested.
+    pub scopes: Vec<String>,
+    /// User ID for secret storage.
+    pub user_id: String,
+    /// Secrets store reference for token persistence.
+    pub secrets: Arc<dyn SecretsStore + Send + Sync>,
+    /// SSE broadcast sender for notifying the web UI.
+    pub sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// Gateway auth token for authenticating with the platform token exchange proxy.
+    pub gateway_token: Option<String>,
+    /// When this flow was created (for expiry).
+    pub created_at: std::time::Instant,
+}
+
+impl std::fmt::Debug for PendingOAuthFlow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingOAuthFlow")
+            .field("extension_name", &self.extension_name)
+            .field("display_name", &self.display_name)
+            .field("secret_name", &self.secret_name)
+            .field("created_at", &self.created_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Thread-safe registry of pending OAuth flows, keyed by CSRF `state` parameter.
+pub type PendingOAuthRegistry = Arc<RwLock<HashMap<String, PendingOAuthFlow>>>;
+
+/// Create a new empty pending OAuth flow registry.
+pub fn new_pending_oauth_registry() -> PendingOAuthRegistry {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+/// Returns `true` if OAuth callbacks should be routed through the web gateway
+/// instead of the local TCP listener.
+///
+/// This is the case when `IRONCLAW_OAUTH_CALLBACK_URL` is set to a non-loopback
+/// URL, meaning the user's browser will redirect to a hosted gateway rather than
+/// localhost.
+pub fn use_gateway_callback() -> bool {
+    std::env::var("IRONCLAW_OAUTH_CALLBACK_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|raw| {
+            url::Url::parse(&raw)
+                .ok()
+                .and_then(|u| u.host_str().map(String::from))
+                .map(|host| !is_loopback_host(&host))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Maximum age for pending OAuth flows (5 minutes, matching TCP listener timeout).
+pub const OAUTH_FLOW_EXPIRY: Duration = Duration::from_secs(300);
+
+/// Remove expired flows from the registry.
+///
+/// Called when inserting new flows to prevent accumulation from abandoned
+/// OAuth attempts.
+pub async fn sweep_expired_flows(registry: &PendingOAuthRegistry) {
+    let mut flows = registry.write().await;
+    flows.retain(|_, flow| flow.created_at.elapsed() < OAUTH_FLOW_EXPIRY);
+}
+
+// ── Platform routing helpers ────────────────────────────────────────
+
+/// Prepend instance name to CSRF state for platform routing.
+///
+/// The NEAR AI platform nginx proxy at `auth.DOMAIN` parses the instance name
+/// from the `state` query parameter (format: `instance:nonce`) to route the
+/// OAuth callback to the correct container.
+///
+/// Returns the nonce unchanged when `IRONCLAW_INSTANCE_NAME` is not set
+/// (local/non-platform mode).
+pub fn build_platform_state(nonce: &str) -> String {
+    let instance = std::env::var("IRONCLAW_INSTANCE_NAME")
+        .or_else(|_| std::env::var("OPENCLAW_INSTANCE_NAME"))
+        .ok()
+        .filter(|v| !v.is_empty());
+    match instance {
+        Some(name) => format!("{}:{}", name, nonce),
+        None => nonce.to_string(),
+    }
+}
+
+/// Strip the instance prefix from a state parameter to recover the lookup nonce.
+///
+/// `"myinstance:abc123"` → `"abc123"`, `"abc123"` → `"abc123"` (no prefix).
+///
+/// Safe because nonces are base64url-encoded (`[A-Za-z0-9_-]`, no colons).
+pub fn strip_instance_prefix(state: &str) -> &str {
+    state
+        .split_once(':')
+        .map(|(_, nonce)| nonce)
+        .unwrap_or(state)
+}
+
+/// Exchange an OAuth authorization code via the platform's token exchange proxy.
+///
+/// The proxy holds `client_secret` server-side so the container never sees it.
+/// Authenticated via the gateway auth token (Bearer header).
+///
+/// The proxy expects form params `{code, redirect_uri, code_verifier}` and
+/// returns a standard Google token response `{access_token, refresh_token, expires_in}`.
+pub async fn exchange_via_proxy(
+    proxy_url: &str,
+    gateway_token: &str,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: Option<&str>,
+    access_token_field: &str,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    if gateway_token.is_empty() {
+        return Err(OAuthCallbackError::Io(
+            "Gateway auth token is required for proxy token exchange".to_string(),
+        ));
+    }
+    let exchange_url = format!("{}/oauth/exchange", proxy_url.trim_end_matches('/'));
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
+    let mut params = vec![
+        ("code", code.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+    ];
+    if let Some(verifier) = code_verifier {
+        params.push(("code_verifier", verifier.to_string()));
+    }
+
+    let response = client
+        .post(&exchange_url)
+        .bearer_auth(gateway_token)
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| {
+            OAuthCallbackError::Io(format!("Token exchange proxy request failed: {}", e))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(OAuthCallbackError::Io(format!(
+            "Token exchange proxy failed: {} - {}",
+            status, body
+        )));
+    }
+
+    let token_data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to parse proxy response: {}", e)))?;
+
+    let access_token = token_data
+        .get(access_token_field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            let fields: Vec<&str> = token_data
+                .as_object()
+                .map(|o| o.keys().map(|k| k.as_str()).collect())
+                .unwrap_or_default();
+            OAuthCallbackError::Io(format!(
+                "No '{}' field in proxy response (fields present: {:?})",
+                access_token_field, fields
+            ))
+        })?
+        .to_string();
+
+    let refresh_token = token_data
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
+
+    Ok(OAuthTokenResponse {
+        access_token,
+        refresh_token,
+        expires_in,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -938,5 +1153,162 @@ mod tests {
 
         // State should be different each time (random)
         assert_ne!(result1.state, result2.state);
+    }
+
+    #[test]
+    fn test_use_gateway_callback_false_by_default() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+        assert!(!crate::cli::oauth_defaults::use_gateway_callback());
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
+    }
+
+    #[test]
+    fn test_use_gateway_callback_true_for_hosted() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://kind-deer.agent1.near.ai",
+            );
+        }
+        assert!(crate::cli::oauth_defaults::use_gateway_callback());
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn test_use_gateway_callback_false_for_localhost() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", "http://127.0.0.1:3001");
+        }
+        assert!(!crate::cli::oauth_defaults::use_gateway_callback());
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn test_use_gateway_callback_false_for_empty() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", "");
+        }
+        assert!(!crate::cli::oauth_defaults::use_gateway_callback());
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_platform_state_with_instance() {
+        use crate::cli::oauth_defaults::build_platform_state;
+
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("IRONCLAW_INSTANCE_NAME", "kind-deer");
+        }
+        assert_eq!(build_platform_state("abc123"), "kind-deer:abc123");
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_INSTANCE_NAME", val);
+            } else {
+                std::env::remove_var("IRONCLAW_INSTANCE_NAME");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_platform_state_without_instance() {
+        use crate::cli::oauth_defaults::build_platform_state;
+
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
+        let original_oc = std::env::var("OPENCLAW_INSTANCE_NAME").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_INSTANCE_NAME");
+            std::env::remove_var("OPENCLAW_INSTANCE_NAME");
+        }
+        assert_eq!(build_platform_state("abc123"), "abc123");
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_INSTANCE_NAME", val);
+            }
+            if let Some(val) = original_oc {
+                std::env::set_var("OPENCLAW_INSTANCE_NAME", val);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_platform_state_with_openclaw_instance() {
+        use crate::cli::oauth_defaults::build_platform_state;
+
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original_ic = std::env::var("IRONCLAW_INSTANCE_NAME").ok();
+        let original_oc = std::env::var("OPENCLAW_INSTANCE_NAME").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_INSTANCE_NAME");
+            std::env::set_var("OPENCLAW_INSTANCE_NAME", "quiet-lion");
+        }
+        assert_eq!(build_platform_state("xyz789"), "quiet-lion:xyz789");
+        unsafe {
+            if let Some(val) = original_ic {
+                std::env::set_var("IRONCLAW_INSTANCE_NAME", val);
+            }
+            if let Some(val) = original_oc {
+                std::env::set_var("OPENCLAW_INSTANCE_NAME", val);
+            } else {
+                std::env::remove_var("OPENCLAW_INSTANCE_NAME");
+            }
+        }
+    }
+
+    #[test]
+    fn test_strip_instance_prefix_with_colon() {
+        use crate::cli::oauth_defaults::strip_instance_prefix;
+
+        assert_eq!(strip_instance_prefix("kind-deer:abc123"), "abc123");
+        assert_eq!(strip_instance_prefix("my-instance:xyz"), "xyz");
+    }
+
+    #[test]
+    fn test_strip_instance_prefix_without_colon() {
+        use crate::cli::oauth_defaults::strip_instance_prefix;
+
+        assert_eq!(strip_instance_prefix("abc123"), "abc123");
+        assert_eq!(strip_instance_prefix(""), "");
     }
 }

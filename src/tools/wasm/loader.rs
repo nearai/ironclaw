@@ -126,6 +126,7 @@ impl WasmToolLoader {
                 let cap_bytes = fs::read(cap_path).await?;
                 let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
                     .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
+                cap_file.validate(name);
                 let caps = cap_file.to_capabilities();
                 let oauth = resolve_oauth_refresh_config(&cap_file);
                 (caps, oauth)

@@ -218,7 +218,7 @@ impl Tool for ToolAuthTool {
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
         // Auto-activate after successful auth so tools are available immediately
-        if result.status == "authenticated" {
+        if result.is_authenticated() {
             match self.manager.activate(name).await {
                 Ok(activate_result) => {
                     let output = serde_json::json!({
@@ -324,7 +324,7 @@ impl Tool for ToolActivateTool {
                 // Activation failed due to missing auth; initiate auth flow
                 // so the agent loop can show the auth card.
                 match self.manager.auth(name, None).await {
-                    Ok(auth_result) if auth_result.status == "authenticated" => {
+                    Ok(auth_result) if auth_result.is_authenticated() => {
                         // Auth succeeded (e.g. env var was set); retry activation.
                         let result = self
                             .manager
