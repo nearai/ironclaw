@@ -3,9 +3,9 @@
 > **AI Agent Use**: Optimized for code review, bug triage, and targeted fixes.
 > Jump directly to the section relevant to the error or task — no narrative reading required.
 
-> Version baseline: IronClaw v0.14.0 (`v0.14.0` tag snapshot)
+> Version baseline: IronClaw v0.15.0 (`v0.15.0` tag snapshot)
 
-**Source**: IronClaw v0.14.0 (`v0.14.0`) · `~/src/ironclaw/`
+**Source**: IronClaw v0.15.0 (`v0.15.0`) · `~/src/ironclaw/`
 
 ---
 
@@ -120,7 +120,7 @@
 | Orchestrator internal API | `src/orchestrator/api.rs` |
 | Per-job bearer token store | `src/orchestrator/auth.rs` |
 | Entry point, CLI arg parsing | `src/main.rs` |
-| `ironclaw --version` (print version and exit, e.g., "ironclaw 0.13.0") | `src/main.rs` |
+| `ironclaw --version` (print version and exit, e.g., "ironclaw 0.15.0") | `src/main.rs` |
 | Library root, module declarations | `src/lib.rs` |
 
 ---
@@ -403,11 +403,11 @@ Enablement is currently by setting `SIGNAL_HTTP_URL` (plus `SIGNAL_ACCOUNT`); th
 |---------|------|---------|----------|-------|
 | `SIGNAL_HTTP_URL` | URL | — | Yes (if enabled) | signal-cli HTTP daemon endpoint |
 | `SIGNAL_ACCOUNT` | string | — | Yes (if enabled) | Registered Signal phone number |
-| `SIGNAL_ALLOW_FROM` | string list | — | No | Comma-separated allowed sender numbers |
+| `SIGNAL_ALLOW_FROM` | string list | `SIGNAL_ACCOUNT` | No | Comma-separated allowed sender numbers; defaults to the configured bot account |
 | `SIGNAL_ALLOW_FROM_GROUPS` | string list | empty | No | Optional explicit group allowlist |
 | `SIGNAL_DM_POLICY` | enum | `pairing` | No | `open\|allowlist\|pairing` |
 | `SIGNAL_GROUP_POLICY` | enum | `allowlist` | No | `disabled\|allowlist\|open` |
-| `SIGNAL_GROUP_ALLOW_FROM` | string list | inherited from `SIGNAL_ALLOW_FROM_GROUPS` | No | Optional explicit group allowlist |
+| `SIGNAL_GROUP_ALLOW_FROM` | string list | inherited from `SIGNAL_ALLOW_FROM` | No | Optional explicit sender allowlist for group messages |
 | `SIGNAL_IGNORE_ATTACHMENTS` | bool | `false` | No | Skip attachment-only Signal messages |
 | `SIGNAL_IGNORE_STORIES` | bool | `true` | No | Skip story messages |
 
@@ -592,7 +592,7 @@ Add your own notes below the comment block. The agent will refine and append as 
 | `HTTP_HOST` | string | `0.0.0.0` | No | HTTP webhook bind host |
 | `HTTP_PORT` | u16 | `8080` | No | HTTP webhook port |
 | `HTTP_USER_ID` | string | `http` | No | Default user id for webhook messages |
-| `HTTP_WEBHOOK_SECRET` | string | none | Yes (when HTTP is enabled) | Required to start webhook channel |
+| `HTTP_WEBHOOK_SECRET` | string | none | No | Optional shared secret; if set, incoming webhook requests must include it |
 | `TELEGRAM_OWNER_ID` | i64 | unset | No | Telegram owner id for channel owner checks |
 
 ---
@@ -601,7 +601,7 @@ Add your own notes below the comment block. The agent will refine and append as 
 
 | Backend | `LLM_BACKEND` value | Required Env Vars | API Protocol | Tool Call Format |
 |---------|---------------------|-------------------|--------------|------------------|
-| NEAR AI | `nearai` (default) | `NEARAI_SESSION_TOKEN` **or** `NEARAI_API_KEY` | Chat Completions | Text-flattened |
+| NEAR AI | `nearai` (default) | none (OAuth/session by default; optional `NEARAI_SESSION_TOKEN` or `NEARAI_API_KEY`) | Chat Completions | Text-flattened |
 | OpenAI | `openai` | `OPENAI_API_KEY` | Chat Completions | Native |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Messages API | Native |
 | Ollama | `ollama` | `OLLAMA_BASE_URL` | Chat Completions | Native |
@@ -805,7 +805,7 @@ impl Tool for MyTool {
 | `tool_search`, `tool_install`, `tool_auth`, `tool_activate`, `tool_list`, `tool_remove` | `builtin/extension_tools.rs` | Extensions |
 | `skill_list`, `skill_search`, `skill_install`, `skill_remove` | `builtin/skill_tools.rs` | Skills |
 | `build_software` | `builder/core.rs` | Builder |
-| `html_to_markdown` | `builtin/html_converter.rs` | Utility |
+| `html_to_markdown` helper | `builtin/html_converter.rs` | Internal helper (used by `web_fetch`/`http` markdown conversion path) |
 
 ### 8.3 Protected Tool Names
 
@@ -817,7 +817,7 @@ The protected list is defined in `src/tools/registry.rs` (`PROTECTED_TOOL_NAMES`
 Tools are registered in three startup phases.
 
 - **Phase 1: App init (`AppBuilder::build_all`)**
-  - `register_builtin_tools()` registers orchestrator-safe built-ins (`echo`, `time`, `json`, `http`).
+  - `register_builtin_tools()` registers orchestrator-safe built-ins (`echo`, `time`, `json`, `http`, `web_fetch`).
   - `register_memory_tools()` adds memory tools when workspace is available.
   - `register_builder_tool()` registers container dev tools (`shell`, `read_file`, `write_file`, `list_dir`, `apply_patch`) and `build_software`.
   - `init_extensions()` creates WASM runtime and loads:
@@ -935,7 +935,7 @@ The following slash commands can be sent in any channel (REPL, web gateway, Tele
 | `/thread new`, `/new` | Create a new conversation thread |
 | `/thread <uuid>` | Switch to an existing thread by UUID |
 | `/resume <uuid>` | Resume from a specific checkpoint by UUID |
-| `/cancel <job_id>` | Cancel a specific running job by ID or ID prefix |
+| `/cancel <job_id>` | Cancel a specific running job by full UUID |
 
 **System commands:**
 
@@ -974,7 +974,7 @@ Source: `src/skills/`
 
 | Trust Level | Source Directory | Tool Access |
 |-------------|-----------------|-------------|
-| `Trusted` | `~/.ironclaw/skills/` or `<workspace>/skills/` | All tools (shell, file write, HTTP, etc.) |
+| `Trusted` | `~/.ironclaw/skills/` | All tools (shell, file write, HTTP, etc.) |
 | `Installed` | `~/.ironclaw/installed_skills/` (from ClawHub) | Read-only tools only |
 
 **Selection pipeline** (per-request):
@@ -1370,4 +1370,4 @@ sqlite3 ~/.ironclaw/ironclaw.db "SELECT id, status, created_at FROM agent_jobs O
 
 ---
 
-*Source: IronClaw v0.14.0 (`v0.14.0`) · Docs: github.com/nearai/ironclaw-docs · Generated: 2026-03-05*
+*Source: IronClaw v0.15.0 (`v0.15.0`) · Docs: github.com/nearai/ironclaw-docs · Generated: 2026-03-05*

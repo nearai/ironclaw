@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Configuration System
 
-> Updated: 2026-03-05 | Version: v0.14.0
+> Updated: 2026-03-05 | Version: v0.15.0
 
 ## 1. Overview
 
@@ -133,7 +133,7 @@ default is possible.
 | `WASM_CHANNELS_DIR` | path | `~/.ironclaw/channels/` | No | Directory containing WASM channel modules (Telegram, Slack, etc.) |
 | `WASM_CHANNELS_ENABLED` | bool | `true` | No | Enable WASM channel modules |
 | `TELEGRAM_OWNER_ID` | i64 | — | No | Telegram user ID. When set, bot only responds to this user |
-| `WASM_CHANNEL_OWNER_IDS` | string | — | No | Per-WASM-channel owner user IDs; format: comma-separated `channel_name:user_id` pairs. Controls which user can trigger each channel. Example: `WASM_CHANNEL_OWNER_IDS=telegram:123456,slack:789012`. Added v0.14.0. |
+| `WASM_CHANNEL_OWNER_IDS` | setting key (not env var) | — | No | Per-WASM-channel owner user IDs live in `config.toml` / settings (`channels.wasm_channel_owner_ids` map). Environment fallback exists only for `TELEGRAM_OWNER_ID` (backward compatibility). |
 | **Channels: Signal** | | | | |
 | `SIGNAL_HTTP_URL` | string | — | If Signal enabled | Base URL of signal-cli HTTP daemon (e.g. `http://127.0.0.1:8080`). Setting this and `SIGNAL_ACCOUNT` enables the Signal channel |
 | `SIGNAL_ACCOUNT` | string | — | If Signal enabled | Bot's E.164 phone number (e.g. `+1234567890`) |
@@ -179,10 +179,11 @@ default is possible.
 | `WASM_DEFAULT_FUEL_LIMIT` | u64 | `10000000` | No | Default fuel (CPU instruction budget) per WASM call |
 | `WASM_CACHE_COMPILED` | bool | `true` | No | Cache compiled WASM modules to disk |
 | `WASM_CACHE_DIR` | path | — | No | Directory for compiled module cache. Defaults to a system temp path |
-| `IRONCLAW_OAUTH_CALLBACK_URL` | string | `http://127.0.0.1:9876/oauth/callback` | No | Override OAuth callback URL for remote server deployments. Set this when users access the gateway from a different machine than where ironclaw runs. |
+| `IRONCLAW_OAUTH_CALLBACK_URL` | string | `http://127.0.0.1:9876/oauth/callback` | No | Override OAuth callback URL for remote server deployments. Set this when users access the gateway from a different machine than where ironclaw runs. In v0.15.0 hosted deployments, set to the gateway's public `/oauth/callback` URL so providers redirect through the web gateway instead of a local listener (#555). |
 | `OAUTH_CALLBACK_HOST` | string | `127.0.0.1` | No | Network interface for the OAuth callback listener. Set to `0.0.0.0` for LAN access or SSH port forwarding scenarios. |
+| `IRONCLAW_OAUTH_EXCHANGE_URL` | string | — | No | When set, enables a server-side token exchange proxy. OAuth authorization codes are POSTed to this URL instead of being exchanged directly by the client; used in hosted environments where client credentials must remain server-side (#555). |
 
-### OAuth for WASM Tools (v0.14.0)
+### OAuth for WASM Tools (v0.14.0+)
 
 WASM tools can declare OAuth 2.0 flows in their `capabilities.json`. No new env vars are required — OAuth is configured per-tool via:
 - `setup_secrets`: client_id and client_secret pairs collected from the user via the web UI
@@ -446,9 +447,9 @@ pub struct SignalConfig {
 - `open`: all DMs accepted, ignoring `SIGNAL_ALLOW_FROM`
 
 **Group Policy (`SIGNAL_GROUP_POLICY`):**
-- `allowlist` (default): only groups in `SIGNAL_ALLOW_FROM_GROUPS` accepted
+- `allowlist` (default): only groups in `SIGNAL_ALLOW_FROM_GROUPS` accepted, and senders must pass `SIGNAL_GROUP_ALLOW_FROM` (or inherited `SIGNAL_ALLOW_FROM`)
 - `disabled`: all group messages ignored
-- `open`: all groups accepted (respects `SIGNAL_ALLOW_FROM_GROUPS` if set)
+- `open`: sender allowlist checks are skipped, but group IDs are still filtered by `SIGNAL_ALLOW_FROM_GROUPS` (`*` allows all groups)
 
 #### Example Configuration
 

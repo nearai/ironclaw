@@ -1,9 +1,9 @@
 # IronClaw Documentation
 
-> Comprehensive developer reference for [IronClaw](https://github.com/nearai/ironclaw) v0.14.0
+> Comprehensive developer reference for [IronClaw](https://github.com/nearai/ironclaw) v0.15.0
 > — a secure, self-hosted personal AI assistant written in Rust.
 
-**Documentation set for IronClaw v0.14.0, validated against release tag `v0.14.0` (2026-03-04).**
+**Documentation set for IronClaw v0.15.0, validated against release tag `v0.15.0` (2026-03-05).**
 
 ---
 
@@ -44,12 +44,12 @@ IronClaw is a Rust-based personal AI assistant built by [NEAR AI](https://near.a
 - **Multiple LLM backends**: NEAR AI, Anthropic, OpenAI, Ollama, OpenAI-compatible, Tinfoil
 - **Dual database**: libSQL (embedded, no server required) or PostgreSQL (with pgvector)
 
-### Source Module Statistics (v0.14.0)
+### Source Module Statistics (v0.15.0)
 
 | Module | Files | Description |
 |--------|------:|-------------|
-| `tools/` | 41 | Tool system: built-in, MCP, WASM, dynamic builder, rate limiter, HTML-to-Markdown |
-| `channels/` | 34 | Channels: REPL, web gateway, HTTP, native Signal, WASM plugins (with pairing + hot-activate) |
+| `tools/` | 46 | Tool system: built-in, MCP, WASM, dynamic builder, rate limiter, HTML-to-Markdown |
+| `channels/` | 36 | Channels: REPL, web gateway, HTTP, native Signal, WASM plugins (with pairing + hot-activate) |
 | `agent/` | 21 | Agent runtime: loop, sessions, jobs, routines, heartbeat, context compaction |
 | `config/` | 17 | Configuration: all env vars and structs |
 | `workspace/` | 7 | Memory, embeddings, hybrid FTS+vector search |
@@ -57,8 +57,8 @@ IronClaw is a Rust-based personal AI assistant built by [NEAR AI](https://near.a
 | `tunnel/` | 6 | Tunnels: cloudflare, ngrok, tailscale, custom |
 | `secrets/` | 5 | Keychain, AES-256-GCM crypto, credential injection |
 | `worker/` | 5 | Docker worker: runtime, LLM bridge, proxy |
-| **Total (`src/`)** | **250** | ~113,000+ Rust source lines in `src/` (v0.14.0 tag snapshot) |
-| **Total (repo-wide)** | **293** | ~129,000+ Rust source lines including tests, channel/tool source trees, and helper binaries |
+| **Total (`src/`)** | **258** | Rust source files in `src/` (`v0.15.0` tag snapshot) |
+| **Total (repo-wide)** | **305** | Rust source files repo-wide (excluding `target/`) |
 
 ---
 
@@ -113,14 +113,40 @@ See [INSTALLATION.md](INSTALLATION.md) for complete setup and deployment, [LLM_P
 
 ## What's New
 
+### v0.15.0 (2026-03-05)
+
+#### Added
+
+- *(oauth)* route callbacks through web gateway for hosted instances ([#555](https://github.com/nearai/ironclaw/pull/555))
+- *(web)* show error details for failed tool calls ([#490](https://github.com/nearai/ironclaw/pull/490))
+- *(extensions)* improve auth UX and add load-time validation ([#536](https://github.com/nearai/ironclaw/pull/536))
+- add local-test skill and Dockerfile.test for web gateway testing ([#524](https://github.com/nearai/ironclaw/pull/524))
+
+#### Fixed
+
+- *(security)* restrict query-token auth to SSE endpoints only ([#528](https://github.com/nearai/ironclaw/pull/528))
+- *(ci)* flush profraw coverage data in E2E teardown ([#550](https://github.com/nearai/ironclaw/pull/550))
+- *(wasm)* coerce string parameters to schema-declared types ([#498](https://github.com/nearai/ironclaw/pull/498))
+- *(agent)* strip leaked [Called tool ...] text from responses ([#497](https://github.com/nearai/ironclaw/pull/497))
+- *(web)* reset job list UI on restart failure ([#499](https://github.com/nearai/ironclaw/pull/499))
+- *(security)* replace .unwrap() panics in pairing store with proper error handling ([#515](https://github.com/nearai/ironclaw/pull/515))
+
+#### Other
+
+- Fix UTF-8 unsafe truncation in sandbox log capture ([#359](https://github.com/nearai/ironclaw/pull/359))
+- enhance coverage with feature matrix, postgres, and E2E ([#523](https://github.com/nearai/ironclaw/pull/523))
+
 ### v0.14.0 (2026-03-04)
 
 #### Added
 
-- remove the Okta WASM tool ([#506](https://github.com/nearai/ironclaw/pull/506))
 - add OAuth support for WASM tools in web gateway ([#489](https://github.com/nearai/ironclaw/pull/489))
 - *(web)* jobs UI parity for non-sandbox mode ([#491](https://github.com/nearai/ironclaw/pull/491))
 - *(workspace)* add TOOLS.md, BOOTSTRAP.md, and disk-to-DB import ([#477](https://github.com/nearai/ironclaw/pull/477))
+
+#### Removed
+
+- Okta WASM tool ([#506](https://github.com/nearai/ironclaw/pull/506))
 
 #### Fixed
 
@@ -135,6 +161,7 @@ See [INSTALLATION.md](INSTALLATION.md) for complete setup and deployment, [LLM_P
 
 #### Other
 
+- enforce regression tests for fix commits ([#517](https://github.com/nearai/ironclaw/pull/517))
 - Remove restart infrastructure, generalize WASM channel setup ([#493](https://github.com/nearai/ironclaw/pull/493))
 - add code coverage with cargo-llvm-cov and Codecov ([#511](https://github.com/nearai/ironclaw/pull/511))
 
@@ -234,8 +261,8 @@ See [INSTALLATION.md](INSTALLATION.md) for complete setup and deployment, [LLM_P
 
 ## Version
 
-Documented: IronClaw v0.14.0
-Release tag: [`v0.14.0`](https://github.com/nearai/ironclaw/releases/tag/v0.14.0) (2026-03-04)
+Documented: IronClaw v0.15.0
+Release tag: [v0.15.0](https://github.com/nearai/ironclaw/releases/tag/v0.15.0) (2026-03-05)
 Source: [github.com/nearai/ironclaw](https://github.com/nearai/ironclaw)
 Docs repo: [github.com/mudrii/ironclaw-docs](https://github.com/mudrii/ironclaw-docs)
 Generated: 2026-03-05

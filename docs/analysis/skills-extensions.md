@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Skills, Extensions & Hooks
 
-> Updated: 2026-02-26 | Version: v0.14.0
+> Updated: 2026-03-05 | Version: v0.15.0
 
 ## 1. Overview
 
@@ -191,6 +191,25 @@ The slug is URL-encoded to prevent query string injection via characters like `&
 
 **Error handling**: All network errors return an empty result vector. Catalog search is best-effort and never blocks the agent.
 
+### 2.5a Bundled Skills (v0.15.0)
+
+IronClaw ships with the following skill(s) bundled in the repository under `skills/`:
+
+#### `local-test` (v0.1.0, #524)
+
+A developer skill for building and testing IronClaw using Docker containers and browser automation.
+
+| Attribute | Value |
+|---|---|
+| Name | `local-test` |
+| Version | `0.1.0` |
+| `max_context_tokens` | 3 000 |
+| Trigger keywords | `"test locally"`, `"local test"`, `"docker test"`, `"test my changes"`, `"test in docker"`, `"test web gateway"`, `"spin up test"`, `"test container"` |
+
+**What it does**: Guides the agent to build IronClaw with `Dockerfile.test` (a two-stage Cargo build, `libsql` backend only, port 3003) and run automated end-to-end tests via Chrome MCP browser automation. Intended for contributors who want to verify web gateway behavior locally without a full install.
+
+The test container starts on port **3003** to avoid collisions with a production instance on the default port.
+
 ### 2.6 Skill Gating (`gating.rs`)
 
 Source: `src/skills/gating.rs`
@@ -333,6 +352,21 @@ All operations flow through `ExtensionManager` (`src/extensions/manager.rs`):
 
 - MCP server: connects client, calls `list_tools`, registers `McpTool` wrappers in `ToolRegistry`
 - WASM tool: loads `.wasm` + `.capabilities.json` via `WasmToolLoader`, registers in `ToolRegistry`; also reads `hooks` section from capabilities file and registers hook bundle
+
+**Load-time validation (v0.15.0, `capabilities_schema.rs:validate()`, #536):**
+
+When a WASM tool's `capabilities.json` is loaded, three warning categories are checked:
+
+1. `setup.required_secrets` defined but no `auth` section present — warns that required secrets will be collected but there is no auth flow to use them
+2. Setup prompt shorter than 30 characters (`MIN_PROMPT_LENGTH`) — warns that the prompt is too brief for users to understand what to provide
+3. Manual auth (no OAuth configured) missing `setup_url` or `instructions` — warns that users will have no guidance on how to obtain the required token
+
+Warnings are logged at `warn!` level and do not block activation.
+
+**Auth UX improvements (v0.15.0, `manager.rs`, #536):**
+
+- **Telegram token pre-validation**: When setup secrets are saved for a Telegram-based tool, the bot token is validated against `https://api.telegram.org/bot{token}/getMe` before it is stored. A non-2xx response causes the setup to fail immediately rather than surfacing an error at runtime.
+- **OAuth token deletion on reconfigure**: When a tool with an OAuth flow successfully saves new setup secrets, any existing OAuth tokens (`access_token`, `scopes`, `refresh_token`) are deleted from the secrets store. This forces a fresh OAuth flow on the next auth call, preventing users from remaining authenticated with a stale account after reconfiguring credentials.
 
 **Remove**:
 
@@ -568,6 +602,20 @@ Fallback path: if OAuth is not supported, prompt the user for a manual API token
 4. Validate WASM magic bytes (`\0asm`)
 5. Write to `~/.ironclaw/tools/<name>.wasm`
 6. Optionally download `<name>.capabilities.json` sidecar
+
+### 5.3a WASM Parameter Type Coercion (v0.15.0, `wrapper.rs:1102-1150`, #498)
+
+LLMs frequently pass numeric values as JSON strings (e.g. `"5"` instead of `5`). To prevent WASM tools from receiving wrongly-typed parameters, `coerce_params_to_schema()` is called on every WASM tool invocation before the parameters are passed to the runtime.
+
+**Coercion rules** (applied only to parameters that arrive as JSON strings):
+
+| Schema-declared type | Coercion | Example |
+|---|---|---|
+| `"number"` | Parsed as `f64`; converted to JSON number | `"3.14"` → `3.14` |
+| `"integer"` | Parsed as `i64`; converted to JSON integer | `"42"` → `42` |
+| `"boolean"` | Case-insensitive match on `"true"` / `"false"` | `"True"`, `"FALSE"` → `true` / `false` |
+
+**Failure mode:** If the string cannot be parsed as the declared type (e.g. `"abc"` for a `"number"` field), the value is left as-is (silent fallback). The WASM runtime then receives the string and may produce a type error.
 
 ### 5.4 Skill Installation from ClawHub
 

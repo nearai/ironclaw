@@ -1,6 +1,6 @@
 # IronClaw Developer Reference
 
-> Version baseline: IronClaw v0.13.0 (`v0.13.0` tag snapshot)
+> Version baseline: IronClaw v0.15.0 (`v0.15.0` tag snapshot)
 
 Reference for developers building tools, channels, or contributing to IronClaw.
 
@@ -109,8 +109,9 @@ authenticate with a third-party service via `auth`.
 ## 2. Tool Setup Schema
 
 The `setup` section of a tool's `capabilities.json` declares secrets that must be
-configured before the tool can operate. This schema is used by `ironclaw tool setup`
-and by the onboarding wizard's extension step.
+configured before the tool can operate. This schema is used by `ironclaw tool setup`.
+The onboarding wizard's extension step installs tools and may suggest running
+`ironclaw tool auth`, but does not execute `tool setup` automatically.
 
 ```json
 {
@@ -160,9 +161,10 @@ ironclaw
 ```
 
 The value is computed once at process startup and cached in a `std::sync::LazyLock`
-for the lifetime of the process. All paths derived from the base directory —
-`~/.ironclaw/.env`, `~/.ironclaw/tools/`, `~/.ironclaw/session.json`, the database
-file — use this base directory.
+for the lifetime of the process. Most runtime paths derived via base-dir helpers —
+`~/.ironclaw/.env`, `~/.ironclaw/tools/`, and `~/.ironclaw/session.json` — use this
+base directory. One exception in `v0.15.0`: libSQL auto-detection still checks the
+default `~/.ironclaw/ironclaw.db` path directly in bootstrap.
 
 | Behavior | Description |
 |----------|-------------|
