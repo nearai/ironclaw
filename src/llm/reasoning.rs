@@ -1133,6 +1133,51 @@ fn recover_tool_calls_from_content(
         }
     }
 
+    // Bracket format from flatten_tool_messages:
+    // [Called tool `name` with arguments: {...}]
+    {
+        let mut remaining = content;
+        while let Some(start) = remaining.find("[Called tool `") {
+            let after_prefix = &remaining[start + "[Called tool `".len()..];
+            let Some(backtick_end) = after_prefix.find('`') else {
+                break;
+            };
+            let name = &after_prefix[..backtick_end];
+            let after_name = &after_prefix[backtick_end + 1..];
+
+            if !tool_names.contains(name) {
+                remaining = after_name;
+                continue;
+            }
+
+            // Look for " with arguments: " followed by JSON until "]"
+            if let Some(args_start) = after_name.strip_prefix(" with arguments: ") {
+                // Find the closing "]" — but the JSON itself may contain "]",
+                // so find the last "]" on this logical line.
+                if let Some(bracket_end) = args_start.rfind(']') {
+                    let args_str = &args_start[..bracket_end];
+                    let arguments = serde_json::from_str::<serde_json::Value>(args_str)
+                        .unwrap_or(serde_json::Value::Object(Default::default()));
+                    calls.push(ToolCall {
+                        id: format!("recovered_{}", calls.len()),
+                        name: name.to_string(),
+                        arguments,
+                    });
+                    remaining = &args_start[bracket_end + 1..];
+                    continue;
+                }
+            }
+
+            // No arguments or malformed — call with empty args
+            calls.push(ToolCall {
+                id: format!("recovered_{}", calls.len()),
+                name: name.to_string(),
+                arguments: serde_json::Value::Object(Default::default()),
+            });
+            remaining = after_name;
+        }
+    }
+
     calls
 }
 
@@ -1176,8 +1221,37 @@ fn clean_response(text: &str) -> String {
         result = strip_pipe_tag(&result, tag);
     }
 
+    // 6b. Strip bracket-format inline tool calls: [Called tool `name` with arguments: {...}]
+    result = strip_bracket_tool_calls(&result);
+
     // 7. Collapse triple+ newlines, trim
     collapse_newlines(&result)
+}
+
+/// Strip bracket-format inline tool calls produced by `flatten_tool_messages`.
+///
+/// Removes patterns like `[Called tool `name` with arguments: {...}]` from text
+/// so the user doesn't see raw tool call syntax when the model echoes it back.
+fn strip_bracket_tool_calls(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find("[Called tool `") {
+        result.push_str(&remaining[..start]);
+        let after = &remaining[start..];
+        // Find the closing "]" for this bracket expression
+        if let Some(end) = after.find("]\n").map(|i| i + 2).or_else(|| {
+            // If it's at the end of the string, just find "]"
+            after.rfind(']').map(|i| i + 1)
+        }) {
+            remaining = &after[end..];
+        } else {
+            // Malformed — keep the rest
+            result.push_str(after);
+            return result;
+        }
+    }
+    result.push_str(remaining);
+    result
 }
 
 /// Tool-related tags stripped with simple string matching (no code-awareness needed).
@@ -1842,5 +1916,33 @@ That's my plan."#;
         let calls = recover_tool_calls_from_content(content, &tools);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "tool_list");
+    }
+
+    #[test]
+    fn test_recover_bracket_format_tool_call() {
+        let tools = make_tools(&["http"]);
+        let content = "Let me try that. [Called tool `http` with arguments: {\"method\":\"GET\",\"url\":\"https://example.com\"}]";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "http");
+        assert_eq!(calls[0].arguments["method"], "GET");
+        assert_eq!(calls[0].arguments["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_recover_bracket_format_unknown_tool_ignored() {
+        let tools = make_tools(&["http"]);
+        let content = "[Called tool `unknown_tool` with arguments: {}]";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_clean_response_strips_bracket_tool_calls() {
+        let input = "Let me fetch that.\n[Called tool `http` with arguments: {\"method\":\"GET\",\"url\":\"https://example.com\"}]\nHere are the results.";
+        let cleaned = clean_response(input);
+        assert!(!cleaned.contains("[Called tool"));
+        assert!(cleaned.contains("Let me fetch that."));
+        assert!(cleaned.contains("Here are the results."));
     }
 }
