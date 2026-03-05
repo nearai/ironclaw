@@ -93,6 +93,31 @@ pub fn assert_response_not_contains(response: &str, forbidden: &[&str]) {
     }
 }
 
+/// Assert that `expected` tools appear in `started` in the given order.
+///
+/// The tools need not be consecutive — only relative ordering is checked.
+/// For example, `assert_tool_order(started, &["write_file", "read_file"])`
+/// passes if `write_file` appears before `read_file`, even with other tools
+/// in between.
+pub fn assert_tool_order(started: &[String], expected: &[&str]) {
+    let mut search_from = 0;
+    for tool in expected {
+        let pos = started[search_from..]
+            .iter()
+            .position(|s| s == tool)
+            .map(|p| p + search_from);
+        match pos {
+            Some(idx) => search_from = idx + 1,
+            None => {
+                panic!(
+                    "assert_tool_order: \"{tool}\" not found after position {search_from} \
+                     in: {started:?}. Expected order: {expected:?}"
+                );
+            }
+        }
+    }
+}
+
 /// Verify all expectations from a `TraceExpects` against actual data.
 ///
 /// `label` is used in assertion messages to identify context (e.g. "top-level" or "turn 0").
@@ -164,6 +189,12 @@ pub fn verify_expects(
     // max_tool_calls
     if let Some(max) = expects.max_tool_calls {
         assert_max_tool_calls(started, max);
+    }
+
+    // tools_order
+    if !expects.tools_order.is_empty() {
+        let expected: Vec<&str> = expects.tools_order.iter().map(|s| s.as_str()).collect();
+        assert_tool_order(started, &expected);
     }
 
     // tool_results_contain

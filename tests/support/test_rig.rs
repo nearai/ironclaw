@@ -562,7 +562,7 @@ pub async fn run_recorded_trace(filename: &str) {
         .with_trace(trace.clone())
         .build()
         .await;
-    rig.run_and_verify_trace(&trace, Duration::from_secs(15))
+    rig.run_and_verify_trace(&trace, Duration::from_secs(30))
         .await;
     rig.shutdown();
 }

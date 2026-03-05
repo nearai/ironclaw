@@ -2,7 +2,7 @@
 # Generate an HTML coverage report for a given set of tests.
 #
 # Usage:
-#   ./scripts/coverage.sh                          # all tests
+#   ./scripts/coverage.sh                          # all tests (lib only)
 #   ./scripts/coverage.sh safety                   # tests matching "safety"
 #   ./scripts/coverage.sh safety::sanitizer        # specific module tests
 #   ./scripts/coverage.sh test_a test_b test_c     # multiple test filters
@@ -12,6 +12,7 @@
 #   COV_FORMAT=html     Output format: html, text, json, lcov (default: html)
 #   COV_OUT=coverage    Output directory (default: coverage/)
 #   COV_FEATURES=""     Extra --features to pass (default: none)
+#   COV_ALL_TARGETS=0   Set to 1 to include integration tests (default: lib only)
 #
 # Requires: cargo-llvm-cov (install: cargo install cargo-llvm-cov)
 
@@ -21,21 +22,29 @@ COV_OPEN="${COV_OPEN:-1}"
 COV_FORMAT="${COV_FORMAT:-html}"
 COV_OUT="${COV_OUT:-coverage}"
 COV_FEATURES="${COV_FEATURES:-}"
+COV_ALL_TARGETS="${COV_ALL_TARGETS:-0}"
 
 cd "$(git rev-parse --show-toplevel)"
 
-# Verify cargo-llvm-cov is installed
 if ! command -v cargo-llvm-cov &>/dev/null; then
     echo "ERROR: cargo-llvm-cov not found. Install with: cargo install cargo-llvm-cov"
     exit 1
 fi
 
 # Build the cargo llvm-cov command
-cmd=(cargo llvm-cov --all-features)
+cmd=(cargo llvm-cov)
 
-# Add extra features if specified
+# Features
 if [[ -n "$COV_FEATURES" ]]; then
-    cmd=(cargo llvm-cov --features "$COV_FEATURES")
+    cmd+=(--features "$COV_FEATURES")
+else
+    cmd+=(--all-features)
+fi
+
+# By default, only run the lib unit tests (fast, no integration test compilation).
+# Set COV_ALL_TARGETS=1 to include integration tests.
+if [[ "$COV_ALL_TARGETS" != "1" ]]; then
+    cmd+=(--lib)
 fi
 
 # Output format
@@ -58,18 +67,14 @@ case "$COV_FORMAT" in
         ;;
 esac
 
-# Add test filters: each positional arg becomes a separate test run filter
-# cargo llvm-cov passes args after -- to cargo test
+# Test name filters (passed after -- to cargo test)
 if [[ $# -gt 0 ]]; then
-    # Use --test to run only the test binary, with filters
-    # Multiple filters: run multiple times and merge, or use regex
-    # cargo test supports a single filter; for multiple we use regex OR
     if [[ $# -eq 1 ]]; then
         cmd+=(-- "$1")
     else
         # Join filters with | for regex matching
         filter=$(IFS='|'; echo "$*")
-        cmd+=(-- -E "test($filter)")
+        cmd+=(-- "$filter")
     fi
 fi
 

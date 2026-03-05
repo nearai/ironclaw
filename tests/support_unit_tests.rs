@@ -50,6 +50,41 @@ mod assertions_tests {
         let completed = vec![("shell".to_string(), false)];
         assert_tool_succeeded(&completed, "shell");
     }
+
+    #[test]
+    fn tool_order_passes_for_correct_order() {
+        let started: Vec<String> = vec!["write_file", "echo", "read_file"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_tool_order(&started, &["write_file", "read_file"]);
+    }
+
+    #[test]
+    fn tool_order_passes_for_consecutive() {
+        let started: Vec<String> = vec!["write_file", "read_file"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_tool_order(&started, &["write_file", "read_file"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "assert_tool_order")]
+    fn tool_order_panics_for_wrong_order() {
+        let started: Vec<String> = vec!["read_file", "write_file"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_tool_order(&started, &["write_file", "read_file"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "assert_tool_order")]
+    fn tool_order_panics_for_missing_tool() {
+        let started: Vec<String> = vec!["echo".to_string()];
+        assert_tool_order(&started, &["echo", "write_file"]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +115,23 @@ mod cleanup_tests {
             assert!(std::path::Path::new(dir).exists());
         }
         assert!(!std::path::Path::new(dir).exists());
+    }
+
+    #[test]
+    fn cleanup_guard_file_does_not_remove_dir() {
+        let dir = "/tmp/ironclaw_cleanup_guard_file_not_dir";
+        std::fs::create_dir_all(dir).unwrap();
+        {
+            // Registering a directory path as .file() should not remove it
+            // (remove_file fails on directories).
+            let _guard = CleanupGuard::new().file(dir);
+        }
+        assert!(
+            std::path::Path::new(dir).exists(),
+            "dir should still exist when registered as file"
+        );
+        // Clean up manually.
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

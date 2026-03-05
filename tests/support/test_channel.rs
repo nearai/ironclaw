@@ -110,9 +110,12 @@ impl TestChannel {
     /// Wait until at least `n` responses have been captured, or `timeout` elapses.
     ///
     /// Returns whatever responses have been collected when the condition is met
-    /// or the timeout expires.
+    /// or the timeout expires. Uses exponential backoff (50ms -> 100ms -> 200ms,
+    /// capped at 500ms) to reduce lock contention while staying responsive.
     pub async fn wait_for_responses(&self, n: usize, timeout: Duration) -> Vec<OutgoingResponse> {
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut interval = Duration::from_millis(50);
+        let max_interval = Duration::from_millis(500);
         loop {
             {
                 let guard = self.responses.lock().await;
@@ -123,7 +126,8 @@ impl TestChannel {
             if tokio::time::Instant::now() >= deadline {
                 return self.responses.lock().await.clone();
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(interval).await;
+            interval = (interval * 2).min(max_interval);
         }
     }
 

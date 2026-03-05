@@ -102,6 +102,9 @@ pub struct TraceExpects {
     /// Tool result preview must contain substring (tool_name -> substring).
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub tool_results_contain: std::collections::HashMap<String, String>,
+    /// Tools must have been called in this relative order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_order: Vec<String>,
 }
 
 impl TraceExpects {
@@ -116,6 +119,7 @@ impl TraceExpects {
             && self.max_tool_calls.is_none()
             && self.min_responses.is_none()
             && self.tool_results_contain.is_empty()
+            && self.tools_order.is_empty()
     }
 }
 
@@ -253,6 +257,11 @@ impl LlmTrace {
 /// Steps from all turns are flattened into a single sequence at construction
 /// time. The provider advances through them linearly regardless of turn
 /// boundaries.
+///
+/// **Concurrency assumption:** Uses `AtomicUsize` for step indexing, so
+/// concurrent calls to `complete`/`complete_with_tools` may consume steps
+/// in non-deterministic order. Current tests are single-threaded per rig;
+/// if parallel tool execution is ever enabled, steps may interleave.
 pub struct TraceLlm {
     model_name: String,
     steps: Vec<TraceStep>,
