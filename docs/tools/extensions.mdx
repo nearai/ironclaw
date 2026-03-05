@@ -1,0 +1,432 @@
+---
+title: Extensions
+description: Install, authenticate, and activate third-party tools and channels
+---
+
+Extensions add new capabilities to IronClaw through three runtime kinds:
+
+- **WASM Tools** — Sandboxed utilities that run inside wasmtime (Web Search, Google Calendar, Gmail)
+- **WASM Channels** — Messaging integrations that enable multi-channel input (Telegram, Slack, Discord)
+- **MCP Servers** — Model Context Protocol servers for ecosystem integrations (Notion, GitHub, Linear)
+
+Extensions are discovered from the built-in registry, installed to your local system, authenticated with your credentials, and then activated to make their tools available to the agent.
+
+## Quick Start
+
+```bash
+# Search for available extensions
+> "Search for Google tools"
+
+# Install an extension
+> "Install the Gmail extension"
+
+# Authenticate (OAuth or manual token)
+> "Authenticate Gmail"
+
+# Activate to make tools available
+> "Activate Gmail"
+```
+
+## Extension Lifecycle
+
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   Search    │───▶│   Install   │───▶│   Auth      │───▶│  Activate   │
+│  (discover) │    │  (download) │    │ (configure) │    │  (enable)   │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+```
+
+## Extension Tools
+
+The agent has six built-in tools for managing extensions:
+
+| Tool | Purpose |
+|------|---------|
+| `tool_search` | Find extensions in the registry or online |
+| `tool_install` | Download and install an extension |
+| `tool_auth` | Configure authentication (OAuth or manual) |
+| `tool_activate` | Enable an installed extension |
+| `tool_list` | Show installed and available extensions |
+| `tool_remove` | Uninstall an extension |
+
+## Bundled Extensions
+
+IronClaw includes a curated registry of pre-configured extensions:
+
+### Google Suite
+
+All Google tools share a single OAuth token (`google_oauth_token`):
+
+| Extension | Type | Description |
+|-----------|------|-------------|
+| `gmail` | WASM Tool | Read, send, and manage Gmail messages |
+| `google-calendar` | WASM Tool | Create, update, and delete calendar events |
+| `google-drive` | WASM Tool | Access and manage Google Drive files |
+| `google-docs` | WASM Tool | Create and edit Google Docs |
+| `google-sheets` | WASM Tool | Work with spreadsheets |
+| `google-slides` | WASM Tool | Create presentations |
+
+Install all Google tools at once:
+
+```bash
+> "Install the Google bundle"
+```
+
+### Messaging Channels
+
+| Extension | Type | Description |
+|-----------|------|-------------|
+| `telegram` | WASM Channel | Talk to your agent through a Telegram bot |
+| `slack` | WASM Channel | Interact via Slack workspace |
+| `discord` | WASM Channel | Discord bot integration |
+| `whatsapp` | WASM Channel | WhatsApp Business API channel |
+
+### MCP Servers
+
+| Extension | Type | Description |
+|-----------|------|-------------|
+| `notion` | MCP Server | Read and write Notion pages and databases |
+| `github` | MCP Server | Repository management, PRs, and issues |
+| `linear` | MCP Server | Issue tracking and project management |
+| `slack-mcp` | MCP Server | Slack integration via MCP |
+| `sentry` | MCP Server | Error tracking and debugging |
+| `stripe` | MCP Server | Payment processing and subscriptions |
+| `cloudflare` | MCP Server | DNS, Workers, and infrastructure |
+| `asana` | MCP Server | Task and project management |
+| `intercom` | MCP Server | Customer messaging and support |
+
+### Utilities
+
+| Extension | Type | Description |
+|-----------|------|-------------|
+| `web-search` | WASM Tool | Search the web using Brave Search API |
+| `github` | WASM Tool | GitHub API integration (WASM) |
+
+## Installing Extensions
+
+### From the built-in registry
+
+```
+> "Install Gmail"
+```
+
+The agent will search the registry, find the matching extension, download it, and make it ready for authentication.
+
+### From a custom URL
+
+```
+> "Install my-custom-tool from https://example.com/tools/my-tool.wasm"
+```
+
+### Install by extension kind
+
+When multiple extensions share a name (e.g., `slack` as both channel and tool), specify the kind:
+
+```
+> "Install slack as a channel"
+> "Install slack as a tool"
+```
+
+## Authentication Methods
+
+Extensions support three authentication patterns:
+
+### 1. OAuth 2.0 (Browser-based)
+
+Google tools, Notion, GitHub, and many others use OAuth. When you authenticate:
+
+1. The agent generates an authorization URL
+2. You open it in your browser and approve access
+3. The OAuth callback is handled automatically
+4. Tokens are stored encrypted in IronClaw's secret store
+
+```
+> "Authenticate Google Calendar"
+
+Agent: "Open this URL to authorize: https://accounts.google.com/o/oauth2/v2/auth?..."
+```
+
+### 2. Manual Token Entry
+
+Some extensions require you to manually obtain and enter a token:
+
+```
+> "Authenticate Telegram"
+
+Agent: "Get your bot token from @BotFather on Telegram, then provide it via the web UI or CLI."
+```
+
+Enter the token through:
+- **Web Gateway**: Extensions tab → Click "Configure" → Enter token
+- **CLI**: `ironclaw extension auth telegram --token "YOUR_TOKEN"`
+
+### 3. Environment Variables
+
+If you've already set the required environment variable, authentication happens automatically:
+
+```bash
+export BRAVE_API_KEY="your-api-key"
+```
+
+When you run `tool_auth` for `web-search`, it will detect the env var and authenticate immediately.
+
+## Shared Authentication
+
+Google tools share a single OAuth token. Authenticating one Google tool makes all others available:
+
+```
+> "Authenticate Gmail"
+# Authenticates all Google tools (Gmail, Calendar, Drive, Docs, Sheets, Slides)
+```
+
+This is configured via the `shared_auth` field in each extension's registry entry.
+
+## Activation
+
+After installation and authentication, activate the extension to load its tools:
+
+```
+> "Activate Gmail"
+
+Agent: "Gmail is now active. You can now:
+  - Send emails: 'Send an email to john@example.com'
+  - Read messages: 'Check my inbox'
+  - Search: 'Find emails from Alice last week'"
+```
+
+Activation:
+- For **WASM tools**: Loads the module into the tool registry
+- For **WASM channels**: Starts the channel's message polling or webhook listener
+- For **MCP servers**: Connects to the server and discovers available tools
+
+## Managing Extensions
+
+### List installed extensions
+
+```
+> "What extensions do I have?"
+
+Agent: "Installed extensions:
+  ✓ gmail (active, authenticated)
+  ✓ telegram (active, authenticated)
+  ✓ web-search (inactive, needs auth)
+  ✓ notion (not installed)"
+```
+
+### Remove an extension
+
+```
+> "Remove the web-search extension"
+
+Agent: "Removed web-search. Its tools are no longer available."
+```
+
+## Configuration Files
+
+### Registry Entry Format
+
+Each extension in the registry has a JSON descriptor:
+
+```json
+{
+  "name": "gmail",
+  "display_name": "Gmail",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "Read, send, and manage Gmail messages and threads",
+  "keywords": ["email", "google", "mail", "messaging"],
+
+  "source": {
+    "dir": "tools-src/gmail",
+    "capabilities": "gmail-tool.capabilities.json",
+    "crate_name": "gmail-tool"
+  },
+
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/gmail-wasm32-wasip2.tar.gz"
+    }
+  },
+
+  "auth_summary": {
+    "method": "oauth",
+    "provider": "Google",
+    "secrets": ["google_oauth_token"],
+    "shared_auth": "google_oauth_token",
+    "setup_url": "https://console.cloud.google.com/apis/credentials"
+  },
+
+  "tags": ["default", "google", "messaging"]
+}
+```
+
+### Capabilities File
+
+WASM extensions declare their permissions in a `capabilities.json`:
+
+```json
+{
+  "http": {
+    "allowlist": [
+      {
+        "host": "gmail.googleapis.com",
+        "path_prefix": "/gmail/v1/",
+        "methods": ["GET", "POST", "DELETE"]
+      }
+    ],
+    "credentials": {
+      "google_oauth_token": {
+        "secret_name": "google_oauth_token",
+        "location": { "type": "bearer" },
+        "host_patterns": ["gmail.googleapis.com"]
+      }
+    },
+    "rate_limit": {
+      "requests_per_minute": 60,
+      "requests_per_hour": 500
+    }
+  },
+  "secrets": {
+    "allowed_names": ["google_oauth_token"]
+  },
+  "auth": {
+    "secret_name": "google_oauth_token",
+    "display_name": "Google",
+    "oauth": {
+      "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+      "token_url": "https://oauth2.googleapis.com/token",
+      "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+      "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+      "scopes": ["https://www.googleapis.com/auth/gmail.modify"],
+      "use_pkce": false,
+      "extra_params": {
+        "access_type": "offline",
+        "prompt": "consent"
+      }
+    },
+    "env_var": "GOOGLE_OAUTH_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "google_oauth_client_id",
+        "prompt": "Google OAuth Client ID (from console.cloud.google.com)"
+      },
+      {
+        "name": "google_oauth_client_secret",
+        "prompt": "Google OAuth Client Secret"
+      }
+    ]
+  }
+}
+```
+
+## Security Model
+
+### WASM Tool Isolation
+
+- **Network**: Only allowlisted domains can be reached
+- **Credentials**: Injected at the proxy boundary, never visible to the tool
+- **Memory**: Fixed limit (default 16MB), enforced by wasmtime
+- **Compute**: Fuel metering prevents infinite loops
+- **Filesystem**: No host filesystem access (except workspace via host functions)
+
+### MCP Server Considerations
+
+MCP servers run as external processes without WASM sandboxing:
+
+- They control their own network access
+- They manage their own credentials
+- Prefer WASM tools for sensitive operations (email, banking)
+- Prefer MCP servers for ecosystem compatibility
+
+### Token Storage
+
+All credentials are encrypted at rest using AES-256-GCM:
+
+- OAuth tokens
+- API keys
+- Bot tokens
+- Webhook secrets
+
+Tokens are never exposed to:
+- The LLM
+- WASM module memory (injected at proxy layer)
+- Log files
+- Tool output
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Extension not found in search" icon="search">
+    - Try `discover: true` to search online beyond the built-in registry
+    - Check spelling or try alternative keywords
+    - Some extensions may require building from source
+  </Accordion>
+
+  <Accordion title="Authentication fails" icon="x-circle">
+    - Verify OAuth client credentials are set (for OAuth tools)
+    - Check that redirect URIs include `http://localhost:9876/callback` through `http://localhost:9886/callback`
+    - For manual tokens, ensure the token hasn't expired
+    - Check the `setup_url` in the extension details for provider-specific setup
+  </Accordion>
+
+  <Accordion title="Activation fails" icon="alert">
+    - Ensure authentication completed successfully
+    - Check logs: `RUST_LOG=ironclaw=debug cargo run`
+    - For WASM tools: Verify the `.wasm` file exists in `~/.ironclaw/tools/`
+    - For MCP servers: Verify the server is running and reachable
+  </Accordion>
+
+  <Accordion title="Tool calls fail after activation" icon="bug">
+    - Check rate limits — you may have exceeded the provider's quota
+    - Verify credentials haven't expired (re-authenticate if needed)
+    - For OAuth: tokens auto-refresh; check `GOOGLE_OAUTH_TOKEN` is still valid
+  </Accordion>
+</AccordionGroup>
+
+## Environment Variables
+
+Configure extension behavior through environment variables:
+
+```bash
+# OAuth callback port range (default: 9876-9886)
+export OAUTH_PORT_MIN=9876
+export OAUTH_PORT_MAX=9886
+
+# WASM sandbox limits
+export WASM_FUEL_LIMIT=100000000
+export WASM_MEMORY_LIMIT=16777216
+
+# Tool discovery paths
+export IRONCLAW_TOOLS_DIR="~/.ironclaw/tools"
+export IRONCLAW_CHANNELS_DIR="~/.ironclaw/channels"
+```
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="WASM Tools" icon="blocks" href="/tools/wasm">
+    Deep dive into sandboxed tool architecture
+  </Card>
+
+  <Card title="MCP Servers" icon="server" href="/tools/mcp">
+    Connect ecosystem MCP servers
+  </Card>
+
+  <Card title="Building Custom Tools" icon="hammer" href="/tools/building">
+    Create your own WASM extensions
+  </Card>
+
+  <Card title="Secrets Management" icon="lock" href="/security/secrets">
+    How credentials are stored and protected
+  </Card>
+
+  <Card title="Safety Layer" icon="shield" href="/security/safety-layer">
+    How tool outputs are sanitized
+  </Card>
+
+  <Card title="Channels" icon="message-square" href="/channels">
+    Configure multi-channel input
+  </Card>
+</CardGroup>

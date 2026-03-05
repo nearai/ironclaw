@@ -56,13 +56,13 @@
         "groups": [
           { "group": "Overview", "pages": ["tools/index"] },
           { "group": "Built-in Tools", "pages": ["tools/builtin", "tools/file-tools", "tools/shell-tool", "tools/memory-tools", "tools/http-tool", "tools/job-tools"] },
-          { "group": "Extensions", "pages": ["tools/wasm", "tools/mcp", "tools/building"] }
+          { "group": "Extensions", "pages": ["tools/extensions", "tools/wasm", "tools/mcp", "tools/building"] }
         ]
       },
       {
         "tab": "Models",
         "groups": [
-          { "group": "LLM Providers", "pages": ["providers/index", "providers/nearai", "providers/anthropic", "providers/openai", "providers/ollama", "providers/openai-compatible", "providers/tinfoil"] }
+          { "group": "LLM Providers", "pages": ["providers/index", "providers/nearai", "providers/anthropic", "providers/openai", "providers/ollama", "providers/openai-compatible", "providers/tinfoil", "providers/moonshot"] }
         ]
       },
       {
