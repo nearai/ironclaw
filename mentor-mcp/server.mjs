@@ -88,6 +88,68 @@ const mentorFishMaxNewTokens = Number(process.env.MENTOR_FISH_MAX_NEW_TOKENS || 
 const mentorFishChunkLength = Number(process.env.MENTOR_FISH_CHUNK_LENGTH || "240");
 
 const mentorArtifactDir = process.env.MENTOR_ARTIFACT_DIR || "/data/artifacts/mentor";
+const mentorImageArtifactDir = process.env.MENTOR_IMAGE_ARTIFACT_DIR || mentorArtifactDir;
+const mentorImageEnabled = (process.env.ENABLE_MENTOR_IMAGE || "true") === "true";
+const mentorImageProvider = (process.env.MENTOR_IMAGE_PROVIDER || "auto").trim().toLowerCase();
+const mentorImageApiKey = (
+  process.env.MENTOR_IMAGE_API_KEY ||
+  process.env.MENTOR_VOICE_API_KEY ||
+  process.env.MAIN_LLM_API_KEY ||
+  process.env.SUB_LLM_API_KEY ||
+  ""
+).trim();
+const mentorImageSize = (process.env.MENTOR_IMAGE_SIZE || "1024x1024").trim().toLowerCase();
+const mentorImageResponseFormat = (process.env.MENTOR_IMAGE_RESPONSE_FORMAT || "url")
+  .trim()
+  .toLowerCase();
+const mentorChutesImageMode = (process.env.MENTOR_CHUTES_IMAGE_MODE || "run_api")
+  .trim()
+  .toLowerCase();
+const mentorChutesImageRunEndpoint =
+  process.env.MENTOR_CHUTES_IMAGE_RUN_ENDPOINT || mentorVoiceRunEndpoint;
+const mentorChutesImageModel =
+  process.env.MENTOR_CHUTES_IMAGE_MODEL || "black-forest-labs/FLUX.1-schnell";
+const mentorChutesImageEndpoint = (process.env.MENTOR_CHUTES_IMAGE_ENDPOINT || "").trim();
+const mentorNovitaApiBaseUrl = (
+  process.env.MENTOR_NOVITA_API_BASE_URL || "https://api.novita.ai"
+).replace(/\/$/, "");
+const mentorNovitaApiKey = (
+  process.env.MENTOR_NOVITA_API_KEY ||
+  process.env.MENTOR_IMAGE_API_KEY ||
+  ""
+).trim();
+const mentorNovitaImageEndpoint =
+  process.env.MENTOR_NOVITA_IMAGE_ENDPOINT || `${mentorNovitaApiBaseUrl}/v3/seedream-3-0-txt2img`;
+const mentorNovitaImageModel = process.env.MENTOR_NOVITA_IMAGE_MODEL || "seedream-3.0";
+const mentorNovitaResponseFormat = (process.env.MENTOR_NOVITA_RESPONSE_FORMAT || "url")
+  .trim()
+  .toLowerCase();
+const mentorVideoArtifactDir = process.env.MENTOR_VIDEO_ARTIFACT_DIR || mentorArtifactDir;
+const mentorVideoEnabled = (process.env.ENABLE_MENTOR_VIDEO || "true") === "true";
+const mentorVideoProvider = (process.env.MENTOR_VIDEO_PROVIDER || "auto").trim().toLowerCase();
+const mentorVideoApiKey = (
+  process.env.MENTOR_VIDEO_API_KEY ||
+  process.env.MENTOR_IMAGE_API_KEY ||
+  process.env.MENTOR_VOICE_API_KEY ||
+  process.env.MAIN_LLM_API_KEY ||
+  ""
+).trim();
+const mentorVideoDurationSeconds = Math.max(
+  1,
+  Math.min(30, Number(process.env.MENTOR_VIDEO_DURATION_SECONDS || "5")),
+);
+const mentorVideoSize = (process.env.MENTOR_VIDEO_SIZE || "1024x576").trim().toLowerCase();
+const mentorChutesVideoMode = (process.env.MENTOR_CHUTES_VIDEO_MODE || "run_api")
+  .trim()
+  .toLowerCase();
+const mentorChutesVideoRunEndpoint =
+  process.env.MENTOR_CHUTES_VIDEO_RUN_ENDPOINT || mentorVoiceRunEndpoint;
+const mentorChutesVideoModel =
+  process.env.MENTOR_CHUTES_VIDEO_MODEL || "genmo/mochi-1-preview";
+const mentorChutesVideoEndpoint = (process.env.MENTOR_CHUTES_VIDEO_ENDPOINT || "").trim();
+const mentorNovitaVideoEndpoint =
+  process.env.MENTOR_NOVITA_VIDEO_ENDPOINT || `${mentorNovitaApiBaseUrl}/v3/video/t2v`;
+const mentorNovitaVideoModel = process.env.MENTOR_NOVITA_VIDEO_MODEL || "seedance-1.0";
 
 const callParamsSchema = z.object({
   name: z.string().min(1),
@@ -108,6 +170,24 @@ const transcribeArgsSchema = z.object({
   base64Audio: z.string().min(1),
   mimeType: z.string().min(1).optional(),
   language: z.string().min(1).optional(),
+});
+
+const imageArgsSchema = z.object({
+  prompt: z.string().min(1),
+  provider: z.enum(["auto", "chutes", "novita"]).optional(),
+  size: z.string().regex(/^\d{2,4}x\d{2,4}$/).optional(),
+  negativePrompt: z.string().min(1).optional(),
+  style: z.string().min(1).optional(),
+  seed: z.number().int().nonnegative().optional(),
+});
+
+const videoArgsSchema = z.object({
+  prompt: z.string().min(1),
+  provider: z.enum(["auto", "chutes", "novita"]).optional(),
+  size: z.string().regex(/^\d{2,4}x\d{2,4}$/).optional(),
+  negativePrompt: z.string().min(1).optional(),
+  durationSeconds: z.number().int().min(1).max(30).optional(),
+  seed: z.number().int().nonnegative().optional(),
 });
 
 let personaCache;
@@ -176,6 +256,42 @@ const tools = [
       additionalProperties: false,
     },
   },
+  {
+    name: "mentor.image",
+    description:
+      "Generate an image artifact using the configured provider (Chutes or Novita).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string" },
+        provider: { type: "string", enum: ["auto", "chutes", "novita"] },
+        size: { type: "string" },
+        negativePrompt: { type: "string" },
+        style: { type: "string" },
+        seed: { type: "integer" },
+      },
+      required: ["prompt"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "mentor.video",
+    description:
+      "Generate a short video artifact using the configured provider (Chutes or Novita).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string" },
+        provider: { type: "string", enum: ["auto", "chutes", "novita"] },
+        size: { type: "string" },
+        negativePrompt: { type: "string" },
+        durationSeconds: { type: "integer" },
+        seed: { type: "integer" },
+      },
+      required: ["prompt"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 const jsonRpcResult = (id, result) => ({ jsonrpc: "2.0", id, result });
@@ -234,6 +350,22 @@ const voiceRequestTimeoutMs = Math.max(
   5000,
   parseNumberWithFallback(process.env.MENTOR_VOICE_REQUEST_TIMEOUT_MS, 120000),
 );
+const imageRequestTimeoutMs = Math.max(
+  5000,
+  parseNumberWithFallback(process.env.MENTOR_IMAGE_REQUEST_TIMEOUT_MS, 120000),
+);
+const mentorImageDefaultNumImages = Math.max(
+  1,
+  Math.min(4, Math.trunc(parseNumberWithFallback(process.env.MENTOR_IMAGE_NUM_IMAGES, 1))),
+);
+const mentorImageMaxPromptChars = Math.max(
+  64,
+  Math.trunc(parseNumberWithFallback(process.env.MENTOR_IMAGE_MAX_PROMPT_CHARS, 1500)),
+);
+const videoRequestTimeoutMs = Math.max(
+  5000,
+  parseNumberWithFallback(process.env.MENTOR_VIDEO_REQUEST_TIMEOUT_MS, 180000),
+);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -280,6 +412,40 @@ const resolveVoiceProvider = () => {
 
 const activeVoiceProvider = resolveVoiceProvider();
 
+const resolveImageProvider = (requestedProvider) => {
+  const normalized = (requestedProvider || "").trim().toLowerCase();
+  if (normalized === "chutes" || normalized === "novita") {
+    return normalized;
+  }
+
+  if (mentorImageProvider === "chutes" || mentorImageProvider === "novita") {
+    return mentorImageProvider;
+  }
+
+  if (mentorNovitaApiKey) {
+    return "novita";
+  }
+
+  return "chutes";
+};
+
+const resolveVideoProvider = (requestedProvider) => {
+  const normalized = (requestedProvider || "").trim().toLowerCase();
+  if (normalized === "chutes" || normalized === "novita") {
+    return normalized;
+  }
+
+  if (mentorVideoProvider === "chutes" || mentorVideoProvider === "novita") {
+    return mentorVideoProvider;
+  }
+
+  if (mentorNovitaApiKey) {
+    return "novita";
+  }
+
+  return "chutes";
+};
+
 const sampleMimeType = (samplePath) => {
   const ext = path.extname(samplePath).toLowerCase();
   if (ext === ".mp4" || ext === ".m4a") {
@@ -315,6 +481,72 @@ const extensionForMimeType = (mimeType) => {
     return "mp3";
   }
   return "ogg";
+};
+
+const extensionForImageMimeType = (mimeType) => {
+  const normalized = (mimeType || "").toLowerCase();
+  if (normalized.includes("png")) {
+    return "png";
+  }
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) {
+    return "jpg";
+  }
+  if (normalized.includes("webp")) {
+    return "webp";
+  }
+  if (normalized.includes("gif")) {
+    return "gif";
+  }
+  return "png";
+};
+
+const mimeTypeForImageExtension = (extension) => {
+  const normalized = `${extension || ""}`.toLowerCase();
+  if (normalized === "jpg" || normalized === "jpeg") {
+    return "image/jpeg";
+  }
+  if (normalized === "webp") {
+    return "image/webp";
+  }
+  if (normalized === "gif") {
+    return "image/gif";
+  }
+  return "image/png";
+};
+
+const extensionForVideoMimeType = (mimeType) => {
+  const normalized = (mimeType || "").toLowerCase();
+  if (normalized.includes("webm")) {
+    return "webm";
+  }
+  if (normalized.includes("quicktime")) {
+    return "mov";
+  }
+  return "mp4";
+};
+
+const mimeTypeForVideoExtension = (extension) => {
+  const normalized = `${extension || ""}`.toLowerCase();
+  if (normalized === "webm") {
+    return "video/webm";
+  }
+  if (normalized === "mov") {
+    return "video/quicktime";
+  }
+  return "video/mp4";
+};
+
+const parseImageSize = (sizeValue) => {
+  const fallback = { width: 1024, height: 1024, size: "1024x1024" };
+  const raw = (sizeValue || mentorImageSize || fallback.size).toString().trim().toLowerCase();
+  const match = raw.match(/^(\d{2,4})x(\d{2,4})$/);
+  if (!match) {
+    return fallback;
+  }
+
+  const width = Math.min(2048, Math.max(128, Number(match[1])));
+  const height = Math.min(2048, Math.max(128, Number(match[2])));
+  return { width, height, size: `${width}x${height}` };
 };
 
 const stripDataUrl = (value) =>
@@ -452,6 +684,196 @@ const extractAudioBufferFromPayload = async (payload) => {
   }
 
   throw new Error("Unable to extract audio payload from Chutes response.");
+};
+
+const decodePossibleBase64 = (value) => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const normalized = trimmed.startsWith("data:")
+    ? trimmed.split(",", 2)[1] || ""
+    : trimmed;
+  if (!normalized) {
+    return undefined;
+  }
+
+  try {
+    const decoded = Buffer.from(normalized, "base64");
+    if (!decoded.length) {
+      return undefined;
+    }
+    return decoded;
+  } catch {
+    return undefined;
+  }
+};
+
+const parseImageDataUrl = (value) => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("data:image/")) {
+    return undefined;
+  }
+
+  const [header, body] = trimmed.split(",", 2);
+  if (!header || !body || !header.includes(";base64")) {
+    return undefined;
+  }
+  const mime = header.replace(/^data:/, "").split(";")[0] || "image/png";
+  const bytes = decodePossibleBase64(body);
+  if (!bytes) {
+    return undefined;
+  }
+  return { mime, bytes };
+};
+
+const parseVideoDataUrl = (value) => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("data:video/")) {
+    return undefined;
+  }
+
+  const [header, body] = trimmed.split(",", 2);
+  if (!header || !body || !header.includes(";base64")) {
+    return undefined;
+  }
+  const mime = header.replace(/^data:/, "").split(";")[0] || "video/mp4";
+  const bytes = decodePossibleBase64(body);
+  if (!bytes) {
+    return undefined;
+  }
+  return { mime, bytes };
+};
+
+const extractImageCandidateFromPayload = (payload) => {
+  const dataUrl = findStringByCandidates(payload, [
+    "image_data_url",
+    "data_url",
+    "imageDataUrl",
+  ]);
+  const parsedDataUrl = parseImageDataUrl(dataUrl);
+  if (parsedDataUrl) {
+    return parsedDataUrl;
+  }
+
+  const imageBase64 = findStringByCandidates(payload, [
+    "image_b64",
+    "image_base64",
+    "b64_json",
+    "base64",
+    "image",
+  ]);
+  const decoded = decodePossibleBase64(imageBase64);
+  if (decoded) {
+    return { mime: "image/png", bytes: decoded };
+  }
+
+  const imageUrl = findStringByCandidates(payload, [
+    "image_url",
+    "url",
+    "output_url",
+    "imageUrl",
+  ]);
+  if (typeof imageUrl === "string" && imageUrl.startsWith("http")) {
+    return { url: imageUrl.trim() };
+  }
+
+  return undefined;
+};
+
+const extractVideoCandidateFromPayload = (payload) => {
+  const dataUrl = findStringByCandidates(payload, [
+    "video_data_url",
+    "data_url",
+    "videoDataUrl",
+  ]);
+  const parsedDataUrl = parseVideoDataUrl(dataUrl);
+  if (parsedDataUrl) {
+    return parsedDataUrl;
+  }
+
+  const videoBase64 = findStringByCandidates(payload, [
+    "video_b64",
+    "video_base64",
+    "base64_video",
+    "b64_json",
+    "video",
+  ]);
+  const decoded = decodePossibleBase64(videoBase64);
+  if (decoded) {
+    return { mime: "video/mp4", bytes: decoded };
+  }
+
+  const videoUrl = findStringByCandidates(payload, [
+    "video_url",
+    "url",
+    "output_url",
+    "videoUrl",
+  ]);
+  if (typeof videoUrl === "string" && videoUrl.startsWith("http")) {
+    return { url: videoUrl.trim() };
+  }
+
+  return undefined;
+};
+
+const downloadImageFromUrl = async (url) => {
+  const headers = {};
+  if (url.includes("novita.ai") && mentorNovitaApiKey) {
+    headers.authorization = `Bearer ${mentorNovitaApiKey}`;
+  } else if (url.includes("chutes.ai") && mentorImageApiKey) {
+    headers.authorization = `Bearer ${mentorImageApiKey}`;
+  }
+
+  const response = await fetchWithTimeout(url, { method: "GET", headers }, imageRequestTimeoutMs);
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Image download failed (${response.status}): ${errorBody.slice(0, 300)}`);
+  }
+
+  const mime = response.headers.get("content-type") || "image/png";
+  const bytes = Buffer.from(await response.arrayBuffer());
+  return { mime, bytes };
+};
+
+const downloadVideoFromUrl = async (url) => {
+  const headers = {};
+  if (url.includes("novita.ai") && mentorNovitaApiKey) {
+    headers.authorization = `Bearer ${mentorNovitaApiKey}`;
+  } else if (url.includes("chutes.ai") && mentorVideoApiKey) {
+    headers.authorization = `Bearer ${mentorVideoApiKey}`;
+  }
+
+  const response = await fetchWithTimeout(url, { method: "GET", headers }, videoRequestTimeoutMs);
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Video download failed (${response.status}): ${errorBody.slice(0, 300)}`);
+  }
+
+  const mime = response.headers.get("content-type") || "video/mp4";
+  const bytes = Buffer.from(await response.arrayBuffer());
+  return { mime, bytes };
+};
+
+const normalizeImagePrompt = (prompt) => {
+  const trimmed = `${prompt || ""}`.trim();
+  if (!trimmed) {
+    throw new Error("Image prompt is required.");
+  }
+
+  const bounded = trimmed.slice(0, mentorImageMaxPromptChars);
+  return bounded;
 };
 
 const callMentorLlm = async (messages) => {
@@ -904,6 +1326,434 @@ const synthesizeWithKokoro = async (text) => {
   }
 };
 
+const callChutesImageGeneration = async ({ prompt, size, negativePrompt, style, seed }) => {
+  if (!mentorImageApiKey) {
+    throw new Error("MENTOR_IMAGE_API_KEY (or fallback MENTOR_VOICE_API_KEY/MAIN_LLM_API_KEY) is missing.");
+  }
+
+  const parsedSize = parseImageSize(size);
+  const requestInput = {
+    prompt: normalizeImagePrompt(prompt),
+    size: parsedSize.size,
+    width: parsedSize.width,
+    height: parsedSize.height,
+    num_images: mentorImageDefaultNumImages,
+    response_format: mentorImageResponseFormat,
+  };
+
+  if (negativePrompt && negativePrompt.trim()) {
+    requestInput.negative_prompt = negativePrompt.trim();
+  }
+  if (style && style.trim()) {
+    requestInput.style = style.trim();
+  }
+  if (Number.isInteger(seed)) {
+    requestInput.seed = seed;
+  }
+
+  let payload;
+  if (mentorChutesImageMode === "direct") {
+    if (!mentorChutesImageEndpoint) {
+      throw new Error("MENTOR_CHUTES_IMAGE_ENDPOINT is required when MENTOR_CHUTES_IMAGE_MODE=direct.");
+    }
+    const response = await fetchWithTimeout(mentorChutesImageEndpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${mentorImageApiKey}`,
+      },
+      body: JSON.stringify(requestInput),
+    }, imageRequestTimeoutMs);
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`Chutes direct image failed (${response.status}): ${errorBody.slice(0, 300)}`);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      payload = await response.json();
+    } else {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return {
+        providerUsed: "chutes",
+        size: parsedSize.size,
+        mime: contentType || "image/png",
+        bytes,
+      };
+    }
+  } else {
+    const response = await fetchWithTimeout(mentorChutesImageRunEndpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${mentorImageApiKey}`,
+      },
+      body: JSON.stringify({
+        model: mentorChutesImageModel,
+        input: requestInput,
+      }),
+    }, imageRequestTimeoutMs);
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`Chutes image run request failed (${response.status}): ${errorBody.slice(0, 300)}`);
+    }
+
+    payload = await response.json();
+  }
+
+  const candidate =
+    extractImageCandidateFromPayload(payload)
+    || extractImageCandidateFromPayload(payload?.output)
+    || extractImageCandidateFromPayload(payload?.result);
+
+  if (!candidate) {
+    throw new Error("Chutes image response did not include image content or image URL.");
+  }
+
+  if (candidate.url) {
+    const downloaded = await downloadImageFromUrl(candidate.url);
+    return {
+      providerUsed: "chutes",
+      size: parsedSize.size,
+      mime: downloaded.mime,
+      bytes: downloaded.bytes,
+      sourceUrl: candidate.url,
+    };
+  }
+
+  return {
+    providerUsed: "chutes",
+    size: parsedSize.size,
+    mime: candidate.mime || "image/png",
+    bytes: candidate.bytes,
+  };
+};
+
+const callNovitaImageGeneration = async ({ prompt, size, negativePrompt, style, seed }) => {
+  if (!mentorNovitaApiKey) {
+    throw new Error("MENTOR_NOVITA_API_KEY is missing.");
+  }
+
+  const parsedSize = parseImageSize(size);
+  const payload = {
+    prompt: normalizeImagePrompt(prompt),
+    model_name: mentorNovitaImageModel,
+    width: parsedSize.width,
+    height: parsedSize.height,
+    size: parsedSize.size,
+    response_format: mentorNovitaResponseFormat,
+    num_images: mentorImageDefaultNumImages,
+  };
+
+  if (negativePrompt && negativePrompt.trim()) {
+    payload.negative_prompt = negativePrompt.trim();
+  }
+  if (style && style.trim()) {
+    payload.style = style.trim();
+  }
+  if (Number.isInteger(seed)) {
+    payload.seed = seed;
+  }
+
+  const response = await fetchWithTimeout(mentorNovitaImageEndpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${mentorNovitaApiKey}`,
+    },
+    body: JSON.stringify(payload),
+  }, imageRequestTimeoutMs);
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Novita image request failed (${response.status}): ${errorBody.slice(0, 300)}`);
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    return {
+      providerUsed: "novita",
+      size: parsedSize.size,
+      mime: contentType || "image/png",
+      bytes: Buffer.from(await response.arrayBuffer()),
+    };
+  }
+
+  const responsePayload = await response.json();
+  const candidate =
+    extractImageCandidateFromPayload(responsePayload)
+    || extractImageCandidateFromPayload(responsePayload?.data)
+    || extractImageCandidateFromPayload(responsePayload?.result);
+
+  if (!candidate) {
+    throw new Error("Novita image response did not include image content or image URL.");
+  }
+
+  if (candidate.url) {
+    const downloaded = await downloadImageFromUrl(candidate.url);
+    return {
+      providerUsed: "novita",
+      size: parsedSize.size,
+      mime: downloaded.mime,
+      bytes: downloaded.bytes,
+      sourceUrl: candidate.url,
+    };
+  }
+
+  return {
+    providerUsed: "novita",
+    size: parsedSize.size,
+    mime: candidate.mime || "image/png",
+    bytes: candidate.bytes,
+  };
+};
+
+const generateMentorImage = async (args = {}) => {
+  if (!mentorImageEnabled) {
+    throw new Error("Mentor image generation is disabled (ENABLE_MENTOR_IMAGE=false).");
+  }
+
+  const providerUsed = resolveImageProvider(args.provider);
+  const request = {
+    prompt: args.prompt,
+    size: args.size,
+    negativePrompt: args.negativePrompt,
+    style: args.style,
+    seed: args.seed,
+  };
+
+  const generated = providerUsed === "novita"
+    ? await callNovitaImageGeneration(request)
+    : await callChutesImageGeneration(request);
+
+  if (!generated?.bytes || generated.bytes.length === 0) {
+    throw new Error("Image backend returned an empty image payload.");
+  }
+
+  await ensureDir(mentorImageArtifactDir);
+  const extension = extensionForImageMimeType(generated.mime);
+  const fileName = `mentor-image-${Date.now()}-${randomUUID()}.${extension}`;
+  const outputPath = path.join(mentorImageArtifactDir, fileName);
+  await writeFile(outputPath, generated.bytes);
+
+  return {
+    imageArtifact: outputPath,
+    imageProvider: generated.providerUsed || providerUsed,
+    imageMimeType: generated.mime || mimeTypeForImageExtension(extension),
+    size: generated.size || parseImageSize(args.size).size,
+    sourceUrl: generated.sourceUrl,
+  };
+};
+
+const callChutesVideoGeneration = async ({ prompt, size, negativePrompt, durationSeconds, seed }) => {
+  if (!mentorVideoApiKey) {
+    throw new Error("MENTOR_VIDEO_API_KEY (or fallback image/voice/main key) is missing.");
+  }
+
+  const parsedSize = parseImageSize(size || mentorVideoSize);
+  const requestInput = {
+    prompt: normalizeImagePrompt(prompt),
+    size: parsedSize.size,
+    width: parsedSize.width,
+    height: parsedSize.height,
+    duration_seconds: Math.max(1, Math.min(30, durationSeconds || mentorVideoDurationSeconds)),
+  };
+  if (negativePrompt && negativePrompt.trim()) {
+    requestInput.negative_prompt = negativePrompt.trim();
+  }
+  if (Number.isInteger(seed)) {
+    requestInput.seed = seed;
+  }
+
+  let payload;
+  if (mentorChutesVideoMode === "direct") {
+    if (!mentorChutesVideoEndpoint) {
+      throw new Error("MENTOR_CHUTES_VIDEO_ENDPOINT is required when MENTOR_CHUTES_VIDEO_MODE=direct.");
+    }
+    const response = await fetchWithTimeout(mentorChutesVideoEndpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${mentorVideoApiKey}`,
+      },
+      body: JSON.stringify(requestInput),
+    }, videoRequestTimeoutMs);
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`Chutes direct video failed (${response.status}): ${errorBody.slice(0, 300)}`);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      payload = await response.json();
+    } else {
+      return {
+        providerUsed: "chutes",
+        size: parsedSize.size,
+        mime: contentType || "video/mp4",
+        bytes: Buffer.from(await response.arrayBuffer()),
+      };
+    }
+  } else {
+    const response = await fetchWithTimeout(mentorChutesVideoRunEndpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${mentorVideoApiKey}`,
+      },
+      body: JSON.stringify({
+        model: mentorChutesVideoModel,
+        input: requestInput,
+      }),
+    }, videoRequestTimeoutMs);
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`Chutes video run request failed (${response.status}): ${errorBody.slice(0, 300)}`);
+    }
+
+    payload = await response.json();
+  }
+
+  const candidate =
+    extractVideoCandidateFromPayload(payload)
+    || extractVideoCandidateFromPayload(payload?.output)
+    || extractVideoCandidateFromPayload(payload?.result);
+
+  if (!candidate) {
+    throw new Error("Chutes video response did not include video content or video URL.");
+  }
+
+  if (candidate.url) {
+    const downloaded = await downloadVideoFromUrl(candidate.url);
+    return {
+      providerUsed: "chutes",
+      size: parsedSize.size,
+      mime: downloaded.mime,
+      bytes: downloaded.bytes,
+      sourceUrl: candidate.url,
+    };
+  }
+
+  return {
+    providerUsed: "chutes",
+    size: parsedSize.size,
+    mime: candidate.mime || "video/mp4",
+    bytes: candidate.bytes,
+  };
+};
+
+const callNovitaVideoGeneration = async ({ prompt, size, negativePrompt, durationSeconds, seed }) => {
+  if (!mentorNovitaApiKey) {
+    throw new Error("MENTOR_NOVITA_API_KEY is missing.");
+  }
+
+  const parsedSize = parseImageSize(size || mentorVideoSize);
+  const payload = {
+    prompt: normalizeImagePrompt(prompt),
+    model_name: mentorNovitaVideoModel,
+    width: parsedSize.width,
+    height: parsedSize.height,
+    duration_seconds: Math.max(1, Math.min(30, durationSeconds || mentorVideoDurationSeconds)),
+  };
+  if (negativePrompt && negativePrompt.trim()) {
+    payload.negative_prompt = negativePrompt.trim();
+  }
+  if (Number.isInteger(seed)) {
+    payload.seed = seed;
+  }
+
+  const response = await fetchWithTimeout(mentorNovitaVideoEndpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${mentorNovitaApiKey}`,
+    },
+    body: JSON.stringify(payload),
+  }, videoRequestTimeoutMs);
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Novita video request failed (${response.status}): ${errorBody.slice(0, 300)}`);
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    return {
+      providerUsed: "novita",
+      size: parsedSize.size,
+      mime: contentType || "video/mp4",
+      bytes: Buffer.from(await response.arrayBuffer()),
+    };
+  }
+
+  const responsePayload = await response.json();
+  const candidate =
+    extractVideoCandidateFromPayload(responsePayload)
+    || extractVideoCandidateFromPayload(responsePayload?.data)
+    || extractVideoCandidateFromPayload(responsePayload?.result);
+
+  if (!candidate) {
+    throw new Error("Novita video response did not include video content or video URL.");
+  }
+
+  if (candidate.url) {
+    const downloaded = await downloadVideoFromUrl(candidate.url);
+    return {
+      providerUsed: "novita",
+      size: parsedSize.size,
+      mime: downloaded.mime,
+      bytes: downloaded.bytes,
+      sourceUrl: candidate.url,
+    };
+  }
+
+  return {
+    providerUsed: "novita",
+    size: parsedSize.size,
+    mime: candidate.mime || "video/mp4",
+    bytes: candidate.bytes,
+  };
+};
+
+const generateMentorVideo = async (args = {}) => {
+  if (!mentorVideoEnabled) {
+    throw new Error("Mentor video generation is disabled (ENABLE_MENTOR_VIDEO=false).");
+  }
+
+  const providerUsed = resolveVideoProvider(args.provider);
+  const request = {
+    prompt: args.prompt,
+    size: args.size,
+    negativePrompt: args.negativePrompt,
+    durationSeconds: args.durationSeconds,
+    seed: args.seed,
+  };
+
+  const generated = providerUsed === "novita"
+    ? await callNovitaVideoGeneration(request)
+    : await callChutesVideoGeneration(request);
+
+  if (!generated?.bytes || generated.bytes.length === 0) {
+    throw new Error("Video backend returned an empty video payload.");
+  }
+
+  await ensureDir(mentorVideoArtifactDir);
+  const extension = extensionForVideoMimeType(generated.mime);
+  const fileName = `mentor-video-${Date.now()}-${randomUUID()}.${extension}`;
+  const outputPath = path.join(mentorVideoArtifactDir, fileName);
+  await writeFile(outputPath, generated.bytes);
+
+  return {
+    videoArtifact: outputPath,
+    videoProvider: generated.providerUsed || providerUsed,
+    videoMimeType: generated.mime || mimeTypeForVideoExtension(extension),
+    size: generated.size || parseImageSize(args.size || mentorVideoSize).size,
+    sourceUrl: generated.sourceUrl,
+  };
+};
+
 const loadPersona = async () => {
   if (typeof personaCache === "string") {
     return personaCache;
@@ -1213,11 +2063,83 @@ const handleMentorStatus = async () => {
         format: mentorFishFormat,
       },
     },
+    image: {
+      enabled: mentorImageEnabled,
+      provider: resolveImageProvider(),
+      defaultProvider: mentorImageProvider,
+      apiKeyConfigured:
+        resolveImageProvider() === "novita"
+          ? mentorNovitaApiKey.length > 0
+          : mentorImageApiKey.length > 0,
+      artifactDir: mentorImageArtifactDir,
+      requestTimeoutMs: imageRequestTimeoutMs,
+      maxPromptChars: mentorImageMaxPromptChars,
+      defaultSize: mentorImageSize,
+      defaultResponseFormat: mentorImageResponseFormat,
+      chutes: {
+        mode: mentorChutesImageMode,
+        model: mentorChutesImageModel,
+        runEndpoint: mentorChutesImageRunEndpoint,
+        endpoint: mentorChutesImageEndpoint || null,
+      },
+      novita: {
+        apiBaseUrl: mentorNovitaApiBaseUrl,
+        endpoint: mentorNovitaImageEndpoint,
+        model: mentorNovitaImageModel,
+        responseFormat: mentorNovitaResponseFormat,
+        apiKeyConfigured: mentorNovitaApiKey.length > 0,
+      },
+    },
+    video: {
+      enabled: mentorVideoEnabled,
+      provider: resolveVideoProvider(),
+      defaultProvider: mentorVideoProvider,
+      apiKeyConfigured:
+        resolveVideoProvider() === "novita"
+          ? mentorNovitaApiKey.length > 0
+          : mentorVideoApiKey.length > 0,
+      artifactDir: mentorVideoArtifactDir,
+      requestTimeoutMs: videoRequestTimeoutMs,
+      defaultSize: mentorVideoSize,
+      defaultDurationSeconds: mentorVideoDurationSeconds,
+      chutes: {
+        mode: mentorChutesVideoMode,
+        model: mentorChutesVideoModel,
+        runEndpoint: mentorChutesVideoRunEndpoint,
+        endpoint: mentorChutesVideoEndpoint || null,
+      },
+      novita: {
+        apiBaseUrl: mentorNovitaApiBaseUrl,
+        endpoint: mentorNovitaVideoEndpoint,
+        model: mentorNovitaVideoModel,
+        apiKeyConfigured: mentorNovitaApiKey.length > 0,
+      },
+    },
     memory: {
       file: mentorMemoryFile,
       window: mentorMemoryWindow,
     },
     personaLoaded: persona.length > 0,
+  };
+};
+
+const handleMentorImage = async (args) => {
+  const parsed = imageArgsSchema.parse(args || {});
+  const result = await generateMentorImage(parsed);
+  return {
+    mentor: mentorName,
+    prompt: normalizeImagePrompt(parsed.prompt),
+    ...result,
+  };
+};
+
+const handleMentorVideo = async (args) => {
+  const parsed = videoArgsSchema.parse(args || {});
+  const result = await generateMentorVideo(parsed);
+  return {
+    mentor: mentorName,
+    prompt: normalizeImagePrompt(parsed.prompt),
+    ...result,
   };
 };
 
@@ -1235,6 +2157,10 @@ app.get("/healthz", async () => {
     voiceMode: mentorVoiceMode,
     sampleReady,
     contextReady,
+    imageEnabled: mentorImageEnabled,
+    imageProvider: resolveImageProvider(),
+    videoEnabled: mentorVideoEnabled,
+    videoProvider: resolveVideoProvider(),
     timestamp: new Date().toISOString(),
   };
 });
@@ -1308,6 +2234,10 @@ const handleMcpRequest = async (request, reply) => {
         result = await handleMentorVoiceBootstrap();
       } else if (name === "mentor.status") {
         result = await handleMentorStatus();
+      } else if (name === "mentor.image") {
+        result = await handleMentorImage(toolArgs);
+      } else if (name === "mentor.video") {
+        result = await handleMentorVideo(toolArgs);
       } else {
         return reply.send(jsonRpcError(id ?? null, -32601, `Unknown tool: ${name}`));
       }
@@ -1349,6 +2279,16 @@ app.listen({ host: "0.0.0.0", port }).then(() => {
       mentorKokoroModel,
       mentorFishModel,
       mentorFishReferenceConfigured: mentorFishReferenceId.trim().length > 0,
+      mentorImageEnabled,
+      mentorImageProvider: resolveImageProvider(),
+      mentorChutesImageMode,
+      mentorChutesImageModel,
+      mentorNovitaImageModel,
+      mentorVideoEnabled,
+      mentorVideoProvider: resolveVideoProvider(),
+      mentorChutesVideoMode,
+      mentorChutesVideoModel,
+      mentorNovitaVideoModel,
     },
     "mentor-mcp started",
   );

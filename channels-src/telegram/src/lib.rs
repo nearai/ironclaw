@@ -251,6 +251,8 @@ const MENTOR_VOICE_MODE_PREFIX: &str = "state/mentor_voice_mode_";
 
 /// Maximum inbound voice/audio payload accepted for STT.
 const MAX_VOICE_BYTES: u64 = 10 * 1024 * 1024;
+/// Maximum outbound attachment payload accepted for Telegram sendPhoto/sendDocument.
+const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 
 // ============================================================================
 // Channel Metadata
@@ -513,7 +515,7 @@ fn parse_mentor_voice_toggle(text: &str) -> Option<MentorVoiceToggle> {
     }
 }
 
-fn parse_data_url_audio(data_url: &str) -> Result<(String, Vec<u8>), String> {
+fn parse_data_url_binary(data_url: &str, max_bytes: u64) -> Result<(String, Vec<u8>), String> {
     let mut parts = data_url.splitn(2, ',');
     let header = parts
         .next()
@@ -535,17 +537,28 @@ fn parse_data_url_audio(data_url: &str) -> Result<(String, Vec<u8>), String> {
 
     let payload = payload.trim();
     let estimated_decoded_bytes = (payload.len() as u64).saturating_mul(3) / 4;
-    if estimated_decoded_bytes > MAX_VOICE_BYTES {
+    if estimated_decoded_bytes > max_bytes {
         return Err(format!(
-            "audio attachment too large (estimated {} bytes > {} bytes)",
-            estimated_decoded_bytes, MAX_VOICE_BYTES
+            "attachment too large (estimated {} bytes > {} bytes)",
+            estimated_decoded_bytes, max_bytes
         ));
     }
 
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(payload)
-        .map_err(|err| format!("invalid base64 audio payload: {}", err))?;
+        .map_err(|err| format!("invalid base64 payload: {}", err))?;
 
+    Ok((mime, bytes))
+}
+
+fn parse_data_url_audio(data_url: &str) -> Result<(String, Vec<u8>), String> {
+    let (mime, bytes) = parse_data_url_binary(data_url, MAX_VOICE_BYTES)?;
+    if !mime.starts_with("audio/") {
+        return Err(format!(
+            "invalid data URL: expected audio/* mime type, got {}",
+            mime
+        ));
+    }
     Ok((mime, bytes))
 }
 
@@ -947,6 +960,10 @@ impl Guest for TelegramChannel {
 
             let delivery = if attachment.starts_with("data:audio/") {
                 send_voice_data_url(metadata.chat_id, attachment, Some(metadata.message_id))
+            } else if attachment.starts_with("data:image/") {
+                send_photo_data_url(metadata.chat_id, attachment, Some(metadata.message_id))
+            } else if attachment.starts_with("data:video/") {
+                send_video_data_url(metadata.chat_id, attachment, Some(metadata.message_id))
             } else if attachment.starts_with("data:") {
                 send_document_data_url(metadata.chat_id, attachment, Some(metadata.message_id))
             } else {
@@ -954,7 +971,7 @@ impl Guest for TelegramChannel {
             };
 
             if let Err(err) = delivery {
-                let fallback = format!("Voice delivery failed: {}", err);
+                let fallback = format!("Attachment delivery failed: {}", err);
                 let _ = send_message(metadata.chat_id, &fallback, Some(metadata.message_id), None);
                 return Err(err);
             }
@@ -1198,20 +1215,158 @@ fn send_voice_data_url(
     Ok(())
 }
 
-fn send_document_data_url(
+fn send_photo_data_url(
     chat_id: i64,
     data_url: &str,
     reply_to_message_id: Option<i64>,
 ) -> Result<(), String> {
-    let (mime, bytes) = parse_data_url_audio(data_url)?;
+    let (mime, bytes) = parse_data_url_binary(data_url, MAX_ATTACHMENT_BYTES)?;
+    if !mime.starts_with("image/") {
+        return Err(format!(
+            "invalid image attachment mime type for sendPhoto: {}",
+            mime
+        ));
+    }
+
+    let extension = if mime.contains("jpeg") || mime.contains("jpg") {
+        "jpg"
+    } else if mime.contains("webp") {
+        "webp"
+    } else if mime.contains("gif") {
+        "gif"
+    } else {
+        "png"
+    };
 
     let mut fields = vec![("chat_id", chat_id.to_string())];
     if let Some(reply_id) = reply_to_message_id {
         fields.push(("reply_to_message_id", reply_id.to_string()));
     }
 
-    let (boundary, body) =
-        multipart_payload(&fields, "document", "mentor-audio.bin", &mime, &bytes);
+    let (boundary, body) = multipart_payload(
+        &fields,
+        "photo",
+        &format!("mentor-image.{}", extension),
+        &mime,
+        &bytes,
+    );
+    let headers = serde_json::json!({
+        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
+    });
+
+    let response = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+        &headers.to_string(),
+        Some(&body),
+        None,
+    )
+    .map_err(|err| format!("sendPhoto request failed: {}", err))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "sendPhoto failed with status {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    Ok(())
+}
+
+fn send_video_data_url(
+    chat_id: i64,
+    data_url: &str,
+    reply_to_message_id: Option<i64>,
+) -> Result<(), String> {
+    let (mime, bytes) = parse_data_url_binary(data_url, MAX_ATTACHMENT_BYTES)?;
+    if !mime.starts_with("video/") {
+        return Err(format!(
+            "invalid video attachment mime type for sendVideo: {}",
+            mime
+        ));
+    }
+
+    let extension = if mime.contains("webm") {
+        "webm"
+    } else if mime.contains("quicktime") {
+        "mov"
+    } else {
+        "mp4"
+    };
+
+    let mut fields = vec![("chat_id", chat_id.to_string())];
+    if let Some(reply_id) = reply_to_message_id {
+        fields.push(("reply_to_message_id", reply_id.to_string()));
+    }
+
+    let (boundary, body) = multipart_payload(
+        &fields,
+        "video",
+        &format!("mentor-video.{}", extension),
+        &mime,
+        &bytes,
+    );
+    let headers = serde_json::json!({
+        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
+    });
+
+    let response = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo",
+        &headers.to_string(),
+        Some(&body),
+        None,
+    )
+    .map_err(|err| format!("sendVideo request failed: {}", err))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "sendVideo failed with status {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    Ok(())
+}
+
+fn send_document_data_url(
+    chat_id: i64,
+    data_url: &str,
+    reply_to_message_id: Option<i64>,
+) -> Result<(), String> {
+    let (mime, bytes) = parse_data_url_binary(data_url, MAX_ATTACHMENT_BYTES)?;
+    let file_name = if mime.starts_with("image/") {
+        if mime.contains("jpeg") || mime.contains("jpg") {
+            "mentor-image.jpg"
+        } else if mime.contains("webp") {
+            "mentor-image.webp"
+        } else if mime.contains("gif") {
+            "mentor-image.gif"
+        } else {
+            "mentor-image.png"
+        }
+    } else if mime.starts_with("video/") {
+        if mime.contains("webm") {
+            "mentor-video.webm"
+        } else if mime.contains("quicktime") {
+            "mentor-video.mov"
+        } else {
+            "mentor-video.mp4"
+        }
+    } else if mime.starts_with("audio/") {
+        "mentor-audio.bin"
+    } else {
+        "mentor-attachment.bin"
+    };
+
+    let mut fields = vec![("chat_id", chat_id.to_string())];
+    if let Some(reply_id) = reply_to_message_id {
+        fields.push(("reply_to_message_id", reply_id.to_string()));
+    }
+
+    let (boundary, body) = multipart_payload(&fields, "document", file_name, &mime, &bytes);
     let headers = serde_json::json!({
         "Content-Type": format!("multipart/form-data; boundary={}", boundary)
     });

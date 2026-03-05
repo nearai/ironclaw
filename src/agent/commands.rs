@@ -89,6 +89,16 @@ fn mentor_error_summary(error: &str) -> String {
         format!(
             "telegram_api_error: Telegram delivery error while sending voice response. cause={detail}"
         )
+    } else if lower.contains("novita")
+        || lower.contains("image")
+        || lower.contains("flux")
+        || lower.contains("txt2img")
+        || lower.contains("video")
+        || lower.contains("t2v")
+        || lower.contains("mochi")
+        || lower.contains("seedance")
+    {
+        format!("media_backend_error: Mentor image/video backend error. cause={detail}")
     } else {
         format!("Mentor error: {}", error)
     }
@@ -313,6 +323,67 @@ fn load_audio_attachment_data_url(path: &str) -> Result<String, String> {
     }
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     let mime = audio_mime_type_for_path(path);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+fn image_mime_type_for_path(path: &str) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/png",
+    }
+}
+
+fn load_image_attachment_data_url(path: &str) -> Result<String, String> {
+    if path.starts_with("data:image/") {
+        return Ok(path.to_string());
+    }
+
+    let bytes =
+        fs::read(path).map_err(|err| format!("Failed reading mentor image artifact: {err}"))?;
+    if bytes.is_empty() {
+        return Err("Mentor image artifact is empty".to_string());
+    }
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let mime = image_mime_type_for_path(path);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+fn video_mime_type_for_path(path: &str) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        _ => "video/mp4",
+    }
+}
+
+fn load_video_attachment_data_url(path: &str) -> Result<String, String> {
+    if path.starts_with("data:video/") {
+        return Ok(path.to_string());
+    }
+
+    let bytes =
+        fs::read(path).map_err(|err| format!("Failed reading mentor video artifact: {err}"))?;
+    if bytes.is_empty() {
+        return Err("Mentor video artifact is empty".to_string());
+    }
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let mime = video_mime_type_for_path(path);
     Ok(format!("data:{mime};base64,{encoded}"))
 }
 
@@ -792,6 +863,8 @@ impl Agent {
                 "  /suggest          Suggest next steps\n",
                 "  /mentor <msg>     Ask mentor (text route)\n",
                 "  /mentor_voice on|off|status|<msg>\n",
+                "  /mentor_image <prompt>\n",
+                "  /mentor_video <prompt>\n",
                 "\n",
                 "  /quit             Exit",
             ))),
@@ -910,6 +983,9 @@ impl Agent {
             }
 
             "mentor_voice" => self.handle_mentor_voice_command(message, args).await,
+
+            "mentor_image" => self.handle_mentor_image_command(message, args).await,
+            "mentor_video" => self.handle_mentor_video_command(message, args).await,
 
             _ => Ok(SubmissionResult::error(format!(
                 "Unknown command. Try /help"
@@ -1093,7 +1169,10 @@ impl Agent {
             .unwrap_or(false);
         let timeout_secs = if logical_tool_name == "mentor.chat" && voice_reply_requested {
             180
-        } else if logical_tool_name == "mentor.speak" {
+        } else if logical_tool_name == "mentor.speak"
+            || logical_tool_name == "mentor.image"
+            || logical_tool_name == "mentor.video"
+        {
             180
         } else {
             60
@@ -1257,6 +1336,152 @@ impl Agent {
                 )))
             }
             Err(error) => Ok(SubmissionResult::error(mentor_error_summary(&error))),
+        }
+    }
+
+    async fn handle_mentor_image_command(
+        &self,
+        message: Option<&IncomingMessage>,
+        args: &[String],
+    ) -> Result<SubmissionResult, Error> {
+        if args.is_empty() {
+            return Ok(SubmissionResult::response(
+                "Usage: /mentor_image [--provider chutes|novita] <prompt>",
+            ));
+        }
+
+        let mut provider: Option<String> = None;
+        let mut prompt_start = 0usize;
+
+        if args.len() >= 3 && args[0] == "--provider" {
+            provider = Some(args[1].to_ascii_lowercase());
+            prompt_start = 2;
+        } else if let Some(raw_provider) = args[0].strip_prefix("provider=") {
+            provider = Some(raw_provider.to_ascii_lowercase());
+            prompt_start = 1;
+        }
+
+        let prompt = args[prompt_start..].join(" ").trim().to_string();
+        if prompt.is_empty() {
+            return Ok(SubmissionResult::response(
+                "Usage: /mentor_image [--provider chutes|novita] <prompt>",
+            ));
+        }
+
+        let user_id = message.map(|msg| msg.user_id.as_str()).unwrap_or("default");
+        let mut params = json!({
+            "prompt": prompt,
+        });
+        if let Some(provider_value) = provider {
+            params["provider"] = json!(provider_value);
+        }
+
+        let payload = match self
+            .execute_mentor_tool("mentor.image", params, user_id)
+            .await
+        {
+            Ok(payload) => payload,
+            Err(error) => return Ok(SubmissionResult::error(mentor_error_summary(&error))),
+        };
+
+        let image_artifact = payload
+            .get("imageArtifact")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+        let image_provider = payload
+            .get("imageProvider")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+
+        let Some(image_artifact) = image_artifact else {
+            return Ok(SubmissionResult::response(format!(
+                "Mentor image generation completed, but no image artifact path was returned (provider={image_provider})."
+            )));
+        };
+
+        let summary = format!("Generated image with {image_provider}.");
+        match load_image_attachment_data_url(&image_artifact) {
+            Ok(data_url) => Ok(SubmissionResult::response_with_attachments(
+                summary,
+                vec![data_url],
+            )),
+            Err(error) => Ok(SubmissionResult::response(format!(
+                "{summary}\n\nImage delivery fallback: {}",
+                mentor_error_summary(&error)
+            ))),
+        }
+    }
+
+    async fn handle_mentor_video_command(
+        &self,
+        message: Option<&IncomingMessage>,
+        args: &[String],
+    ) -> Result<SubmissionResult, Error> {
+        if args.is_empty() {
+            return Ok(SubmissionResult::response(
+                "Usage: /mentor_video [--provider chutes|novita] <prompt>",
+            ));
+        }
+
+        let mut provider: Option<String> = None;
+        let mut prompt_start = 0usize;
+
+        if args.len() >= 3 && args[0] == "--provider" {
+            provider = Some(args[1].to_ascii_lowercase());
+            prompt_start = 2;
+        } else if let Some(raw_provider) = args[0].strip_prefix("provider=") {
+            provider = Some(raw_provider.to_ascii_lowercase());
+            prompt_start = 1;
+        }
+
+        let prompt = args[prompt_start..].join(" ").trim().to_string();
+        if prompt.is_empty() {
+            return Ok(SubmissionResult::response(
+                "Usage: /mentor_video [--provider chutes|novita] <prompt>",
+            ));
+        }
+
+        let user_id = message.map(|msg| msg.user_id.as_str()).unwrap_or("default");
+        let mut params = json!({
+            "prompt": prompt,
+        });
+        if let Some(provider_value) = provider {
+            params["provider"] = json!(provider_value);
+        }
+
+        let payload = match self
+            .execute_mentor_tool("mentor.video", params, user_id)
+            .await
+        {
+            Ok(payload) => payload,
+            Err(error) => return Ok(SubmissionResult::error(mentor_error_summary(&error))),
+        };
+
+        let video_artifact = payload
+            .get("videoArtifact")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+        let video_provider = payload
+            .get("videoProvider")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+
+        let Some(video_artifact) = video_artifact else {
+            return Ok(SubmissionResult::response(format!(
+                "Mentor video generation completed, but no video artifact path was returned (provider={video_provider})."
+            )));
+        };
+
+        let summary = format!("Generated video with {video_provider}.");
+        match load_video_attachment_data_url(&video_artifact) {
+            Ok(data_url) => Ok(SubmissionResult::response_with_attachments(
+                summary,
+                vec![data_url],
+            )),
+            Err(error) => Ok(SubmissionResult::response(format!(
+                "{summary}\n\nVideo delivery fallback: {}",
+                mentor_error_summary(&error)
+            ))),
         }
     }
 
