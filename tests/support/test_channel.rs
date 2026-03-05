@@ -153,7 +153,7 @@ impl TestChannel {
         self.captured_status_events()
             .iter()
             .filter_map(|s| match s {
-                StatusUpdate::ToolCompleted { name, success } => Some((name.clone(), *success)),
+                StatusUpdate::ToolCompleted { name, success, .. } => Some((name.clone(), *success)),
                 _ => None,
             })
             .collect()
