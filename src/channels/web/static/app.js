@@ -428,6 +428,22 @@ function renderMarkdown(text) {
 // Strip dangerous HTML elements and attributes from rendered markdown.
 // This prevents XSS from tool output or prompt injection in LLM responses.
 function sanitizeRenderedHtml(html) {
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(html, {
+      ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|ftp):|[^a-z]|[a-z+.-]+(?:[^a-z+.-]|$))/i,
+    });
+  }
+
+  if (!window.__domPurifyMissingWarned) {
+    window.__domPurifyMissingWarned = true;
+    showToast('DOMPurify unavailable; using degraded HTML sanitizer.', 'error');
+    console.warn('DOMPurify unavailable; using fallback sanitizer');
+  }
+
+  return sanitizeRenderedHtmlFallback(html);
+}
+
+function sanitizeRenderedHtmlFallback(html) {
   html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
   html = html.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '');
   html = html.replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '');
@@ -437,11 +453,11 @@ function sanitizeRenderedHtml(html) {
   html = html.replace(/<link\b[^>]*\/?>/gi, '');
   html = html.replace(/<base\b[^>]*\/?>/gi, '');
   html = html.replace(/<meta\b[^>]*\/?>/gi, '');
-  // Remove event handler attributes (onclick, onerror, onload, etc.)
+  // Remove inline event handlers (onclick=, onerror=, etc.) across quoted/unquoted forms.
   html = html.replace(/\s+on\w+\s*=\s*"[^"]*"/gi, '');
   html = html.replace(/\s+on\w+\s*=\s*'[^']*'/gi, '');
   html = html.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
-  // Remove javascript: and data: URLs in href/src attributes
+  // Neutralize javascript:/data: URL schemes in link-like attributes.
   html = html.replace(/(href|src|action)\s*=\s*["']?\s*javascript\s*:/gi, '$1="');
   html = html.replace(/(href|src|action)\s*=\s*["']?\s*data\s*:/gi, '$1="');
   return html;

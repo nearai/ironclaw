@@ -305,6 +305,7 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
+        .route("/dompurify.bundle.min.js", get(dompurify_bundle_handler))
         .route("/favicon.ico", get(favicon_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
@@ -404,6 +405,16 @@ async fn js_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/app.js"),
+    )
+}
+
+async fn dompurify_bundle_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/dompurify.bundle.min.js"),
     )
 }
 
