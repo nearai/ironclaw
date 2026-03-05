@@ -58,7 +58,6 @@ impl SecretsCrypto {
 
     /// Generate a random salt for a new secret.
     pub fn generate_salt() -> Vec<u8> {
-        use rand::rngs::OsRng;
         let mut salt = vec![0u8; SALT_SIZE];
         rand::RngCore::fill_bytes(&mut OsRng, &mut salt);
         salt
@@ -247,5 +246,24 @@ mod tests {
         let (encrypted, salt) = crypto.encrypt(&plaintext).unwrap();
         let decrypted = crypto.decrypt(&encrypted, &salt).unwrap();
         assert_eq!(decrypted.expose().as_bytes(), plaintext.as_slice());
+    }
+
+    #[test]
+    fn test_generate_salt_correct_length() {
+        let salt = SecretsCrypto::generate_salt();
+        assert_eq!(salt.len(), super::SALT_SIZE);
+    }
+
+    #[test]
+    fn test_generate_salt_nonzero() {
+        let salt = SecretsCrypto::generate_salt();
+        assert!(salt.iter().any(|&b| b != 0), "salt should not be all zeros");
+    }
+
+    #[test]
+    fn test_generate_salt_unique() {
+        let s1 = SecretsCrypto::generate_salt();
+        let s2 = SecretsCrypto::generate_salt();
+        assert_ne!(s1, s2, "two generated salts should not be identical");
     }
 }
