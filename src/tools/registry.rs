@@ -176,8 +176,9 @@ impl ToolRegistry {
         if names.is_empty() {
             return;
         }
+        let names_set: std::collections::HashSet<&str> = names.iter().copied().collect();
         let mut tools = self.tools.write().await;
-        tools.retain(|k, _| names.contains(&k.as_str()));
+        tools.retain(|k, _| names_set.contains(k.as_str()));
     }
 
     /// Get the number of registered tools.

@@ -295,8 +295,9 @@ impl SkillRegistry {
         if names.is_empty() {
             return;
         }
+        let names_set: HashSet<&str> = names.iter().copied().collect();
         self.skills
-            .retain(|s| names.contains(&s.manifest.name.as_str()));
+            .retain(|s| names_set.contains(s.manifest.name.as_str()));
     }
 
     /// Check if a skill with the given name is loaded.
@@ -993,11 +994,21 @@ mod tests {
         assert_eq!(skill.lowercased_tags, vec!["email", "prose"]);
     }
 
-    #[test]
-    fn test_retain_only_empty_is_noop() {
-        let mut registry = SkillRegistry::new(PathBuf::from("/tmp/nonexistent-skills-test"));
+    #[tokio::test]
+    async fn test_retain_only_empty_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("SKILL.md"),
+            "---\nname: keep-me\ndescription: test\nactivation:\n  keywords: [\"test\"]\n---\n\nKeep this skill.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.discover_all().await;
+        assert_eq!(registry.count(), 1);
+
         registry.retain_only(&[]);
-        assert_eq!(registry.count(), 0);
+        assert_eq!(registry.count(), 1, "empty retain_only should keep all skills");
     }
 
     #[test]
