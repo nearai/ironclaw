@@ -25,3 +25,8 @@ bench-results/
 
 # Traces
 trace_*.json
+node_modules/
+
+# docs
+.env.screenshots
+

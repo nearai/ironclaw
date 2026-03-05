@@ -1,6 +1,18 @@
 {
+  "name": "ironclaw-docs",
+  "private": true,
+  "scripts": {
+    "screenshots": "./scripts/run-screenshots.sh",
+    "screenshots:list": "./scripts/run-screenshots.sh --list",
+    "screenshots:update": "./scripts/run-screenshots.sh --update-snapshots",
+    "dev": "mint dev"
+  },
   "dependencies": {
     "@excalidraw/excalidraw": "^0.17.0",
-    "@excalidraw/utils": "^0.1.3-test32"
+    "@excalidraw/utils": "^0.1.3-test32",
+    "mint": "^4.2.405"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0"
   }
 }
