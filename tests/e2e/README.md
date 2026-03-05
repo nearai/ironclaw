@@ -78,14 +78,15 @@ import json
 
 async def test_something(page):
     # 1. Set up route intercepts BEFORE navigation triggers the fetch
-    await page.route(
-        "**/api/extensions/tools",
-        lambda route: route.fulfill(
+    # Always use async def handlers — route.fulfill() is a coroutine and must be awaited.
+    async def handle_tools(route):
+        await route.fulfill(
             status=200,
             content_type="application/json",
             body=json.dumps({"tools": [{"name": "echo", "description": "Echo"}]}),
-        ),
-    )
+        )
+
+    await page.route("**/api/extensions/tools", handle_tools)
 
     # 2. Navigate / interact to trigger the fetch
     await page.locator('.tab-bar button[data-tab="extensions"]').click()

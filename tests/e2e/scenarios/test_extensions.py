@@ -18,7 +18,6 @@ WASM binaries or external registry connections are needed.
 
 import json
 
-import pytest
 from helpers import SEL
 
 # ─── Fixture data ─────────────────────────────────────────────────────────────
@@ -944,8 +943,14 @@ async def test_extensions_tab_reloads_on_revisit(page):
         else:
             await route.continue_()
 
-    await page.route("**/api/extensions/tools", lambda r: r.fulfill(status=200, content_type="application/json", body='{"tools":[]}'))
-    await page.route("**/api/extensions/registry", lambda r: r.fulfill(status=200, content_type="application/json", body='{"entries":[]}'))
+    async def handle_tools(route):
+        await route.fulfill(status=200, content_type="application/json", body='{"tools":[]}')
+
+    async def handle_registry(route):
+        await route.fulfill(status=200, content_type="application/json", body='{"entries":[]}')
+
+    await page.route("**/api/extensions/tools", handle_tools)
+    await page.route("**/api/extensions/registry", handle_registry)
     await page.route("**/api/extensions*", counting_handler)
 
     # First visit
@@ -979,8 +984,14 @@ async def test_auth_completed_sse_triggers_extensions_reload(page):
         else:
             await route.continue_()
 
-    await page.route("**/api/extensions/tools", lambda r: r.fulfill(status=200, content_type="application/json", body='{"tools":[]}'))
-    await page.route("**/api/extensions/registry", lambda r: r.fulfill(status=200, content_type="application/json", body='{"entries":[]}'))
+    async def handle_tools(route):
+        await route.fulfill(status=200, content_type="application/json", body='{"tools":[]}')
+
+    async def handle_registry(route):
+        await route.fulfill(status=200, content_type="application/json", body='{"entries":[]}')
+
+    await page.route("**/api/extensions/tools", handle_tools)
+    await page.route("**/api/extensions/registry", handle_registry)
     await page.route("**/api/extensions*", counting_handler)
 
     await go_to_extensions(page)

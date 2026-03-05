@@ -2233,9 +2233,16 @@ function closeConfigureModal() {
 
 // Validate that a server-supplied OAuth URL is HTTPS before opening a popup.
 // Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
+// Uses the URL constructor to safely parse and validate the scheme, which also
+// handles non-string values (objects, null, etc.) that would throw on .startsWith().
 function openOAuthUrl(url) {
-  if (!url || !url.startsWith('https://')) {
-    console.warn('Blocked non-HTTPS OAuth URL:', url);
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      throw new Error('non-HTTPS protocol: ' + parsed.protocol);
+    }
+  } catch (e) {
+    console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
     showToast('Invalid OAuth URL returned by server', 'error');
     return;
   }
