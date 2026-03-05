@@ -312,6 +312,8 @@ async fn test_ws_multiple_events_in_sequence() {
     state.sse.broadcast(SseEvent::ToolCompleted {
         name: "shell".to_string(),
         success: true,
+        error: None,
+        parameters: None,
         thread_id: None,
     });
     state.sse.broadcast(SseEvent::Response {

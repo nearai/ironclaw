@@ -10,6 +10,7 @@ mod memory;
 mod message;
 pub mod path_utils;
 pub mod routine;
+pub mod secrets_tools;
 pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
@@ -31,6 +32,7 @@ pub use message::MessageTool;
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };
+pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
