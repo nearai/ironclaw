@@ -1,0 +1,372 @@
+---
+title: REST API Reference
+sidebarTitle: REST API
+description: Complete endpoint reference for the IronClaw Web Gateway API
+---
+
+The IronClaw Web Gateway exposes a REST API for all agent operations. All endpoints require bearer token authentication.
+
+## Authentication
+
+```http
+Authorization: Bearer <GATEWAY_AUTH_TOKEN>
+```
+
+The token is set via the `GATEWAY_AUTH_TOKEN` environment variable. An unauthenticated request returns `401 Unauthorized`.
+
+## Base URL
+
+```
+http://localhost:3000
+```
+
+For remote deployments, replace with your reverse proxy domain (e.g., `https://ironclaw.yourdomain.com`).
+
+---
+
+## Status
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/status` | Agent status, version, uptime, active job count |
+| `GET` | `/api/health` | Liveness check — returns `200 OK` if the gateway is up |
+
+### GET /api/status
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/status | jq .
+```
+
+```json
+{
+  "status": "running",
+  "version": "0.13.0",
+  "uptime_secs": 86400,
+  "active_jobs": 2,
+  "llm_backend": "nearai",
+  "database_backend": "libsql",
+  "sandbox_enabled": true
+}
+```
+
+---
+
+## Chat
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/chat` | Submit a message; returns a streaming response or job ID |
+| `GET` | `/api/sessions` | List all conversation sessions |
+| `GET` | `/api/sessions/:id` | Get a session with its message history |
+| `DELETE` | `/api/sessions/:id` | Delete a session and its history |
+
+### POST /api/chat
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Summarize the last 3 jobs", "session_id": "default"}' \
+  http://localhost:3000/api/chat
+```
+
+**Request body:**
+
+```json
+{
+  "message": "string (required)",
+  "session_id": "string (optional, defaults to 'default')",
+  "stream": false
+}
+```
+
+**Response:**
+
+```json
+{
+  "job_id": "job_01j9abc123",
+  "session_id": "default",
+  "status": "pending",
+  "message": "Job created. Connect to /api/jobs/job_01j9abc123 for updates."
+}
+```
+
+---
+
+## Jobs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/jobs` | List jobs (supports `?status=`, `?limit=`, `?offset=`) |
+| `POST` | `/api/jobs` | Create a new job directly |
+| `GET` | `/api/jobs/:id` | Get job details and current state |
+| `DELETE` | `/api/jobs/:id` | Delete a completed job record |
+| `POST` | `/api/jobs/:id/cancel` | Cancel a running job |
+
+### GET /api/jobs
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3000/api/jobs?status=running&limit=10" | jq .
+```
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by: `pending`, `running`, `completed`, `failed`, `cancelled` |
+| `limit` | integer | Max results (default: 20, max: 100) |
+| `offset` | integer | Pagination offset |
+| `session_id` | string | Filter by session |
+
+**Response:**
+
+```json
+{
+  "jobs": [
+    {
+      "id": "job_01j9abc123",
+      "session_id": "default",
+      "status": "running",
+      "intent": "summarize recent activity",
+      "created_at": "2024-01-15T10:30:00Z",
+      "updated_at": "2024-01-15T10:30:05Z",
+      "tool_calls": 3,
+      "tokens_used": 1200
+    }
+  ],
+  "total": 47,
+  "limit": 10,
+  "offset": 0
+}
+```
+
+### POST /api/jobs/:id/cancel
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/jobs/job_01j9abc123/cancel
+```
+
+---
+
+## Memory
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/memory/search` | Hybrid search (FTS + vector) across workspace memory |
+| `GET` | `/api/memory/tree` | Browse the workspace file tree |
+| `GET` | `/api/memory/:path` | Read a memory document by path |
+| `PUT` | `/api/memory/:path` | Write or update a memory document |
+| `DELETE` | `/api/memory/:path` | Delete a memory document |
+
+### GET /api/memory/search
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3000/api/memory/search?q=deployment+notes&limit=5" | jq .
+```
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `q` | string | Search query (required) |
+| `limit` | integer | Max results (default: 10) |
+| `semantic` | boolean | Include semantic/vector results (default: true, requires embeddings) |
+
+### PUT /api/memory/:path
+
+```bash
+curl -s -X PUT \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Deploy Notes\n\nDeployed v0.13 on 2024-01-15.", "tags": ["deploy", "notes"]}' \
+  http://localhost:3000/api/memory/context/deploy-notes.md
+```
+
+---
+
+## Routines
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/routines` | List all routines |
+| `POST` | `/api/routines` | Create a new routine |
+| `GET` | `/api/routines/:id` | Get a routine by ID |
+| `PUT` | `/api/routines/:id` | Update a routine |
+| `DELETE` | `/api/routines/:id` | Delete a routine |
+| `GET` | `/api/routines/:id/history` | Execution history for a routine |
+
+### POST /api/routines
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "daily-digest",
+    "trigger": {"type": "cron", "schedule": "0 9 * * *"},
+    "action": {"type": "message", "content": "Generate a daily summary of yesterday'"'"'s activity."},
+    "enabled": true
+  }' \
+  http://localhost:3000/api/routines
+```
+
+---
+
+## Skills
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/skills` | List all discovered skills with trust level and activation status |
+| `POST` | `/api/skills/install` | Install a skill from ClawHub or a local path |
+| `DELETE` | `/api/skills/:name` | Remove an installed skill |
+| `GET` | `/api/skills/search` | Search the ClawHub registry |
+
+### GET /api/skills/search
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3000/api/skills/search?q=git+workflow" | jq .
+```
+
+### POST /api/skills/install
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "git-workflow", "source": "clawhub"}' \
+  http://localhost:3000/api/skills/install
+```
+
+---
+
+## Extensions
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/extensions` | List installed extensions (MCP servers, WASM modules) |
+| `POST` | `/api/extensions/install` | Install an extension from URL or registry |
+| `POST` | `/api/extensions/:id/auth` | Configure authentication for an extension |
+| `POST` | `/api/extensions/:id/activate` | Activate an installed extension |
+| `DELETE` | `/api/extensions/:id` | Uninstall an extension |
+
+---
+
+## Secrets
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/secrets` | List secret names (values are never returned) |
+| `POST` | `/api/secrets` | Store a new secret (AES-256-GCM encrypted at rest) |
+| `DELETE` | `/api/secrets/:name` | Delete a stored secret |
+
+### POST /api/secrets
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "github_token", "value": "ghp_xxxxxxxxxxxx", "description": "GitHub PAT for CI"}' \
+  http://localhost:3000/api/secrets
+```
+
+**Response:**
+
+```json
+{
+  "name": "github_token",
+  "created_at": "2024-01-15T10:00:00Z"
+}
+```
+
+<Note>
+Secret values are write-only. The `GET /api/secrets` endpoint returns only secret names and metadata, never the plaintext values. Values are encrypted with AES-256-GCM before storage.
+</Note>
+
+---
+
+## Settings
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/settings` | Get all user settings as a key-value map |
+| `PUT` | `/api/settings` | Update one or more settings |
+
+### PUT /api/settings
+
+```bash
+curl -s -X PUT \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"heartbeat_enabled": "true", "max_parallel_jobs": "3"}' \
+  http://localhost:3000/api/settings
+```
+
+---
+
+## Logs
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/logs` | SSE stream of live log events (see [WebSocket & SSE](/ops/websocket-sse)) |
+
+```bash
+curl -N \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: text/event-stream" \
+  http://localhost:3000/api/logs
+```
+
+---
+
+## Channels
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/channels` | List all configured channels and their enabled status |
+| `GET` | `/api/channels/:id/status` | Connection status for a specific channel |
+
+---
+
+## Error Codes
+
+| Status | Code | Description |
+|--------|------|-------------|
+| `400` | Bad Request | Malformed request body or missing required fields |
+| `401` | Unauthorized | Missing or invalid `Authorization` header |
+| `404` | Not Found | The requested resource does not exist |
+| `409` | Conflict | Resource already exists (e.g., duplicate secret name) |
+| `422` | Unprocessable Entity | Request is well-formed but semantically invalid |
+| `429` | Too Many Requests | Rate limit exceeded |
+| `500` | Internal Server Error | Unexpected server error — check logs |
+| `503` | Service Unavailable | Agent is initializing or shutting down |
+
+**Error response body:**
+
+```json
+{
+  "error": "not_found",
+  "message": "Job 'job_01j9abc123' does not exist",
+  "request_id": "req_7f3a9b"
+}
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="WebSocket & SSE" icon="radio" href="/ops/websocket-sse">
+    Real-time streaming for job updates and log tailing
+  </Card>
+  <Card title="Logging" icon="file-text" href="/ops/logging">
+    RUST_LOG, journalctl, and cost tracking
+  </Card>
+  <Card title="Configuration" icon="settings" href="/setup/configuration">
+    Full environment variable reference
+  </Card>
+</CardGroup>

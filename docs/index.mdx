@@ -6,23 +6,17 @@ description: Secure personal AI assistant. Your data stays yours, encrypted and 
 
 <div className="relative">
   <div className="absolute inset-0 bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-slate-900 dark:to-slate-800 -z-10 rounded-2xl"></div>
-
-  <div className="pt-12 pb-8 px-8 text-center">
-    <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 mb-6 shadow-lg">
-      <svg viewBox="0 0 100 100" className="w-12 h-12" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect width="100" height="100" rx="16" fill="white"/>
-        <path d="M30 35 L50 25 L70 35 L70 50 L50 60 L30 50 Z" fill="#5B6FFF"/>
-        <path d="M30 50 L50 60 L50 75 L30 65 Z" fill="#8B9AFF"/>
-        <path d="M70 50 L50 60 L50 75 L70 65 Z" fill="#4A5FE6"/>
-        <circle cx="50" cy="42" r="8" fill="#5B6FFF"/>
-      </svg>
-    </div>
-
-    <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-slate-900 to-slate-700 dark:from-white dark:to-slate-300 bg-clip-text text-transparent mb-4">
+  <div className="pt-12 pb-2 px-8 text-center">
+  <h1 className="text-4xl md:text-5xl font-bold  bg-gradient-to-r from-slate-900 to-slate-700 dark:from-white dark:to-slate-300 bg-clip-text text-transparent mb-4">
       IronClaw
     </h1>
+    <div className="inline-flex items-center justify-center mb-6">
+      <img src="/assets/ironclaw.png" alt="IronClaw" style={{height: "200px", width: "auto"}} />
+    </div>
 
-    <p className="text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto mb-8">
+    
+
+    <p className="text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto mb-1">
       Secure personal AI assistant. Your data stays yours, encrypted and local.
     </p>
 
@@ -81,15 +75,15 @@ The architecture shows how user input flows through IronClaw's multi-layer syste
     Choose from 7+ providers: NEAR AI, Anthropic, OpenAI, Ollama, Tinfoil, and more
   </Card>
 
-  <Card title="Skills System" icon="puzzle" href="/skills">
+  <Card title="Skills System" icon="puzzle" href="/agents/skills">
     Extend capabilities with SKILL.md prompt extensions from ClawHub registry
   </Card>
 
-  <Card title="Parallel Jobs" icon="workflow" href="/start/wizard">
+  <Card title="Parallel Jobs" icon="workflow" href="/agents/jobs">
     Execute multiple tasks concurrently with state machine and self-repair
   </Card>
 
-  <Card title="Persistent Memory" icon="database" href="/memory">
+  <Card title="Persistent Memory" icon="database" href="/agents/memory">
     Hybrid search (FTS + vector) with identity files and heartbeat system
   </Card>
 </CardGroup>
@@ -120,7 +114,7 @@ Get IronClaw running in under 10 minutes:
     ```bash
     ironclaw run
     ```
-    If you enabled the Web Gateway, open `http://127.0.0.1:3001` in your browser.
+    If you enabled the Web Gateway, open `http://127.0.0.1:3000` in your browser.
   </Step>
 </Steps>
 

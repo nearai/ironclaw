@@ -1,0 +1,146 @@
+---
+title: Self-Repair & Stuck Jobs
+sidebarTitle: Self-Repair
+description: Automatic detection and recovery of stuck jobs
+---
+
+IronClaw monitors all running jobs and automatically recovers those that stop making progress — without requiring human intervention.
+
+## What Is a Stuck Job?
+
+A job is considered **stuck** when it has been in the **InProgress** state for longer than the configured timeout without producing any output, tool calls, or state updates.
+
+Common causes:
+- LLM provider timeout or rate limit with no retry budget remaining
+- Tool call hanging on an unresponsive external service
+- Container resource exhaustion (OOM, CPU throttle)
+- Network partition between the agent and a sandboxed worker
+
+## Detection
+
+The self-repair system runs as a background task alongside the scheduler. It periodically scans all InProgress jobs and compares the last-activity timestamp against the stuck threshold.
+
+```
+[Self-Repair Monitor]
+         ↓
+For each InProgress job:
+    last_activity > SELF_REPAIR_TIMEOUT?
+         ↓ yes
+    Transition: InProgress → Stuck
+         ↓
+    Log failure to tool_failures table
+         ↓
+    Attempt recovery
+```
+
+The `tool_failures` table accumulates failure records per job and per tool. This data is used to assess whether recovery is worth attempting again or whether the job should be moved directly to **Failed**.
+
+## Recovery Flow
+
+When a stuck job is detected, the self-repair system attempts to restart it:
+
+<Steps>
+  <Step title="Transition to Stuck">
+    The job state changes from InProgress to Stuck. The event is logged with the failure reason and timestamp.
+  </Step>
+
+  <Step title="Inspect failure history">
+    The system checks the `tool_failures` table for this job. If the job has exceeded the maximum retry count, it is transitioned directly to **Failed** and recovery is skipped.
+  </Step>
+
+  <Step title="Re-enter InProgress">
+    If retries remain, the job transitions back to InProgress. A new worker picks it up and resumes execution from the last saved checkpoint.
+  </Step>
+
+  <Step title="Evaluate outcome">
+    If the job completes successfully, the failure records are cleared. If it gets stuck again, the cycle repeats until the retry limit is reached, at which point the job fails permanently.
+  </Step>
+</Steps>
+
+### State Diagram
+
+```
+InProgress
+    ↓ (timeout detected)
+  Stuck ──────────────────────► Failed (retry limit reached)
+    ↓ (retry available)
+InProgress
+    ↓
+Completed (or back to Stuck)
+```
+
+## Tool Failure Tracking
+
+Every time a tool fails during job execution, the event is recorded:
+
+| Field | Description |
+|-------|-------------|
+| `job_id` | The job that experienced the failure |
+| `tool_name` | Which tool failed |
+| `error` | Error message or failure reason |
+| `occurred_at` | Timestamp of the failure |
+
+This history is available to the worker on retry, allowing it to avoid repeating the same failing tool call or to select an alternative approach.
+
+## Configuration
+
+```bash
+# Enable self-repair (default: true)
+SELF_REPAIR_ENABLED=true
+
+# How long before a job is considered stuck (seconds)
+SELF_REPAIR_TIMEOUT_SECS=300
+
+# Maximum recovery attempts before marking job as Failed
+SELF_REPAIR_MAX_RETRIES=3
+
+# How often the monitor checks for stuck jobs (seconds)
+SELF_REPAIR_CHECK_INTERVAL_SECS=60
+```
+
+<Note>
+`SELF_REPAIR_TIMEOUT_SECS` should be set lower than `SANDBOX_TIMEOUT_SECS`. The sandbox enforces a hard kill; self-repair is a soft recovery that runs before the hard kill triggers.
+</Note>
+
+## Observability
+
+Stuck and recovered jobs are visible in:
+
+- **Job history** — The web gateway's job list shows state transitions with timestamps
+- **Logs** — `RUST_LOG=ironclaw::agent::self_repair=debug` for detailed repair events
+- **`list_jobs` tool** — Shows current state including Stuck jobs
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Job repeatedly gets stuck" icon="refresh-cw">
+    - Check `RUST_LOG=ironclaw::agent::self_repair=debug` for failure reasons
+    - Inspect tool failure records via `job_status` tool
+    - Consider increasing `SELF_REPAIR_TIMEOUT_SECS` if the job is legitimately long-running
+    - Check network connectivity to LLM provider and external services
+  </Accordion>
+
+  <Accordion title="Job fails immediately after recovery" icon="x-circle">
+    - The tool failure history may reveal a specific tool that always fails
+    - Check whether the external service the tool depends on is available
+    - Review sandbox logs if the job runs in a container (`SANDBOX_ENABLED=true`)
+  </Accordion>
+
+  <Accordion title="Stuck jobs not being detected" icon="search">
+    - Verify `SELF_REPAIR_ENABLED=true`
+    - Check that `SELF_REPAIR_TIMEOUT_SECS` is not set too high
+    - Confirm the self-repair monitor is running: look for `self_repair` in startup logs
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Jobs & Parallel Execution" icon="layers" href="/agents/jobs">
+    State machine details and job management tools
+  </Card>
+
+  <Card title="Agent Overview" icon="cpu" href="/agents/index">
+    How the agent loop and scheduler work
+  </Card>
+</CardGroup>

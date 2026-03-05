@@ -1,0 +1,163 @@
+---
+title: MCP Servers
+sidebarTitle: MCP Servers
+description: Connect Model Context Protocol servers to extend IronClaw
+---
+
+IronClaw can connect to any [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server and expose its tools to the agent. MCP is an open standard for tool servers, with a growing ecosystem of pre-built servers covering databases, APIs, cloud services, and more.
+
+## Transport
+
+IronClaw connects to MCP servers over **HTTP transport** using JSON-RPC 2.0. The `stdio` transport (subprocess pipes) is not yet supported.
+
+This means MCP servers must be running as HTTP servers before IronClaw starts.
+
+## Protocol
+
+Tool discovery and invocation follow the MCP specification:
+
+1. **Initialize** — IronClaw sends `initialize` to negotiate protocol version and capabilities
+2. **List tools** — IronClaw sends `tools/list` to discover available tools and their schemas
+3. **Call tool** — When the LLM selects an MCP tool, IronClaw sends `tools/call` with the validated parameters
+4. **Return result** — The MCP server returns the result; IronClaw passes it through the Safety Layer
+
+All messages use JSON-RPC 2.0 over HTTP POST.
+
+## Adding an MCP Server
+
+Configure MCP servers via environment variable or config file.
+
+### Via config file
+
+```json
+{
+  "mcp_servers": [
+    {
+      "name": "filesystem",
+      "url": "http://localhost:3100",
+      "description": "Filesystem access via MCP",
+      "auth": {
+        "type": "bearer",
+        "token_env": "MCP_FILESYSTEM_TOKEN"
+      }
+    },
+    {
+      "name": "postgres",
+      "url": "http://localhost:3101",
+      "description": "PostgreSQL query interface"
+    }
+  ]
+}
+```
+
+### Via environment variable
+
+```bash
+# Comma-separated list of server URLs
+export MCP_SERVERS="http://localhost:3100,http://localhost:3101"
+
+# Named servers with auth
+export MCP_SERVER_FILESYSTEM_URL="http://localhost:3100"
+export MCP_SERVER_FILESYSTEM_TOKEN="your-auth-token"
+```
+
+## Authentication
+
+MCP server authentication is configured per-server:
+
+| Auth type | Config |
+|-----------|--------|
+| **None** | Omit `auth` block |
+| **Bearer token** | `type: bearer`, `token_env: ENV_VAR_NAME` |
+| **Basic auth** | `type: basic`, `username_env`, `password_env` |
+
+Token values are read from environment variables at startup — they are never stored in the config file.
+
+## Listing Available Tools
+
+Once connected, MCP tools appear in the agent's tool list alongside built-in tools. You can see them:
+
+```bash
+# Via CLI
+ironclaw tool list --include-mcp
+
+# Via agent in chat
+```
+
+> "What tools do you have available?"
+
+The agent will include MCP tools in its response, with the server name as a prefix: `filesystem:read_file`, `postgres:query`, etc.
+
+## Removing an MCP Server
+
+Remove from your config file and restart IronClaw. Any tools that were provided by that server will no longer be available.
+
+## WASM vs MCP: When to Use Each
+
+| Consideration | WASM | MCP |
+|--------------|------|-----|
+| **Isolation** | Strong — wasmtime sandbox, fuel metering, memory limits | Weaker — separate process, but no wasmtime sandbox |
+| **Credential injection** | Proxy-level injection, WASM module never sees raw tokens | MCP server manages its own auth |
+| **Network control** | Domain allowlist via `capabilities.json` | MCP server controls its own network access |
+| **Ecosystem** | Custom-built | Large existing ecosystem (databases, APIs, cloud) |
+| **Language** | Any `wasm32-wasi` target | Any language |
+| **Startup cost** | Module compilation on first load (then cached) | External process must already be running |
+| **Best for** | Custom integrations where isolation is critical | Leveraging existing MCP servers |
+
+<Note>
+For integrations that handle sensitive credentials or untrusted external data, prefer WASM tools. The network proxy and credential injection model give you stronger isolation guarantees than an MCP server running as a separate process.
+</Note>
+
+## Example: Running a Community MCP Server
+
+```bash
+# Install the Postgres MCP server (example)
+npm install -g @modelcontextprotocol/server-postgres
+
+# Start it on port 3101
+MCP_POSTGRES_URL="postgres://user:pass@localhost/mydb" \
+  npx @modelcontextprotocol/server-postgres --port 3101
+
+# Configure IronClaw to connect
+export MCP_SERVER_POSTGRES_URL="http://localhost:3101"
+```
+
+IronClaw will discover the server's tools on startup and make them available to the agent.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server not reachable" icon="x-circle">
+    - Verify the MCP server is running: `curl http://localhost:3100/health`
+    - Check the URL and port in your config
+    - Ensure no firewall is blocking the port
+  </Accordion>
+
+  <Accordion title="Tools not appearing" icon="search">
+    - Check IronClaw startup logs for MCP initialization errors
+    - Verify the server implements `tools/list` correctly
+    - Try running with `RUST_LOG=ironclaw=debug` to see full MCP negotiation
+  </Accordion>
+
+  <Accordion title="Tool calls failing" icon="alert">
+    - Enable debug logging: `RUST_LOG=ironclaw::tools::mcp=debug`
+    - Check the MCP server's own logs
+    - Verify parameter schema matches what the server expects
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="WASM Tools" icon="blocks" href="/tools/wasm">
+    Sandboxed custom tools with credential injection
+  </Card>
+
+  <Card title="Building Custom Tools" icon="hammer" href="/tools/building">
+    Build a WASM tool or use the dynamic builder
+  </Card>
+
+  <Card title="Secrets Management" icon="lock" href="/security/secrets">
+    Managing credentials for external integrations
+  </Card>
+</CardGroup>

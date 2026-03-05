@@ -28,7 +28,7 @@ docker run -d \
   --name ironclaw \
   -v ~/.ironclaw:/home/ironclaw/.ironclaw \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -p 3001:3001 \
+  -p 3000:3000 \
   -p 8080:8080 \
   ironclaw/ironclaw:latest
 ```
@@ -55,7 +55,7 @@ services:
 
     ports:
       # Web Gateway
-      - "3001:3001"
+      - "3000:3000"
       # HTTP Webhook
       - "8080:8080"
 
@@ -70,7 +70,7 @@ services:
       # Optional: Web Gateway
       - GATEWAY_ENABLED=true
       - GATEWAY_HOST=0.0.0.0
-      - GATEWAY_PORT=3001
+      - GATEWAY_PORT=3000
 
       # Optional: HTTP Webhook
       - HTTP_ENABLED=true
@@ -117,7 +117,7 @@ docker run -d \
   -e GATEWAY_ENABLED=true \
   -v ~/.ironclaw:/home/ironclaw/.ironclaw \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -p 3001:3001 \
+  -p 3000:3000 \
   ironclaw/ironclaw:latest
 ```
 
@@ -163,7 +163,7 @@ For external access, put a reverse proxy in front:
 ```caddy
 # Caddyfile
 docs.ironclaw.ai {
-  reverse_proxy localhost:3001
+  reverse_proxy localhost:3000
 }
 ```
 
@@ -178,7 +178,7 @@ server {
   ssl_certificate_key /path/to/key.pem;
 
   location / {
-    proxy_pass http://localhost:3001;
+    proxy_pass http://localhost:3000;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
@@ -201,7 +201,7 @@ docker run -d \
   --name ironclaw \
   -v ~/.ironclaw:/home/ironclaw/.ironclaw \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -p 3001:3001 \
+  -p 3000:3000 \
   ironclaw/ironclaw:latest
 
 # Or with docker-compose
@@ -229,7 +229,7 @@ docker-compose up -d
   <Accordion title="Port already in use" icon="network">
     Change port mapping:
     ```bash
-    -p 3002:3001  # Maps host port 3002 to container port 3001
+    -p 3002:3000  # Maps host port 3002 to container port 3000
     ```
   </Accordion>
 </AccordionGroup>

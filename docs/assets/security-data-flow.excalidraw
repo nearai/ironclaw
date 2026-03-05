@@ -4,6 +4,68 @@
   "source": "https://excalidraw.com",
   "elements": [
     {
+      "type": "text",
+      "id": "title",
+      "x": 350,
+      "y": 20,
+      "width": 300,
+      "height": 35,
+      "text": "Security Data Flow",
+      "fontSize": 28,
+      "fontFamily": 3,
+      "textAlign": "center",
+      "verticalAlign": "top",
+      "strokeColor": "#1e40af",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "angle": 0,
+      "seed": 100001,
+      "version": 1,
+      "versionNonce": 100002,
+      "isDeleted": false,
+      "groupIds": [],
+      "boundElements": null,
+      "link": null,
+      "locked": false,
+      "containerId": null,
+      "lineHeight": 1.25
+    },
+    {
+      "type": "text",
+      "id": "subtitle",
+      "x": 350,
+      "y": 60,
+      "width": 300,
+      "height": 20,
+      "text": "Defense in Depth",
+      "fontSize": 16,
+      "fontFamily": 3,
+      "textAlign": "center",
+      "verticalAlign": "top",
+      "strokeColor": "#64748b",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "angle": 0,
+      "seed": 100003,
+      "version": 1,
+      "versionNonce": 100004,
+      "isDeleted": false,
+      "groupIds": [],
+      "boundElements": null,
+      "link": null,
+      "locked": false,
+      "containerId": null,
+      "lineHeight": 1.25
+    },
+    {
       "type": "ellipse",
       "id": "user_input",
       "x": 350,
@@ -19,13 +81,18 @@
       "opacity": 100,
       "angle": 0,
       "seed": 300010,
-      "boundElements": [{ "id": "user_input_text", "type": "text" }]
+      "boundElements": [
+        {
+          "id": "user_input_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "user_input_text",
-      "x": 400,
-      "y": 55,
+      "x": 360.0,
+      "y": 50.0,
       "width": 80,
       "height": 20,
       "text": "User Input",
@@ -50,14 +117,21 @@
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "roundness": { "type": 3 },
-      "boundElements": [{ "id": "validator_text", "type": "text" }]
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "validator_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "validator_text",
-      "x": 400,
-      "y": 110,
+      "x": 360.0,
+      "y": 107.5,
       "width": 80,
       "height": 20,
       "text": "Validator",
@@ -71,23 +145,28 @@
     {
       "type": "diamond",
       "id": "validation_check",
-      "x": 375,
-      "y": 155,
-      "width": 50,
-      "height": 35,
+      "x": 340,
+      "y": 148,
+      "width": 120,
+      "height": 55,
       "strokeColor": "#dc2626",
       "backgroundColor": "#fee2e2",
       "fillStyle": "solid",
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "boundElements": [{ "id": "valid_text", "type": "text" }]
+      "boundElements": [
+        {
+          "id": "valid_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "valid_text",
-      "x": 400,
-      "y": 167,
+      "x": 380,
+      "y": 168,
       "width": 40,
       "height": 15,
       "text": "Valid?",
@@ -111,14 +190,21 @@
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "roundness": { "type": 3 },
-      "boundElements": [{ "id": "sanitizer_text", "type": "text" }]
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "sanitizer_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "sanitizer_text",
-      "x": 400,
-      "y": 220,
+      "x": 360.0,
+      "y": 217.5,
       "width": 80,
       "height": 20,
       "text": "Sanitizer",
@@ -142,14 +228,21 @@
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "roundness": { "type": 3 },
-      "boundElements": [{ "id": "policy_text", "type": "text" }]
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "policy_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "policy_text",
-      "x": 400,
-      "y": 275,
+      "x": 360.0,
+      "y": 272.5,
       "width": 80,
       "height": 20,
       "text": "Policy",
@@ -163,9 +256,9 @@
     {
       "type": "rectangle",
       "id": "leak",
-      "x": 350,
+      "x": 335,
       "y": 320,
-      "width": 100,
+      "width": 130,
       "height": 35,
       "strokeColor": "#b45309",
       "backgroundColor": "#fef3c7",
@@ -173,14 +266,21 @@
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "roundness": { "type": 3 },
-      "boundElements": [{ "id": "leak_text", "type": "text" }]
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "leak_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "leak_text",
-      "x": 400,
-      "y": 330,
+      "x": 355.0,
+      "y": 327.5,
       "width": 90,
       "height": 20,
       "text": "Leak Detector",
@@ -204,13 +304,18 @@
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "boundElements": [{ "id": "llm_text", "type": "text" }]
+      "boundElements": [
+        {
+          "id": "llm_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "llm_text",
-      "x": 400,
-      "y": 390,
+      "x": 370.0,
+      "y": 385.0,
       "width": 60,
       "height": 20,
       "text": "LLM",
@@ -234,14 +339,21 @@
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "roundness": { "type": 3 },
-      "boundElements": [{ "id": "wasm_text", "type": "text" }]
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "wasm_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "wasm_text",
-      "x": 240,
-      "y": 385,
+      "x": 205.0,
+      "y": 382.5,
       "width": 70,
       "height": 20,
       "text": "WASM",
@@ -265,14 +377,21 @@
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "roundness": { "type": 3 },
-      "boundElements": [{ "id": "docker_text", "type": "text" }]
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "docker_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "docker_text",
-      "x": 240,
-      "y": 440,
+      "x": 205.0,
+      "y": 437.5,
       "width": 70,
       "height": 20,
       "text": "Docker",
@@ -296,13 +415,18 @@
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "boundElements": [{ "id": "proxy_text", "type": "text" }]
+      "boundElements": [
+        {
+          "id": "proxy_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "proxy_text",
-      "x": 240,
-      "y": 497,
+      "x": 210.0,
+      "y": 495.0,
       "width": 60,
       "height": 15,
       "text": "Proxy",
@@ -326,13 +450,18 @@
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "boundElements": [{ "id": "external_text", "type": "text" }]
+      "boundElements": [
+        {
+          "id": "external_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "external_text",
-      "x": 360,
-      "y": 497,
+      "x": 330.0,
+      "y": 495.0,
       "width": 60,
       "height": 15,
       "text": "External",
@@ -348,22 +477,29 @@
       "id": "reject",
       "x": 480,
       "y": 155,
-      "width": 70,
-      "height": 30,
+      "width": 80,
+      "height": 35,
       "strokeColor": "#dc2626",
       "backgroundColor": "#fee2e2",
       "fillStyle": "solid",
       "strokeWidth": 2,
       "roughness": 0,
       "opacity": 100,
-      "roundness": { "type": 3 },
-      "boundElements": [{ "id": "reject_text", "type": "text" }]
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "reject_text",
+          "type": "text"
+        }
+      ]
     },
     {
       "type": "text",
       "id": "reject_text",
-      "x": 515,
-      "y": 167,
+      "x": 495.0,
+      "y": 165.0,
       "width": 50,
       "height": 15,
       "text": "Reject",
@@ -384,9 +520,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [0, 20]],
-      "startBinding": { "elementId": "user_input", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "validator", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          20
+        ]
+      ],
+      "startBinding": {
+        "elementId": "user_input",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "validator",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -398,9 +551,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [0, 20]],
-      "startBinding": { "elementId": "validator", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "validation_check", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          20
+        ]
+      ],
+      "startBinding": {
+        "elementId": "validator",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "validation_check",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -412,9 +582,26 @@
       "strokeColor": "#dc2626",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [55, 0]],
-      "startBinding": { "elementId": "validation_check", "focus": -0.5, "gap": 1 },
-      "endBinding": { "elementId": "reject", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          55,
+          0
+        ]
+      ],
+      "startBinding": {
+        "elementId": "validation_check",
+        "focus": -0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "reject",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -426,9 +613,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [0, 20]],
-      "startBinding": { "elementId": "validation_check", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "sanitizer", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          20
+        ]
+      ],
+      "startBinding": {
+        "elementId": "validation_check",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "sanitizer",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -440,9 +644,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [0, 20]],
-      "startBinding": { "elementId": "sanitizer", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "policy", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          20
+        ]
+      ],
+      "startBinding": {
+        "elementId": "sanitizer",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "policy",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -454,9 +675,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [0, 20]],
-      "startBinding": { "elementId": "policy", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "leak", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          20
+        ]
+      ],
+      "startBinding": {
+        "elementId": "policy",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "leak",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -468,9 +706,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [0, 20]],
-      "startBinding": { "elementId": "leak", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "llm", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          20
+        ]
+      ],
+      "startBinding": {
+        "elementId": "leak",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "llm",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -482,9 +737,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [-70, 0]],
-      "startBinding": { "elementId": "llm", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "wasm", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -70,
+          0
+        ]
+      ],
+      "startBinding": {
+        "elementId": "llm",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "wasm",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -496,9 +768,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [0, 20]],
-      "startBinding": { "elementId": "wasm", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "docker", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          20
+        ]
+      ],
+      "startBinding": {
+        "elementId": "wasm",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "docker",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -510,9 +799,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [0, 20]],
-      "startBinding": { "elementId": "docker", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "proxy", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          20
+        ]
+      ],
+      "startBinding": {
+        "elementId": "docker",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "proxy",
+        "focus": 0.5,
+        "gap": 1
+      }
     },
     {
       "type": "arrow",
@@ -524,9 +830,26 @@
       "strokeColor": "#1e3a5f",
       "strokeWidth": 2,
       "roughness": 0,
-      "points": [[0, 0], [40, 0]],
-      "startBinding": { "elementId": "proxy", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "external", "focus": 0.5, "gap": 1 }
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          40,
+          0
+        ]
+      ],
+      "startBinding": {
+        "elementId": "proxy",
+        "focus": 0.5,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "external",
+        "focus": 0.5,
+        "gap": 1
+      }
     }
   ],
   "appState": {

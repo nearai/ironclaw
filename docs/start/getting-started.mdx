@@ -62,7 +62,7 @@ This guide will get you from zero to a running IronClaw instance in under 10 min
       --name ironclaw \
       -v ~/.ironclaw:/home/ironclaw/.ironclaw \
       -v /var/run/docker.sock:/var/run/docker.sock \
-      -p 3001:3001 \
+      -p 3000:3000 \
       -p 8080:8080 \
       ironclaw/ironclaw:latest
     ```
@@ -150,7 +150,7 @@ You should see output similar to:
 [2024-01-15T10:30:00Z INFO] IronClaw v0.13.0 starting...
 [2024-01-15T10:30:00Z INFO] Database: libSQL at ~/.ironclaw/ironclaw.db
 [2024-01-15T10:30:00Z INFO] LLM Backend: nearai
-[2024-01-15T10:30:00Z INFO] Web Gateway: http://127.0.0.1:3001
+[2024-01-15T10:30:00Z INFO] Web Gateway: http://127.0.0.1:3000
 [2024-01-15T10:30:00Z INFO] Gateway auth token: ic_xxxxxxxxxxxx
 [2024-01-15T10:30:00Z INFO] Agent ready
 ```
@@ -159,7 +159,7 @@ You should see output similar to:
 
 If you enabled the Web Gateway during setup:
 
-1. Open `http://127.0.0.1:3001` in your browser
+1. Open `http://127.0.0.1:3000` in your browser
 2. Enter the auth token from the logs (or set `GATEWAY_AUTH_TOKEN` for a persistent token)
 3. Start chatting!
 
@@ -171,7 +171,7 @@ The default auth token is randomly generated on each startup. For a persistent t
 
 ✅ **You're ready when:**
 - The `ironclaw run` command shows "Agent ready"
-- You can access the Web Gateway at `http://127.0.0.1:3001`
+- You can access the Web Gateway at `http://127.0.0.1:3000`
 - The chat interface loads and accepts messages
 
 ## Next Steps

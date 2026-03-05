@@ -55,12 +55,7 @@
       "versionNonce": 400011,
       "isDeleted": false,
       "groupIds": [],
-      "boundElements": [
-        {
-          "id": "safety_label",
-          "type": "text"
-        }
-      ],
+      "boundElements": [],
       "link": null,
       "locked": false,
       "roundness": {
@@ -70,8 +65,8 @@
     {
       "type": "text",
       "id": "safety_label",
-      "x": 400,
-      "y": 297.5,
+      "x": 300,
+      "y": 95,
       "width": 200,
       "height": 25,
       "text": "Safety Layer",
@@ -96,7 +91,7 @@
       "boundElements": null,
       "link": null,
       "locked": false,
-      "containerId": "safety_layer",
+      "containerId": null,
       "lineHeight": 1.25
     },
     {
@@ -166,9 +161,9 @@
     {
       "type": "text",
       "id": "validator_desc",
-      "x": 400,
+      "x": 260,
       "y": 185,
-      "width": 360,
+      "width": 280,
       "height": 30,
       "text": "Length, encoding, forbidden patterns",
       "originalText": "Length, encoding, forbidden patterns",
@@ -262,9 +257,9 @@
     {
       "type": "text",
       "id": "sanitizer_desc",
-      "x": 400,
+      "x": 260,
       "y": 285,
-      "width": 360,
+      "width": 280,
       "height": 30,
       "text": "Pattern detection, content escaping",
       "originalText": "Pattern detection, content escaping",
@@ -358,9 +353,9 @@
     {
       "type": "text",
       "id": "policy_desc",
-      "x": 400,
+      "x": 260,
       "y": 385,
-      "width": 360,
+      "width": 280,
       "height": 30,
       "text": "Severity rules: Critical, High, Medium, Low",
       "originalText": "Severity rules: Critical, High, Medium, Low",
@@ -454,9 +449,9 @@
     {
       "type": "text",
       "id": "leak_desc",
-      "x": 400,
+      "x": 260,
       "y": 485,
-      "width": 360,
+      "width": 280,
       "height": 30,
       "text": "15+ secret patterns: API keys, tokens, private keys",
       "originalText": "15+ secret patterns: API keys, tokens, private keys",

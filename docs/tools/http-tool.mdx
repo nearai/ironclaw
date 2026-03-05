@@ -1,0 +1,171 @@
+---
+title: HTTP Tool
+sidebarTitle: HTTP Tool
+description: http_request — make outbound HTTP requests with credential injection
+---
+
+The `http_request` tool lets the agent make outbound HTTP requests to external APIs and services. It supports credential injection via IronClaw's secrets system, so API tokens are never embedded in tool call parameters.
+
+## Parameters
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "url": {
+      "type": "string",
+      "description": "The full URL to request (e.g., https://api.github.com/user)."
+    },
+    "method": {
+      "type": "string",
+      "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
+      "description": "HTTP method. Default: GET.",
+      "default": "GET"
+    },
+    "headers": {
+      "type": "object",
+      "description": "Additional HTTP headers to include in the request.",
+      "additionalProperties": { "type": "string" }
+    },
+    "body": {
+      "type": "string",
+      "description": "Request body. For JSON APIs, serialize the object and set Content-Type: application/json."
+    },
+    "timeout_secs": {
+      "type": "integer",
+      "description": "Request timeout in seconds. Default: 30.",
+      "default": 30
+    },
+    "credential": {
+      "type": "string",
+      "description": "Name of a stored secret to inject as the Authorization header. The secret value is retrieved from the encrypted store — never passed as a parameter value."
+    }
+  },
+  "required": ["url"]
+}
+```
+
+## Credential Injection
+
+The `credential` parameter is a reference to a secret stored in IronClaw's encrypted secret store — not the credential value itself. When the request is made, IronClaw retrieves the encrypted secret, decrypts it, and injects it as the `Authorization` header.
+
+**This means the LLM never sees your API keys.** The agent calls the tool with only the secret name:
+
+```json
+{
+  "url": "https://api.github.com/user/repos",
+  "method": "GET",
+  "credential": "github_token"
+}
+```
+
+IronClaw then:
+1. Looks up `github_token` in the encrypted secrets store
+2. Decrypts it using the master key from the OS keychain
+3. Adds `Authorization: Bearer <token>` to the request
+4. Makes the HTTP request
+5. Returns the response (after sanitization)
+
+To store a credential for injection:
+
+```bash
+ironclaw secret set github_token "ghp_yourtokenhere"
+```
+
+## Examples
+
+### GET request without auth
+
+```json
+{
+  "url": "https://api.github.com/repos/nearai/ironclaw/releases/latest",
+  "method": "GET",
+  "headers": {
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  }
+}
+```
+
+### POST request with JSON body
+
+```json
+{
+  "url": "https://api.example.com/v1/items",
+  "method": "POST",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"name\": \"widget\", \"quantity\": 10}",
+  "credential": "example_api_key",
+  "timeout_secs": 15
+}
+```
+
+### GET with injected credentials
+
+```json
+{
+  "url": "https://api.openai.com/v1/models",
+  "method": "GET",
+  "credential": "llm_openai_api_key"
+}
+```
+
+**Example in chat:**
+> "Check the latest release of the ironclaw repo on GitHub"
+
+The agent will use `http_request` to call the GitHub API and return the release details.
+
+## Content-Type Handling
+
+The response body is returned as a string. IronClaw detects the Content-Type:
+
+| Content-Type | Handling |
+|-------------|---------|
+| `application/json` | Pretty-printed JSON for readability |
+| `text/html` | Returned as-is (sanitized) |
+| `text/plain` | Returned as-is |
+| Binary types | Base64-encoded |
+
+## Response Sanitization
+
+HTTP responses pass through the Safety Layer before reaching the LLM:
+
+- **Leak detector** — Scans the response body for embedded secrets (API keys, tokens, connection strings). Detected patterns are redacted.
+- **Sanitizer** — Escapes injection patterns and control characters.
+- **Content length** — Responses are truncated if they exceed the configured max tool output size.
+
+The `http_request` tool always sets `requires_sanitization = true` because external server responses are untrusted content.
+
+## Security Considerations
+
+<AccordionGroup>
+  <Accordion title="Credential values never leave the host" icon="lock">
+    The `credential` parameter is a name, not a value. The actual token is decrypted in-process and added to the outgoing request. It is never written to logs, never passed to the LLM, and never returned in tool output.
+  </Accordion>
+
+  <Accordion title="Response content is untrusted" icon="shield">
+    External API responses can contain prompt injection payloads. The sanitizer escapes patterns like `Ignore previous instructions` and the leak detector catches accidentally-reflected tokens. Always treat tool output as untrusted.
+  </Accordion>
+
+  <Accordion title="No redirect following for auth requests" icon="arrow-right">
+    When a `credential` is specified, redirects are not automatically followed to prevent token leakage to a different host than intended.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Secrets Management" icon="lock" href="/security/secrets">
+    Storing and rotating credentials
+  </Card>
+
+  <Card title="Safety Layer" icon="shield" href="/security/safety-layer">
+    How external content is sanitized
+  </Card>
+
+  <Card title="WASM Tools" icon="blocks" href="/tools/wasm">
+    For more complex integrations with network allowlisting
+  </Card>
+</CardGroup>

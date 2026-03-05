@@ -1,0 +1,174 @@
+---
+title: File Tools
+sidebarTitle: File Tools
+description: read_file, write_file, list_dir, apply_patch
+---
+
+The file tools give the agent access to the local filesystem. All paths are resolved relative to the workspace root unless absolute paths are provided.
+
+<Warning>
+File tools require `ALLOW_LOCAL_TOOLS=true`. They are disabled by default to prevent accidental filesystem access in hosted or shared environments.
+
+```bash
+export ALLOW_LOCAL_TOOLS=true
+```
+</Warning>
+
+## read_file
+
+Read the contents of a file.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path to the file to read. Relative paths are resolved from the workspace root."
+    },
+    "encoding": {
+      "type": "string",
+      "enum": ["utf8", "base64"],
+      "description": "Output encoding. Default: utf8.",
+      "default": "utf8"
+    }
+  },
+  "required": ["path"]
+}
+```
+
+**Path handling:** Relative paths like `notes/todo.md` resolve to `<workspace>/notes/todo.md`. Absolute paths are used as-is.
+
+**Sanitization:** `read_file` sets `requires_sanitization = true`. File contents pass through the Safety Layer before reaching the LLM, so secrets embedded in files are redacted and injection patterns are escaped.
+
+**Example in chat:**
+> "Read my project notes at `projects/ironclaw/notes.md`"
+
+## write_file
+
+Write content to a file, creating parent directories as needed.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path to write to. Relative paths are resolved from the workspace root."
+    },
+    "content": {
+      "type": "string",
+      "description": "Content to write to the file."
+    },
+    "append": {
+      "type": "boolean",
+      "description": "If true, append to existing content instead of overwriting. Default: false.",
+      "default": false
+    }
+  },
+  "required": ["path", "content"]
+}
+```
+
+**Example in chat:**
+> "Write a README for my project to `projects/ironclaw/README.md`"
+
+## list_dir
+
+List the contents of a directory.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory path to list. Relative paths are resolved from the workspace root. Default: workspace root.",
+      "default": "."
+    },
+    "recursive": {
+      "type": "boolean",
+      "description": "If true, list subdirectories recursively. Default: false.",
+      "default": false
+    },
+    "include_hidden": {
+      "type": "boolean",
+      "description": "If true, include hidden files (dotfiles). Default: false.",
+      "default": false
+    }
+  },
+  "required": []
+}
+```
+
+**Example in chat:**
+> "What files are in my `projects/` directory?"
+
+## apply_patch
+
+Apply a unified diff patch to a file. This is the preferred way for the agent to make targeted edits to existing files rather than rewriting them in full.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path to the file to patch."
+    },
+    "patch": {
+      "type": "string",
+      "description": "Unified diff patch content (--- / +++ / @@ format)."
+    }
+  },
+  "required": ["path", "patch"]
+}
+```
+
+**Patch format:**
+
+```diff
+--- a/notes.md
++++ b/notes.md
+@@ -3,4 +3,5 @@
+ ## Status
+
+-In progress
++Completed
++Shipped 2026-03-04
+```
+
+**Example in chat:**
+> "Update the status section in `projects/notes.md` to say Completed"
+
+## Security Considerations
+
+<AccordionGroup>
+  <Accordion title="Path traversal protection" icon="shield">
+    The sanitizer detects path traversal patterns (`../`) in file paths supplied by external content. Paths that resolve outside the workspace root are blocked by policy.
+  </Accordion>
+
+  <Accordion title="Sanitization of file contents" icon="search">
+    `read_file` passes file contents through the Safety Layer. If a file contains patterns that look like API keys, tokens, or private keys, the leak detector will redact them before the LLM sees them.
+  </Accordion>
+
+  <Accordion title="No shell interpretation" icon="terminal">
+    File paths are not passed through a shell. Characters like `;`, `&`, and `$()` in paths are treated as literals and cannot be used for command injection.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Shell Tool" icon="terminal" href="/tools/shell-tool">
+    Execute commands with injection protection
+  </Card>
+
+  <Card title="Memory Tools" icon="database" href="/tools/memory-tools">
+    Persistent workspace memory
+  </Card>
+
+  <Card title="Safety Layer" icon="shield" href="/security/safety-layer">
+    How tool output is sanitized
+  </Card>
+</CardGroup>

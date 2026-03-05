@@ -1,0 +1,334 @@
+---
+title: Job & Routine Tools
+sidebarTitle: Job & Routine Tools
+description: Tools for creating and managing jobs and routines
+---
+
+IronClaw has two related but distinct concepts for background work:
+
+- **Jobs** — One-off units of work created on demand, each tracked through a state machine
+- **Routines** — Scheduled or reactive tasks that run automatically on a trigger (cron, event, or webhook)
+
+Both are managed through built-in tools that the agent can call directly.
+
+## Job Tools
+
+Jobs are the fundamental unit of execution in IronClaw. Every message the agent handles creates a job. The job tools let the agent create additional background jobs and inspect their state.
+
+### create_job
+
+Create a new background job and return its ID.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "description": {
+      "type": "string",
+      "description": "What the job should do. This is the task description sent to the job worker."
+    },
+    "channel": {
+      "type": "string",
+      "description": "Channel to send results to when the job completes. Defaults to the originating channel."
+    },
+    "priority": {
+      "type": "integer",
+      "description": "Job priority (higher = runs sooner when queued). Default: 0.",
+      "default": 0
+    }
+  },
+  "required": ["description"]
+}
+```
+
+### list_jobs
+
+List all jobs with their current status.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["pending", "in_progress", "completed", "failed", "stuck", "all"],
+      "description": "Filter by status. Default: all.",
+      "default": "all"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum jobs to return. Default: 20.",
+      "default": 20
+    }
+  },
+  "required": []
+}
+```
+
+### job_status
+
+Get the current status and output of a specific job.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "description": "The job ID returned by create_job or list_jobs."
+    }
+  },
+  "required": ["job_id"]
+}
+```
+
+Returns the job state, elapsed time, any output produced so far, and the final result if completed.
+
+### cancel_job
+
+Cancel a running or pending job.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "description": "The job ID to cancel."
+    }
+  },
+  "required": ["job_id"]
+}
+```
+
+Jobs in `Completed` or `Failed` state cannot be cancelled.
+
+### Job State Machine
+
+```
+Pending
+    ↓
+InProgress ──────────────┬──► Completed
+    ↑                    │
+    │ (recovery)         └──► Failed
+    │
+  Stuck ────────────────────► Failed (if unrecoverable)
+```
+
+| State | Meaning |
+|-------|---------|
+| **Pending** | Waiting for a worker slot |
+| **InProgress** | Actively executing |
+| **Completed** | Finished successfully |
+| **Failed** | Terminal failure |
+| **Stuck** | No progress detected — recovery attempted |
+
+---
+
+## Routine Tools
+
+Routines are persistent tasks that run on a schedule or in response to events. They are stored in the database and persist across restarts.
+
+<Note>
+Routine tools require `ROUTINES_ENABLED=true`.
+
+```bash
+export ROUTINES_ENABLED=true
+```
+</Note>
+
+### routine_create
+
+Create a new routine.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique name for the routine."
+    },
+    "description": {
+      "type": "string",
+      "description": "What the routine should do when triggered."
+    },
+    "trigger": {
+      "type": "object",
+      "description": "Trigger configuration.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["cron", "event", "webhook"],
+          "description": "Trigger type."
+        },
+        "cron": {
+          "type": "string",
+          "description": "Cron expression (for type=cron). Example: '0 9 * * 1-5' for weekdays at 9am."
+        },
+        "event": {
+          "type": "string",
+          "description": "Event pattern to match (for type=event)."
+        }
+      },
+      "required": ["type"]
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Whether the routine is active. Default: true.",
+      "default": true
+    },
+    "guardrails": {
+      "type": "object",
+      "description": "Optional constraints on routine execution.",
+      "properties": {
+        "max_runs_per_day": {
+          "type": "integer",
+          "description": "Maximum times this routine can run in a 24-hour period."
+        },
+        "require_approval": {
+          "type": "boolean",
+          "description": "If true, prompt for human approval before executing."
+        }
+      }
+    }
+  },
+  "required": ["name", "description", "trigger"]
+}
+```
+
+### routine_list
+
+List all configured routines.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "enabled_only": {
+      "type": "boolean",
+      "description": "If true, return only enabled routines. Default: false.",
+      "default": false
+    }
+  },
+  "required": []
+}
+```
+
+### routine_update
+
+Update an existing routine by name.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Name of the routine to update."
+    },
+    "description": {
+      "type": "string",
+      "description": "New task description."
+    },
+    "trigger": {
+      "type": "object",
+      "description": "New trigger configuration."
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Enable or disable the routine."
+    },
+    "guardrails": {
+      "type": "object",
+      "description": "Updated guardrail settings."
+    }
+  },
+  "required": ["name"]
+}
+```
+
+### routine_delete
+
+Delete a routine permanently.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Name of the routine to delete."
+    }
+  },
+  "required": ["name"]
+}
+```
+
+### routine_history
+
+View the execution history for a routine.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Routine name to view history for."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum runs to return. Default: 10.",
+      "default": 10
+    }
+  },
+  "required": ["name"]
+}
+```
+
+Returns a list of runs with start time, end time, status, and any output.
+
+---
+
+## Example: Creating a Cron Routine via Tool Call
+
+**User:** "Remind me every weekday morning at 9am to check my email and write a daily plan"
+
+**Agent tool call:**
+
+```json
+{
+  "name": "routine_create",
+  "parameters": {
+    "name": "morning-standup",
+    "description": "Remind the user to check email and write a daily plan. Search memory for any pending tasks from yesterday and include them in the reminder.",
+    "trigger": {
+      "type": "cron",
+      "cron": "0 9 * * 1-5"
+    },
+    "enabled": true,
+    "guardrails": {
+      "max_runs_per_day": 1
+    }
+  }
+}
+```
+
+The routine will fire at 9am Monday–Friday, create a job with the description, and send the result to the configured notification channel.
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Routines" icon="clock" href="/agents/routines">
+    Full routines documentation with cron and reactive triggers
+  </Card>
+
+  <Card title="Agent Overview" icon="layers" href="/agents/index">
+    Job state machine and parallel execution
+  </Card>
+
+  <Card title="Self-Repair" icon="wrench" href="/agents/self-repair">
+    Automatic stuck job recovery
+  </Card>
+</CardGroup>
