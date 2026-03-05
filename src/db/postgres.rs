@@ -61,6 +61,11 @@ impl Database for PgBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         self.store.run_migrations().await
     }
+
+    async fn shutdown(&self) -> Result<(), DatabaseError> {
+        self.store.pool().close();
+        Ok(())
+    }
 }
 
 // ==================== ConversationStore ====================

@@ -294,6 +294,18 @@ impl Database for LibSqlBackend {
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
         Ok(())
     }
+
+    async fn shutdown(&self) -> Result<(), DatabaseError> {
+        match self.db.flush_replicator().await {
+            Ok(Some(frame_no)) => {
+                tracing::debug!("libSQL replicator flushed at frame {}", frame_no);
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(libsql::Error::SyncNotSupported(_)) => Ok(()),
+            Err(error) => Err(DatabaseError::from(error)),
+        }
+    }
 }
 
 // ==================== Row conversion helpers ====================
