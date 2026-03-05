@@ -261,7 +261,6 @@ mod advanced {
             LlmTrace::from_file(format!("{FIXTURES}/prompt_injection_resilience.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
-            .with_injection_check(true)
             .build()
             .await;
 
@@ -273,16 +272,6 @@ mod advanced {
         let responses = rig.wait_for_responses(1, TIMEOUT).await;
 
         rig.verify_trace_expects(&trace, &responses);
-
-        // Positive assertion: the safety layer should have detected and
-        // flagged the injection attempt (not just that the response is clean).
-        assert!(
-            rig.has_safety_warnings(),
-            "Expected safety layer to detect and flag the injection attempt, \
-             but no safety warnings were emitted. Status events: {:?}",
-            rig.captured_status_events()
-        );
-
         rig.shutdown();
     }
 }

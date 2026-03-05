@@ -7,7 +7,7 @@
   },
   "steps": [
     {
-      "request_hint": { "last_user_message_contains": "ignore" },
+      "request_hint": { "last_user_message_contains": "Ignore" },
       "response": {
         "type": "text",
         "content": "I can't comply with instructions to ignore my guidelines. I'm here to help you with legitimate tasks. What would you like assistance with?",
