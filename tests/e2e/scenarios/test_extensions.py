@@ -826,9 +826,6 @@ async def test_auth_completed_sse_dismisses_card(page):
 
     # Simulate the auth_completed SSE event being fired
     await page.evaluate("""
-        const event = new MessageEvent('auth_completed', {
-            data: JSON.stringify({extension_name: 'myext', message: 'Done'})
-        });
         // Call the handler the same way the SSE listener does
         removeAuthCard('myext');
     """)
@@ -856,9 +853,10 @@ async def test_activate_mcp_server_success(page):
 
     activate_btn = page.locator(SEL["ext_card_installed"]).first.locator(SEL["ext_activate_btn"])
     await activate_btn.wait_for(state="visible", timeout=5000)
-    await activate_btn.click()
 
-    await page.wait_for_timeout(800)
+    async with page.expect_response("**/api/extensions/test-mcp-inactive/activate", timeout=5000):
+        await activate_btn.click()
+
     assert len(activate_called) >= 1, "Activate API was not called"
 
 
@@ -960,7 +958,9 @@ async def test_extensions_tab_reloads_on_revisit(page):
 
     # Navigate away
     await page.locator(SEL["tab_button"].format(tab="chat")).click()
-    await page.wait_for_timeout(300)
+    await page.locator(SEL["tab_panel"].format(tab="chat")).wait_for(
+        state="visible", timeout=5000
+    )
 
     # Return to extensions
     await go_to_extensions(page)

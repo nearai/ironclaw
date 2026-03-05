@@ -2236,8 +2236,9 @@ function closeConfigureModal() {
 // Uses the URL constructor to safely parse and validate the scheme, which also
 // handles non-string values (objects, null, etc.) that would throw on .startsWith().
 function openOAuthUrl(url) {
+  let parsed;
   try {
-    const parsed = new URL(url);
+    parsed = new URL(url);
     if (parsed.protocol !== 'https:') {
       throw new Error('non-HTTPS protocol: ' + parsed.protocol);
     }
@@ -2246,7 +2247,7 @@ function openOAuthUrl(url) {
     showToast('Invalid OAuth URL returned by server', 'error');
     return;
   }
-  window.open(url, '_blank', 'width=600,height=700');
+  window.open(parsed.href, '_blank', 'width=600,height=700');
 }
 
 // --- Pairing ---
