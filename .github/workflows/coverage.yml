@@ -106,7 +106,9 @@ jobs:
           # CARGO_INCREMENTAL, LLVM_PROFILE_FILE, etc.) so the build step
           # compiles an instrumented binary regardless of cargo-llvm-cov version.
           cargo llvm-cov show-env >> "$GITHUB_ENV"
-          cargo llvm-cov clean --workspace
+
+      - name: Clean coverage workspace
+        run: cargo llvm-cov clean --workspace
 
       - name: Build instrumented binary
         run: cargo build --no-default-features --features libsql
