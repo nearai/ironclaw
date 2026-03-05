@@ -11,6 +11,7 @@ pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
 mod nearai_chat;
+pub mod gemini_oauth;
 mod provider;
 mod reasoning;
 pub mod recording;
@@ -23,6 +24,7 @@ pub mod smart_routing;
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai_chat::{ModelInfo, NearAiChatProvider};
+pub use gemini_oauth::GeminiOauthProvider;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
@@ -62,6 +64,7 @@ pub fn create_llm_provider(
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
+        LlmBackend::GeminiOauth => create_gemini_oauth_provider(config),
     }
 }
 
@@ -489,6 +492,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            gemini_oauth: None,
         }
     }
 
@@ -528,4 +532,14 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
+}
+
+pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let gemini_config = config
+        .gemini_oauth
+        .clone()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "gemini_oauth".to_string(),
+        })?;
+    Ok(Arc::new(gemini_oauth::GeminiOauthProvider::new(gemini_config)))
 }

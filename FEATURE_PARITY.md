@@ -3,6 +3,7 @@
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
 **Legend:**
+
 - ✅ Implemented
 - 🚧 Partial (in progress or incomplete)
 - ❌ Not implemented
@@ -183,7 +184,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
 | Skill routing blocks | ✅ | 🚧 | ActivationCriteria (keywords, patterns, tags) but no "Use when / Don't use when" blocks |
 | Skill path compaction | ✅ | ❌ | ~ prefix to reduce prompt tokens |
-| Thinking modes (low/med/high) | ✅ | ❌ | Configurable reasoning depth |
+| Thinking modes (low/med/high) | ✅ | 🚧 | thinkingConfig for Gemini models (includeThoughts); no per-level control yet |
 | Per-model thinkingDefault override | ✅ | ❌ | Override thinking level per model |
 | Block-level streaming | ✅ | ❌ | |
 | Tool-level streaming | ✅ | ❌ | |
@@ -216,7 +217,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy; Opus 4.5, Sonnet 4, Sonnet 4.6 |
 | OpenAI | ✅ | 🚧 | - | Via NEAR AI proxy |
 | AWS Bedrock | ✅ | ❌ | P3 | |
-| Google Gemini | ✅ | ❌ | P3 | |
+| Google Gemini | ✅ | ✅ | - | OAuth (PKCE + S256), function calling, thinkingConfig, generationConfig |
 | NVIDIA API | ✅ | ❌ | P3 | New provider |
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
@@ -440,7 +441,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Device pairing | ✅ | ❌ | |
 | Tailscale identity | ✅ | ❌ | |
 | Trusted-proxy auth | ✅ | ❌ | Header-based reverse proxy auth |
-| OAuth flows | ✅ | 🚧 | NEAR AI OAuth |
+| OAuth flows | ✅ | 🚧 | NEAR AI OAuth + Gemini OAuth (PKCE, S256, loopback redirect, offline access) |
 | DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
 | Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Per-group tool policies | ✅ | ❌ | |
@@ -497,6 +498,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 ## Implementation Priorities
 
 ### P0 - Core (Already Done)
+
 - ✅ TUI channel with approval overlays
 - ✅ HTTP webhook channel
 - ✅ DM pairing (ironclaw pairing list/approve, host APIs)
@@ -524,6 +526,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ OpenAI-compatible / OpenRouter provider support
 
 ### P1 - High Priority
+
 - ❌ Slack channel (real implementation)
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
 - ❌ WhatsApp channel
@@ -531,6 +534,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Hooks system (core lifecycle hooks + bundled/plugin/workspace hooks + outbound webhooks)
 
 ### P2 - Medium Priority
+
 - ❌ Media handling (images, PDFs)
 - ✅ Ollama/local model support (via rig::providers::ollama)
 - ❌ Configuration hot-reload
@@ -539,6 +543,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Partial output preservation on abort
 
 ### P3 - Lower Priority
+
 - ❌ Discord channel
 - ❌ Matrix channel
 - ❌ Other messaging platforms

@@ -799,6 +799,7 @@ impl SetupWizard {
                     "openai" => "OpenAI",
                     "ollama" => "Ollama (local)",
                     "openai_compatible" => "OpenAI-compatible endpoint",
+                    "gemini_oauth" => "Gemini API (OAuth)",
                     other => other,
                 }
             };
@@ -807,7 +808,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "gemini_oauth"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -821,6 +822,7 @@ impl SetupWizard {
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
+                    "gemini_oauth" => return self.setup_gemini_oauth().await,
                     _ => {
                         return Err(SetupError::Config(format!(
                             "Unhandled provider: {}",
@@ -848,6 +850,7 @@ impl SetupWizard {
             "Ollama           - local models, no API key needed",
             "OpenRouter       - 200+ models via single API key",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
+            "Gemini CLI        - Official Gemini API via Gemini CLI OAuth",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -859,6 +862,7 @@ impl SetupWizard {
             3 => self.setup_ollama()?,
             4 => self.setup_openrouter().await?,
             5 => self.setup_openai_compatible().await?,
+            6 => self.setup_gemini_oauth().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -1114,6 +1118,34 @@ impl SetupWizard {
         Ok(())
     }
 
+    async fn setup_gemini_oauth(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("gemini_oauth".to_string());
+        print_info("Starting Gemini CLI OAuth authentication...");
+        println!();
+
+        let creds_path = crate::config::GeminiOauthConfig::default_credentials_path();
+        let cred_manager = crate::llm::gemini_oauth::CredentialManager::new(&creds_path);
+
+        match cred_manager.get_valid_credential().await {
+            Ok(cred) => {
+                print_success("Gemini CLI authentication successful!");
+                if let Some(ref pid) = cred.project_id {
+                    print_info(&format!("Cloud Code project: {}", pid));
+                }
+            }
+            Err(e) => {
+                return Err(SetupError::Config(format!(
+                    "Gemini CLI authentication failed: {}. Please try again.",
+                    e
+                )));
+            }
+        }
+
+        println!();
+        print_success("Gemini API configured via Gemini CLI");
+        Ok(())
+    }
+
     /// Step 4: Model selection.
     ///
     /// Branches on the selected LLM backend and fetches models from the
@@ -1174,6 +1206,16 @@ impl SetupWizard {
                 }
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
+            }
+            "gemini_oauth" => {
+                let default_models: Vec<(String, String)> = vec![
+                    ("gemini-3.1-pro-preview".into(), "Gemini 3.1 Pro (Latest, strongest reasoning)".into()),
+                    ("gemini-3-flash-preview".into(), "Gemini 3 Flash (Fast preview with thinking)".into()),
+                    ("gemini-2.5-pro".into(), "Gemini 2.5 Pro (Stable, strong reasoning)".into()),
+                    ("gemini-2.5-flash".into(), "Gemini 2.5 Flash (Fast, good quality)".into()),
+                    ("gemini-2.5-flash-lite".into(), "Gemini 2.5 Flash Lite (Fastest, lightweight)".into()),
+                ];
+                self.select_from_model_list(&default_models)?;
             }
             _ => {
                 // NEAR AI: use existing provider list_models()
@@ -1278,6 +1320,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            gemini_oauth: None,
         };
 
         match create_llm_provider(&config, session) {

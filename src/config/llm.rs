@@ -26,6 +26,8 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// Official Gemini OAuth integrated provider
+    GeminiOauth,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -39,8 +41,9 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "gemini_oauth" | "gemini-oauth" => Ok(Self::GeminiOauth),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil, gemini_oauth",
                 s
             )),
         }
@@ -56,6 +59,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::GeminiOauth => write!(f, "gemini_oauth"),
         }
     }
 }
@@ -73,6 +77,7 @@ impl LlmBackend {
             Self::Ollama => "OLLAMA_MODEL",
             Self::OpenAiCompatible => "LLM_MODEL",
             Self::Tinfoil => "TINFOIL_MODEL",
+            Self::GeminiOauth => "GEMINI_MODEL",
         }
     }
 }
@@ -140,6 +145,24 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// Gemini OAuth config (populated when backend=gemini_oauth)
+    pub gemini_oauth: Option<GeminiOauthConfig>,
+}
+
+/// Configuration for Gemini OAuth integration.
+#[derive(Debug, Clone)]
+pub struct GeminiOauthConfig {
+    pub model: String,
+    pub credentials_path: PathBuf,
+}
+
+impl GeminiOauthConfig {
+    pub fn default_credentials_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".gemini")
+            .join("oauth_creds.json")
+    }
 }
 
 /// NEAR AI configuration.
@@ -384,6 +407,24 @@ impl LlmConfig {
             None
         };
 
+        let gemini_oauth = if backend == LlmBackend::GeminiOauth {
+            let model = Self::resolve_model("GEMINI_MODEL", settings, "gemini-2.5-flash")?;
+            let credentials_path = optional_env("GEMINI_CREDENTIALS_PATH")?
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("/tmp"))
+                        .join(".gemini")
+                        .join("oauth_creds.json")
+                });
+            Some(GeminiOauthConfig {
+                model,
+                credentials_path,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -392,6 +433,7 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            gemini_oauth,
         })
     }
 }

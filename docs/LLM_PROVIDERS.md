@@ -1,8 +1,8 @@
 # LLM Provider Configuration
 
 IronClaw defaults to NEAR AI for model access, but supports any OpenAI-compatible
-endpoint as well as Anthropic and Ollama directly. This guide covers the most common
-configurations.
+endpoint as well as Anthropic, Ollama, and Google Gemini directly. This guide covers
+the most common configurations.
 
 ## Provider Overview
 
@@ -11,6 +11,7 @@ configurations.
 | NEAR AI | `nearai` | OAuth (browser) | Default; multi-model |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
+| Google Gemini | `gemini_oauth` | OAuth (browser) | Gemini models; function calling |
 | Ollama | `ollama` | No | Local inference |
 | OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
@@ -51,6 +52,47 @@ OPENAI_API_KEY=sk-...
 ```
 
 Popular models: `gpt-4o`, `gpt-4o-mini`, `o3-mini`
+
+---
+
+## Google Gemini (OAuth)
+
+Uses Google OAuth with PKCE (S256) for authentication — no API key required.
+On first run, a browser opens for Google account login. Credentials (including
+refresh token) are saved to `~/.gemini/oauth_creds.json` with `0600` permissions.
+
+```env
+LLM_BACKEND=gemini_oauth
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+### Supported features
+
+| Feature | Status | Notes |
+|---|---|---|
+| Function calling | ✅ | `functionDeclarations` / `functionCall` / `functionResponse` |
+| `generationConfig` | ✅ | `temperature`, `maxOutputTokens` passed from request |
+| `thinkingConfig` | ✅ | `includeThoughts: true` for `gemini-3`/`thinking` models |
+| `toolConfig` | ✅ | `functionCallingConfig.mode`: `AUTO`/`ANY`/`NONE` |
+| SSE streaming | ✅ | Cloud Code API with `streamGenerateContent?alt=sse` |
+| Token refresh | ✅ | Automatic via refresh token |
+
+### Popular models
+
+| Model | ID | Notes |
+|---|---|---|
+| Gemini 3.1 Pro | `gemini-3.1-pro-preview` | Latest, strongest reasoning |
+| Gemini 3 Flash | `gemini-3-flash-preview` | Fast preview with thinkingLevel |
+| Gemini 2.5 Pro | `gemini-2.5-pro` | Stable, strong reasoning |
+| Gemini 2.5 Flash | `gemini-2.5-flash` | Fast, good quality |
+| Gemini 2.5 Flash Lite | `gemini-2.5-flash-lite` | Fastest, lightweight |
+
+### Cloud Code API vs standard API
+
+Models containing `preview` or `gemini-3` in the name route through the
+Cloud Code API (`cloudcode-pa.googleapis.com`) which supports SSE streaming
+and project-scoped access. Other models use the standard Generative Language
+API (`generativelanguage.googleapis.com`).
 
 ---
 
