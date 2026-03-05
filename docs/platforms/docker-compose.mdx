@@ -102,8 +102,8 @@ Create `.env` in the same directory as `docker-compose.yml`:
 ```bash
 # ─── Database ─────────────────────────────────────────────────────────────────
 DATABASE_BACKEND=postgres
-DATABASE_URL=postgres://ironclaw:${POSTGRES_PASSWORD}@postgres:5432/ironclaw
-POSTGRES_PASSWORD=change_this_to_a_strong_password
+DATABASE_URL=postgres://ironclaw:change_this_to_a_strong_password@postgres:5432/ironclaw
+POSTGRES_PASSWORD=change_this_to_a_strong_password  # Must match password in DATABASE_URL
 
 # ─── LLM Provider ─────────────────────────────────────────────────────────────
 LLM_BACKEND=nearai
