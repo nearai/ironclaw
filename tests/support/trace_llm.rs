@@ -27,6 +27,9 @@ use ironclaw::llm::{
 pub struct TraceTurn {
     pub user_input: String,
     pub steps: Vec<TraceStep>,
+    /// Declarative expectations for this turn (optional).
+    #[serde(default, skip_serializing_if = "TraceExpects::is_empty")]
+    pub expects: TraceExpects,
 }
 
 /// A complete LLM trace: a model name and an ordered list of turns.
@@ -47,9 +50,13 @@ pub struct LlmTrace {
     /// HTTP exchanges recorded during the session, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_exchanges: Vec<HttpExchange>,
+    /// Declarative expectations for the whole trace (optional).
+    #[serde(default, skip_serializing_if = "TraceExpects::is_empty")]
+    pub expects: TraceExpects,
     /// Raw steps before turn conversion (populated only for recorded traces).
     /// Used by `playable_steps()` for recorded-format inspection.
     #[serde(skip)]
+    #[allow(dead_code)]
     pub steps: Vec<TraceStep>,
 }
 
@@ -95,6 +102,56 @@ pub struct ExpectedToolResult {
     pub content: String,
 }
 
+/// Declarative expectations for a trace or turn.
+///
+/// All fields are optional and default to empty/None, so traces without
+/// `expects` work unchanged (backward compatible).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TraceExpects {
+    /// Each string must appear in the response (case-insensitive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_contains: Vec<String>,
+    /// None of these may appear in the response (case-insensitive).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_not_contains: Vec<String>,
+    /// Regex that must match the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_matches: Option<String>,
+    /// Each tool name must appear in started calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_used: Vec<String>,
+    /// None of these tool names may appear.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools_not_used: Vec<String>,
+    /// If true, all tools must succeed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_tools_succeeded: Option<bool>,
+    /// Upper bound on tool call count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<usize>,
+    /// Minimum response count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_responses: Option<usize>,
+    /// Tool result preview must contain substring (tool_name -> substring).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub tool_results_contain: std::collections::HashMap<String, String>,
+}
+
+impl TraceExpects {
+    /// Returns true if no expectations are set.
+    pub fn is_empty(&self) -> bool {
+        self.response_contains.is_empty()
+            && self.response_not_contains.is_empty()
+            && self.response_matches.is_none()
+            && self.tools_used.is_empty()
+            && self.tools_not_used.is_empty()
+            && self.all_tools_succeeded.is_none()
+            && self.max_tool_calls.is_none()
+            && self.min_responses.is_none()
+            && self.tool_results_contain.is_empty()
+    }
+}
+
 /// Raw deserialization helper -- accepts either `turns` or flat `steps`.
 #[derive(Deserialize)]
 struct RawLlmTrace {
@@ -107,6 +164,8 @@ struct RawLlmTrace {
     memory_snapshot: Vec<MemorySnapshotEntry>,
     #[serde(default)]
     http_exchanges: Vec<HttpExchange>,
+    #[serde(default)]
+    expects: TraceExpects,
 }
 
 impl<'de> Deserialize<'de> for LlmTrace {
@@ -129,6 +188,7 @@ impl<'de> Deserialize<'de> for LlmTrace {
             vec![TraceTurn {
                 user_input: "(test input)".to_string(),
                 steps: playable,
+                expects: TraceExpects::default(),
             }]
         } else {
             vec![]
@@ -138,6 +198,7 @@ impl<'de> Deserialize<'de> for LlmTrace {
             turns,
             memory_snapshot: raw.memory_snapshot,
             http_exchanges: raw.http_exchanges,
+            expects: raw.expects,
             steps: raw_steps,
         })
     }
@@ -151,6 +212,7 @@ impl LlmTrace {
             turns,
             memory_snapshot: Vec::new(),
             http_exchanges: Vec::new(),
+            expects: TraceExpects::default(),
             steps: Vec::new(),
         }
     }
@@ -166,9 +228,11 @@ impl LlmTrace {
             turns: vec![TraceTurn {
                 user_input: user_input.into(),
                 steps,
+                expects: TraceExpects::default(),
             }],
             memory_snapshot: Vec::new(),
             http_exchanges: Vec::new(),
+            expects: TraceExpects::default(),
             steps: Vec::new(),
         }
     }
@@ -183,6 +247,7 @@ impl LlmTrace {
     /// Return only the playable steps from the raw steps (text + tool_calls),
     /// skipping `user_input` markers. Only meaningful for recorded traces that
     /// were deserialized from a flat `steps` array.
+    #[allow(dead_code)]
     pub fn playable_steps(&self) -> Vec<&TraceStep> {
         self.steps
             .iter()
@@ -771,10 +836,12 @@ mod tests {
                 TraceTurn {
                     user_input: "first".to_string(),
                     steps: vec![text_step("turn 1 response", 10, 5)],
+                    expects: TraceExpects::default(),
                 },
                 TraceTurn {
                     user_input: "second".to_string(),
                     steps: vec![text_step("turn 2 response", 20, 10)],
+                    expects: TraceExpects::default(),
                 },
             ],
         );

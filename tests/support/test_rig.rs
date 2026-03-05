@@ -267,6 +267,40 @@ impl TestRig {
         all_responses
     }
 
+    /// Run a trace, then verify all declarative `expects` (top-level and per-turn).
+    ///
+    /// Returns the per-turn response lists for additional manual assertions.
+    pub async fn run_and_verify_trace(
+        &self,
+        trace: &LlmTrace,
+        timeout: Duration,
+    ) -> Vec<Vec<OutgoingResponse>> {
+        use crate::support::assertions::verify_expects;
+
+        let all_responses = self.run_trace(trace, timeout).await;
+
+        // Verify top-level expects against all accumulated data.
+        if !trace.expects.is_empty() {
+            let all_response_strings: Vec<String> = all_responses
+                .iter()
+                .flat_map(|turn| turn.iter().map(|r| r.content.clone()))
+                .collect();
+            let started = self.tool_calls_started();
+            let completed = self.tool_calls_completed();
+            let results = self.tool_results();
+            verify_expects(
+                &trace.expects,
+                &all_response_strings,
+                &started,
+                &completed,
+                &results,
+                "top-level",
+            );
+        }
+
+        all_responses
+    }
+
     /// Signal the channel to shut down and abort the background agent task.
     pub fn shutdown(mut self) {
         self.channel.signal_shutdown();
@@ -523,6 +557,30 @@ impl TestRig {
             matches!(s, StatusUpdate::Status(msg) if msg.contains("sanitiz") || msg.contains("inject") || msg.contains("warning"))
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Convenience: run a recorded trace fixture end-to-end
+// ---------------------------------------------------------------------------
+
+/// Load a recorded trace fixture, build a rig, run and verify expects, then shut down.
+///
+/// `filename` is relative to `tests/fixtures/llm_traces/recorded/`.
+#[cfg(feature = "libsql")]
+pub async fn run_recorded_trace(filename: &str) {
+    let path = format!(
+        "{}/tests/fixtures/llm_traces/recorded/{filename}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let trace = LlmTrace::from_file(&path)
+        .unwrap_or_else(|e| panic!("failed to load trace {filename}: {e}"));
+    let rig = TestRigBuilder::new()
+        .with_trace(trace.clone())
+        .build()
+        .await;
+    rig.run_and_verify_trace(&trace, Duration::from_secs(15))
+        .await;
+    rig.shutdown();
 }
 
 // ---------------------------------------------------------------------------

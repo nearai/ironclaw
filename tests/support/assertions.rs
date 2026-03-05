@@ -7,6 +7,8 @@
 
 use regex::Regex;
 
+use crate::support::trace_llm::TraceExpects;
+
 /// Assert the response contains all `needles` (case-insensitive).
 pub fn assert_response_contains(response: &str, needles: &[&str]) {
     let lower = response.to_lowercase();
@@ -78,6 +80,99 @@ pub fn assert_tool_succeeded(completed: &[(String, bool)], tool_name: &str) {
         found,
         "Expected '{tool_name}' to complete successfully, got: {completed:?}"
     );
+}
+
+/// Assert the response does NOT contain any of `forbidden` (case-insensitive).
+pub fn assert_response_not_contains(response: &str, forbidden: &[&str]) {
+    let lower = response.to_lowercase();
+    for needle in forbidden {
+        assert!(
+            !lower.contains(&needle.to_lowercase()),
+            "response_not_contains: found \"{needle}\" in response: {response}"
+        );
+    }
+}
+
+/// Verify all expectations from a `TraceExpects` against actual data.
+///
+/// `label` is used in assertion messages to identify context (e.g. "top-level" or "turn 0").
+/// `responses` are the response content strings, `started` are tool names started,
+/// `completed` are (name, success) pairs, `results` are (name, preview) pairs.
+pub fn verify_expects(
+    expects: &TraceExpects,
+    responses: &[String],
+    started: &[String],
+    completed: &[(String, bool)],
+    results: &[(String, String)],
+    label: &str,
+) {
+    if expects.is_empty() {
+        return;
+    }
+
+    // min_responses
+    if let Some(min) = expects.min_responses {
+        assert!(
+            responses.len() >= min,
+            "[{label}] min_responses: expected >= {min}, got {}",
+            responses.len()
+        );
+    }
+
+    // response_contains / response_not_contains / response_matches — checked against joined response
+    let joined = responses.join("\n");
+
+    if !expects.response_contains.is_empty() {
+        let needles: Vec<&str> = expects.response_contains.iter().map(|s| s.as_str()).collect();
+        assert_response_contains(&joined, &needles);
+    }
+
+    if !expects.response_not_contains.is_empty() {
+        let forbidden: Vec<&str> = expects.response_not_contains.iter().map(|s| s.as_str()).collect();
+        assert_response_not_contains(&joined, &forbidden);
+    }
+
+    if let Some(ref pattern) = expects.response_matches {
+        assert_response_matches(&joined, pattern);
+    }
+
+    // tools_used
+    if !expects.tools_used.is_empty() {
+        let expected: Vec<&str> = expects.tools_used.iter().map(|s| s.as_str()).collect();
+        assert_tools_used(started, &expected);
+    }
+
+    // tools_not_used
+    if !expects.tools_not_used.is_empty() {
+        let forbidden: Vec<&str> = expects.tools_not_used.iter().map(|s| s.as_str()).collect();
+        assert_tools_not_used(started, &forbidden);
+    }
+
+    // all_tools_succeeded
+    if expects.all_tools_succeeded == Some(true) {
+        assert_all_tools_succeeded(completed);
+    }
+
+    // max_tool_calls
+    if let Some(max) = expects.max_tool_calls {
+        assert_max_tool_calls(started, max);
+    }
+
+    // tool_results_contain
+    for (tool_name, substring) in &expects.tool_results_contain {
+        let found = results
+            .iter()
+            .find(|(name, _)| name == tool_name);
+        assert!(
+            found.is_some(),
+            "[{label}] tool_results_contain: no result for tool \"{tool_name}\", got: {results:?}"
+        );
+        let (_, preview) = found.unwrap();
+        assert!(
+            preview.to_lowercase().contains(&substring.to_lowercase()),
+            "[{label}] tool_results_contain: tool \"{tool_name}\" result does not contain \"{substring}\", got: \"{preview}\""
+        );
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,12 @@
 {
   "model_name": "recorded-telegram-check",
+  "expects": {
+    "response_contains": ["Telegram", "connected"],
+    "tools_used": ["echo"],
+    "all_tools_succeeded": true,
+    "tool_results_contain": { "echo": "Checking telegram" },
+    "min_responses": 1
+  },
   "memory_snapshot": [
     {
       "path": "IDENTITY.md",

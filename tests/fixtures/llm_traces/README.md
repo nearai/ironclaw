@@ -99,6 +99,7 @@ For backward compatibility, traces with a top-level `"steps"` array (no `"turns"
 | `turns` | array | yes* | List of turns. Each turn has `user_input` (string) and `steps` (array of response steps). |
 | `memory_snapshot` | array | no | Workspace memory documents captured before the recording session. Replay should restore these before running the trace. Each entry has `path` (string) and `content` (string). |
 | `http_exchanges` | array | no | HTTP request/response pairs recorded during the session, in order. During replay, the `ReplayingHttpInterceptor` returns these instead of making real HTTP requests. |
+| `expects` | object | no | Declarative expectations verified after replay. See [Expects fields](#expects-fields). |
 
 *Or `steps` for the legacy flat format (deserialized as a single turn with a placeholder user message). Legacy `steps` are ordered: each `complete()` or `complete_with_tools()` call consumes the next `text`/`tool_calls` step. `user_input` steps are metadata markers and must be skipped during replay. If LLM calls exceed the number of playable steps, `TraceLlm` returns an error.
 
@@ -108,6 +109,7 @@ For backward compatibility, traces with a top-level `"steps"` array (no `"turns"
 |-------|------|----------|-------------|
 | `user_input` | string | yes | The user message that starts this turn. |
 | `steps` | array | yes | Ordered list of LLM response steps for this turn. |
+| `expects` | object | no | Per-turn expectations. Same schema as top-level `expects`. |
 
 ### Step fields
 
@@ -216,6 +218,55 @@ When present on a step, `expected_tool_results` lists the tool output that appea
 | `content` | string | The full tool result content as it appeared in the message context. |
 
 During replay, after tools execute and before returning the canned LLM response, the test harness should compare actual tool results against these entries. A content mismatch indicates a tool behavior change (regression).
+
+### Expects fields
+
+The `expects` object can appear at the top level (whole trace) or per-turn. All fields are optional; traces without `expects` work unchanged.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `response_contains` | `string[]` | Each must appear in response (case-insensitive). |
+| `response_not_contains` | `string[]` | None may appear in response. |
+| `response_matches` | `string` | Regex that must match response. |
+| `tools_used` | `string[]` | Each tool name must appear in started calls. |
+| `tools_not_used` | `string[]` | None of these may appear. |
+| `all_tools_succeeded` | `bool` | If true, all tools must succeed. |
+| `max_tool_calls` | `usize` | Upper bound on tool call count. |
+| `min_responses` | `usize` | Minimum response count. |
+| `tool_results_contain` | `map<string,string>` | Tool result preview must contain substring. |
+
+Example (top-level):
+
+```json
+{
+  "model_name": "recorded-telegram-check",
+  "expects": {
+    "response_contains": ["Telegram", "connected"],
+    "tools_used": ["echo"],
+    "all_tools_succeeded": true,
+    "tool_results_contain": { "echo": "Checking telegram" },
+    "min_responses": 1
+  },
+  "steps": [ ... ]
+}
+```
+
+Example (per-turn):
+
+```json
+{
+  "model_name": "multi-turn-example",
+  "turns": [
+    {
+      "user_input": "say hello",
+      "expects": { "response_contains": ["hello"], "tools_not_used": ["shell"] },
+      "steps": [ ... ]
+    }
+  ]
+}
+```
+
+`run_recorded_trace("filename.json")` in test code loads the fixture, builds a rig, replays, verifies all expects, and shuts down -- turning recorded trace tests into one-liners.
 
 ## What gets mocked vs. what runs for real
 
