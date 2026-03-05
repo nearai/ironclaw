@@ -503,8 +503,7 @@ mod trace_llm_tests {
 
     #[tokio::test]
     async fn complete_text_step() {
-        let trace =
-            LlmTrace::single_turn("test-model", "hi", vec![text_step("plain text", 30, 8)]);
+        let trace = LlmTrace::single_turn("test-model", "hi", vec![text_step("plain text", 30, 8)]);
         let llm = TraceLlm::from_trace(trace);
 
         let resp = llm.complete(make_completion_request("hi")).await.unwrap();

@@ -566,4 +566,3 @@ pub async fn run_recorded_trace(filename: &str) {
         .await;
     rig.shutdown();
 }
-

@@ -31,4 +31,3 @@ impl Drop for CleanupGuard {
         }
     }
 }
-

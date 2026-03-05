@@ -277,4 +277,3 @@ impl Channel for TestChannel {
         HashMap::new()
     }
 }
-
