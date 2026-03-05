@@ -102,13 +102,10 @@ jobs:
 
       - name: Set up coverage instrumentation
         run: |
-          source <(cargo llvm-cov show-env --export-prefix)
-          # Persist env vars for subsequent steps
-          echo "RUSTFLAGS=${RUSTFLAGS}" >> "$GITHUB_ENV"
-          echo "LLVM_PROFILE_FILE=${LLVM_PROFILE_FILE}" >> "$GITHUB_ENV"
-          echo "CARGO_LLVM_COV=1" >> "$GITHUB_ENV"
-          echo "CARGO_LLVM_COV_SHOW_ENV=1" >> "$GITHUB_ENV"
-          echo "CARGO_LLVM_COV_TARGET_DIR=${CARGO_LLVM_COV_TARGET_DIR}" >> "$GITHUB_ENV"
+          # Append ALL env vars from show-env (including CARGO_ENCODED_RUSTFLAGS,
+          # CARGO_INCREMENTAL, LLVM_PROFILE_FILE, etc.) so the build step
+          # compiles an instrumented binary regardless of cargo-llvm-cov version.
+          cargo llvm-cov show-env >> "$GITHUB_ENV"
           cargo llvm-cov clean --workspace
 
       - name: Build instrumented binary

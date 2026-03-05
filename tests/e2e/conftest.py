@@ -101,7 +101,7 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server):
     # Forward LLVM coverage instrumentation env vars when present
     # (allows cargo-llvm-cov to collect profraw data from E2E runs)
     for key in ("LLVM_PROFILE_FILE", "CARGO_LLVM_COV", "CARGO_LLVM_COV_SHOW_ENV",
-                "CARGO_LLVM_COV_TARGET_DIR"):
+                "CARGO_LLVM_COV_TARGET_DIR", "CARGO_ENCODED_RUSTFLAGS"):
         val = os.environ.get(key)
         if val is not None:
             env[key] = val
