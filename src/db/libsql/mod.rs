@@ -11,6 +11,7 @@ mod jobs;
 mod routines;
 mod sandbox;
 mod settings;
+mod structured;
 mod tool_failures;
 mod workspace;
 
@@ -25,6 +26,7 @@ use rust_decimal::Decimal;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
 };
+
 use crate::context::JobState;
 use crate::db::Database;
 use crate::error::DatabaseError;
@@ -295,6 +297,7 @@ impl Database for LibSqlBackend {
         Ok(())
     }
 }
+
 
 // ==================== Row conversion helpers ====================
 

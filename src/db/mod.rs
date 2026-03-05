@@ -15,6 +15,8 @@ pub mod postgres;
 #[cfg(feature = "postgres")]
 pub mod tls;
 
+pub mod structured;
+
 #[cfg(feature = "libsql")]
 pub mod libsql;
 
@@ -414,6 +416,7 @@ pub trait Database:
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore
+    + structured::StructuredStore
     + Send
     + Sync
 {

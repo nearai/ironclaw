@@ -23,6 +23,7 @@ pub mod selector;
 
 pub use attenuation::{AttenuationResult, attenuate_tools};
 pub use registry::SkillRegistry;
+pub(crate) use registry::load_and_validate_skill;
 pub use selector::prefilter_skills;
 
 use std::path::PathBuf;
