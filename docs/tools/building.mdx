@@ -1,0 +1,251 @@
+---
+title: Building Custom Tools
+sidebarTitle: Building Tools
+description: Create WASM tools and dynamic tool builder
+---
+
+IronClaw supports two paths for creating custom tools:
+
+1. **WASM from scratch** — Write a tool in any language that compiles to `wasm32-wasi`, declare its capabilities, and install it
+2. **Dynamic tool builder** — Ask the agent to build a tool on your behalf; it scaffolds, tests, and installs the tool automatically
+
+Both paths produce WASM tools — sandboxed, capability-declared, and running inside wasmtime.
+
+## Path 1: WASM Tool from Scratch
+
+### Step 1: Create the project
+
+```bash
+cargo new --lib my-tool
+cd my-tool
+```
+
+Add the WASM target and dependencies:
+
+```toml
+# Cargo.toml
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+```
+
+### Step 2: Implement the tool ABI
+
+WASM tools expose a standard ABI that IronClaw calls when invoking the tool:
+
+```rust
+// src/lib.rs
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct Params {
+    query: String,
+    limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct Output {
+    results: Vec<String>,
+    count: usize,
+}
+
+/// Called by IronClaw to get the tool's JSON Schema for parameters.
+#[no_mangle]
+pub extern "C" fn schema() -> *mut u8 {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string", "description": "Search query" },
+            "limit": { "type": "integer", "description": "Max results", "default": 10 }
+        },
+        "required": ["query"]
+    });
+    export_string(schema.to_string())
+}
+
+/// Called by IronClaw to execute the tool with the given JSON parameters.
+#[no_mangle]
+pub extern "C" fn execute(params_ptr: *const u8, params_len: usize) -> *mut u8 {
+    let params_bytes = unsafe { std::slice::from_raw_parts(params_ptr, params_len) };
+    let params: Params = serde_json::from_slice(params_bytes).unwrap();
+
+    // ... tool logic here ...
+    let output = Output {
+        results: vec![format!("Result for: {}", params.query)],
+        count: 1,
+    };
+
+    export_string(serde_json::to_string(&output).unwrap())
+}
+
+fn export_string(s: String) -> *mut u8 {
+    let bytes = s.into_bytes();
+    let ptr = bytes.as_ptr() as *mut u8;
+    std::mem::forget(bytes);
+    ptr
+}
+```
+
+### Step 3: Declare capabilities
+
+Create `capabilities.json` in the project root:
+
+```json
+{
+  "name": "my-tool",
+  "version": "0.1.0",
+  "description": "Searches the example.com API",
+
+  "network": {
+    "allowed_hosts": ["api.example.com"]
+  },
+
+  "credentials": [
+    {
+      "name": "example_api_key",
+      "inject_as": "Authorization",
+      "format": "Bearer {value}"
+    }
+  ],
+
+  "rate_limit": {
+    "requests_per_minute": 60
+  }
+}
+```
+
+### Step 4: Build and install
+
+```bash
+# Build for WASM
+cargo build --release --target wasm32-wasi
+
+# Install into IronClaw
+ironclaw tool install \
+  ./target/wasm32-wasi/release/my_tool.wasm \
+  --capabilities ./capabilities.json
+
+# Verify it appears
+ironclaw tool list
+```
+
+### Step 5: Grant capabilities
+
+After installation, grant any required capabilities:
+
+```bash
+# Grant network access (prompts for confirmation)
+ironclaw tool grant my-tool network api.example.com
+
+# Link a stored credential for injection
+ironclaw tool grant my-tool credential example_api_key
+```
+
+<Note>
+Capabilities must be explicitly granted after installation, even if they are declared in `capabilities.json`. This is a deliberate two-step process: declaration tells IronClaw what the tool needs, granting tells IronClaw that you approve it.
+</Note>
+
+---
+
+## Path 2: Dynamic Tool Builder
+
+The dynamic builder lets the agent scaffold, build, and install tools on your behalf without leaving the conversation.
+
+**Example in chat:**
+> "Build me a tool that searches the Hacker News Algolia API and returns the top 10 results for a given query"
+
+The agent will:
+
+1. Scaffold the tool source code and `capabilities.json`
+2. Compile to `wasm32-wasi`
+3. Run the test harness to verify correctness
+4. Install the compiled module
+5. Report the tool name so you can use it immediately
+
+The builder handles Rust scaffolding, WASM compilation, and test verification automatically.
+
+---
+
+## Auth Flows in capabilities.json
+
+Tools that require OAuth or manual token setup declare their auth requirements in `capabilities.json`:
+
+### Bearer token (manual)
+
+```json
+{
+  "auth": {
+    "type": "manual_token",
+    "prompt": "Paste your API token from https://example.com/settings/tokens",
+    "secret_name": "example_api_key",
+    "inject_as": "Authorization",
+    "format": "Bearer {value}"
+  }
+}
+```
+
+When the user installs the tool, IronClaw prompts for the token, encrypts it, and stores it under `example_api_key`.
+
+### OAuth 2.0
+
+```json
+{
+  "auth": {
+    "type": "oauth2",
+    "provider": "github",
+    "client_id": "YOUR_CLIENT_ID",
+    "scopes": ["repo", "read:user"],
+    "token_url": "https://github.com/login/oauth/access_token",
+    "auth_url": "https://github.com/login/oauth/authorize",
+    "secret_name": "github_oauth_token"
+  }
+}
+```
+
+IronClaw handles the OAuth flow (opens browser, listens for redirect, exchanges code for token) and stores the resulting access token encrypted.
+
+---
+
+## Decision Guide: WASM vs MCP vs Built-in Rust
+
+| Scenario | Recommendation |
+|---------|----------------|
+| Custom integration needing isolation and credential security | **WASM** |
+| Leveraging an existing MCP server from the ecosystem | **MCP** |
+| Core capability needed by every job, latency-sensitive | **Built-in Rust** (contributes a PR) |
+| Prototype or one-off integration | **WASM via dynamic builder** |
+| Tool needs to call a subprocess or system binary | **WASM** (via allowed host functions) or **built-in Rust** |
+| Tool touches sensitive credentials and external APIs | **WASM** (proxy-level injection, never in module memory) |
+
+<Note>
+When in doubt, start with WASM. The sandbox is the right default for any custom tool — it limits blast radius if the tool misbehaves or is compromised.
+</Note>
+
+## Current Limitations
+
+- Built WASM tools currently receive empty capabilities after the dynamic build; granting HTTP and credential access requires a manual step via `ironclaw tool grant`
+- Tool versioning and rollback are not yet supported — installing a new version of a tool replaces the old one
+- WIT bindgen integration (automatic schema extraction from WASM interface types) is stubbed; schemas must be implemented manually in the `schema()` export
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="WASM Tools" icon="blocks" href="/tools/wasm">
+    Full WASM sandbox reference
+  </Card>
+
+  <Card title="MCP Servers" icon="server" href="/tools/mcp">
+    Connect existing MCP servers
+  </Card>
+
+  <Card title="Secrets Management" icon="lock" href="/security/secrets">
+    Storing credentials for tool auth
+  </Card>
+</CardGroup>

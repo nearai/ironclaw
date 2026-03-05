@@ -1,0 +1,7 @@
+/* Navbar logo sizing */
+#navbar img,
+nav img[alt="IronClaw"],
+header img {
+  height: 36px !important;
+  width: auto !important;
+}

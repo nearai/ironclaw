@@ -1,0 +1,232 @@
+---
+title: Windows (Native)
+sidebarTitle: Windows Native
+description: Running IronClaw natively on Windows (experimental)
+---
+
+IronClaw can run natively on Windows without WSL2. This is useful when you need a pure Windows deployment or cannot use WSL2. Native Windows support is experimental — for most users, [WSL2 is recommended](/platforms/windows-wsl2).
+
+<Warning>
+Native Windows support is experimental. Some features behave differently compared to Linux and WSL2, particularly shell tool execution and Docker sandbox integration. Production deployments should use Linux or WSL2.
+</Warning>
+
+---
+
+## Installation
+
+### PowerShell Script
+
+Open PowerShell as your user (not necessarily Administrator) and run:
+
+```powershell
+irm https://install.ironclaw.ai/windows | iex
+```
+
+This downloads the `ironclaw-x86_64-pc-windows-msvc.exe` binary and installs it to `%USERPROFILE%\.local\bin\ironclaw.exe`.
+
+### Manual Install
+
+1. Download `ironclaw-x86_64-pc-windows-msvc.zip` from [github.com/ironclaw-ai/ironclaw/releases](https://github.com/ironclaw-ai/ironclaw/releases)
+2. Extract to `C:\Program Files\IronClaw\`
+3. Add to PATH (see below)
+
+### Add to PATH
+
+```powershell
+# Add to user PATH (persistent)
+[Environment]::SetEnvironmentVariable(
+  "Path",
+  $env:Path + ";C:\Program Files\IronClaw",
+  "User"
+)
+
+# Reload PATH in current session
+$env:Path = [Environment]::GetEnvironmentVariable("Path", "User")
+
+# Verify
+ironclaw --version
+```
+
+### Build from Source
+
+Requires [Rust](https://rustup.rs) and [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/):
+
+```powershell
+# Install dependencies
+winget install Rustlang.Rust.MSVC
+winget install Microsoft.VisualStudio.2022.BuildTools
+
+# Build
+git clone https://github.com/ironclaw-ai/ironclaw.git
+cd ironclaw
+cargo build --release
+
+# Install
+copy target\release\ironclaw.exe C:\Program Files\IronClaw\ironclaw.exe
+```
+
+---
+
+## First Run
+
+```powershell
+ironclaw onboard
+ironclaw run
+```
+
+Navigate to `http://127.0.0.1:3000` in your browser.
+
+---
+
+## Secrets: Windows DPAPI
+
+On Windows, IronClaw stores the encryption master key using the **Windows Data Protection API (DPAPI)**. DPAPI ties the key to your Windows user account and machine — no additional setup is required.
+
+The key is stored in the Windows Credential Manager under the name `IronClaw Master Key`. You can inspect it via:
+
+1. Open **Credential Manager** (search in Start menu)
+2. Click **Windows Credentials**
+3. Look for `IronClaw Master Key` under **Generic Credentials**
+
+<Note>
+DPAPI keys are tied to the current Windows user and machine. If you migrate your IronClaw data to a different machine or reinstall Windows, your encrypted secrets will be unreadable without re-entering them. Export secrets before migrating.
+</Note>
+
+---
+
+## Task Scheduler Autostart
+
+Use Windows Task Scheduler to run IronClaw at login without a console window.
+
+### Using schtasks (Command Line)
+
+```powershell
+# Create task (runs at login, hidden)
+schtasks /create `
+  /tn "IronClaw" `
+  /tr "\"C:\Program Files\IronClaw\ironclaw.exe\" run" `
+  /sc ONLOGON `
+  /ru "%USERNAME%" `
+  /f
+
+# Start immediately
+schtasks /run /tn "IronClaw"
+
+# Stop
+schtasks /end /tn "IronClaw"
+
+# Delete task
+schtasks /delete /tn "IronClaw" /f
+```
+
+### Using Task Scheduler XML
+
+Create `ironclaw-task.xml`:
+
+```xml
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2"
+  xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions>
+    <Exec>
+      <Command>C:\Program Files\IronClaw\ironclaw.exe</Command>
+      <Arguments>run</Arguments>
+      <WorkingDirectory>%USERPROFILE%</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+```
+
+Import the task:
+
+```powershell
+schtasks /create /xml ironclaw-task.xml /tn "IronClaw"
+```
+
+---
+
+## Known Limitations vs WSL2
+
+| Feature | Native Windows | WSL2 |
+|---------|---------------|------|
+| Docker sandbox | Requires Docker Desktop, limited | Full support via Docker Desktop WSL2 backend |
+| Shell tool (`shell`) | PowerShell / cmd.exe only; bash unavailable | Full bash support |
+| PATH handling | Windows PATH conventions (`\`, `;`) | Unix PATH (`/`, `:`) |
+| GNOME Keyring | Not available (uses DPAPI) | Available |
+| systemd service | Not available (use Task Scheduler) | Available (Win 11 22H2+) |
+| Signal handling | Limited SIGTERM support | Full Unix signals |
+| Symbolic links | Requires Developer Mode or elevated privileges | Native support |
+
+---
+
+## Docker Sandbox on Native Windows
+
+The Docker sandbox requires [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/).
+
+```powershell
+# Install via winget
+winget install Docker.DockerDesktop
+```
+
+After installation:
+1. Start Docker Desktop
+2. Go to **Settings → General** and ensure "Use the WSL 2 based engine" is checked (recommended even for native Windows IronClaw to avoid Windows container mode)
+3. Set `SANDBOX_ENABLED=true` in your IronClaw configuration
+
+<Note>
+Docker Desktop must be running before IronClaw starts if the sandbox is enabled. Docker Desktop does not auto-start by default after a fresh install — enable it in **Settings → General → Start Docker Desktop when you sign in**.
+</Note>
+
+---
+
+## Environment Configuration
+
+Create `%USERPROFILE%\.ironclaw\.env` or set environment variables via System Properties:
+
+```powershell
+# PowerShell: set persistent user environment variables
+[Environment]::SetEnvironmentVariable("DATABASE_BACKEND", "libsql", "User")
+[Environment]::SetEnvironmentVariable("LLM_BACKEND", "nearai", "User")
+[Environment]::SetEnvironmentVariable("NEARAI_SESSION_TOKEN", "sess_xxx", "User")
+[Environment]::SetEnvironmentVariable("GATEWAY_ENABLED", "true", "User")
+[Environment]::SetEnvironmentVariable("GATEWAY_AUTH_TOKEN", "change_me", "User")
+```
+
+Or via the GUI: **System Properties → Advanced → Environment Variables → User variables**.
+
+---
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Windows (WSL2)" icon="terminal" href="/platforms/windows-wsl2">
+    Recommended Windows setup with full feature support
+  </Card>
+  <Card title="Configuration" icon="settings" href="/setup/configuration">
+    Full environment variable reference
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/help/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

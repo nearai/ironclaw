@@ -153,11 +153,11 @@ This checks:
     ironclaw status
 
     # Verify port
-    sudo ss -tlnp | grep 3001
+    sudo ss -tlnp | grep 3000
 
     # Check firewall
     sudo ufw status
-    sudo ufw allow 3001
+    sudo ufw allow 3000
     ```
   </Accordion>
 
@@ -268,7 +268,7 @@ This checks:
   <Accordion title="WSL2 port not accessible" icon="windows">
     **Solutions:**
     - WSL2 automatically forwards ports
-    - Use `http://localhost:3001` from Windows
+    - Use `http://localhost:3000` from Windows
     - Check WSL2 is running: `wsl --status`
   </Accordion>
 </AccordionGroup>

@@ -22,7 +22,7 @@ The Web Gateway is enabled by default. To configure:
 ```bash
 export GATEWAY_ENABLED=true
 export GATEWAY_HOST=127.0.0.1
-export GATEWAY_PORT=3001
+export GATEWAY_PORT=3000
 export GATEWAY_AUTH_TOKEN=your-secure-token
 ```
 
@@ -30,14 +30,14 @@ Or during onboarding:
 ```
 Step 6: Channel Configuration
 → Select "Web Gateway"
-→ Port: 3001
+→ Port: 3000
 ```
 
 ## Accessing the Web UI
 
 Once IronClaw is running:
 
-1. Open `http://127.0.0.1:3001` in your browser
+1. Open `http://127.0.0.1:3000` in your browser
 2. Enter the auth token when prompted
 3. Start chatting
 
@@ -48,7 +48,7 @@ Once IronClaw is running:
 By default, a random auth token is generated at startup and printed in the logs:
 
 ```
-[2024-01-15T10:30:00Z INFO] Web Gateway: http://127.0.0.1:3001
+[2024-01-15T10:30:00Z INFO] Web Gateway: http://127.0.0.1:3000
 [2024-01-15T10:30:00Z INFO] Gateway auth token: ic_a1b2c3d4e5f6...
 ```
 
@@ -103,7 +103,7 @@ For external access, use a reverse proxy:
 
 ```caddy
 docs.ironclaw.ai {
-  reverse_proxy localhost:3001
+  reverse_proxy localhost:3000
 }
 ```
 
@@ -118,7 +118,7 @@ server {
   ssl_certificate_key /path/to/key.pem;
 
   location / {
-    proxy_pass http://localhost:3001;
+    proxy_pass http://localhost:3000;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
@@ -129,7 +129,7 @@ server {
 ### Cloudflare Tunnel
 
 ```bash
-cloudflared tunnel --url http://localhost:3001
+cloudflared tunnel --url http://localhost:3000
 ```
 
 ## WebSocket Connection
@@ -181,9 +181,17 @@ See [API Reference](/reference/api) for details.
   </Accordion>
 </AccordionGroup>
 
-## Next Steps
+## See Also
 
 <CardGroup cols={2}>
+  <Card title="REST API Reference" icon="code" href="/ops/api">
+    Full endpoint table with request/response examples
+  </Card>
+
+  <Card title="WebSocket & SSE" icon="zap" href="/ops/websocket-sse">
+    Real-time streaming details and proxy configuration
+  </Card>
+
   <Card title="Telegram" icon="message-circle" href="/channels/telegram">
     Set up Telegram bot integration
   </Card>

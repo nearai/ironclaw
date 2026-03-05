@@ -1,0 +1,206 @@
+---
+title: Memory Tools Reference
+sidebarTitle: Memory Tools
+description: memory_search, memory_write, memory_read, memory_tree
+---
+
+The memory tools are the agent's interface to the persistent workspace — a flexible, filesystem-like memory store backed by a database. The workspace uses hybrid search (FTS + vector via Reciprocal Rank Fusion) to retrieve relevant documents by keyword or semantic similarity.
+
+The principle is simple: **memory is database, not RAM**. If you want the agent to remember something across sessions, write it explicitly. Nothing is remembered automatically.
+
+<Note>
+Before answering questions about prior work, conversations, or past decisions, the agent should call `memory_search` first. This is the primary retrieval path for persistent context.
+</Note>
+
+## memory_search
+
+Search the workspace using hybrid search. Combines full-text search (FTS) with semantic vector search, then merges results using Reciprocal Rank Fusion (RRF) to produce a single ranked list.
+
+### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Search query in natural language or keywords |
+| `limit` | integer | No | `10` | Maximum number of results to return |
+| `semantic` | boolean | No | `true` | Include semantic (vector) search in addition to FTS |
+
+### Schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The search query. Supports natural language for semantic search and keyword terms for FTS."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum results to return.",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 100
+    },
+    "semantic": {
+      "type": "boolean",
+      "description": "Whether to include semantic vector search. Set to false for pure keyword search.",
+      "default": true
+    }
+  },
+  "required": ["query"]
+}
+```
+
+### How hybrid search works
+
+Results are ranked by combining two scores via RRF:
+1. **FTS rank** — BM25-style full-text ranking against the FTS5 index
+2. **Vector rank** — Cosine similarity against embedded chunk vectors
+
+RRF merges these two ranked lists into a single result set that captures both exact keyword matches and semantically related content.
+
+**Example in chat:**
+> "Do you remember what we decided about the database schema last week?"
+
+The agent will call `memory_search` with `query: "database schema decision"` before answering.
+
+## memory_write
+
+Write a document to the workspace at a given path. If the document already exists at that path, it is overwritten. Parent path segments are created automatically.
+
+### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | Yes | — | Workspace path (e.g., `projects/ironclaw/notes.md`) |
+| `content` | string | Yes | — | Document content (typically Markdown) |
+| `metadata` | object | No | `{}` | Optional key-value metadata attached to the document |
+
+### Schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Workspace path for the document. Use forward slashes. No leading slash required."
+    },
+    "content": {
+      "type": "string",
+      "description": "Document content. Markdown is recommended."
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Optional metadata (tags, category, source, etc.).",
+      "additionalProperties": true
+    }
+  },
+  "required": ["path", "content"]
+}
+```
+
+**Example in chat:**
+> "Remember that we decided to use libSQL for the local deployment"
+
+The agent will call `memory_write` with a path like `decisions/2026-03-04-database.md` and write the decision as content.
+
+## memory_read
+
+Read a specific document from the workspace by path. Returns the full document content.
+
+### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | Yes | — | Exact workspace path to read |
+
+### Schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Exact workspace path to read (e.g., context/vision.md)."
+    }
+  },
+  "required": ["path"]
+}
+```
+
+**Example in chat:**
+> "Read my identity file"
+
+The agent will call `memory_read` with `path: "IDENTITY.md"` (or similar identity file path).
+
+## memory_tree
+
+List the workspace filesystem tree — all paths and their types (file or directory).
+
+### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | No | `"/"` | Root path to start the tree from |
+
+### Schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Workspace path to list recursively. Defaults to the root.",
+      "default": "/"
+    }
+  },
+  "required": []
+}
+```
+
+**Example in chat:**
+> "What's in my workspace?"
+
+## Path Conventions
+
+Workspace paths follow a flexible filesystem-like structure. Common conventions:
+
+| Path pattern | Purpose |
+|-------------|---------|
+| `context/vision.md` | Project vision and goals |
+| `daily/2026-03-04.md` | Daily notes (ISO date format) |
+| `decisions/YYYY-MM-DD-topic.md` | Architectural decisions |
+| `projects/<name>/notes.md` | Per-project notes |
+| `AGENTS.md` | Agent identity injected into every system prompt |
+| `SOUL.md` | Agent personality and values |
+| `USER.md` | User profile and preferences |
+| `IDENTITY.md` | Combined identity context |
+
+Identity files (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`) at the workspace root are automatically injected into the LLM system prompt at the start of each session.
+
+## Chunking and Indexing
+
+When a document is written, it is automatically chunked (800 tokens per chunk, ~15% overlap) and indexed:
+- Each chunk is stored in the FTS5 index for keyword search
+- Each chunk is embedded via the configured embedding provider and stored as a vector for semantic search
+
+This happens transparently — you write a document, the agent can search it semantically.
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Memory System" icon="database" href="/agents/memory">
+    Full workspace architecture and search details
+  </Card>
+
+  <Card title="Identity Files" icon="user" href="/agents/identity-files">
+    How AGENTS.md, SOUL.md, and USER.md are injected
+  </Card>
+
+  <Card title="Heartbeat" icon="activity" href="/agents/heartbeat">
+    Proactive periodic execution that reads workspace state
+  </Card>
+</CardGroup>

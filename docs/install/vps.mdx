@@ -116,7 +116,7 @@ sudo ufw default allow outgoing
 sudo ufw allow 22/tcp
 
 # Allow Web Gateway
-sudo ufw allow 3001/tcp
+sudo ufw allow 3000/tcp
 
 # Allow HTTP Webhook (if using)
 sudo ufw allow 8080/tcp
@@ -145,7 +145,7 @@ sudo apt install caddy
 # Configure Caddy
 sudo tee /etc/caddy/Caddyfile <<EOF
 docs.ironclaw.ai {
-  reverse_proxy localhost:3001
+  reverse_proxy localhost:3000
 }
 EOF
 
@@ -169,7 +169,7 @@ server {
   ssl_certificate_key /etc/letsencrypt/live/docs.ironclaw.ai/privkey.pem;
 
   location / {
-    proxy_pass http://localhost:3001;
+    proxy_pass http://localhost:3000;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
@@ -214,7 +214,7 @@ credentials-file: /root/.cloudflared/YOUR-TUNNEL-ID.json
 
 ingress:
   - hostname: docs.ironclaw.ai
-    service: http://localhost:3001
+    service: http://localhost:3000
   - service: http_status:404
 EOF
 
@@ -316,7 +316,7 @@ sudo dpkg-reconfigure unattended-upgrades
     Check firewall and binding:
     ```bash
     sudo ufw status
-    sudo ss -tlnp | grep 3001
+    sudo ss -tlnp | grep 3000
     ```
   </Accordion>
 
