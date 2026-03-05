@@ -31,6 +31,9 @@ if ! command -v cargo-llvm-cov &>/dev/null; then
     exit 1
 fi
 
+# Clean stale profiling data to avoid "mismatched data" warnings.
+cargo llvm-cov clean --workspace 2>/dev/null || true
+
 # Build the cargo llvm-cov command
 cmd=(cargo llvm-cov)
 
