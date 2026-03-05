@@ -3028,6 +3028,25 @@ function renderRoutineDetail(routine) {
   html += '<div class="job-description"><h3>Trigger</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
 
+  if (routine.trigger && routine.trigger.Webhook) {
+    const webhookUrl = window.location.origin + '/api/webhooks/routines/' + routine.id;
+    html += '<div class="job-description"><h3>Webhook Context</h3>'
+      + '<div class="configure-field" style="margin-bottom:0;">'
+      + '<label>Webhook URL (POST payload here)</label>'
+      + '<div style="display:flex; gap:0.5rem; align-items:center;">'
+      + '<input type="text" readonly value="' + escapeHtml(webhookUrl) + '" style="font-family:var(--font-mono); font-size:13px; flex:1;" id="webhook-url-input">'
+      + '<button class="btn-ext activate" onclick="navigator.clipboard.writeText(document.getElementById(\'webhook-url-input\').value); showToast(\'Copied\', \'success\')">Copy</button>'
+      + '</div></div>';
+
+    if (routine.trigger.Webhook.secret) {
+      html += '<div style="margin-top:10px;"><strong style="font-size:13px;">Secret:</strong> <code style="padding:2px 4px; background:var(--bg-tertiary); border-radius:4px; font-size:13px; margin-left:8px;">' + escapeHtml(routine.trigger.Webhook.secret) + '</code></div>';
+      html += '<div style="margin-top:4px; font-size:12px; color:var(--text-secondary);">Set <code>X-Hub-Signature-256</code> or <code>Stripe-Signature</code> in headers to authorize requests.</div>';
+    } else {
+      html += '<div style="margin-top:10px; font-size:12px; color:var(--text-secondary);">No secret configured. Requests are public! Warning: insecure.</div>';
+    }
+    html += '</div>';
+  }
+
   // Action config
   html += '<div class="job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';

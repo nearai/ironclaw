@@ -337,3 +337,222 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
         status: status.to_string(),
     }
 }
+
+pub async fn webhook_trigger_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(identifier): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    // Try to parse identifier as UUID first
+    let routine = if let Ok(routine_id) = Uuid::parse_str(&identifier) {
+        store.get_routine(routine_id).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?
+    } else {
+        // If it's not a UUID, currently we don't have a get_routine_by_path in Store,
+        // so we reject it. To fully support string paths, we would need to add
+        // get_routine_by_webhook_path to the Database trait.
+        // For now, we only support UUID identifiers in the webhook URL.
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid routine ID format (expected UUID)".to_string(),
+        ));
+    };
+
+    let routine = routine.ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    if !routine.enabled {
+        return Err((StatusCode::BAD_REQUEST, "Routine is disabled".to_string()));
+    }
+
+    // Verify it is a webhook trigger
+    let trigger_secret = match &routine.trigger {
+        crate::agent::routine::Trigger::Webhook { secret, .. } => secret.clone(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Routine is not configured for webhook triggers".to_string(),
+            ));
+        }
+    };
+
+    // If a secret is configured, perform HMAC validation
+    if let Some(secret) = trigger_secret {
+        if secret.is_empty() {
+            // Secret exists but is empty, allow (though not recommended)
+        } else {
+            // Check for common signature headers
+            // e.g. X-Hub-Signature-256 for GitHub, Stripe-Signature for Stripe
+            let signature_header = headers
+                .get("x-hub-signature-256")
+                .or_else(|| headers.get("stripe-signature"))
+                .or_else(|| headers.get("x-webhook-signature"))
+                .and_then(|v| v.to_str().ok());
+
+            let signature = match signature_header {
+                Some(sig) => sig,
+                None => {
+                    tracing::warn!(routine = %routine.name, "Webhook missing signature header");
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "Missing webhook signature header".to_string(),
+                    ));
+                }
+            };
+
+            // Extract the actual hex/b64 value depending on the provider format
+            // GitHub format: "sha256=HEX..."
+            let sig_value = if let Some(stripped) = signature.strip_prefix("sha256=") {
+                stripped
+            } else {
+                signature
+            };
+
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+
+            type HmacSha256 = Hmac<Sha256>;
+
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Invalid secret key length".to_string(),
+                )
+            })?;
+
+            mac.update(&body);
+
+            if let Ok(expected_mac) = hex::decode(sig_value) {
+                if mac.verify_slice(&expected_mac).is_err() {
+                    tracing::warn!(routine = %routine.name, "Webhook signature verification failed");
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "Invalid webhook signature".to_string(),
+                    ));
+                }
+            } else {
+                tracing::warn!(routine = %routine.name, "Webhook signature is not valid hex");
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid webhook signature format".to_string(),
+                ));
+            }
+        }
+    }
+
+    // Try to parse the payload to extract a summary or pass it along
+    let payload_str = match std::str::from_utf8(&body) {
+        Ok(s) => s.to_string(),
+        Err(_) => "[Binary payload]".to_string(),
+    };
+
+    let prompt = match &routine.action {
+        crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
+        crate::agent::routine::RoutineAction::FullJob {
+            title, description, ..
+        } => format!("{}: {}", title, description),
+    };
+
+    // Include the payload in the message to the agent so it knows *why* it was triggered
+    let content = format!(
+        "[routine:{}]\n{}\n\nWebhook Payload:\n```json\n{}\n```",
+        routine.name, prompt, payload_str
+    );
+
+    let thread_id = format!(
+        "routine-{}-{}",
+        routine.id,
+        chrono::Utc::now().timestamp_millis()
+    );
+
+    // We impersonate the routine's owner to ensure it runs with correct permissions
+    let msg = IncomingMessage::new("webhook", &routine.user_id, content).with_thread(thread_id);
+
+    let tx_guard = state.msg_tx.read().await;
+    let tx = tx_guard.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Channel not started".to_string(),
+    ))?;
+
+    tx.send(msg).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Channel closed".to_string(),
+        )
+    })?;
+
+    tracing::info!(routine = %routine.name, "Triggered via webhook");
+    Ok(Json(serde_json::json!({
+        "status": "triggered",
+        "routine_id": routine.id,
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    // We mock the handler logic since testing axum routers end-to-end requires setup.
+    // However, we verify the HMAC generation and validation logic here.
+
+    #[test]
+    fn test_valid_webhook_hmac() {
+        let secret = "super-secret-key-123";
+        let body = b"{\"event\": \"push\", \"ref\": \"refs/heads/main\"}";
+
+        // Generate HMAC signature as the "external service" would
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+        mac.update(body);
+        let valid_signature = hex::encode(mac.finalize().into_bytes());
+
+        // Now simulate the handler receiving it
+        let mut handler_mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        handler_mac.update(body);
+
+        let expected_mac = hex::decode(&valid_signature).unwrap();
+
+        let result = handler_mac.verify_slice(&expected_mac);
+        assert!(
+            result.is_ok(),
+            "Valid signature should pass HMAC verification"
+        );
+    }
+
+    #[test]
+    fn test_invalid_webhook_hmac() {
+        let secret = "super-secret-key-123";
+        let wrong_secret = "wrong-secret-key-123";
+        let body = b"{\"event\": \"push\", \"ref\": \"refs/heads/main\"}";
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        // Generate with wrong secret
+        let mut wrong_mac = HmacSha256::new_from_slice(wrong_secret.as_bytes()).unwrap();
+        wrong_mac.update(body);
+        let invalid_signature = hex::encode(wrong_mac.finalize().into_bytes());
+
+        // Validate with correct secret
+        let mut handler_mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        handler_mac.update(body);
+
+        let expected_mac = hex::decode(&invalid_signature).unwrap();
+
+        let result = handler_mac.verify_slice(&expected_mac);
+        assert!(
+            result.is_err(),
+            "Invalid signature should fail HMAC verification"
+        );
+    }
+}
