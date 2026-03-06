@@ -546,36 +546,61 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         }
                     }
                 }
-            } else if selections.len() == 1 {
-                // Single tool: execute directly
-                let selection = &selections[0];
-                tracing::debug!(
-                    "Job {} selecting tool: {} - {}",
-                    self.job_id,
-                    selection.tool_name,
-                    selection.reasoning
-                );
-
-                let result = self
-                    .execute_tool(&selection.tool_name, &selection.parameters)
-                    .await;
-
-                self.process_tool_result(reason_ctx, selection, result)
-                    .await?;
             } else {
-                // Multiple tools: execute in parallel
-                tracing::debug!(
-                    "Job {} executing {} tools in parallel",
-                    self.job_id,
-                    selections.len()
-                );
+                // Build and push an assistant_with_tool_calls message so that
+                // subsequent tool_result messages have a matching parent.
+                // Without this, sanitize_tool_messages() treats tool_results
+                // as orphaned and rewrites them as user messages, confusing
+                // the LLM into returning empty responses.
+                let tool_calls: Vec<crate::llm::ToolCall> = selections
+                    .iter()
+                    .map(|s| crate::llm::ToolCall {
+                        id: s.tool_call_id.clone(),
+                        name: s.tool_name.clone(),
+                        arguments: s.parameters.clone(),
+                    })
+                    .collect();
 
-                let results = self.execute_tools_parallel(&selections).await;
+                let reasoning_text = selections
+                    .first()
+                    .map(|s| s.reasoning.clone())
+                    .filter(|r| !r.is_empty());
+                reason_ctx.messages.push(ChatMessage::assistant_with_tool_calls(
+                    reasoning_text,
+                    tool_calls,
+                ));
 
-                // Process all results
-                for (selection, result) in selections.iter().zip(results) {
-                    self.process_tool_result(reason_ctx, selection, result.result)
+                if selections.len() == 1 {
+                    // Single tool: execute directly
+                    let selection = &selections[0];
+                    tracing::debug!(
+                        "Job {} selecting tool: {} - {}",
+                        self.job_id,
+                        selection.tool_name,
+                        selection.reasoning
+                    );
+
+                    let result = self
+                        .execute_tool(&selection.tool_name, &selection.parameters)
+                        .await;
+
+                    self.process_tool_result(reason_ctx, selection, result)
                         .await?;
+                } else {
+                    // Multiple tools: execute in parallel
+                    tracing::debug!(
+                        "Job {} executing {} tools in parallel",
+                        self.job_id,
+                        selections.len()
+                    );
+
+                    let results = self.execute_tools_parallel(&selections).await;
+
+                    // Process all results
+                    for (selection, result) in selections.iter().zip(results) {
+                        self.process_tool_result(reason_ctx, selection, result.result)
+                            .await?;
+                    }
                 }
             }
 

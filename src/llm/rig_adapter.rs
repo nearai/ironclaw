@@ -264,15 +264,35 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 }
             }
             crate::llm::Role::Tool => {
-                // Tool result message: wrap as User { ToolResult }
+                // Tool result message: wrap as User { ToolResult }.
+                // The Anthropic API requires all tool results for a given
+                // assistant tool_use batch to be sent in a single User
+                // message. If the previous message is already a User with
+                // ToolResult content, merge into it instead of creating a
+                // separate User message (which would violate the protocol
+                // and cause empty responses from the API).
                 let tool_id = normalized_tool_call_id(msg.tool_call_id.as_deref(), history.len());
-                history.push(RigMessage::User {
-                    content: OneOrMany::one(UserContent::ToolResult(RigToolResult {
-                        id: tool_id.clone(),
-                        call_id: Some(tool_id),
-                        content: OneOrMany::one(ToolResultContent::text(&msg.content)),
-                    })),
+                let tool_result = UserContent::ToolResult(RigToolResult {
+                    id: tool_id.clone(),
+                    call_id: Some(tool_id),
+                    content: OneOrMany::one(ToolResultContent::text(&msg.content)),
                 });
+
+                let should_merge = matches!(
+                    history.last(),
+                    Some(RigMessage::User { content })
+                        if content.iter().all(|c| matches!(c, UserContent::ToolResult(_)))
+                );
+
+                if should_merge {
+                    if let Some(RigMessage::User { content }) = history.last_mut() {
+                        content.push(tool_result);
+                    }
+                } else {
+                    history.push(RigMessage::User {
+                        content: OneOrMany::one(tool_result),
+                    });
+                }
             }
         }
     }
