@@ -3294,6 +3294,12 @@ function fetchGatewayStatus() {
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
+    // Version
+    if (data.version) {
+      html += '<div class="gw-section-label">IronClaw v' + escapeHtml(data.version) + '</div>';
+      html += '<div class="gw-divider"></div>';
+    }
+
     // Connection info
     html += '<div class="gw-section-label">Connections</div>';
     html += '<div class="gw-stat"><span>SSE</span><span>' + (data.sse_connections || 0) + '</span></div>';
