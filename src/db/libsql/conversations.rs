@@ -544,3 +544,128 @@ impl ConversationStore for LibSqlBackend {
         Ok(found.is_some())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+
+    #[tokio::test]
+    async fn test_get_or_create_routine_conversation_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_routine_conv.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let routine_id = Uuid::new_v4();
+        let user_id = "test_user";
+
+        // First call — creates the conversation
+        let id1 = backend
+            .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
+            .await
+            .unwrap();
+
+        // Second call — should return the SAME conversation
+        let id2 = backend
+            .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(id1, id2, "Expected same conversation ID on repeated calls");
+
+        // Third call — still the same
+        let id3 = backend
+            .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(id1, id3);
+
+        // Different routine_id should get a different conversation
+        let other_routine_id = Uuid::new_v4();
+        let id4 = backend
+            .get_or_create_routine_conversation(other_routine_id, "other-routine", user_id)
+            .await
+            .unwrap();
+
+        assert_ne!(
+            id1, id4,
+            "Different routines should get different conversations"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_routine_conversation_persists_across_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_routine_persist.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let routine_id = Uuid::new_v4();
+        let user_id = "test_user";
+
+        // First invocation: create conversation and add a message
+        let id1 = backend
+            .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
+            .await
+            .unwrap();
+
+        backend
+            .add_conversation_message(id1, "assistant", "[cron] Completed: all good")
+            .await
+            .unwrap();
+
+        // Second invocation: should find existing conversation
+        let id2 = backend
+            .get_or_create_routine_conversation(routine_id, "my-routine", user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(id1, id2, "Second invocation should reuse same conversation");
+
+        backend
+            .add_conversation_message(id2, "assistant", "[cron] Completed: still good")
+            .await
+            .unwrap();
+
+        // Verify only one routine conversation exists (not two)
+        let convs = backend
+            .list_conversations_all_channels(user_id, 50)
+            .await
+            .unwrap();
+
+        let routine_convs: Vec<_> = convs.iter().filter(|c| c.channel == "routine").collect();
+        assert_eq!(
+            routine_convs.len(),
+            1,
+            "Should have exactly 1 routine conversation, found {}",
+            routine_convs.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_heartbeat_conversation_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_heartbeat_conv.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let user_id = "test_user";
+
+        let id1 = backend
+            .get_or_create_heartbeat_conversation(user_id)
+            .await
+            .unwrap();
+
+        let id2 = backend
+            .get_or_create_heartbeat_conversation(user_id)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            id1, id2,
+            "Expected same heartbeat conversation on repeated calls"
+        );
+    }
+}

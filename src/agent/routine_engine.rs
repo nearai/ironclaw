@@ -387,6 +387,12 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         .await
     {
         Ok(conv_id) => {
+            tracing::debug!(
+                routine = %routine.name,
+                routine_id = %routine.id,
+                conversation_id = %conv_id,
+                "Resolved routine conversation thread"
+            );
             // Record the run result as a conversation message
             let msg = match (&summary, status) {
                 (Some(s), _) => format!("[{}] {}: {}", run.trigger_type, status, s),
