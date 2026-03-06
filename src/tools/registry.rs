@@ -195,7 +195,8 @@ impl ToolRegistry {
 
     /// Get tool definitions for LLM function calling.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
             .read()
             .await
             .values()
@@ -204,7 +205,9 @@ impl ToolRegistry {
                 description: tool.description().to_string(),
                 parameters: tool.parameters_schema(),
             })
-            .collect()
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// Get tool definitions for specific tools.
@@ -758,6 +761,52 @@ mod tests {
             .to_string();
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
+    }
+
+    #[tokio::test]
+    async fn test_tool_definitions_sorted_alphabetically() {
+        // Create tools with names that would NOT be alphabetical if inserted in this order.
+        struct ToolZ;
+        struct ToolA;
+        struct ToolM;
+
+        macro_rules! impl_tool {
+            ($ty:ident, $name:expr) => {
+                #[async_trait::async_trait]
+                impl Tool for $ty {
+                    fn name(&self) -> &str {
+                        $name
+                    }
+                    fn description(&self) -> &str {
+                        $name
+                    }
+                    fn parameters_schema(&self) -> serde_json::Value {
+                        serde_json::json!({})
+                    }
+                    async fn execute(
+                        &self,
+                        _: serde_json::Value,
+                        _: &crate::context::JobContext,
+                    ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                        unreachable!()
+                    }
+                }
+            };
+        }
+
+        impl_tool!(ToolZ, "zebra");
+        impl_tool!(ToolA, "alpha");
+        impl_tool!(ToolM, "middle");
+
+        let registry = ToolRegistry::new();
+        // Register in non-alphabetical order
+        registry.register(Arc::new(ToolZ)).await;
+        registry.register(Arc::new(ToolA)).await;
+        registry.register(Arc::new(ToolM)).await;
+
+        let defs = registry.tool_definitions().await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "middle", "zebra"]);
     }
 
     #[tokio::test]

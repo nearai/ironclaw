@@ -4,24 +4,35 @@
 //! than the retention period. Identity files (`IDENTITY.md`, `SOUL.md`,
 //! etc.) are never touched.
 //!
+//! A global [`AtomicBool`] guard prevents concurrent hygiene passes, which
+//! avoids TOCTOU races on the state file and Windows file-locking errors
+//! (OS error 1224) when multiple heartbeat ticks fire before the first
+//! pass completes.
+//!
 //! ```text
 //! ┌─────────────────────────────────────────────┐
 //! │               Hygiene Pass                   │
 //! │                                              │
+//! │  0. Acquire RUNNING guard (skip if held)     │
 //! │  1. Check cadence (skip if ran recently)     │
-//! │  2. List daily/ documents                    │
-//! │  3. Delete those older than retention_days   │
-//! │  4. Log summary                              │
+//! │  2. Save state (claim the cadence window)    │
+//! │  3. List daily/ documents                    │
+//! │  4. Delete those older than retention_days   │
+//! │  5. Log summary                              │
 //! └─────────────────────────────────────────────┘
 //! ```
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::workspace::Workspace;
+
+/// Global guard preventing concurrent hygiene passes.
+static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Configuration for workspace hygiene.
 #[derive(Debug, Clone)]
@@ -73,6 +84,10 @@ impl HygieneReport {
 ///
 /// This is best-effort: failures are logged but never propagate. The
 /// agent should not crash because cleanup failed.
+///
+/// An [`AtomicBool`] guard ensures only one pass runs at a time, and the
+/// state file is written *before* cleanup so that concurrent callers that
+/// slip past the guard still see an up-to-date cadence timestamp.
 pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> HygieneReport {
     if !config.enabled {
         return HygieneReport {
@@ -80,6 +95,22 @@ pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> Hygien
             ..Default::default()
         };
     }
+
+    // Prevent concurrent passes. If another task is already running,
+    // skip immediately.
+    if RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        tracing::debug!("memory hygiene: skipping (another pass is running)");
+        return HygieneReport {
+            skipped: true,
+            ..Default::default()
+        };
+    }
+
+    // Ensure the guard is released when we return.
+    let _guard = RunningGuard;
 
     let state_file = config.state_dir.join("memory_hygiene_state.json");
 
@@ -99,6 +130,10 @@ pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> Hygien
             };
         }
     }
+
+    // Save state *before* cleanup to claim the cadence window and prevent
+    // TOCTOU races where another task reads stale state.
+    save_state(&state_file);
 
     tracing::info!(
         retention_days = config.retention_days,
@@ -122,10 +157,16 @@ pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> Hygien
         tracing::debug!("memory hygiene: nothing to clean");
     }
 
-    // Save state (best-effort)
-    save_state(&state_file);
-
     report
+}
+
+/// RAII guard that clears the [`RUNNING`] flag on drop.
+struct RunningGuard;
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        RUNNING.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Delete daily log documents older than `retention_days`.
@@ -173,23 +214,46 @@ fn load_state(path: &std::path::Path) -> Option<HygieneState> {
     serde_json::from_str(&data).ok()
 }
 
+/// Save state using atomic write (write to temp file, then rename).
+///
+/// This avoids partial writes and Windows file-locking errors (OS error
+/// 1224) when multiple processes try to write the same file.
 fn save_state(path: &std::path::Path) {
     let state = HygieneState {
         last_run: Utc::now(),
     };
-    if let Some(dir) = state_path_dir(path) {
-        std::fs::create_dir_all(dir).ok();
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&state)
-        && let Err(e) = std::fs::write(path, json)
+    if let Some(dir) = state_path_dir(path)
+        && let Err(e) = std::fs::create_dir_all(dir)
     {
-        tracing::warn!("memory hygiene: failed to save state: {e}");
+        tracing::warn!("memory hygiene: failed to create state dir: {e}");
+        return;
+    }
+    let Ok(json) = serde_json::to_string_pretty(&state) else {
+        return;
+    };
+
+    // Write to a temp file in the same directory, then atomically rename.
+    let tmp_path = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp_path, &json) {
+        tracing::warn!("memory hygiene: failed to write temp state: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        tracing::warn!("memory hygiene: failed to rename state file: {e}");
+        // Clean up temp file on rename failure
+        let _ = std::fs::remove_file(&tmp_path);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use crate::workspace::hygiene::*;
+
+    /// Serialize tests that touch the global `RUNNING` AtomicBool so they
+    /// don't interfere with each other when `cargo test` runs in parallel.
+    static RUNNING_TESTS: Mutex<()> = Mutex::new(());
 
     #[test]
     fn default_config_is_reasonable() {
@@ -240,5 +304,56 @@ mod tests {
 
         save_state(&path);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn save_state_is_atomic_no_tmp_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let tmp = dir.path().join("state.json.tmp");
+
+        save_state(&path);
+        assert!(path.exists(), "state file should exist");
+        assert!(!tmp.exists(), "temp file should be cleaned up after rename");
+
+        // Verify the content is valid JSON
+        let state = load_state(&path).expect("saved state should be loadable");
+        let elapsed = Utc::now().signed_duration_since(state.last_run);
+        assert!(elapsed.num_seconds() < 2);
+    }
+
+    /// Regression test for issue #495: concurrent hygiene passes should be
+    /// serialized by the AtomicBool guard.
+    #[test]
+    fn running_guard_prevents_reentry() {
+        let _lock = RUNNING_TESTS.lock().unwrap();
+
+        // Simulate acquiring the guard
+        assert!(
+            RUNNING
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok(),
+            "first acquisition should succeed"
+        );
+
+        // Second acquisition should fail
+        assert!(
+            RUNNING
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err(),
+            "second acquisition should fail while first is held"
+        );
+
+        // Release
+        RUNNING.store(false, Ordering::SeqCst);
+
+        // Now it should succeed again
+        assert!(
+            RUNNING
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok(),
+            "acquisition should succeed after release"
+        );
+        RUNNING.store(false, Ordering::SeqCst);
     }
 }
