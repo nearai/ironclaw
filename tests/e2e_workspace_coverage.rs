@@ -52,6 +52,27 @@ mod tests {
             doc.content.len()
         );
 
+        // Verify memory_search was called and returned relevant results.
+        let started = rig.tool_calls_started();
+        assert!(
+            started.contains(&"memory_search".to_string()),
+            "memory_search should be called: {started:?}"
+        );
+        let results = rig.tool_results();
+        let search_results: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name == "memory_search")
+            .collect();
+        assert!(!search_results.is_empty(), "Expected memory_search results");
+        assert!(
+            search_results
+                .iter()
+                .any(|(_, preview)| preview.contains("Payment Service")
+                    || preview.contains("payment")
+                    || preview.contains("architecture")),
+            "memory_search should return results related to payment/architecture: {search_results:?}"
+        );
+
         rig.shutdown();
     }
 
@@ -87,6 +108,13 @@ mod tests {
         assert!(backend.is_ok(), "backend.md should exist");
         assert!(devops.is_ok(), "devops.md should exist");
 
+        // Verify cross-document memory_search was called.
+        let started = rig.tool_calls_started();
+        assert!(
+            started.contains(&"memory_search".to_string()),
+            "memory_search should be called in multi_document_search: {started:?}"
+        );
+
         rig.shutdown();
     }
 
@@ -113,12 +141,17 @@ mod tests {
 
         rig.verify_trace_expects(&trace, &responses);
 
-        // Verify memory_search was used (even without real embeddings,
-        // the FTS path should find keyword matches).
+        // Verify both memory_write and memory_search were used.
+        // Without a real embedding provider the FTS path handles keyword matches;
+        // we assert both tools ran to confirm the write-then-search pipeline.
         let started = rig.tool_calls_started();
         assert!(
+            started.contains(&"memory_write".to_string()),
+            "memory_write should be called: {started:?}"
+        );
+        assert!(
             started.contains(&"memory_search".to_string()),
-            "memory_search should be called"
+            "memory_search should be called: {started:?}"
         );
 
         rig.shutdown();
@@ -154,13 +187,26 @@ mod tests {
             "memory_tree should be called: {started:?}"
         );
 
-        // Verify the tree result contains expected entries.
+        // Verify the tree result contains the expected directory hierarchy.
         let results = rig.tool_results();
         let tree_results: Vec<_> = results
             .iter()
             .filter(|(name, _)| name == "memory_tree")
             .collect();
         assert!(!tree_results.is_empty(), "Expected memory_tree results");
+
+        let tree_output: String = tree_results
+            .iter()
+            .map(|(_, preview)| preview.as_str())
+            .collect();
+        assert!(
+            tree_output.contains("alpha") || tree_output.contains("Alpha"),
+            "memory_tree output should contain 'alpha' project, got: {tree_output:?}"
+        );
+        assert!(
+            tree_output.contains("beta") || tree_output.contains("Beta"),
+            "memory_tree output should contain 'beta' project, got: {tree_output:?}"
+        );
 
         rig.shutdown();
     }
