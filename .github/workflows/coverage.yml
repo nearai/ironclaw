@@ -54,7 +54,10 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        run: |
+          if ! command -v cargo-component >/dev/null 2>&1; then
+            cargo install cargo-component --locked
+          fi
 
       - name: Build WASM channels (for integration tests)
         run: ./scripts/build-wasm-extensions.sh --channels
@@ -63,7 +66,8 @@ jobs:
         if: matrix.has_postgres
         run: |
           set -euo pipefail
-          for f in $(ls migrations/V*.sql | sort -V); do
+          readarray -t migration_files < <(printf '%s\n' migrations/V*.sql | sort -V)
+          for f in "${migration_files[@]}"; do
             echo "Applying $f..."
             psql -v ON_ERROR_STOP=1 -f "$f"
           done
@@ -109,7 +113,10 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        run: |
+          if ! command -v cargo-component >/dev/null 2>&1; then
+            cargo install cargo-component --locked
+          fi
 
       - name: Build WASM channels
         run: ./scripts/build-wasm-extensions.sh --channels
@@ -117,9 +124,9 @@ jobs:
       - name: Set up coverage instrumentation
         run: |
           # show-env outputs shell-quoted values (KEY='value') but GITHUB_ENV
-          # expects unquoted KEY=value. Strip the single quotes to avoid them
-          # being treated as literal characters in rustflags.
-          cargo llvm-cov show-env | sed "s/'//g" >> "$GITHUB_ENV"
+          # expects unquoted KEY=value. Strip only the wrapping single quotes
+          # from KEY='value' lines without altering any internal characters.
+          cargo llvm-cov show-env | sed -E "s/^([A-Za-z_][A-Za-z0-9_]*)='(.*)'$/\1=\2/" >> "$GITHUB_ENV"
 
       - name: Clean coverage workspace
         run: cargo llvm-cov clean --workspace
