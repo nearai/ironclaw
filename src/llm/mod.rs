@@ -135,7 +135,15 @@ fn create_openai_compat_from_registry(
         .api_key
         .as_ref()
         .map(|k| k.expose_secret().to_string())
-        .unwrap_or_else(|| "no-key".to_string());
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                provider = %config.provider_id,
+                "No API key configured for {}. Requests will likely fail with 401. \
+                 Check your .env or secrets store.",
+                config.provider_id,
+            );
+            "no-key".to_string()
+        });
 
     let mut builder = openai::Client::builder().api_key(&api_key);
     if !config.base_url.is_empty() {
