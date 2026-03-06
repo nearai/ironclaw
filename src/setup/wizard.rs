@@ -1232,6 +1232,18 @@ impl SetupWizard {
                     }
                 };
 
+                // Apply models_filter from setup hint (e.g., Groq "chat" filters non-chat models)
+                let models =
+                    if let Some(filter) = def.setup.as_ref().and_then(|s| s.models_filter()) {
+                        let filter_lower = filter.to_lowercase();
+                        models
+                            .into_iter()
+                            .filter(|(id, _)| id.to_lowercase().contains(&filter_lower))
+                            .collect()
+                    } else {
+                        models
+                    };
+
                 if models.is_empty() {
                     // Fall back to manual entry
                     let default = &def.default_model;
@@ -2755,7 +2767,7 @@ async fn fetch_openai_compatible_models(
 
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
-    let mut req = client.get(&url);
+    let mut req = client.get(&url).timeout(std::time::Duration::from_secs(5));
     if let Some(key) = cached_key {
         req = req.bearer_auth(key);
     }

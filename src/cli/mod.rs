@@ -94,11 +94,11 @@ pub enum Command {
         skip_auth: bool,
 
         /// Reconfigure channels only
-        #[arg(long)]
+        #[arg(long, conflicts_with = "provider_only")]
         channels_only: bool,
 
         /// Reconfigure LLM provider and model only
-        #[arg(long)]
+        #[arg(long, conflicts_with = "channels_only")]
         provider_only: bool,
     },
 

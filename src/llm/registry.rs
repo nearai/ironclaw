@@ -104,6 +104,13 @@ impl SetupHint {
             Self::Ollama { .. } => None,
         }
     }
+
+    pub fn models_filter(&self) -> Option<&str> {
+        match self {
+            Self::ApiKey { models_filter, .. } => models_filter.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// Declarative definition of an LLM provider.
@@ -451,5 +458,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_models_filter_accessor() {
+        let registry = ProviderRegistry::new(
+            serde_json::from_str(include_str!("../../providers.json")).unwrap(),
+        );
+        // Groq has models_filter: "chat"
+        let groq = registry.find("groq").expect("groq should exist");
+        let filter = groq
+            .setup
+            .as_ref()
+            .and_then(|s| s.models_filter())
+            .expect("groq should have models_filter");
+        assert_eq!(filter, "chat");
+
+        // OpenAI has no models_filter
+        let openai = registry.find("openai").expect("openai should exist");
+        assert!(
+            openai
+                .setup
+                .as_ref()
+                .and_then(|s| s.models_filter())
+                .is_none(),
+            "openai should not have models_filter"
+        );
+
+        // Ollama setup hint variant should return None
+        let ollama = registry.find("ollama").expect("ollama should exist");
+        assert!(
+            ollama
+                .setup
+                .as_ref()
+                .and_then(|s| s.models_filter())
+                .is_none(),
+            "ollama should not have models_filter"
+        );
     }
 }

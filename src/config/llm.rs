@@ -202,6 +202,8 @@ impl LlmConfig {
         Ok(Self {
             backend: if is_nearai {
                 "nearai".to_string()
+            } else if let Some(ref p) = provider {
+                p.provider_id.clone()
             } else {
                 backend_lower
             },
