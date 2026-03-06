@@ -19,8 +19,10 @@ use ironclaw::channels::wasm::{
 use ironclaw::pairing::PairingStore;
 
 /// Path to the built Telegram WASM module
-const TELEGRAM_WASM_PATH: &str =
-    "channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm";
+fn telegram_wasm_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm")
+}
 
 /// Create a test runtime for WASM channel operations.
 fn create_test_runtime() -> Arc<WasmChannelRuntime> {
@@ -32,7 +34,7 @@ fn create_test_runtime() -> Arc<WasmChannelRuntime> {
 async fn load_telegram_module(
     runtime: &Arc<WasmChannelRuntime>,
 ) -> Result<Arc<PreparedChannelModule>, Box<dyn std::error::Error>> {
-    let wasm_path = std::path::PathBuf::from(TELEGRAM_WASM_PATH);
+    let wasm_path = telegram_wasm_path();
     assert!(
         wasm_path.exists(),
         "Telegram WASM module not found at {:?}. Build it with: cd channels-src/telegram && cargo build --target wasm32-wasip2 --release",
