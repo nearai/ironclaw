@@ -144,7 +144,7 @@ sudo apt install caddy
 
 # Configure Caddy
 sudo tee /etc/caddy/Caddyfile <<EOF
-docs.ironclaw.ai {
+webg.example.com {
   reverse_proxy localhost:3000
 }
 EOF
@@ -163,10 +163,10 @@ sudo apt install nginx
 sudo tee /etc/nginx/sites-available/ironclaw <<'EOF'
 server {
   listen 443 ssl http2;
-  server_name docs.ironclaw.ai;
+  server_name webg.example.com;
 
-  ssl_certificate /etc/letsencrypt/live/docs.ironclaw.ai/fullchain.pem;
-  ssl_certificate_key /etc/letsencrypt/live/docs.ironclaw.ai/privkey.pem;
+  ssl_certificate /etc/letsencrypt/live/webg.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/webg.example.com/privkey.pem;
 
   location / {
     proxy_pass http://localhost:3000;
@@ -182,7 +182,7 @@ server {
 
 server {
   listen 80;
-  server_name docs.ironclaw.ai;
+  server_name webg.example.com;
   return 301 https://$server_name$request_uri;
 }
 EOF
@@ -213,7 +213,7 @@ tunnel: YOUR-TUNNEL-ID
 credentials-file: /root/.cloudflared/YOUR-TUNNEL-ID.json
 
 ingress:
-  - hostname: docs.ironclaw.ai
+  - hostname: webg.example.com
     service: http://localhost:3000
   - service: http_status:404
 EOF
