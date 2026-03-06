@@ -3,6 +3,7 @@
   "display_name": "Web Search",
   "kind": "tool",
   "version": "0.1.0",
+  "wit_version": "0.2.0",
   "description": "Search the web using Brave Search API",
   "keywords": ["search", "web", "brave", "internet"],
 

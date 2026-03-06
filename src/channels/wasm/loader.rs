@@ -90,6 +90,14 @@ impl WasmChannelLoader {
                         "Parsed capabilities file"
                     );
 
+                    // Check WIT version compatibility
+                    crate::tools::wasm::loader::check_wit_version_compat(
+                        name,
+                        cap_file.wit_version.as_deref(),
+                        crate::tools::wasm::WIT_CHANNEL_VERSION,
+                    )
+                    .map_err(|e| WasmChannelError::Config(e.to_string()))?;
+
                     let caps = cap_file.to_capabilities();
 
                     // Debug: log resulting capabilities

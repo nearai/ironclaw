@@ -2879,6 +2879,7 @@ dependencies = [
  "secrecy",
  "secret-service",
  "security-framework",
+ "semver",
  "serde",
  "serde_json",
  "serde_yml",

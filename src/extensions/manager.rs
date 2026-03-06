@@ -637,6 +637,78 @@ impl ExtensionManager {
         }
     }
 
+    /// Get detailed info about an installed extension (version, wit_version, status).
+    pub async fn extension_info(&self, name: &str) -> Result<serde_json::Value, ExtensionError> {
+        Self::validate_extension_name(name)?;
+        let kind = self.determine_installed_kind(name).await?;
+
+        match kind {
+            ExtensionKind::WasmTool => {
+                let cap_path = self
+                    .wasm_tools_dir
+                    .join(format!("{}.capabilities.json", name));
+                let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
+
+                let mut info = serde_json::json!({
+                    "name": name,
+                    "kind": "wasm_tool",
+                    "installed": wasm_path.exists(),
+                });
+
+                if cap_path.exists()
+                    && let Ok(bytes) = tokio::fs::read(&cap_path).await
+                    && let Ok(cap) = crate::tools::wasm::CapabilitiesFile::from_bytes(&bytes)
+                {
+                    info["version"] =
+                        serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
+                    info["wit_version"] =
+                        serde_json::json!(cap.wit_version.unwrap_or_else(|| "unknown".into()));
+                }
+
+                info["host_wit_version"] = serde_json::json!(crate::tools::wasm::WIT_TOOL_VERSION);
+
+                Ok(info)
+            }
+            ExtensionKind::WasmChannel => {
+                let cap_path = self
+                    .wasm_channels_dir
+                    .join(format!("{}.capabilities.json", name));
+                let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
+
+                let mut info = serde_json::json!({
+                    "name": name,
+                    "kind": "wasm_channel",
+                    "installed": wasm_path.exists(),
+                    "active": self.active_channel_names.read().await.contains(name),
+                });
+
+                if cap_path.exists()
+                    && let Ok(bytes) = tokio::fs::read(&cap_path).await
+                    && let Ok(cap) =
+                        crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                {
+                    info["version"] =
+                        serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
+                    info["wit_version"] =
+                        serde_json::json!(cap.wit_version.unwrap_or_else(|| "unknown".into()));
+                }
+
+                info["host_wit_version"] =
+                    serde_json::json!(crate::tools::wasm::WIT_CHANNEL_VERSION);
+
+                Ok(info)
+            }
+            ExtensionKind::McpServer => {
+                let info = serde_json::json!({
+                    "name": name,
+                    "kind": "mcp_server",
+                    "connected": self.mcp_clients.read().await.contains_key(name),
+                });
+                Ok(info)
+            }
+        }
+    }
+
     // ── MCP config helpers (DB with disk fallback) ─────────────────────
 
     async fn load_mcp_servers(

@@ -496,6 +496,61 @@ impl Tool for ToolRemoveTool {
     }
 }
 
+// ── extension_info ────────────────────────────────────────────────────
+
+pub struct ExtensionInfoTool {
+    manager: Arc<ExtensionManager>,
+}
+
+impl ExtensionInfoTool {
+    pub fn new(manager: Arc<ExtensionManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for ExtensionInfoTool {
+    fn name(&self) -> &str {
+        "extension_info"
+    }
+
+    fn description(&self) -> &str {
+        "Show detailed information about an installed extension, including version, \
+         WIT version, status, and install time."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Extension name to get info about"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let name = require_str(&params, "name")?;
+
+        let info = self
+            .manager
+            .extension_info(name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        Ok(ToolOutput::success(info, start.elapsed()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

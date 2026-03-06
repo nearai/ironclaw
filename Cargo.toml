@@ -106,6 +106,9 @@ serde_yml = "0.0.12"
 dirs = "6"
 fs4 = "0.6"
 
+# Semantic versioning
+semver = "1"
+
 # Secrecy for sensitive values
 secrecy = { version = "0.10", features = ["serde"] }
 

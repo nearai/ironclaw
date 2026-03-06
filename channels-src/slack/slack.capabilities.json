@@ -1,4 +1,6 @@
 {
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
   "type": "channel",
   "name": "slack",
   "description": "Slack Events API channel for receiving and responding to Slack messages",

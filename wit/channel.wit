@@ -38,7 +38,7 @@
 // - Workspace writes are prefixed with channels/<name>/ to prevent escape
 // - Message emission is rate-limited
 
-package near:agent;
+package near:agent@0.2.0;
 
 /// Host-provided capabilities for sandboxed channels.
 ///

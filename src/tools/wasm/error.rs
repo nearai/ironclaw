@@ -78,6 +78,16 @@ pub enum WasmError {
     /// Path traversal attempt blocked.
     #[error("Path traversal blocked: {0}")]
     PathTraversalBlocked(String),
+
+    /// WIT version mismatch between extension and host.
+    #[error(
+        "WIT version mismatch for '{tool_name}': extension compiled against WIT {declared}, but host supports WIT {host}. Rebuild the extension against the current WIT."
+    )]
+    IncompatibleWitVersion {
+        tool_name: String,
+        declared: String,
+        host: String,
+    },
 }
 
 impl From<std::io::Error> for WasmError {

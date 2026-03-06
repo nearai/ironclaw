@@ -214,22 +214,21 @@ fn instantiate_tool_component(
 
     // If the WIT added/removed/renamed a function, stub registration
     // or instantiation will fail.
-    {
+    // Register stubs for both versioned (0.2.0+) and unversioned (pre-0.2.0) interface
+    // paths so that both old and new WASM artifacts can instantiate.
+    for interface in &["near:agent/host", "near:agent/host@0.2.0"] {
         let mut root = linker.root();
-        let mut host = root
-            .instance("near:agent/host")
-            .map_err(|e| format!("failed to create host instance: {e}"))?;
+        if let Ok(mut host) = root.instance(interface) {
+            stub_shared_host_functions(&mut host)?;
 
-        stub_shared_host_functions(&mut host)?;
-
-        // tool-invoke is only in the tool host interface, not channel-host
-        host.func_new("tool-invoke", |_ctx, _args, results| {
-            results[0] = wasmtime::component::Val::Result(Err(Some(Box::new(
-                wasmtime::component::Val::String("stub".into()),
-            ))));
-            Ok(())
-        })
-        .map_err(|e| format!("stub 'tool-invoke': {e}"))?;
+            host.func_new("tool-invoke", |_ctx, _args, results| {
+                results[0] = wasmtime::component::Val::Result(Err(Some(Box::new(
+                    wasmtime::component::Val::String("stub".into()),
+                ))));
+                Ok(())
+            })
+            .map_err(|e| format!("stub 'tool-invoke': {e}"))?;
+        }
     }
 
     let mut store = Store::new(engine, TestStoreData::new());
@@ -253,15 +252,15 @@ fn instantiate_channel_component(
     wasmtime_wasi::add_to_linker_sync(&mut linker)
         .map_err(|e| format!("WASI linker failed: {e}"))?;
 
-    {
-        let mut root = linker.root();
-        let mut host = root
-            .instance("near:agent/channel-host")
-            .map_err(|e| format!("failed to create channel-host instance: {e}"))?;
+    // Register stubs for both versioned (0.2.0+) and unversioned (pre-0.2.0) interface
+    // paths so that both old and new WASM artifacts can instantiate.
+    // Register stubs under both versioned and unversioned interface paths.
+    // This helper avoids repeating the stub registration code.
+    fn stub_channel_host(
+        host: &mut wasmtime::component::LinkerInstance<'_, TestStoreData>,
+    ) -> Result<(), String> {
+        stub_shared_host_functions(host)?;
 
-        stub_shared_host_functions(&mut host)?;
-
-        // Channel-specific host functions
         host.func_new("emit-message", |_ctx, _args, _results| Ok(()))
             .map_err(|e| format!("stub 'emit-message': {e}"))?;
 
@@ -294,6 +293,23 @@ fn instantiate_channel_component(
             Ok(())
         })
         .map_err(|e| format!("stub 'pairing-read-allow-from': {e}"))?;
+
+        Ok(())
+    }
+
+    {
+        let mut root = linker.root();
+        let mut host = root
+            .instance("near:agent/channel-host")
+            .map_err(|e| format!("failed to create unversioned channel-host: {e}"))?;
+        stub_channel_host(&mut host)?;
+    }
+    {
+        let mut root = linker.root();
+        let mut host = root
+            .instance("near:agent/channel-host@0.2.0")
+            .map_err(|e| format!("failed to create versioned channel-host: {e}"))?;
+        stub_channel_host(&mut host)?;
     }
 
     let mut store = Store::new(engine, TestStoreData::new());
@@ -475,5 +491,51 @@ fn wit_compat_all_registry_extensions_have_source() {
         missing.is_empty(),
         "Registry entries with missing sources:\n{}",
         missing.join("\n")
+    );
+}
+
+#[test]
+fn wit_files_contain_version_annotation() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    for wit_file in &["wit/tool.wit", "wit/channel.wit"] {
+        let path = repo_root.join(wit_file);
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {wit_file}: {e}"));
+
+        assert!(
+            content.contains("package near:agent@"),
+            "{wit_file} must contain a versioned package declaration (e.g., 'package near:agent@0.2.0;')"
+        );
+    }
+}
+
+#[test]
+fn wit_version_constants_match_wit_files() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let tool_wit = std::fs::read_to_string(repo_root.join("wit/tool.wit"))
+        .expect("failed to read wit/tool.wit");
+    let channel_wit = std::fs::read_to_string(repo_root.join("wit/channel.wit"))
+        .expect("failed to read wit/channel.wit");
+
+    let expected_tool = format!(
+        "package near:agent@{};",
+        ironclaw::tools::wasm::WIT_TOOL_VERSION
+    );
+    let expected_channel = format!(
+        "package near:agent@{};",
+        ironclaw::tools::wasm::WIT_CHANNEL_VERSION
+    );
+
+    assert!(
+        tool_wit.contains(&expected_tool),
+        "wit/tool.wit version must match WIT_TOOL_VERSION constant ({})",
+        ironclaw::tools::wasm::WIT_TOOL_VERSION
+    );
+    assert!(
+        channel_wit.contains(&expected_channel),
+        "wit/channel.wit version must match WIT_CHANNEL_VERSION constant ({})",
+        ironclaw::tools::wasm::WIT_CHANNEL_VERSION
     );
 }

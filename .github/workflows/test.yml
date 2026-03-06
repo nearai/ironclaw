@@ -76,15 +76,34 @@ jobs:
       - name: Build Docker image
         run: docker build -t ironclaw-test:ci .
 
+  version-check:
+    name: Version Bump Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check version bumps for changed extensions
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: ./scripts/check-version-bumps.sh
+
   # Roll-up job for branch protection
   run-tests:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, telegram-tests, wasm-wit-compat, docker-build]
+    needs: [tests, telegram-tests, wasm-wit-compat, docker-build, version-check]
     steps:
       - run: |
           if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.telegram-tests.result }}" != "success" || "${{ needs.wasm-wit-compat.result }}" != "success" || "${{ needs.docker-build.result }}" != "success" ]]; then
             echo "One or more jobs failed"
+            exit 1
+          fi
+          # version-check only runs on PRs, so skip/success are both acceptable
+          if [[ "${{ needs.version-check.result }}" == "failure" ]]; then
+            echo "Version bump check failed"
             exit 1
           fi

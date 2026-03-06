@@ -298,6 +298,7 @@ CREATE TABLE IF NOT EXISTS wasm_tools (
     user_id TEXT NOT NULL,
     name TEXT NOT NULL,
     version TEXT NOT NULL DEFAULT '1.0.0',
+    wit_version TEXT NOT NULL DEFAULT '0.1.0',
     description TEXT NOT NULL,
     wasm_binary BLOB NOT NULL,
     binary_hash BLOB NOT NULL,
@@ -313,6 +314,24 @@ CREATE TABLE IF NOT EXISTS wasm_tools (
 CREATE INDEX IF NOT EXISTS idx_wasm_tools_user ON wasm_tools(user_id);
 CREATE INDEX IF NOT EXISTS idx_wasm_tools_name ON wasm_tools(user_id, name);
 CREATE INDEX IF NOT EXISTS idx_wasm_tools_status ON wasm_tools(status);
+
+-- ==================== WASM Channel Extensions ====================
+
+CREATE TABLE IF NOT EXISTS wasm_channels (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '0.1.0',
+    wit_version TEXT NOT NULL DEFAULT '0.1.0',
+    description TEXT NOT NULL DEFAULT '',
+    wasm_binary BLOB NOT NULL,
+    binary_hash BLOB NOT NULL,
+    capabilities_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, name)
+);
 
 -- ==================== Tool Capabilities ====================
 
