@@ -90,24 +90,39 @@ impl SandboxReaper {
         let now = Utc::now();
         for (container_id, job_id, created_at) in containers {
             let age = now.signed_duration_since(created_at);
-            let threshold = chrono::Duration::from_std(self.config.orphan_threshold)
-                .unwrap_or(chrono::Duration::minutes(10));
+            let threshold = match chrono::Duration::from_std(self.config.orphan_threshold) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Reaper: failed to convert orphan_threshold to chrono::Duration, using default of 10 minutes"
+                    );
+                    chrono::Duration::minutes(10)
+                }
+            };
 
             if age < threshold {
                 continue; // Too young — skip
             }
 
-            // Check if job is active in ContextManager
-            let is_active = match self.context_manager.get_context(job_id).await {
-                Ok(ctx) => ctx.state.is_active(),
+            // Check if job is still running (not terminal).
+            // Terminal states: Failed, Cancelled, Accepted
+            // Reapable states: Pending, InProgress, Completed, Submitted, Stuck (if old enough)
+            // Note: Completed and Submitted are non-terminal but can be reaped if old enough.
+            // Only truly active states (InProgress, Stuck) prevent reaping regardless of age.
+            let is_actively_running = match self.context_manager.get_context(job_id).await {
+                Ok(ctx) => {
+                    use crate::context::JobState;
+                    matches!(ctx.state, JobState::InProgress | JobState::Stuck)
+                }
                 Err(_) => false, // Not found — treat as orphaned
             };
 
-            if is_active {
+            if is_actively_running {
                 tracing::debug!(
                     job_id = %job_id,
                     container_id = %&container_id[..12.min(container_id.len())],
-                    "Reaper: container has active job, skipping"
+                    "Reaper: container has actively running job, skipping"
                 );
                 continue;
             }
@@ -167,7 +182,7 @@ impl SandboxReaper {
             };
 
             // Parse created_at from label (set by us at creation time); fall back to Docker timestamp
-            let created_at = labels
+            let created_at = match labels
                 .get("ironclaw.created_at")
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc))
@@ -175,8 +190,16 @@ impl SandboxReaper {
                     summary
                         .created
                         .and_then(|ts| DateTime::from_timestamp(ts, 0))
-                })
-                .unwrap_or_else(Utc::now);
+                }) {
+                Some(ts) => ts,
+                None => {
+                    tracing::warn!(
+                        container_id = %&container_id[..12.min(container_id.len())],
+                        "Reaper: could not determine creation time for container, skipping"
+                    );
+                    continue;
+                }
+            };
 
             result.push((container_id, job_id, created_at));
         }
