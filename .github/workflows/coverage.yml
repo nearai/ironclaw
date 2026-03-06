@@ -1,3 +1,31 @@
+# Code Coverage Workflow
+#
+# This workflow runs test coverage analysis and uploads reports to Codecov.
+# Coverage reports help identify untested code paths and maintain code quality.
+#
+# What it does:
+# - Runs unit and integration tests with coverage instrumentation
+# - Runs E2E tests with coverage instrumentation
+# - Uploads coverage reports to Codecov (https://codecov.io/gh/nearai/ironclaw)
+#
+# Viewing coverage reports:
+# - PRs automatically get coverage comments showing changes in coverage
+# - Visit https://codecov.io/gh/nearai/ironclaw for detailed coverage reports
+# - Coverage reports are generated for three configurations:
+#   1. all-features: Full feature set
+#   2. default: Default features
+#   3. libsql-only: Minimal libSQL-only configuration
+# - E2E coverage tracks end-to-end test coverage separately
+#
+# Coverage files:
+# - Unit/integration: lcov.info (uploaded to Codecov with "unit" flag)
+# - E2E: e2e-coverage.info (uploaded to Codecov with "e2e" flag)
+#
+# Requirements:
+# - Uses cargo-llvm-cov for coverage instrumentation
+# - Requires PostgreSQL for integration tests (pgvector/pgvector:pg16)
+# - E2E tests require Python 3.12 and Playwright
+
 name: Code Coverage
 on:
   push:
