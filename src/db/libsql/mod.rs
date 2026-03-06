@@ -12,6 +12,7 @@ mod routines;
 mod sandbox;
 mod settings;
 mod tool_failures;
+mod webhook_dedup;
 mod workspace;
 
 use std::path::Path;
@@ -456,5 +457,90 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let count: i64 = row.get(0).unwrap();
         assert_eq!(count, 20);
+    }
+
+    // ==================== Webhook deduplication tests ====================
+
+    use crate::db::WebhookDedupStore;
+
+    #[tokio::test]
+    async fn test_webhook_dedup_first_record_returns_true() {
+        // Use a temp file so connections share state (in-memory DBs are connection-local)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_dedup_first.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // First record should return true (new message inserted)
+        let was_inserted = backend
+            .record_webhook_message_processed("whatsapp", "wamid.test123")
+            .await
+            .unwrap();
+        assert!(
+            was_inserted,
+            "First record should return true (new message)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_dedup_duplicate_returns_false() {
+        // Use a temp file so connections share state (in-memory DBs are connection-local)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_dedup_duplicate.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // First record returns true
+        let was_inserted = backend
+            .record_webhook_message_processed("whatsapp", "wamid.duplicate")
+            .await
+            .unwrap();
+        assert!(was_inserted, "First record should return true");
+
+        // Second record (duplicate) returns false
+        let was_inserted = backend
+            .record_webhook_message_processed("whatsapp", "wamid.duplicate")
+            .await
+            .unwrap();
+        assert!(
+            !was_inserted,
+            "Duplicate record should return false (already processed)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_dedup_different_channels_independent() {
+        // Use a temp file so connections share state (in-memory DBs are connection-local)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_dedup_channels.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Record message for whatsapp - should return true
+        let was_inserted = backend
+            .record_webhook_message_processed("whatsapp", "msg789")
+            .await
+            .unwrap();
+        assert!(was_inserted, "First channel record should return true");
+
+        // Same message_id on different channel should also return true (independent)
+        let was_inserted = backend
+            .record_webhook_message_processed("telegram", "msg789")
+            .await
+            .unwrap();
+        assert!(
+            was_inserted,
+            "Different channel should have independent dedup state"
+        );
+
+        // Duplicate on original channel should return false
+        let was_inserted = backend
+            .record_webhook_message_processed("whatsapp", "msg789")
+            .await
+            .unwrap();
+        assert!(
+            !was_inserted,
+            "Duplicate on original channel should return false"
+        );
     }
 }

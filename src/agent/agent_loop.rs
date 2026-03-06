@@ -77,6 +77,10 @@ pub struct AgentDeps {
     pub sse_tx: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
     /// HTTP interceptor for trace recording/replay.
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    /// WASM channel router for webhook ACK signaling.
+    /// When set, the agent will signal ACK after persisting messages,
+    /// allowing webhooks to wait for persistence before returning 200 OK.
+    pub wasm_router: Option<Arc<crate::channels::wasm::router::WasmChannelRouter>>,
 }
 
 /// The main agent that coordinates all components.

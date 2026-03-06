@@ -83,7 +83,7 @@ mod capabilities;
 mod error;
 mod host;
 mod loader;
-mod router;
+pub mod router;
 mod runtime;
 mod schema;
 pub(crate) mod signature;
@@ -105,4 +105,4 @@ pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeC
 pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
-pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};
+pub use wrapper::{HttpResponse, HttpResponseWithMessages, SharedWasmChannel, WasmChannel};

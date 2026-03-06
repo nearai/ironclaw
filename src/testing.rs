@@ -295,6 +295,7 @@ impl TestHarnessBuilder {
             cost_guard,
             sse_tx: None,
             http_interceptor: None,
+            wasm_router: None,
         };
 
         TestHarness {

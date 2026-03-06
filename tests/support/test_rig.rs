@@ -448,7 +448,7 @@ impl TestRigBuilder {
         let log_broadcaster = Arc::new(LogBroadcaster::new());
 
         // 4. Create TraceLlm + InstrumentedLlm, extract HTTP exchanges for replay.
-        let http_exchanges = self
+        let _http_exchanges = self
             .trace
             .as_ref()
             .map(|t| t.http_exchanges.clone())
@@ -560,13 +560,8 @@ impl TestRigBuilder {
             hooks: components.hooks,
             cost_guard: components.cost_guard,
             sse_tx: None,
-            http_interceptor: if http_exchanges.is_empty() {
-                None
-            } else {
-                Some(Arc::new(
-                    ironclaw::llm::recording::ReplayingHttpInterceptor::new(http_exchanges),
-                ))
-            },
+            http_interceptor: None,
+            wasm_router: None,
         };
 
         // 7. Create TestChannel and ChannelManager.
