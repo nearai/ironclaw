@@ -66,13 +66,24 @@ impl Tunnel for CloudflareTunnel {
             match line {
                 Ok(Ok(Some(l))) => {
                     tracing::debug!("cloudflared: {l}");
+                    // Skip GitHub documentation links and other non-tunnel URLs
+                    if l.contains("github.com/") || l.contains("githubusercontent.com/") {
+                        continue;
+                    }
+
                     if let Some(idx) = l.find("https://") {
                         let url_part = &l[idx..];
                         let end = url_part
                             .find(|c: char| c.is_whitespace())
                             .unwrap_or(url_part.len());
-                        public_url = url_part[..end].to_string();
-                        break;
+                        let url = url_part[..end].to_string();
+
+                        // Verify this is a Cloudflare tunnel URL
+                        // Cloudflare tunnel URLs typically contain trycloudflare.com or similar patterns
+                        if url.contains("trycloudflare.com") || url.contains("cfargotunnel.com") {
+                            public_url = url;
+                            break;
+                        }
                     }
                 }
                 Ok(Ok(None)) => break,
