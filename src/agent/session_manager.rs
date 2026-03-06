@@ -221,6 +221,35 @@ impl SessionManager {
         }
     }
 
+    /// Remove a thread from the session and all associated state.
+    ///
+    /// Removes the thread from the session's `threads` map, clears `active_thread`
+    /// if it was the deleted one, removes thread_map entries, and cleans up the
+    /// undo manager.
+    pub async fn remove_thread(&self, user_id: &str, thread_id: Uuid) {
+        // Remove from session
+        let session = self.get_or_create_session(user_id).await;
+        {
+            let mut sess = session.lock().await;
+            sess.threads.remove(&thread_id);
+            if sess.active_thread == Some(thread_id) {
+                sess.active_thread = None;
+            }
+        }
+
+        // Remove thread_map entries pointing to this thread
+        {
+            let mut thread_map = self.thread_map.write().await;
+            thread_map.retain(|_, &mut v| v != thread_id);
+        }
+
+        // Remove undo manager
+        {
+            let mut undo_managers = self.undo_managers.write().await;
+            undo_managers.remove(&thread_id);
+        }
+    }
+
     /// Get undo manager for a thread.
     pub async fn get_undo_manager(&self, thread_id: Uuid) -> Arc<Mutex<UndoManager>> {
         // Fast path
@@ -919,5 +948,72 @@ mod tests {
             1,
             "should have exactly 1 thread, not a duplicate"
         );
+    }
+
+    #[tokio::test]
+    async fn test_remove_thread_cleans_all_state() {
+        let manager = SessionManager::new();
+
+        let (session, tid) = manager
+            .resolve_thread("user-rm", "gateway", Some("ext-rm"))
+            .await;
+
+        // Verify thread exists
+        {
+            let sess = session.lock().await;
+            assert!(sess.threads.contains_key(&tid));
+            assert_eq!(sess.active_thread, Some(tid));
+        }
+
+        // Remove it
+        manager.remove_thread("user-rm", tid).await;
+
+        // Thread should be gone from session
+        {
+            let sess = session.lock().await;
+            assert!(!sess.threads.contains_key(&tid));
+            assert_eq!(sess.active_thread, None);
+        }
+
+        // Thread map should be empty
+        {
+            let tm = manager.thread_map.read().await;
+            assert!(tm.is_empty());
+        }
+
+        // Undo manager should be gone
+        {
+            let um = manager.undo_managers.read().await;
+            assert!(!um.contains_key(&tid));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_thread_preserves_other_threads() {
+        let manager = SessionManager::new();
+
+        let (_, t1) = manager
+            .resolve_thread("user-rm2", "gateway", Some("thread-a"))
+            .await;
+        let (session, t2) = manager
+            .resolve_thread("user-rm2", "gateway", Some("thread-b"))
+            .await;
+
+        // Remove only t1
+        manager.remove_thread("user-rm2", t1).await;
+
+        // t2 should still exist
+        {
+            let sess = session.lock().await;
+            assert!(!sess.threads.contains_key(&t1));
+            assert!(sess.threads.contains_key(&t2));
+        }
+
+        // Thread map should only have t2
+        {
+            let tm = manager.thread_map.read().await;
+            assert_eq!(tm.len(), 1);
+            assert!(tm.values().any(|&v| v == t2));
+        }
     }
 }

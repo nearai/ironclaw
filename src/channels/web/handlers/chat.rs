@@ -322,9 +322,51 @@ pub async fn chat_history_handler(
         }));
     }
 
-    // Try in-memory first (freshest data for active threads)
+    // Check in-memory thread for pending approval (not persisted to DB)
+    let pending_approval = sess
+        .threads
+        .get(&thread_id)
+        .and_then(|thread| thread.pending_approval.as_ref())
+        .map(|pa| PendingApprovalInfo {
+            request_id: pa.request_id.to_string(),
+            tool_name: pa.tool_name.clone(),
+            description: pa.description.clone(),
+            parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+        });
+
+    // Always load turns from DB (has correct message IDs for cherry-pick)
+    if let Some(ref store) = state.store {
+        let (messages, has_more) = store
+            .list_conversation_messages_paginated(thread_id, None, limit as i64)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if !messages.is_empty() {
+            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+            let mut turns = build_turns_from_db_messages(&messages);
+
+            // Overlay in-memory state for the last turn if it's still processing
+            if let Some(thread) = sess.threads.get(&thread_id)
+                && let Some(mem_turn) = thread.turns.last()
+                && matches!(mem_turn.state, crate::agent::session::TurnState::Processing)
+                && let Some(last_turn) = turns.last_mut()
+            {
+                last_turn.state = "Processing".to_string();
+            }
+
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more,
+                oldest_timestamp,
+                pending_approval,
+            }));
+        }
+    }
+
+    // In-memory only (no DB, or empty DB) — e.g., first turn being processed
     if let Some(thread) = sess.threads.get(&thread_id)
-        && (!thread.turns.is_empty() || thread.pending_approval.is_some())
+        && !thread.turns.is_empty()
     {
         let turns: Vec<TurnInfo> = thread
             .turns
@@ -353,18 +395,9 @@ pub async fn chat_history_handler(
                         error: tc.error.clone(),
                     })
                     .collect(),
+                message_ids: Vec::new(),
             })
             .collect();
-
-        let pending_approval = thread
-            .pending_approval
-            .as_ref()
-            .map(|pa| PendingApprovalInfo {
-                request_id: pa.request_id.to_string(),
-                tool_name: pa.tool_name.clone(),
-                description: pa.description.clone(),
-                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
-            });
 
         return Ok(Json(HistoryResponse {
             thread_id,
@@ -373,26 +406,6 @@ pub async fn chat_history_handler(
             oldest_timestamp: None,
             pending_approval,
         }));
-    }
-
-    // Fall back to DB for historical threads not in memory (paginated)
-    if let Some(ref store) = state.store {
-        let (messages, has_more) = store
-            .list_conversation_messages_paginated(thread_id, None, limit as i64)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if !messages.is_empty() {
-            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-            let turns = build_turns_from_db_messages(&messages);
-            return Ok(Json(HistoryResponse {
-                thread_id,
-                turns,
-                has_more,
-                oldest_timestamp,
-                pending_approval: None,
-            }));
-        }
     }
 
     // Empty thread (just created, no messages yet)

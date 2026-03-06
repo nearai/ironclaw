@@ -452,12 +452,15 @@ function copyCodeBlock(btn) {
   });
 }
 
-function addMessage(role, content) {
+function addMessage(role, content, messageIds) {
   const container = document.getElementById('chat-messages');
   const div = document.createElement('div');
   div.className = 'message ' + role;
   if (role === 'user') {
     div.textContent = content;
+    if (messageIds && messageIds.length > 0) {
+      div.setAttribute('data-message-ids', JSON.stringify(messageIds));
+    }
   } else {
     div.setAttribute('data-raw', content);
     div.innerHTML = renderMarkdown(content);
@@ -982,7 +985,7 @@ function loadHistory(before) {
       // Fresh load: clear and render
       container.innerHTML = '';
       for (const turn of data.turns) {
-        addMessage('user', turn.user_input);
+        addMessage('user', turn.user_input, turn.message_ids);
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
         }
@@ -999,12 +1002,14 @@ function loadHistory(before) {
       if (data.pending_approval) {
         showApproval(data.pending_approval);
       }
+      // If selection mode is active (cross-thread), add checkboxes to new messages
+      if (_selectionMode) renderSelectionCheckboxes();
     } else {
       // Pagination: prepend older messages
       const savedHeight = container.scrollHeight;
       const fragment = document.createDocumentFragment();
       for (const turn of data.turns) {
-        const userDiv = createMessageElement('user', turn.user_input);
+        const userDiv = createMessageElement('user', turn.user_input, turn.message_ids);
         fragment.appendChild(userDiv);
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           fragment.appendChild(createToolCallsSummaryElement(turn.tool_calls));
@@ -1017,6 +1022,8 @@ function loadHistory(before) {
       container.insertBefore(fragment, container.firstChild);
       // Restore scroll position so the user doesn't jump
       container.scrollTop = container.scrollHeight - savedHeight;
+      // If selection mode is active, add checkboxes to newly loaded messages
+      if (_selectionMode) renderSelectionCheckboxes();
     }
 
     hasMore = data.has_more || false;
@@ -1030,11 +1037,14 @@ function loadHistory(before) {
 }
 
 // Create a message DOM element without appending it (for prepend operations)
-function createMessageElement(role, content) {
+function createMessageElement(role, content, messageIds) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
   if (role === 'user') {
     div.textContent = content;
+    if (messageIds && messageIds.length > 0) {
+      div.setAttribute('data-message-ids', JSON.stringify(messageIds));
+    }
   } else {
     div.setAttribute('data-raw', content);
     div.innerHTML = renderMarkdown(content);
@@ -1129,10 +1139,19 @@ function loadThreads() {
       label.textContent = thread.title || thread.id.substring(0, 8);
       label.title = thread.title ? thread.title + ' (' + thread.id + ')' : thread.id;
       item.appendChild(label);
+      const rightCol = document.createElement('div');
+      rightCol.className = 'thread-right';
       const meta = document.createElement('span');
       meta.className = 'thread-meta';
       meta.textContent = (thread.turn_count || 0) + ' turns';
-      item.appendChild(meta);
+      rightCol.appendChild(meta);
+      const delBtn = document.createElement('button');
+      delBtn.className = 'thread-delete-btn';
+      delBtn.innerHTML = '&#x1f5d1;';
+      delBtn.title = 'Delete thread';
+      delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteThread(thread.id); });
+      rightCol.appendChild(delBtn);
+      item.appendChild(rightCol);
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
     }
@@ -1183,6 +1202,151 @@ function toggleThreadSidebar() {
   sidebar.classList.toggle('collapsed');
   const btn = document.getElementById('thread-toggle-btn');
   btn.innerHTML = sidebar.classList.contains('collapsed') ? '&raquo;' : '&laquo;';
+}
+
+// --- Thread Management ---
+
+function deleteThread(threadId) {
+  if (!confirm('Delete this thread and all its messages? This cannot be undone.')) return;
+  apiFetch('/api/chat/thread/' + encodeURIComponent(threadId), { method: 'DELETE' })
+    .then(() => {
+      showToast('Thread deleted', 'success');
+      if (currentThreadId === threadId) {
+        switchToAssistant();
+      }
+      loadThreads();
+    })
+    .catch((err) => showToast('Failed to delete thread: ' + err.message, 'error'));
+}
+
+// --- Selection / Cherry-Pick Mode (cross-thread) ---
+
+let _selectionMode = false;
+let _selectedMessageIds = new Set(); // accumulated across threads
+
+function enterSelectionMode() {
+  if (!_selectionMode) {
+    _selectionMode = true;
+    _selectedMessageIds.clear();
+  }
+  document.getElementById('chat-header').style.display = '';
+  updateCherryPickCount();
+  renderSelectionCheckboxes();
+}
+
+function selectAllMessages() {
+  if (!_selectionMode) {
+    _selectionMode = true;
+    _selectedMessageIds.clear();
+    document.getElementById('chat-header').style.display = '';
+    renderSelectionCheckboxes();
+  }
+  // Load all pages first, then check everything
+  _selectAllAfterLoad();
+}
+
+function _selectAllAfterLoad() {
+  if (hasMore && !loadingOlder) {
+    // Trigger pagination, then retry after it completes
+    loadHistory(oldestTimestamp);
+    // Poll until pagination finishes, then recurse
+    const check = setInterval(() => {
+      if (!loadingOlder) {
+        clearInterval(check);
+        _selectAllAfterLoad();
+      }
+    }, 200);
+  } else if (!loadingOlder) {
+    // All pages loaded — check every checkbox and scroll to top
+    document.querySelectorAll('#chat-messages .select-cb').forEach((cb) => {
+      if (!cb.checked) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event('change'));
+      }
+    });
+    document.getElementById('chat-messages').scrollTop = 0;
+  }
+}
+
+function exitSelectionMode() {
+  _selectionMode = false;
+  _selectedMessageIds.clear();
+  document.getElementById('chat-header').style.display = 'none';
+  removeSelectionCheckboxes();
+}
+
+function renderSelectionCheckboxes() {
+  const messages = document.querySelectorAll('#chat-messages .message.user');
+  messages.forEach((el) => {
+    if (el.querySelector('.select-cb')) return;
+    const idsAttr = el.getAttribute('data-message-ids');
+    if (!idsAttr) return; // no message IDs — skip (can't cherry-pick)
+    const turnIds = JSON.parse(idsAttr);
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'select-cb';
+    // Pre-check if these message IDs were already selected (cross-thread revisit)
+    const alreadySelected = turnIds.every(id => _selectedMessageIds.has(id));
+    cb.checked = alreadySelected;
+    cb.addEventListener('change', () => {
+      if (cb.checked) {
+        turnIds.forEach(id => _selectedMessageIds.add(id));
+      } else {
+        turnIds.forEach(id => _selectedMessageIds.delete(id));
+      }
+      updateCherryPickCount();
+    });
+    el.insertBefore(cb, el.firstChild);
+  });
+}
+
+function removeSelectionCheckboxes() {
+  document.querySelectorAll('#chat-messages .select-cb').forEach(cb => cb.remove());
+}
+
+function updateCherryPickCount() {
+  const count = _selectedMessageIds.size;
+  const label = count === 1 ? '1 message selected' : count + ' messages selected';
+  document.getElementById('cherry-pick-count').textContent = label;
+  document.getElementById('cherry-pick-btn').disabled = count === 0;
+  document.getElementById('cherry-move-btn').disabled = count === 0;
+  document.getElementById('cherry-delete-btn').disabled = count === 0;
+}
+
+function cherryPickSelected(action) {
+  if (_selectedMessageIds.size === 0) return;
+  if (action === 'move' && !confirm('Move selected messages? They will be removed from their original threads.')) return;
+  apiFetch('/api/chat/thread/cherry-pick', {
+    method: 'POST',
+    body: {
+      message_ids: Array.from(_selectedMessageIds),
+      action: action || 'copy',
+    },
+  })
+    .then((data) => {
+      exitSelectionMode();
+      const verb = action === 'move' ? 'Moved' : 'Copied';
+      showToast(verb + ' ' + data.message_count + ' messages to new thread', 'success');
+      switchThread(data.thread_id);
+      loadThreads();
+    })
+    .catch((err) => showToast('Cherry-pick failed: ' + err.message, 'error'));
+}
+
+function deleteSelectedMessages() {
+  if (_selectedMessageIds.size === 0) return;
+  if (!confirm('Delete ' + _selectedMessageIds.size + ' selected messages? This cannot be undone.')) return;
+  apiFetch('/api/chat/messages/delete', {
+    method: 'POST',
+    body: { message_ids: Array.from(_selectedMessageIds) },
+  })
+    .then((data) => {
+      exitSelectionMode();
+      showToast('Deleted ' + data.deleted + ' messages', 'success');
+      loadHistory();
+      loadThreads();
+    })
+    .catch((err) => showToast('Delete failed: ' + err.message, 'error'));
 }
 
 // Chat input auto-resize and keyboard handling
@@ -1269,6 +1433,11 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-panel').forEach((p) => {
     p.classList.toggle('active', p.id === 'tab-' + tab);
   });
+  // Hide cherry-pick bar on non-chat tabs, restore on chat if selection active
+  const chatHeader = document.getElementById('chat-header');
+  if (chatHeader) {
+    chatHeader.style.display = (tab === 'chat' && _selectionMode) ? '' : 'none';
+  }
 
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();

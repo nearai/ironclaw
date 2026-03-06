@@ -30,6 +30,7 @@ pub fn build_turns_from_db_messages(
 
     while let Some(msg) = iter.next() {
         if msg.role == "user" {
+            let mut message_ids = vec![msg.id];
             let mut turn = TurnInfo {
                 turn_number,
                 user_input: msg.content.clone(),
@@ -38,6 +39,7 @@ pub fn build_turns_from_db_messages(
                 started_at: msg.created_at.to_rfc3339(),
                 completed_at: None,
                 tool_calls: Vec::new(),
+                message_ids: Vec::new(),
             };
 
             // Check if next message is a tool_calls record
@@ -45,6 +47,7 @@ pub fn build_turns_from_db_messages(
                 && next.role == "tool_calls"
             {
                 let tc_msg = iter.next().expect("peeked");
+                message_ids.push(tc_msg.id);
                 match serde_json::from_str::<Vec<serde_json::Value>>(&tc_msg.content) {
                     Ok(calls) => {
                         turn.tool_calls = calls
@@ -72,6 +75,7 @@ pub fn build_turns_from_db_messages(
                 && next.role == "assistant"
             {
                 let assistant_msg = iter.next().expect("peeked");
+                message_ids.push(assistant_msg.id);
                 turn.response = Some(assistant_msg.content.clone());
                 turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
             }
@@ -81,6 +85,7 @@ pub fn build_turns_from_db_messages(
                 turn.state = "Failed".to_string();
             }
 
+            turn.message_ids = message_ids;
             turns.push(turn);
             turn_number += 1;
         }
@@ -230,5 +235,50 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].tool_calls.is_empty());
         assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_build_turns_includes_message_ids() {
+        let user_msg = make_msg("user", "Hello", 0);
+        let asst_msg = make_msg("assistant", "Hi!", 1000);
+        let user_id = user_msg.id;
+        let asst_id = asst_msg.id;
+        let messages = vec![user_msg, asst_msg];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].message_ids.len(), 2);
+        assert_eq!(turns[0].message_ids[0], user_id);
+        assert_eq!(turns[0].message_ids[1], asst_id);
+    }
+
+    #[test]
+    fn test_build_turns_message_ids_with_tool_calls() {
+        let user_msg = make_msg("user", "Run it", 0);
+        let tc_msg = make_msg(
+            "tool_calls",
+            &serde_json::json!([{"name": "shell"}]).to_string(),
+            500,
+        );
+        let asst_msg = make_msg("assistant", "Done", 1000);
+        let uid = user_msg.id;
+        let tcid = tc_msg.id;
+        let aid = asst_msg.id;
+        let messages = vec![user_msg, tc_msg, asst_msg];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].message_ids, vec![uid, tcid, aid]);
+    }
+
+    #[test]
+    fn test_build_turns_message_ids_incomplete() {
+        let user_msg = make_msg("user", "Hello", 0);
+        let uid = user_msg.id;
+        let messages = vec![user_msg];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].message_ids, vec![uid]);
     }
 }

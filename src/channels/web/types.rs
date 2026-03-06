@@ -48,6 +48,9 @@ pub struct TurnInfo {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub tool_calls: Vec<ToolCallInfo>,
+    /// Message IDs for cherry-pick selection (user message, then assistant message if present).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub message_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +89,41 @@ pub struct PendingApprovalInfo {
     pub tool_name: String,
     pub description: String,
     pub parameters: String,
+}
+
+// --- Thread Management ---
+
+#[derive(Debug, Deserialize)]
+pub struct CherryPickRequest {
+    pub message_ids: Vec<Uuid>,
+    /// "copy" (default) or "move" (copy then delete originals).
+    #[serde(default = "default_copy_action")]
+    pub action: String,
+}
+
+fn default_copy_action() -> String {
+    "copy".to_string()
+}
+
+#[derive(Debug, Serialize)]
+pub struct CherryPickResponse {
+    pub thread_id: Uuid,
+    pub message_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteThreadResponse {
+    pub deleted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteMessagesRequest {
+    pub message_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteMessagesResponse {
+    pub deleted: usize,
 }
 
 // --- Approval ---

@@ -161,6 +161,29 @@ pub trait ConversationStore: Send + Sync {
         conversation_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError>;
+
+    /// Delete a conversation and its messages.
+    ///
+    /// Nullifies FK references in `agent_jobs` and `llm_calls` before deleting
+    /// the conversation row (messages cascade automatically). Idempotent: deleting
+    /// a non-existent conversation is a no-op.
+    async fn delete_conversation(&self, id: Uuid) -> Result<(), DatabaseError>;
+
+    /// Cherry-pick messages from a source conversation into a new conversation.
+    ///
+    /// Creates a new conversation, copies the selected messages (preserving order)
+    /// with fresh UUIDs and monotonically increasing timestamps.
+    /// Messages can come from any conversation(s) — they are fetched by ID directly.
+    /// Returns `(new_conversation_id, messages_copied)`.
+    async fn cherry_pick_messages(
+        &self,
+        message_ids: &[Uuid],
+        channel: &str,
+        user_id: &str,
+    ) -> Result<(Uuid, usize), DatabaseError>;
+
+    /// Delete specific messages by their IDs (used by move operation).
+    async fn delete_messages_by_ids(&self, message_ids: &[Uuid]) -> Result<usize, DatabaseError>;
 }
 
 #[async_trait]
