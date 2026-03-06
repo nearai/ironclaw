@@ -1,0 +1,53 @@
+{
+  "model_name": "test-routine-create-list",
+  "expects": {
+    "tools_used": ["routine_create", "routine_list"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "routine" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rc_1",
+            "name": "routine_create",
+            "arguments": {
+              "name": "daily-check",
+              "trigger_type": "cron",
+              "schedule": "0 0 9 * * * *",
+              "prompt": "Check system status and report any issues.",
+              "description": "Daily system health check"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 35
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_1",
+            "name": "routine_list",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 200,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I created a daily-check routine that runs at 9 AM every day. The routine list shows it as active.",
+        "input_tokens": 300,
+        "output_tokens": 25
+      }
+    }
+  ]
+}

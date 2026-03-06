@@ -1,0 +1,63 @@
+{
+  "model_name": "test-job-list-cancel",
+  "expects": {
+    "tools_used": ["create_job", "list_jobs", "cancel_job"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_cj_lc",
+            "name": "create_job",
+            "arguments": {
+              "title": "Cancellable job",
+              "description": "A job that will be cancelled.",
+              "wait": false
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_lj_1",
+            "name": "list_jobs",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 200,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_cancel_1",
+            "name": "cancel_job",
+            "arguments": { "job_id": "latest" }
+          }
+        ],
+        "input_tokens": 300,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Created a job, verified it appeared in the list, then cancelled it successfully.",
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    }
+  ]
+}
