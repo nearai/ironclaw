@@ -16,11 +16,12 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
-    JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
-    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
+    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
+    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
+    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+    WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -386,8 +387,9 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
-        tracing::info!("Registered 6 extension management tools");
+        self.register_sync(Arc::new(ToolRemoveTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ExtensionInfoTool::new(manager)));
+        tracing::info!("Registered 7 extension management tools");
     }
 
     /// Register skill management tools (list, search, install, remove).
@@ -761,6 +763,44 @@ mod tests {
             .to_string();
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_register_and_read_no_panic() {
+        use std::sync::Arc as StdArc;
+
+        let registry = StdArc::new(ToolRegistry::new());
+        registry.register_builtin_tools();
+
+        // Spawn concurrent readers and check they don't panic
+        let mut handles = Vec::new();
+
+        // Readers
+        for _ in 0..10 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                let tools = reg.all().await;
+                assert!(!tools.is_empty());
+                let names = reg.list().await;
+                assert!(!names.is_empty());
+                let _ = reg.get("echo").await;
+                let _ = reg.has("echo").await;
+                let _ = reg.tool_definitions().await;
+            }));
+        }
+
+        // Concurrent register attempts (will be rejected as shadowing)
+        for _ in 0..5 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                // This will be rejected (echo is protected) but should not panic
+                reg.register(Arc::new(EchoTool)).await;
+            }));
+        }
+
+        for handle in handles {
+            handle.await.expect("task should not panic");
+        }
     }
 
     #[tokio::test]

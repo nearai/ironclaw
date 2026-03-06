@@ -3,29 +3,37 @@
   "display_name": "Gmail",
   "kind": "tool",
   "version": "0.1.0",
+  "wit_version": "0.2.0",
   "description": "Read, send, and manage Gmail messages and threads",
-  "keywords": ["email", "google", "mail", "messaging"],
-
+  "keywords": [
+    "email",
+    "google",
+    "mail",
+    "messaging"
+  ],
   "source": {
     "dir": "tools-src/gmail",
     "capabilities": "gmail-tool.capabilities.json",
     "crate_name": "gmail-tool"
   },
-
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/gmail-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "f0899b243cb175fcfc07f5a431abb28fac73fc6893c9932d32ce2bd17bc72763"
     }
   },
-
   "auth_summary": {
     "method": "oauth",
     "provider": "Google",
-    "secrets": ["google_oauth_token"],
+    "secrets": [
+      "google_oauth_token"
+    ],
     "shared_auth": "google_oauth_token",
     "setup_url": "https://console.cloud.google.com/apis/credentials"
   },
-
-  "tags": ["default", "google", "messaging"]
+  "tags": [
+    "default",
+    "google",
+    "messaging"
+  ]
 }

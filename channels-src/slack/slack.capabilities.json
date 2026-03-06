@@ -1,4 +1,6 @@
 {
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
   "type": "channel",
   "name": "slack",
   "description": "Slack Events API channel for receiving and responding to Slack messages",
@@ -44,6 +46,9 @@
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000
+      },
+      "webhook": {
+        "hmac_secret_name": "slack_signing_secret"
       }
     }
   },

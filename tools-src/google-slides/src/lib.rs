@@ -209,7 +209,9 @@ impl exports::near::agent::tool::Guest for GoogleSlidesTool {
          Also provides a batch_update action for complex multi-step edits executed atomically. \
          Positions and sizes use points (standard slide is 720x405 pt). Presentation IDs are the \
          same as Google Drive file IDs, so use the google-drive tool to search for existing \
-         presentations. Requires a Google OAuth token with the presentations scope."
+         presentations. Requires a Google OAuth token with the presentations scope. \
+         To discover all available API operations, use http GET to fetch \
+         <https://www.googleapis.com/discovery/v1/apis/slides/v1/rest> (public, no auth needed)."
             .to_string()
     }
 }

@@ -44,6 +44,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+          targets: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -52,11 +53,21 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Install cargo-component
+        run: |
+          if ! command -v cargo-component >/dev/null 2>&1; then
+            cargo install cargo-component --locked
+          fi
+
+      - name: Build WASM channels (for integration tests)
+        run: ./scripts/build-wasm-extensions.sh --channels
+
       - name: Run database migrations
         if: matrix.has_postgres
         run: |
           set -euo pipefail
-          for f in migrations/V*.sql; do
+          readarray -t migration_files < <(printf '%s\n' migrations/V*.sql | sort -V)
+          for f in "${migration_files[@]}"; do
             echo "Applying $f..."
             psql -v ON_ERROR_STOP=1 -f "$f"
           done
@@ -92,6 +103,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+          targets: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -100,12 +112,21 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      - name: Install cargo-component
+        run: |
+          if ! command -v cargo-component >/dev/null 2>&1; then
+            cargo install cargo-component --locked
+          fi
+
+      - name: Build WASM channels
+        run: ./scripts/build-wasm-extensions.sh --channels
+
       - name: Set up coverage instrumentation
         run: |
-          # Append ALL env vars from show-env (including CARGO_ENCODED_RUSTFLAGS,
-          # CARGO_INCREMENTAL, LLVM_PROFILE_FILE, etc.) so the build step
-          # compiles an instrumented binary regardless of cargo-llvm-cov version.
-          cargo llvm-cov show-env >> "$GITHUB_ENV"
+          # show-env outputs shell-quoted values (KEY='value') but GITHUB_ENV
+          # expects unquoted KEY=value. Strip only the wrapping single quotes
+          # from KEY='value' lines without altering any internal characters.
+          cargo llvm-cov show-env | sed -E "s/^([A-Za-z_][A-Za-z0-9_]*)='(.*)'$/\1=\2/" >> "$GITHUB_ENV"
 
       - name: Clean coverage workspace
         run: cargo llvm-cov clean --workspace
