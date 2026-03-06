@@ -121,7 +121,9 @@ fn discover_extensions() -> Vec<(String, PathBuf, String)> {
                 .as_str()
                 .map(|s| s.to_string());
 
-            if let (Some(source_dir), Some(crate_name)) = (source_dir, crate_name) && source_dir.exists() {
+            if let (Some(source_dir), Some(crate_name)) = (source_dir, crate_name)
+                && source_dir.exists()
+            {
                 extensions.push((name, source_dir, crate_name));
             }
         }
@@ -308,7 +310,9 @@ fn wit_compat_tool_components_compile_and_instantiate() {
         let wasm_path = match find_wasm_artifact(source_dir, crate_name) {
             Some(p) => p,
             None => {
-                eprintln!("  SKIP {name}: no built WASM artifact (run ./scripts/build-wasm-extensions.sh)");
+                eprintln!(
+                    "  SKIP {name}: no built WASM artifact (run ./scripts/build-wasm-extensions.sh)"
+                );
                 continue;
             }
         };
@@ -367,7 +371,9 @@ fn wit_compat_channel_components_compile_and_instantiate() {
         let wasm_path = match find_wasm_artifact(source_dir, crate_name) {
             Some(p) => p,
             None => {
-                eprintln!("  SKIP {name}: no built WASM artifact (run ./scripts/build-wasm-extensions.sh)");
+                eprintln!(
+                    "  SKIP {name}: no built WASM artifact (run ./scripts/build-wasm-extensions.sh)"
+                );
                 continue;
             }
         };
