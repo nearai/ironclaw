@@ -29,8 +29,9 @@ services:
     volumes:
       # Persistent IronClaw data (skills, installed extensions, workspace files)
       - ironclaw_data:/home/ironclaw/.ironclaw
-      # Docker socket for sandbox job execution (Docker-in-Docker sibling containers)
-      - /var/run/docker.sock:/var/run/docker.sock
+      # OPTIONAL: Docker socket for sandbox job execution (Docker-in-Docker sibling containers).
+      # Enabling this grants the container control over the host Docker daemon; uncomment only if required.
+      # - /var/run/docker.sock:/var/run/docker.sock
     ports:
       # Web Gateway — bind to localhost only, expose via reverse proxy
       - "127.0.0.1:3000:3000"
