@@ -257,7 +257,7 @@ docker run --rm \
 
 IronClaw can launch Docker sandbox containers even when running inside Docker itself. This works by mounting the host Docker socket (`/var/run/docker.sock`). The sandbox containers become siblings on the host, not children of the IronClaw container.
 
-The `docker-compose.yml` above already includes this mount:
+To enable this, add the following mount to your `docker-compose.yml` (inside the IronClaw service):
 
 ```yaml
 volumes:
