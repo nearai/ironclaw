@@ -2,6 +2,7 @@
   "model_name": "test-job-list-cancel",
   "expects": {
     "tools_used": ["create_job", "list_jobs", "cancel_job"],
+    "all_tools_succeeded": true,
     "min_responses": 1
   },
   "steps": [
@@ -14,7 +15,7 @@
             "name": "create_job",
             "arguments": {
               "title": "Cancellable job",
-              "description": "A job that will be listed."
+              "description": "A job that will be cancelled."
             }
           }
         ],
@@ -43,7 +44,7 @@
           {
             "id": "call_cancel_1",
             "name": "cancel_job",
-            "arguments": { "job_id": "latest" }
+            "arguments": { "job_id": "{{call_cj_lc.job_id}}" }
           }
         ],
         "input_tokens": 300,
@@ -53,7 +54,7 @@
     {
       "response": {
         "type": "text",
-        "content": "Created a job and verified it in the list. The cancel attempt failed because the job ID could not be resolved.",
+        "content": "Created a job, verified it appeared in the list, then cancelled it successfully.",
         "input_tokens": 400,
         "output_tokens": 20
       }

@@ -197,14 +197,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: job_create_and_list
+    // Test 6: job_create_status
     // -----------------------------------------------------------------------
-    // Note: job_status and cancel_job require a dynamic UUID from create_job
-    // which trace-based tests cannot forward between steps. We verify
-    // create_job + list_jobs (both ID-independent) and assert success.
+    // Uses {{call_cj_1.job_id}} template to forward the dynamic UUID from
+    // create_job's result into job_status's arguments.
 
     #[tokio::test]
-    async fn job_create_and_list() {
+    async fn job_create_status() {
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/tools/job_create_status.json"
@@ -216,7 +215,7 @@ mod tests {
             .build()
             .await;
 
-        rig.send_message("Create a job and list jobs").await;
+        rig.send_message("Create a job and check its status").await;
         let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
 
         rig.verify_trace_expects(&trace, &responses);
@@ -228,8 +227,29 @@ mod tests {
             "create_job should succeed: {completed:?}"
         );
         assert!(
-            completed.iter().any(|(n, ok)| n == "list_jobs" && *ok),
-            "list_jobs should succeed: {completed:?}"
+            completed.iter().any(|(n, ok)| n == "job_status" && *ok),
+            "job_status should succeed: {completed:?}"
+        );
+
+        // Verify tool results contain expected content.
+        let results = rig.tool_results();
+        let create_result = results
+            .iter()
+            .find(|(n, _)| n == "create_job")
+            .expect("create_job result missing");
+        assert!(
+            create_result.1.contains("job_id"),
+            "create_job should return a job_id: {:?}",
+            create_result.1
+        );
+        let status_result = results
+            .iter()
+            .find(|(n, _)| n == "job_status")
+            .expect("job_status result missing");
+        assert!(
+            status_result.1.contains("Test analysis job"),
+            "job_status should return the job title: {:?}",
+            status_result.1
         );
 
         rig.shutdown();
@@ -238,9 +258,8 @@ mod tests {
     // -----------------------------------------------------------------------
     // Test 7: job_list_cancel
     // -----------------------------------------------------------------------
-    // cancel_job uses a canned job_id ("latest") which is not a valid UUID
-    // or hex prefix — we explicitly verify it fails while create_job and
-    // list_jobs succeed.
+    // Uses {{call_cj_lc.job_id}} template to forward the dynamic UUID from
+    // create_job into cancel_job.
 
     #[tokio::test]
     async fn job_list_cancel() {
@@ -261,8 +280,8 @@ mod tests {
 
         rig.verify_trace_expects(&trace, &responses);
 
+        // All three tools should have succeeded.
         let completed = rig.tool_calls_completed();
-        // create_job and list_jobs should succeed.
         assert!(
             completed.iter().any(|(n, ok)| n == "create_job" && *ok),
             "create_job should succeed: {completed:?}"
@@ -271,18 +290,9 @@ mod tests {
             completed.iter().any(|(n, ok)| n == "list_jobs" && *ok),
             "list_jobs should succeed: {completed:?}"
         );
-        // cancel_job should fail (canned "latest" is not a valid job ID).
-        let cancel_results: Vec<_> = completed
-            .iter()
-            .filter(|(n, _)| n == "cancel_job")
-            .collect();
         assert!(
-            !cancel_results.is_empty(),
-            "cancel_job should have been attempted: {completed:?}"
-        );
-        assert!(
-            cancel_results.iter().all(|(_, ok)| !ok),
-            "cancel_job should fail with invalid job_id: {cancel_results:?}"
+            completed.iter().any(|(n, ok)| n == "cancel_job" && *ok),
+            "cancel_job should succeed: {completed:?}"
         );
 
         rig.shutdown();
