@@ -1,0 +1,93 @@
+{
+  "model_name": "advanced-long-tool-chain",
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "daily log" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_w1",
+            "name": "write_file",
+            "arguments": {
+              "path": "/tmp/ironclaw_chain_test/log.md",
+              "content": "# Daily Log\n\n## Morning\n- Standup at 9am\n- Reviewed PR #42"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_w2",
+            "name": "write_file",
+            "arguments": {
+              "path": "/tmp/ironclaw_chain_test/log.md",
+              "content": "# Daily Log\n\n## Morning\n- Standup at 9am\n- Reviewed PR #42\n\n## Afternoon\n- Deployed v2.1 to staging\n- Fixed auth timeout bug"
+            }
+          }
+        ],
+        "input_tokens": 160,
+        "output_tokens": 40
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_w3",
+            "name": "write_file",
+            "arguments": {
+              "path": "/tmp/ironclaw_chain_test/summary.md",
+              "content": "# End of Day Summary\n\nKey accomplishments: PR review, staging deploy, auth bug fix."
+            }
+          }
+        ],
+        "input_tokens": 220,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_r1",
+            "name": "read_file",
+            "arguments": { "path": "/tmp/ironclaw_chain_test/log.md" }
+          }
+        ],
+        "input_tokens": 260,
+        "output_tokens": 15
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_r2",
+            "name": "read_file",
+            "arguments": { "path": "/tmp/ironclaw_chain_test/summary.md" }
+          }
+        ],
+        "input_tokens": 320,
+        "output_tokens": 15
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Here's your daily log and summary:\n\nMorning: Standup and PR #42 review.\nAfternoon: Deployed v2.1 to staging and fixed the auth timeout bug.\n\nEnd-of-day summary written to summary.md with key accomplishments.",
+        "input_tokens": 400,
+        "output_tokens": 50
+      }
+    }
+  ]
+}

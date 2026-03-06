@@ -46,6 +46,27 @@ jobs:
       - name: Run Telegram Channel Tests
         run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
 
+  wasm-wit-compat:
+    name: WASM WIT Compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-extensions
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build all WASM extensions against current WIT
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Instantiation test (host linker compatibility)
+        run: cargo test --all-features wit_compat -- --nocapture
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
@@ -60,10 +81,10 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, telegram-tests, docker-build]
+    needs: [tests, telegram-tests, wasm-wit-compat, docker-build]
     steps:
       - run: |
-          if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.telegram-tests.result }}" != "success" || "${{ needs.docker-build.result }}" != "success" ]]; then
+          if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.telegram-tests.result }}" != "success" || "${{ needs.wasm-wit-compat.result }}" != "success" || "${{ needs.docker-build.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi

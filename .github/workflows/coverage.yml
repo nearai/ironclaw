@@ -1,0 +1,177 @@
+name: Code Coverage
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  coverage:
+    name: Coverage (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all-features
+            flags: "--all-features"
+            has_postgres: true
+          - name: default
+            flags: ""
+            has_postgres: true
+          - name: libsql-only
+            flags: "--no-default-features --features libsql"
+            has_postgres: false
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ironclaw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage-${{ matrix.name }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run database migrations
+        if: matrix.has_postgres
+        run: |
+          set -euo pipefail
+          for f in migrations/V*.sql; do
+            echo "Applying $f..."
+            psql -v ON_ERROR_STOP=1 -f "$f"
+          done
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: ironclaw_test
+
+      - name: Set DATABASE_URL for postgres configs
+        if: matrix.has_postgres
+        run: echo "DATABASE_URL=postgres://postgres:postgres@localhost/ironclaw_test" >> "$GITHUB_ENV"
+
+      - name: Generate coverage
+        run: cargo llvm-cov ${{ matrix.flags }} --workspace --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          flags: ${{ matrix.name }}
+          disable_search: true
+          use_oidc: true
+          fail_ci_if_error: true
+
+  e2e-coverage:
+    name: E2E Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-coverage
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Set up coverage instrumentation
+        run: |
+          # Append ALL env vars from show-env (including CARGO_ENCODED_RUSTFLAGS,
+          # CARGO_INCREMENTAL, LLVM_PROFILE_FILE, etc.) so the build step
+          # compiles an instrumented binary regardless of cargo-llvm-cov version.
+          cargo llvm-cov show-env >> "$GITHUB_ENV"
+
+      - name: Clean coverage workspace
+        run: cargo llvm-cov clean --workspace
+
+      - name: Build instrumented binary
+        run: cargo build --no-default-features --features libsql
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install E2E dependencies
+        run: |
+          cd tests/e2e
+          pip install -e .
+          playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        run: |
+          pytest tests/e2e/ -v -x --timeout=120
+        env:
+          RUST_LOG: ironclaw=info
+          RUST_BACKTRACE: "1"
+
+      - name: Verify profraw files exist
+        if: always()
+        run: |
+          echo "LLVM_PROFILE_FILE=${LLVM_PROFILE_FILE}"
+          echo "CARGO_LLVM_COV_TARGET_DIR=${CARGO_LLVM_COV_TARGET_DIR}"
+          profraw_count=$(find target/ -name '*.profraw' 2>/dev/null | wc -l)
+          echo "Found ${profraw_count} .profraw files under target/"
+          find target/ -name '*.profraw' 2>/dev/null || true
+          if [ "$profraw_count" -eq 0 ]; then
+            echo "::warning::No .profraw files found — coverage report will fail"
+          fi
+
+      - name: Generate coverage report
+        if: always()
+        run: cargo llvm-cov report --lcov --output-path e2e-coverage.info
+
+      - name: Upload to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          files: e2e-coverage.info
+          flags: e2e
+          disable_search: true
+          use_oidc: true
+          fail_ci_if_error: true
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: tests/e2e/screenshots/
+          if-no-files-found: ignore
+
+  coverage-gate:
+    name: Coverage
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [coverage, e2e-coverage]
+    steps:
+      - run: |
+          if [[ "${{ needs.coverage.result }}" != "success" || "${{ needs.e2e-coverage.result }}" != "success" ]]; then
+            echo "One or more coverage jobs failed"
+            exit 1
+          fi
