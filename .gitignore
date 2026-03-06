@@ -17,7 +17,7 @@ target/
 bench-results/
 
 # Coverage reports (local runs, not committed)
-coverage/
+/coverage/
 
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
