@@ -17,7 +17,6 @@ mod tests {
     use ironclaw::context::JobContext;
     use ironclaw::tools::{Tool, ToolError, ToolOutput};
 
-    use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -92,16 +91,22 @@ mod tests {
 
     #[tokio::test]
     async fn tool_error_feedback() {
-        let test_dir = "/tmp/ironclaw_error_feedback_test";
-        let _ = std::fs::remove_dir_all(test_dir);
-        std::fs::create_dir_all(test_dir).expect("create test dir");
-        let _cleanup = CleanupGuard::new().dir(test_dir);
+        // Use a tempdir for the recovery file. The fixture's recovery path
+        // is updated to write here via the test_dir variable.
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let test_dir = tmp.path().to_str().expect("tempdir path");
 
-        let trace = LlmTrace::from_file(concat!(
+        // Patch the fixture's recovery path to use our tempdir.
+        let fixture_str = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/worker/tool_error_feedback.json"
         ))
-        .expect("failed to load tool_error_feedback.json");
+        .expect("read fixture");
+        let fixture_str = fixture_str.replace(
+            "/tmp/ironclaw_error_feedback_test/recovered.txt",
+            &format!("{test_dir}/recovered.txt"),
+        );
+        let trace: LlmTrace = serde_json::from_str(&fixture_str).expect("parse patched fixture");
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
@@ -114,7 +119,7 @@ mod tests {
 
         rig.verify_trace_expects(&trace, &responses);
 
-        // Verify the recovery file exists.
+        // Verify the recovery file exists in the tempdir.
         let content = std::fs::read_to_string(format!("{test_dir}/recovered.txt"))
             .expect("recovered.txt should exist");
         assert!(
@@ -249,11 +254,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: worker_timeout (iteration limit)
+    // Test 6: iteration_limit
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn worker_timeout() {
+    async fn iteration_limit() {
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/worker/worker_timeout.json"
@@ -287,11 +292,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: post_plan_work_remaining
+    // Test 7: simple_echo_flow
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn post_plan_work_remaining() {
+    async fn simple_echo_flow() {
         let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/worker/plan_remaining_work.json"

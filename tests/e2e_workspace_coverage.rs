@@ -233,24 +233,41 @@ mod tests {
             .build()
             .await;
 
+        // Seed an IDENTITY.md so the system prompt has real content to inject.
+        let ws = rig.workspace().expect("workspace must be available");
+        ws.write(
+            "IDENTITY.md",
+            "I am TestBot, a helpful testing assistant created for E2E verification.",
+        )
+        .await
+        .expect("write IDENTITY.md");
+
         rig.send_message("Who are you?").await;
         let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
 
         rig.verify_trace_expects(&trace, &responses);
 
-        // Verify the TraceLlm captured requests include a system message.
+        // Verify the TraceLlm captured requests include a system message
+        // with the seeded identity content.
         let trace_llm = rig.trace_llm().expect("trace_llm must be available");
         let captured = trace_llm.captured_requests();
         assert!(
             !captured.is_empty(),
             "Expected at least one captured request"
         );
-        // The first request should have a system message with identity content.
         let first_request = &captured[0];
-        let has_system = first_request
+        let system_msg = first_request
             .iter()
-            .any(|msg| matches!(msg.role, ironclaw::llm::Role::System));
-        assert!(has_system, "Expected a system message in the first request");
+            .find(|msg| matches!(msg.role, ironclaw::llm::Role::System));
+        assert!(
+            system_msg.is_some(),
+            "Expected a system message in the first request"
+        );
+        assert!(
+            system_msg.unwrap().content.contains("TestBot"),
+            "System prompt should contain seeded identity 'TestBot', got: {:?}",
+            &system_msg.unwrap().content[..200.min(system_msg.unwrap().content.len())]
+        );
 
         rig.shutdown();
     }

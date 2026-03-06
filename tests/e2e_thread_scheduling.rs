@@ -94,10 +94,11 @@ mod tests {
             .run_and_verify_trace(&trace, Duration::from_secs(30))
             .await;
 
-        // Should get responses for all 3 turns.
-        assert!(
-            all_responses.len() >= 2,
-            "Expected at least 2 turn responses, got {}",
+        // Should get responses for all 3 turns (echo, /undo, /redo).
+        assert_eq!(
+            all_responses.len(),
+            3,
+            "Expected 3 turn responses, got {}",
             all_responses.len()
         );
 
