@@ -12,7 +12,8 @@ pub struct SandboxConfig {
     /// Whether `FullAccess` policy is explicitly allowed.
     ///
     /// When `policy` is `FullAccess` but this field is `false`, the manager
-    /// will downgrade to `WorkspaceWrite` and emit a `tracing::error!` log.
+    /// will return `SandboxError::Config` and refuse to execute. This is an
+    /// intentional double opt-in to prevent accidental host execution.
     /// Set via `SANDBOX_ALLOW_FULL_ACCESS=true` env var.
     pub allow_full_access: bool,
     /// Default timeout for command execution.
@@ -81,7 +82,8 @@ pub enum SandboxPolicy {
     /// are completely unrestricted.
     ///
     /// Requires `SANDBOX_ALLOW_FULL_ACCESS=true` as a second opt-in.
-    /// Without it, the sandbox manager will downgrade to `WorkspaceWrite`.
+    /// Without it, the sandbox manager will return `SandboxError::Config`
+    /// and refuse to execute.
     FullAccess,
 }
 
