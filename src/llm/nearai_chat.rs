@@ -522,9 +522,6 @@ impl LlmProvider for NearAiChatProvider {
                     reason: "No choices in response".to_string(),
                 })?;
 
-        // Fall back to reasoning_content when content is null (e.g. GLM-5
-        // returns its answer in reasoning_content instead of content).
-        let content = choice.message.content.or(choice.message.reasoning_content);
         let tool_calls: Vec<ToolCall> = choice
             .message
             .tool_calls
@@ -540,6 +537,18 @@ impl LlmProvider for NearAiChatProvider {
                 }
             })
             .collect();
+
+        // Fall back to reasoning_content when content is null (e.g. GLM-5
+        // returns its answer in reasoning_content instead of content), but
+        // only for final text responses. Tool-call responses often have
+        // content: null + reasoning_content filled with chain-of-thought;
+        // leaking that into conversation history inflates context and
+        // confuses the model.
+        let content = if tool_calls.is_empty() {
+            choice.message.content.or(choice.message.reasoning_content)
+        } else {
+            choice.message.content
+        };
 
         let finish_reason = match choice.finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
@@ -1284,5 +1293,110 @@ mod tests {
         let (default_in, default_out) = costs::default_cost();
         assert_eq!(input, default_in);
         assert_eq!(output, default_out);
+    }
+
+    /// Regression: reasoning_content must NOT leak into tool-call responses.
+    #[test]
+    fn test_reasoning_content_not_leaked_into_tool_call_response() {
+        let response: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "chatcmpl-test",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "Let me think about which tool to call...",
+                    "tool_calls": [{
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "arguments": "{\"query\":\"test\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 100, "completion_tokens": 50 }
+        }))
+        .unwrap();
+
+        let choice = response.choices.into_iter().next().unwrap();
+        let tool_calls: Vec<ToolCall> = choice
+            .message
+            .tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tc| {
+                let arguments = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                ToolCall {
+                    id: tc.id,
+                    name: tc.function.name,
+                    arguments,
+                }
+            })
+            .collect();
+
+        let content = if tool_calls.is_empty() {
+            choice.message.content.or(choice.message.reasoning_content)
+        } else {
+            choice.message.content
+        };
+
+        assert!(
+            content.is_none(),
+            "reasoning_content should NOT leak into tool-call responses, got: {:?}",
+            content
+        );
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "search");
+    }
+
+    /// Regression: reasoning_content SHOULD be used as fallback for text responses.
+    #[test]
+    fn test_reasoning_content_used_for_text_response() {
+        let response: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "chatcmpl-test",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "The answer is 42."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 50, "completion_tokens": 20 }
+        }))
+        .unwrap();
+
+        let choice = response.choices.into_iter().next().unwrap();
+        let tool_calls: Vec<ToolCall> = choice
+            .message
+            .tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tc| {
+                let arguments = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                ToolCall {
+                    id: tc.id,
+                    name: tc.function.name,
+                    arguments,
+                }
+            })
+            .collect();
+
+        let content = if tool_calls.is_empty() {
+            choice.message.content.or(choice.message.reasoning_content)
+        } else {
+            choice.message.content
+        };
+
+        assert_eq!(
+            content,
+            Some("The answer is 42.".to_string()),
+            "reasoning_content should be used as fallback for text responses"
+        );
+        assert!(tool_calls.is_empty());
     }
 }
