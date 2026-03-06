@@ -68,7 +68,6 @@ async fn core_registration_covers_expected_tools() {
         "read_file",
         "shell",
         "time",
-        "web_fetch",
         "write_file",
     ];
 

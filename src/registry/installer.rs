@@ -20,6 +20,10 @@ const ALLOWED_ARTIFACT_HOSTS: &[&str] = &[
 ];
 
 fn should_attempt_source_fallback(err: &RegistryError) -> bool {
+    // MissingChecksum is intentionally allowed here — it's a bootstrapping issue
+    // (no release has populated checksums yet), not a security concern. Source
+    // builds use local trusted code. ChecksumMismatch (tampered artifact) and
+    // InvalidManifest (structural problem) remain blocked.
     !matches!(
         err,
         RegistryError::AlreadyInstalled { .. }
@@ -367,15 +371,15 @@ impl RegistryInstaller {
 
         // Require SHA256 — refuse to install unverified binaries. Check before
         // downloading to avoid wasting bandwidth on manifests that are missing
-        // checksums.
+        // checksums. Uses MissingChecksum (not InvalidManifest) so that
+        // install_with_source_fallback can fall back to building from source
+        // when checksums haven't been populated yet (bootstrapping).
         let expected_sha =
             artifact
                 .sha256
                 .as_ref()
-                .ok_or_else(|| RegistryError::InvalidManifest {
+                .ok_or_else(|| RegistryError::MissingChecksum {
                     name: manifest.name.clone(),
-                    field: "artifacts.wasm32-wasip2.sha256",
-                    reason: "sha256 is required for artifact downloads".to_string(),
                 })?;
 
         let target_dir = match manifest.kind {
@@ -500,7 +504,7 @@ impl RegistryInstaller {
         if prefer_build || !has_artifact {
             self.install_from_source(manifest, force).await
         } else {
-            self.install_from_artifact(manifest, force).await
+            self.install_with_source_fallback(manifest, force).await
         }
     }
 
@@ -905,9 +909,8 @@ mod tests {
 
         let result = installer.install_from_artifact(&manifest, false).await;
         match result {
-            Err(RegistryError::InvalidManifest { field, reason, .. }) => {
-                assert_eq!(field, "artifacts.wasm32-wasip2.sha256");
-                assert!(reason.contains("required"), "reason: {}", reason);
+            Err(RegistryError::MissingChecksum { name }) => {
+                assert_eq!(name, "demo");
             }
             other => panic!("unexpected result: {:?}", other),
         }
@@ -942,6 +945,12 @@ mod tests {
             reason: "host not allowed".to_string(),
         };
         assert!(!should_attempt_source_fallback(&invalid));
+
+        // MissingChecksum SHOULD allow source fallback (bootstrapping)
+        let missing = RegistryError::MissingChecksum {
+            name: "demo".to_string(),
+        };
+        assert!(should_attempt_source_fallback(&missing));
     }
 
     #[test]

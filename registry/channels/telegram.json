@@ -4,28 +4,34 @@
   "kind": "channel",
   "version": "0.1.0",
   "description": "Talk to your agent through a Telegram bot",
-  "keywords": ["messaging", "bot", "chat", "telegram"],
-
+  "keywords": [
+    "messaging",
+    "bot",
+    "chat",
+    "telegram"
+  ],
   "source": {
     "dir": "channels-src/telegram",
     "capabilities": "telegram.capabilities.json",
     "crate_name": "telegram-channel"
   },
-
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/telegram-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "1c3028052f680e2efa7d857d50bcb57dbc171ad197d2527875b9c3cd22f0c830"
     }
   },
-
   "auth_summary": {
     "method": "manual",
     "provider": "Telegram",
-    "secrets": ["telegram_bot_token"],
+    "secrets": [
+      "telegram_bot_token"
+    ],
     "shared_auth": null,
     "setup_url": "https://t.me/BotFather"
   },
-
-  "tags": ["default", "messaging"]
+  "tags": [
+    "default",
+    "messaging"
+  ]
 }
