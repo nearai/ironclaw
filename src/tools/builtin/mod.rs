@@ -9,12 +9,12 @@ mod json;
 mod memory;
 mod message;
 pub mod path_utils;
+mod restart;
 pub mod routine;
 pub mod secrets_tools;
 pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
-mod web_fetch;
 
 pub use echo::EchoTool;
 pub use extension_tools::{
@@ -29,6 +29,7 @@ pub use job::{
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use restart::RestartTool;
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };
@@ -36,8 +37,6 @@ pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
-pub use web_fetch::WebFetchTool;
-
 mod html_converter;
 
 pub use html_converter::convert_html_to_markdown;
