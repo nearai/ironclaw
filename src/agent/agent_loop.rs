@@ -79,6 +79,8 @@ pub struct AgentDeps {
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Audio transcription middleware for voice messages.
     pub transcription: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
+    /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
+    pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
 }
 
 /// The main agent that coordinates all components.
@@ -527,6 +529,11 @@ impl Agent {
             let mut message = message;
             if let Some(ref transcription) = self.deps.transcription {
                 transcription.process(&mut message).await;
+            }
+
+            // Apply document extraction middleware to document attachments
+            if let Some(ref doc_extraction) = self.deps.document_extraction {
+                doc_extraction.process(&mut message).await;
             }
 
             match self.handle_message(&message).await {

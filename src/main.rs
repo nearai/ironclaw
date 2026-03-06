@@ -682,6 +682,9 @@ async fn async_main() -> anyhow::Result<()> {
             .transcription
             .create_provider()
             .map(|p| Arc::new(ironclaw::transcription::TranscriptionMiddleware::new(p))),
+        document_extraction: Some(Arc::new(
+            ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
+        )),
     };
 
     let agent = Agent::new(

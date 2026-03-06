@@ -1079,6 +1079,7 @@ mod tests {
             sse_tx: None,
             http_interceptor: None,
             transcription: None,
+            document_extraction: None,
         };
 
         Agent::new(
@@ -1820,6 +1821,7 @@ mod tests {
             sse_tx: None,
             http_interceptor: None,
             transcription: None,
+            document_extraction: None,
         };
 
         Agent::new(
@@ -1934,6 +1936,7 @@ mod tests {
                 sse_tx: None,
                 http_interceptor: None,
                 transcription: None,
+                document_extraction: None,
             };
 
             Agent::new(

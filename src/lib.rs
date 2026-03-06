@@ -47,6 +47,7 @@ pub mod cli;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod document_extraction;
 pub mod error;
 pub mod estimation;
 pub mod evaluation;
