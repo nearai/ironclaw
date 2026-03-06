@@ -2479,7 +2479,7 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             message: format!("Tool started: {}", name),
             metadata_json,
         },
-        StatusUpdate::ToolCompleted { name, success } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolCompleted { name, success, .. } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolCompleted,
             message: format!(
                 "Tool completed: {} ({})",
@@ -3387,6 +3387,8 @@ mod tests {
             &crate::channels::StatusUpdate::ToolCompleted {
                 name: "http_request".to_string(),
                 success: true,
+                error: None,
+                parameters: None,
             },
             &metadata,
         );
@@ -3407,6 +3409,8 @@ mod tests {
             &crate::channels::StatusUpdate::ToolCompleted {
                 name: "http_request".to_string(),
                 success: false,
+                error: Some("connection refused".to_string()),
+                parameters: None,
             },
             &metadata,
         );

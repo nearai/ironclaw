@@ -160,7 +160,9 @@ impl exports::near::agent::tool::Guest for GoogleDriveTool {
          files and folders. Supports personal drives and shared (organizational) drives via the \
          corpora parameter. Can search with Drive query syntax, download text files, upload new \
          files, manage folder structure, and control sharing permissions. Requires a Google OAuth \
-         token with the drive scope."
+         token with the drive scope. \
+         To discover all available API operations, use http GET to fetch \
+         <https://www.googleapis.com/discovery/v1/apis/drive/v3/rest> (public, no auth needed)."
             .to_string()
     }
 }

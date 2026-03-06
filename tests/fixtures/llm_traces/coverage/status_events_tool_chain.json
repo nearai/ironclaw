@@ -1,0 +1,60 @@
+{
+  "model_name": "test-status-events",
+  "expects": {
+    "tools_used": ["echo"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_echo_1",
+            "name": "echo",
+            "arguments": { "message": "first" }
+          }
+        ],
+        "input_tokens": 50,
+        "output_tokens": 15
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_echo_2",
+            "name": "echo",
+            "arguments": { "message": "second" }
+          }
+        ],
+        "input_tokens": 80,
+        "output_tokens": 10
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_echo_3",
+            "name": "echo",
+            "arguments": { "message": "third" }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 10
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I executed three echo calls: first, second, and third. All three completed.",
+        "input_tokens": 130,
+        "output_tokens": 15
+      }
+    }
+  ]
+}
