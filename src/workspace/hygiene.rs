@@ -50,9 +50,16 @@ const IDENTITY_PATHS: &[&str] = &[
 ];
 
 /// Check if a document path is an identity document that must never be deleted.
+///
+/// Performs case-insensitive comparison to handle case-insensitive filesystems
+/// (Windows, macOS) and prevent accidental deletion of identity docs with
+/// different casing (e.g., memory.md, MEMORY.MD, Memory.md).
 fn is_identity_path(path: &str) -> bool {
     let file_name = path.rsplit('/').next().unwrap_or(path);
-    IDENTITY_PATHS.contains(&file_name)
+    let file_name_lower = file_name.to_lowercase();
+    IDENTITY_PATHS
+        .iter()
+        .any(|&p| p.to_lowercase() == file_name_lower)
 }
 
 /// Configuration for workspace hygiene.
@@ -393,6 +400,23 @@ mod tests {
                 "conversations/{name} should be excluded via path"
             );
         }
+    }
+
+    #[test]
+    fn is_identity_path_case_insensitive() {
+        // Verify case-insensitive matching for case-insensitive filesystems
+        assert!(is_identity_path("memory.md"), "lowercase memory.md should be excluded");
+        assert!(is_identity_path("Memory.md"), "mixed case Memory.md should be excluded");
+        assert!(is_identity_path("MEMORY.MD"), "uppercase MEMORY.MD should be excluded");
+        assert!(is_identity_path("identity.md"), "lowercase identity.md should be excluded");
+        assert!(
+            is_identity_path("conversations/soul.md"),
+            "conversations/soul.md should be excluded"
+        );
+        assert!(
+            is_identity_path("conversations/SOUL.MD"),
+            "conversations/SOUL.MD should be excluded"
+        );
     }
 
     #[test]
