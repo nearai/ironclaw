@@ -34,14 +34,17 @@ fn runtime_overrides() -> &'static Mutex<HashMap<String, String>> {
 /// all config resolution that goes through those helpers. This avoids the UB
 /// of `std::env::set_var` in multi-threaded programs.
 pub fn set_runtime_env(key: &str, value: &str) {
-    if let Ok(mut map) = runtime_overrides().lock() {
-        map.insert(key.to_string(), value.to_string());
-    }
+    runtime_overrides()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key.to_string(), value.to_string());
 }
 
-/// Read an env var, checking runtime overrides first, then the real environment.
+/// Read an env var, checking the real environment first, then runtime overrides.
 ///
 /// Priority: real env vars > runtime overrides > `INJECTED_VARS`.
+/// Empty values are treated as unset at every layer for consistency with
+/// `optional_env()`.
 ///
 /// Use this instead of `std::env::var()` when the value might have been set
 /// via `set_runtime_env()` (e.g., `NEARAI_API_KEY` during interactive login).
@@ -53,16 +56,25 @@ pub fn env_or_override(key: &str) -> Option<String> {
         return Some(val);
     }
 
-    // Check runtime overrides
-    if let Ok(map) = runtime_overrides().lock()
-        && let Some(val) = map.get(key)
+    // Check runtime overrides (skip empty values for consistency with optional_env)
+    if let Some(val) = runtime_overrides()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .filter(|v| !v.is_empty())
+        .cloned()
     {
-        return Some(val.clone());
+        return Some(val);
     }
 
     // Check INJECTED_VARS (secrets from DB, set once at startup)
-    if let Some(val) = INJECTED_VARS.get().and_then(|m| m.get(key)) {
-        return Some(val.clone());
+    if let Some(val) = INJECTED_VARS
+        .get()
+        .and_then(|m| m.get(key))
+        .filter(|v| !v.is_empty())
+        .cloned()
+    {
+        return Some(val);
     }
 
     None
@@ -82,10 +94,14 @@ pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     }
 
     // Fall back to runtime overrides (set via set_runtime_env)
-    if let Ok(map) = runtime_overrides().lock()
-        && let Some(val) = map.get(key)
+    if let Some(val) = runtime_overrides()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .filter(|v| !v.is_empty())
+        .cloned()
     {
-        return Ok(Some(val.clone()));
+        return Ok(Some(val));
     }
 
     // Fall back to thread-safe overlay (secrets injected from DB)
