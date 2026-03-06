@@ -748,21 +748,6 @@ async fn run_memory_command(mem_cmd: &ironclaw::cli::MemoryCommand) -> anyhow::R
         .embeddings
         .create_provider(&config.llm.nearai.base_url, session);
 
-    // Warn if libSQL backend is used with non-1536 embedding dimension.
-    if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
-        && config.embeddings.enabled
-        && config.embeddings.dimension != 1536
-    {
-        tracing::warn!(
-            configured_dimension = config.embeddings.dimension,
-            "Embedding dimension {} is not 1536. The libSQL schema uses \
-             F32_BLOB(1536) which requires exactly 1536 dimensions. \
-             Embedding storage will fail. Use PostgreSQL or set \
-             EMBEDDING_DIMENSION=1536.",
-            config.embeddings.dimension
-        );
-    }
-
     let db: Arc<dyn ironclaw::db::Database> = ironclaw::db::connect_from_config(&config.database)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;

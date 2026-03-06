@@ -2,6 +2,9 @@
 //!
 //! Consolidates all PostgreSQL migrations (V1-V8) into a single SQLite-compatible
 //! schema. Run once on database creation; idempotent via `IF NOT EXISTS`.
+//!
+//! Incremental migrations (V9+) are tracked in the `_migrations` table and run
+//! exactly once per database, in version order.
 
 /// Consolidated schema for libSQL.
 ///
@@ -12,7 +15,7 @@
 /// - `BYTEA` -> `BLOB`
 /// - `NUMERIC` -> `TEXT` (preserve precision for rust_decimal)
 /// - `TEXT[]` -> `TEXT` (JSON array)
-/// - `VECTOR(1536)` -> `F32_BLOB(1536)` (libsql native)
+/// - `VECTOR` -> `BLOB` (raw little-endian F32 bytes, any dimension)
 /// - `TSVECTOR` -> FTS5 virtual table
 /// - `BIGSERIAL` -> `INTEGER PRIMARY KEY AUTOINCREMENT`
 /// - PL/pgSQL functions -> SQLite triggers
@@ -221,16 +224,16 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
     content TEXT NOT NULL,
-    embedding F32_BLOB(1536),
+    embedding BLOB,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (document_id, chunk_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_document ON memory_chunks(document_id);
 
--- Vector index for semantic search (libSQL native)
-CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding
-    ON memory_chunks (libsql_vector_idx(embedding));
+-- No vector index: BLOB column accepts any embedding dimension.
+-- Vector search uses brute-force cosine distance (fast enough for
+-- personal assistant workspaces). Matches PostgreSQL after V9 migration.
 
 -- FTS5 virtual table for full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts USING fts5(
@@ -566,3 +569,132 @@ INSERT OR IGNORE INTO leak_detection_patterns (id, name, pattern, severity, acti
     ('550e8400-e29b-41d4-a716-446655440012', 'high_entropy_hex', '(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])', 'medium', 'warn', 1, datetime('now'));
 
 "#;
+
+/// Incremental migrations applied after the base schema.
+///
+/// Each entry is `(version, name, sql)`. Migrations are idempotent: the
+/// `_migrations` table tracks which versions have been applied.
+pub const INCREMENTAL_MIGRATIONS: &[(i64, &str, &str)] = &[(
+    9,
+    "flexible_embedding_dimension",
+    // Rebuild memory_chunks to remove the fixed F32_BLOB(1536) type
+    // constraint so any embedding dimension works. Existing embeddings
+    // are preserved; users only need to re-embed if they change models.
+    //
+    // The vector index (libsql_vector_idx) requires a fixed-dimension
+    // F32_BLOB(N), so we drop it entirely. Vector search falls back to
+    // brute-force cosine distance which is fast enough for personal
+    // assistant workspaces. This matches PostgreSQL after its V9 migration.
+    //
+    // SQLite cannot ALTER COLUMN types, so we recreate the table.
+    r#"
+-- Drop vector index (requires fixed F32_BLOB(N), incompatible with flexible dimensions)
+DROP INDEX IF EXISTS idx_memory_chunks_embedding;
+
+-- Drop FTS triggers that reference the old table
+DROP TRIGGER IF EXISTS memory_chunks_fts_insert;
+DROP TRIGGER IF EXISTS memory_chunks_fts_delete;
+DROP TRIGGER IF EXISTS memory_chunks_fts_update;
+
+-- Recreate table with flexible BLOB column (any embedding dimension)
+CREATE TABLE IF NOT EXISTS memory_chunks_new (
+    _rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    embedding BLOB,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (document_id, chunk_index)
+);
+
+-- Copy all existing data (embeddings preserved as-is)
+INSERT OR IGNORE INTO memory_chunks_new (_rowid, id, document_id, chunk_index, content, embedding, created_at)
+    SELECT _rowid, id, document_id, chunk_index, content, embedding, created_at FROM memory_chunks;
+
+-- Swap tables
+DROP TABLE memory_chunks;
+ALTER TABLE memory_chunks_new RENAME TO memory_chunks;
+
+-- Recreate indexes (no vector index — see comment above)
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_document ON memory_chunks(document_id);
+
+-- Recreate FTS triggers
+CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_insert AFTER INSERT ON memory_chunks BEGIN
+    INSERT INTO memory_chunks_fts(rowid, content) VALUES (new._rowid, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_delete AFTER DELETE ON memory_chunks BEGIN
+    INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content)
+        VALUES ('delete', old._rowid, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_update AFTER UPDATE ON memory_chunks BEGIN
+    INSERT INTO memory_chunks_fts(memory_chunks_fts, rowid, content)
+        VALUES ('delete', old._rowid, old.content);
+    INSERT INTO memory_chunks_fts(rowid, content) VALUES (new._rowid, new.content);
+END;
+"#,
+)];
+
+/// Run incremental migrations that haven't been applied yet.
+///
+/// Each migration is wrapped in a transaction. On success the version is
+/// recorded in `_migrations` so it won't run again.
+pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::error::DatabaseError> {
+    use crate::error::DatabaseError;
+
+    for &(version, name, sql) in INCREMENTAL_MIGRATIONS {
+        // Check if already applied
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM _migrations WHERE version = ?1",
+                libsql::params![version],
+            )
+            .await
+            .map_err(|e| {
+                DatabaseError::Migration(format!("Failed to check migration {version}: {e}"))
+            })?;
+
+        if rows.next().await.ok().flatten().is_some() {
+            continue; // Already applied
+        }
+
+        tracing::info!(version, name, "libSQL: applying incremental migration");
+
+        // Wrap migration + recording in a transaction for atomicity.
+        // If the process crashes mid-migration, the transaction rolls back
+        // and the migration will be retried on next startup.
+        let tx = conn.transaction().await.map_err(|e| {
+            DatabaseError::Migration(format!(
+                "libSQL migration V{version}: failed to start transaction: {e}"
+            ))
+        })?;
+
+        tx.execute_batch(sql).await.map_err(|e| {
+            DatabaseError::Migration(format!("libSQL migration V{version} ({name}) failed: {e}"))
+        })?;
+
+        // Record as applied (inside the same transaction)
+        tx.execute(
+            "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
+            libsql::params![version, name],
+        )
+        .await
+        .map_err(|e| {
+            DatabaseError::Migration(format!(
+                "Failed to record migration V{version} ({name}): {e}"
+            ))
+        })?;
+
+        tx.commit().await.map_err(|e| {
+            DatabaseError::Migration(format!(
+                "libSQL migration V{version} ({name}): commit failed: {e}"
+            ))
+        })?;
+
+        tracing::info!(version, name, "libSQL: migration applied successfully");
+    }
+
+    Ok(())
+}

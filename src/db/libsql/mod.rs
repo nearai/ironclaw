@@ -292,6 +292,8 @@ impl Database for LibSqlBackend {
         conn.execute_batch(libsql_migrations::SCHEMA)
             .await
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
+        // Apply incremental migrations (V9+) tracked in _migrations table.
+        libsql_migrations::run_incremental(&conn).await?;
         Ok(())
     }
 }
