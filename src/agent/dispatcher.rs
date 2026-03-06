@@ -217,13 +217,26 @@ impl Agent {
     }
 
     /// Execute a tool for chat (without full job context).
+    ///
+    /// `original_user_intent` is passed to the LLM judge when enabled.
+    /// Pass `""` for approval-resumed executions where the user already
+    /// explicitly authorised the tool call.
     pub(super) async fn execute_chat_tool(
         &self,
         tool_name: &str,
         params: &serde_json::Value,
         job_ctx: &JobContext,
+        original_user_intent: &str,
     ) -> Result<String, Error> {
-        execute_chat_tool_standalone(self.tools(), self.safety(), tool_name, params, job_ctx).await
+        execute_chat_tool_standalone(
+            self.tools(),
+            self.safety(),
+            tool_name,
+            params,
+            job_ctx,
+            original_user_intent,
+        )
+        .await
     }
 }
 
@@ -609,7 +622,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
                 let result = self
                     .agent
-                    .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
+                    .execute_chat_tool(
+                        &tc.name,
+                        &tc.arguments,
+                        &self.job_ctx,
+                        &self.message.content,
+                    )
                     .await;
 
                 let disp_tool = self.agent.tools().get(&tc.name).await;
@@ -642,6 +660,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 let tc = tc.clone();
                 let channel = self.message.channel.clone();
                 let metadata = self.message.metadata.clone();
+                let intent = self.message.content.clone();
 
                 join_set.spawn(async move {
                     let _ = channels
@@ -660,6 +679,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         &tc.name,
                         &tc.arguments,
                         &job_ctx,
+                        &intent,
                     )
                     .await;
 
@@ -912,7 +932,16 @@ pub(super) async fn execute_chat_tool_standalone(
     tool_name: &str,
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
+    original_user_intent: &str,
 ) -> Result<String, Error> {
+    // LLM-as-Judge: semantic evaluation AFTER heuristic checks, BEFORE execution.
+    // No-op when SAFETY_LLM_JUDGE_ENABLED=false (default) or intent is empty
+    // (approval-resumed calls where the user already explicitly authorised the tool).
+    if !original_user_intent.is_empty() {
+        safety
+            .llm_judge_tool_call(tool_name, params, original_user_intent)
+            .await?;
+    }
     crate::tools::execute::execute_tool_with_safety(tools, safety, tool_name, params, job_ctx).await
 }
 
@@ -1480,6 +1509,7 @@ mod tests {
             "echo",
             &serde_json::json!({"message": "hello"}),
             &job_ctx,
+            "",
         )
         .await;
 
@@ -1508,6 +1538,7 @@ mod tests {
             "nonexistent",
             &serde_json::json!({}),
             &job_ctx,
+            "",
         )
         .await;
 
