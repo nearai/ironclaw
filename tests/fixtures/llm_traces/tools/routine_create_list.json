@@ -17,7 +17,7 @@
             "arguments": {
               "name": "daily-check",
               "trigger_type": "cron",
-              "schedule": "0 0 9 * * * *",
+              "schedule": "0 0 9 * * *",
               "prompt": "Check system status and report any issues.",
               "description": "Daily system health check"
             }
