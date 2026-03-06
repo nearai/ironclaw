@@ -94,7 +94,7 @@ services:
 Start:
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ## Volume Mounts
@@ -162,7 +162,7 @@ For external access, put a reverse proxy in front:
 
 ```caddy
 # Caddyfile
-docs.ironclaw.ai {
+webg.example.com {
   reverse_proxy localhost:3000
 }
 ```
@@ -172,7 +172,7 @@ docs.ironclaw.ai {
 ```nginx
 server {
   listen 443 ssl;
-  server_name docs.ironclaw.ai;
+  server_name webg.example.com;
 
   ssl_certificate /path/to/cert.pem;
   ssl_certificate_key /path/to/key.pem;
@@ -204,9 +204,9 @@ docker run -d \
   -p 3000:3000 \
   nearai/ironclaw:latest
 
-# Or with docker-compose
-docker-compose pull
-docker-compose up -d
+# Or with docker compose
+docker compose pull
+docker compose up -d
 ```
 
 ## Troubleshooting
