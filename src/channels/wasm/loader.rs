@@ -285,11 +285,23 @@ impl LoadedChannel {
             .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()))
     }
 
-    /// Get the HMAC-SHA256 signing secret name from capabilities.
-    pub fn hmac_secret_name(&self) -> Option<String> {
+    /// Get the webhook verification mode from capabilities.
+    ///
+    /// Returns "query_param", "signature", or None (default behavior).
+    pub fn verification_mode(&self) -> Option<&str> {
         self.capabilities_file
             .as_ref()
-            .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()))
+            .and_then(|f| f.webhook_verification_mode())
+    }
+
+    /// Get the JSON pointer for extracting message IDs from metadata_json.
+    ///
+    /// Returns the configured pointer (e.g., "/message_id" for WhatsApp),
+    /// or None if not configured (falls back to user_id).
+    pub fn message_id_json_pointer(&self) -> Option<&str> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.webhook_message_id_json_pointer())
     }
 
     /// Get the webhook secret name from capabilities.
@@ -298,6 +310,13 @@ impl LoadedChannel {
             .as_ref()
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.channel.channel_name()))
+    }
+
+    /// Get the HMAC secret name from capabilities.
+    pub fn hmac_secret_name(&self) -> Option<String> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.webhook_hmac_secret_name().map(|s| s.to_string()))
     }
 }
 

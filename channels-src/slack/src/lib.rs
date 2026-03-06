@@ -306,6 +306,11 @@ impl Guest for SlackChannel {
 
     fn on_status(_update: StatusUpdate) {}
 
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        // Slack doesn't need post-persistence actions
+        Ok(())
+    }
+
     fn on_shutdown() {
         channel_host::log(channel_host::LogLevel::Info, "Slack channel shutting down");
     }

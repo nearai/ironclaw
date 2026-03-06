@@ -476,6 +476,98 @@ impl Guest for WhatsAppChannel {
 
     fn on_status(_update: StatusUpdate) {}
 
+    fn on_message_persisted(metadata_json: String) -> Result<(), String> {
+        channel_host::log(
+            channel_host::LogLevel::Debug,
+            "on_message_persisted callback invoked",
+        );
+
+        // Parse metadata to get message_id and phone_number_id
+        let metadata: WhatsAppMessageMetadata = match serde_json::from_str(&metadata_json) {
+            Ok(m) => m,
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to parse metadata in on_message_persisted: {}", e),
+                );
+                // Don't fail the ACK - just log and return
+                return Ok(());
+            }
+        };
+
+        // Read api_version from workspace (set during on_start), fallback to default
+        let api_version = channel_host::workspace_read("channels/whatsapp/api_version")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "v18.0".to_string());
+
+        // Build WhatsApp mark_as_read API URL
+        let url = format!(
+            "https://graph.facebook.com/{}/{}/messages",
+            api_version, metadata.phone_number_id
+        );
+
+        // Build mark_as_read payload
+        let payload = serde_json::json!({
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": metadata.message_id
+        });
+
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map_err(|e| format!("Failed to serialize mark_as_read payload: {}", e))?;
+
+        // Headers with Bearer token placeholder
+        // Host will inject the actual access token
+        let headers = serde_json::json!({
+            "Content-Type": "application/json",
+            "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
+        });
+
+        channel_host::log(
+            channel_host::LogLevel::Debug,
+            &format!("Calling mark_as_read for message: {}", metadata.message_id),
+        );
+
+        let result = channel_host::http_request(
+            "POST",
+            &url,
+            &headers.to_string(),
+            Some(&payload_bytes),
+            None,
+        );
+
+        match result {
+            Ok(http_response) => {
+                if http_response.status >= 200 && http_response.status < 300 {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!("Marked message {} as read", metadata.message_id),
+                    );
+                    Ok(())
+                } else {
+                    let body_str = String::from_utf8_lossy(&http_response.body);
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!(
+                            "mark_as_read API error: {} - {}",
+                            http_response.status, body_str
+                        ),
+                    );
+                    // Don't fail the ACK - mark_as_read is best-effort
+                    Ok(())
+                }
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("mark_as_read HTTP request failed: {}", e),
+                );
+                // Don't fail the ACK - mark_as_read is best-effort
+                Ok(())
+            }
+        }
+    }
+
     fn on_shutdown() {
         channel_host::log(
             channel_host::LogLevel::Info,
@@ -652,6 +744,11 @@ fn handle_message(
         return;
     }
 
+    // Note: mark_as_read is now handled by the host after DB persistence.
+    // The host will call the WhatsApp API directly after receiving the ACK
+    // from the agent loop. This ensures the webhook returns 200 OK only after
+    // the message is durably stored.
+
     // Build metadata for response routing
     // This is critical - the response handler uses this to know where to send
     let metadata = WhatsAppMessageMetadata {
@@ -680,10 +777,6 @@ fn handle_message(
         ),
     );
 }
-
-// ============================================================================
-// Utilities
-// ============================================================================
 
 // ============================================================================
 // Permission & Pairing
