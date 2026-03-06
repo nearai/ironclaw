@@ -606,6 +606,12 @@ async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    tracing::debug!(
+        "[chat_send_handler] Received message: content={:?}, thread_id={:?}",
+        req.content,
+        req.thread_id
+    );
+
     if !state.chat_rate_limiter.check() {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
@@ -621,6 +627,11 @@ async fn chat_send_handler(
     }
 
     let msg_id = msg.id;
+    tracing::debug!(
+        "[chat_send_handler] Created message id={}, content={:?}",
+        msg_id,
+        req.content
+    );
 
     let tx_guard = state.msg_tx.read().await;
     let tx = tx_guard.as_ref().ok_or((
@@ -628,12 +639,15 @@ async fn chat_send_handler(
         "Channel not started".to_string(),
     ))?;
 
+    tracing::debug!("[chat_send_handler] Sending message through channel");
     tx.send(msg).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Channel closed".to_string(),
         )
     })?;
+
+    tracing::debug!("[chat_send_handler] Message sent successfully, returning 202 ACCEPTED");
 
     Ok((
         StatusCode::ACCEPTED,
@@ -2300,11 +2314,16 @@ async fn gateway_status_handler(
         (None, None, None)
     };
 
+    let restart_enabled = std::env::var("IRONCLAW_IN_DOCKER")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false);
+
     Json(GatewayStatusResponse {
         sse_connections,
         ws_connections,
         total_connections: sse_connections + ws_connections,
         uptime_secs,
+        restart_enabled,
         daily_cost,
         actions_this_hour,
         model_usage,
@@ -2325,6 +2344,7 @@ struct GatewayStatusResponse {
     ws_connections: u64,
     total_connections: u64,
     uptime_secs: u64,
+    restart_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     daily_cost: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

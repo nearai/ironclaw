@@ -950,6 +950,7 @@ async fn setup_wasm_channels(
 
         let secret_name = loaded.webhook_secret_name();
         let sig_key_secret_name = loaded.signature_key_secret_name();
+        let hmac_secret_name = loaded.hmac_secret_name();
 
         let webhook_secret = if let Some(secrets) = secrets_store {
             secrets
@@ -1042,6 +1043,17 @@ async fn setup_wasm_channels(
                     tracing::error!(channel = %channel_name, error = %e, "Invalid signature key in secrets store")
                 }
             }
+        }
+
+        // Register HMAC signing secret if declared in capabilities
+        if let Some(ref hmac_secret_name) = hmac_secret_name
+            && let Some(secrets) = secrets_store
+            && let Ok(secret) = secrets.get_decrypted("default", hmac_secret_name).await
+        {
+            wasm_router
+                .register_hmac_secret(&channel_name, secret.expose())
+                .await;
+            tracing::info!(channel = %channel_name, "Registered HMAC signing secret");
         }
 
         if let Some(secrets) = secrets_store {

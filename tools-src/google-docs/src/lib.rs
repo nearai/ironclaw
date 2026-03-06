@@ -199,7 +199,9 @@ impl exports::near::agent::tool::Guest for GoogleDocsTool {
          bulleted/numbered lists. Also provides a batch_update action for complex multi-step \
          edits executed atomically. Document IDs are the same as Google Drive file IDs, so use \
          the google-drive tool to search for existing documents. Requires a Google OAuth token \
-         with the documents scope."
+         with the documents scope. \
+         To discover all available API operations, use http GET to fetch \
+         <https://www.googleapis.com/discovery/v1/apis/docs/v1/rest> (public, no auth needed)."
             .to_string()
     }
 }
