@@ -1,0 +1,13 @@
+{
+  "model_name": "test-model",
+  "steps": [
+    {
+      "response": {
+        "type": "text",
+        "content": "Hello from fixture file!",
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    }
+  ]
+}

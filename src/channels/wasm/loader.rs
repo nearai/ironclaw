@@ -81,6 +81,7 @@ impl WasmChannelLoader {
                     let cap_bytes = fs::read(cap_path).await?;
                     let cap_file = ChannelCapabilitiesFile::from_bytes(&cap_bytes)
                         .map_err(|e| WasmChannelError::InvalidCapabilities(e.to_string()))?;
+                    cap_file.validate();
 
                     // Debug: log raw capabilities
                     tracing::debug!(
@@ -274,6 +275,13 @@ impl LoadedChannel {
         self.capabilities_file
             .as_ref()
             .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()))
+    }
+
+    /// Get the HMAC-SHA256 signing secret name from capabilities.
+    pub fn hmac_secret_name(&self) -> Option<String> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()))
     }
 
     /// Get the webhook secret name from capabilities.

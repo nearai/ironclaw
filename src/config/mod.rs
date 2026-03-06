@@ -82,6 +82,77 @@ pub struct Config {
 }
 
 impl Config {
+    /// Create a full Config for integration tests without reading env vars.
+    ///
+    /// Requires the `libsql` feature. Sets up:
+    /// - libSQL database at the given path
+    /// - WASM and embeddings disabled
+    /// - Skills enabled with the given directories
+    /// - Heartbeat, routines, sandbox, builder all disabled
+    /// - Safety with injection check off, 100k output limit
+    #[cfg(feature = "libsql")]
+    pub fn for_testing(
+        libsql_path: std::path::PathBuf,
+        skills_dir: std::path::PathBuf,
+        installed_skills_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            database: DatabaseConfig {
+                backend: DatabaseBackend::LibSql,
+                url: secrecy::SecretString::from("unused://test".to_string()),
+                pool_size: 1,
+                ssl_mode: SslMode::Disable,
+                libsql_path: Some(libsql_path),
+                libsql_url: None,
+                libsql_auth_token: None,
+            },
+            llm: LlmConfig::for_testing(),
+            embeddings: EmbeddingsConfig::default(),
+            tunnel: TunnelConfig::default(),
+            channels: ChannelsConfig {
+                cli: CliConfig { enabled: false },
+                http: None,
+                gateway: None,
+                signal: None,
+                wasm_channels_dir: std::path::PathBuf::from("/tmp/ironclaw-test-channels"),
+                wasm_channels_enabled: false,
+                wasm_channel_owner_ids: HashMap::new(),
+            },
+            agent: AgentConfig::for_testing(),
+            safety: SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            },
+            wasm: WasmConfig {
+                enabled: false,
+                ..WasmConfig::default()
+            },
+            secrets: SecretsConfig::default(),
+            builder: BuilderModeConfig {
+                enabled: false,
+                ..BuilderModeConfig::default()
+            },
+            heartbeat: HeartbeatConfig::default(),
+            hygiene: HygieneConfig::default(),
+            routines: RoutineConfig {
+                enabled: false,
+                ..RoutineConfig::default()
+            },
+            sandbox: SandboxModeConfig {
+                enabled: false,
+                ..SandboxModeConfig::default()
+            },
+            claude_code: ClaudeCodeConfig::default(),
+            skills: SkillsConfig {
+                enabled: true,
+                local_dir: skills_dir,
+                installed_dir: installed_skills_dir,
+                ..SkillsConfig::default()
+            },
+            observability: crate::observability::ObservabilityConfig::default(),
+        }
+    }
+
     /// Load configuration from environment variables and the database.
     ///
     /// Priority: env var > TOML config file > DB settings > default.
