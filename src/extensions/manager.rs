@@ -2943,8 +2943,9 @@ impl ExtensionManager {
                             .unwrap_or(false);
                         if !already_provided && !already_stored {
                             use rand::RngCore;
+                            use rand::rngs::OsRng;
                             let mut bytes = vec![0u8; auto_gen.length];
-                            rand::thread_rng().fill_bytes(&mut bytes);
+                            OsRng.fill_bytes(&mut bytes);
                             let hex_value: String =
                                 bytes.iter().map(|b| format!("{b:02x}")).collect();
                             let params = CreateSecretParams::new(&secret_def.name, &hex_value)
