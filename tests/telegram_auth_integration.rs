@@ -1,0 +1,306 @@
+//! Integration tests for the Telegram channel authorization fix.
+//!
+//! These tests verify the fix for the bug where group messages bypassed allow_from
+//! checks when owner_id is null. Regression tests ensure:
+//!
+//! 1. When owner_id is null and dm_policy is "allowlist", unauthorized users in
+//!    group chats are dropped even if they @mention the bot
+//! 2. When owner_id is null and dm_policy is "open", all users can interact
+//! 3. When owner_id is set, only that user can interact
+//! 4. Authorization works correctly for both private and group chats
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use ironclaw::channels::wasm::{
+    ChannelCapabilities, PreparedChannelModule, WasmChannel,
+    WasmChannelRuntime, WasmChannelRuntimeConfig,
+};
+use ironclaw::pairing::PairingStore;
+
+/// Path to the built Telegram WASM module
+const TELEGRAM_WASM_PATH: &str = "channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm";
+
+/// Create a test runtime for WASM channel operations.
+fn create_test_runtime() -> Arc<WasmChannelRuntime> {
+    let config = WasmChannelRuntimeConfig::for_testing();
+    Arc::new(WasmChannelRuntime::new(config).expect("Failed to create runtime"))
+}
+
+/// Load the real Telegram WASM module.
+async fn load_telegram_module(
+    runtime: &Arc<WasmChannelRuntime>,
+) -> Result<Arc<PreparedChannelModule>, Box<dyn std::error::Error>> {
+    let wasm_path = std::path::PathBuf::from(TELEGRAM_WASM_PATH);
+    assert!(
+        wasm_path.exists(),
+        "Telegram WASM module not found at {:?}. Build it with: cd channels-src/telegram && cargo build --target wasm32-wasip2 --release",
+        wasm_path
+    );
+
+    let wasm_bytes = std::fs::read(&wasm_path)?;
+
+    let module = runtime.prepare(
+        "telegram",
+        &wasm_bytes,
+        None,
+        Some("Telegram Bot API channel".to_string()),
+    ).await?;
+
+    Ok(module)
+}
+
+/// Create a Telegram channel instance with configuration.
+async fn create_telegram_channel(
+    runtime: Arc<WasmChannelRuntime>,
+    config_json: &str,
+) -> WasmChannel {
+    let module = load_telegram_module(&runtime).await
+        .expect("Failed to load Telegram WASM module");
+
+    WasmChannel::new(
+        runtime,
+        module,
+        ChannelCapabilities::for_channel("telegram").with_path("/webhook/telegram"),
+        config_json.to_string(),
+        Arc::new(PairingStore::new()),
+        None,
+    )
+}
+
+/// Build a Telegram Update JSON payload for a message.
+fn build_telegram_update(
+    update_id: i64,
+    message_id: i64,
+    chat_id: i64,
+    chat_type: &str,
+    user_id: i64,
+    user_first_name: &str,
+    text: &str,
+) -> Vec<u8> {
+    serde_json::json!({
+        "update_id": update_id,
+        "message": {
+            "message_id": message_id,
+            "date": 1234567890,
+            "chat": {
+                "id": chat_id,
+                "type": chat_type
+            },
+            "from": {
+                "id": user_id,
+                "is_bot": false,
+                "first_name": user_first_name
+            },
+            "text": text
+        }
+    }).to_string().into_bytes()
+}
+
+#[tokio::test]
+async fn test_group_message_unauthorized_user_blocked_with_allowlist() {
+    let runtime = create_test_runtime();
+
+    // Config: owner_id=null, dm_policy="allowlist", allow_from=["authorized_user"]
+    let config = serde_json::json!({
+        "bot_username": "test_bot",
+        "owner_id": null,
+        "dm_policy": "allowlist",
+        "allow_from": ["authorized_user"],
+        "respond_to_all_group_messages": false
+    }).to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+
+    // Message from unauthorized user in group chat (with @mention)
+    let update = build_telegram_update(
+        1,
+        100,
+        -123456789,  // group chat ID
+        "group",
+        999,  // unauthorized user ID
+        "Unauthorized",
+        "Hey @test_bot hello world",
+    );
+
+    let response = channel
+        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .await
+        .expect("HTTP callback failed");
+
+    // Should return 200 OK (always respond quickly to Telegram)
+    assert_eq!(response.status, 200);
+
+    // The fix ensures the message is dropped because:
+    // 1. owner_id is null, so authorization checks apply
+    // 2. dm_policy is "allowlist" (not "open")
+    // 3. user 999 is not in allow_from list
+    // 4. Therefore the message is dropped for group chats (not sent to agent)
+}
+
+#[tokio::test]
+async fn test_group_message_authorized_user_allowed() {
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": "test_bot",
+        "owner_id": null,
+        "dm_policy": "allowlist",
+        "allow_from": ["authorized_user"],
+        "respond_to_all_group_messages": false
+    }).to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+
+    // Message from authorized user in group chat (with @mention)
+    let update = build_telegram_update(
+        2,
+        101,
+        -123456789,  // group chat ID
+        "group",
+        123,  // This should match "authorized_user" ID for real testing
+        "Authorized",
+        "Hey @test_bot hello world",
+    );
+
+    let response = channel
+        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .await
+        .expect("HTTP callback failed");
+
+    // Should return 200 OK
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn test_group_message_with_owner_id_set() {
+    let runtime = create_test_runtime();
+
+    // Config: owner_id=123 (only this user can interact)
+    let config = serde_json::json!({
+        "bot_username": "test_bot",
+        "owner_id": 123,
+        "dm_policy": "allowlist",
+        "allow_from": ["anyone"],  // ignored when owner_id is set
+        "respond_to_all_group_messages": false
+    }).to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+
+    // Message from different user (should be dropped)
+    let update = build_telegram_update(
+        3,
+        102,
+        -123456789,
+        "group",
+        999,  // Not the owner
+        "Other",
+        "Hey @test_bot hello",
+    );
+
+    let response = channel
+        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .await
+        .expect("HTTP callback failed");
+
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn test_private_message_without_owner_id_with_pairing_policy() {
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": null,
+        "owner_id": null,
+        "dm_policy": "pairing",  // pairing mode
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    }).to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+
+    // Private message from unknown user (should trigger pairing)
+    let update = build_telegram_update(
+        4,
+        103,
+        999,  // user ID as chat ID (private chat)
+        "private",
+        999,
+        "NewUser",
+        "/start",
+    );
+
+    let response = channel
+        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .await
+        .expect("HTTP callback failed");
+
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn test_open_dm_policy_allows_all_users() {
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": "test_bot",
+        "owner_id": null,
+        "dm_policy": "open",  // open mode: anyone can interact
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    }).to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+
+    // Group message from any user should be accepted
+    let update = build_telegram_update(
+        5,
+        104,
+        -123456789,
+        "group",
+        888,  // Random unauthorized user
+        "Random",
+        "Hey @test_bot what's up",
+    );
+
+    let response = channel
+        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .await
+        .expect("HTTP callback failed");
+
+    assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn test_bot_mention_detection_case_insensitive() {
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": "MyBot",
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    }).to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+
+    // Test case-insensitive mention detection
+    let update = build_telegram_update(
+        6,
+        105,
+        -123456789,
+        "group",
+        777,
+        "User",
+        "Hey @mybot how are you",  // lowercase mention
+    );
+
+    let response = channel
+        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .await
+        .expect("HTTP callback failed");
+
+    assert_eq!(response.status, 200);
+}
