@@ -26,9 +26,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           profile: minimal
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM channels (for integration tests)
+        run: ./scripts/build-wasm-extensions.sh --channels
       - name: Run Tests
         run: cargo test ${{ matrix.flags }} -- --nocapture
 
