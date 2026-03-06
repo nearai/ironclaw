@@ -800,7 +800,7 @@ mod tests {
             handle.await.expect("task should not panic");
         }
     }
-  
+
     #[tokio::test]
     async fn test_tool_definitions_sorted_alphabetically() {
         // Create tools with names that would NOT be alphabetical if inserted in this order.
