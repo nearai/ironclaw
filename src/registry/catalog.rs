@@ -47,6 +47,9 @@ pub enum RegistryError {
         actual_sha256: String,
     },
 
+    #[error("Missing SHA256 checksum for '{name}' artifact. Use --build to build from source.")]
+    MissingChecksum { name: String },
+
     #[error(
         "Source fallback unavailable for '{name}' after artifact install failed. Retry artifact download or run from a repository checkout."
     )]
