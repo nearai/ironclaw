@@ -2397,6 +2397,7 @@ impl ExtensionManager {
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
+        let hmac_secret_name = loaded.hmac_secret_name();
 
         // Get webhook secret from secrets store
         let webhook_secret = self
@@ -2477,6 +2478,21 @@ impl ExtensionManager {
                     }
                     Err(e) => {
                         tracing::error!(channel = %channel_name, error = %e, "Failed to register signature key")
+                    }
+                }
+            }
+
+            // Register HMAC signing secret if declared in capabilities
+            if let Some(hmac_name) = &hmac_secret_name {
+                match self.secrets.get_decrypted(&self.user_id, hmac_name).await {
+                    Ok(secret) => {
+                        wasm_channel_router
+                            .register_hmac_secret(&channel_name, secret.expose())
+                            .await;
+                        tracing::info!(channel = %channel_name, "Registered HMAC signing secret for hot-activated channel");
+                    }
+                    Err(e) => {
+                        tracing::warn!(channel = %channel_name, error = %e, "HMAC secret not found");
                     }
                 }
             }
@@ -2645,6 +2661,34 @@ impl ExtensionManager {
                 }
                 Err(e) => {
                     tracing::error!(channel = %name, error = %e, "Failed to refresh signature key")
+                }
+            }
+        }
+
+        // Also refresh HMAC signing secret in the router
+        let hmac_secret_name_opt = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .ok()
+                    .and_then(|f| f.hmac_secret_name().map(|s| s.to_string())),
+                Err(_) => None,
+            }
+        };
+        if let Some(ref hmac_secret_name) = hmac_secret_name_opt {
+            match self
+                .secrets
+                .get_decrypted(&self.user_id, hmac_secret_name)
+                .await
+            {
+                Ok(secret) => {
+                    router.register_hmac_secret(name, secret.expose()).await;
+                    tracing::info!(channel = %name, "Refreshed HMAC signing secret");
+                }
+                Err(e) => {
+                    tracing::warn!(channel = %name, error = %e, "HMAC secret not found");
                 }
             }
         }

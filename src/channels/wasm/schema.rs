@@ -154,6 +154,18 @@ impl ChannelCapabilitiesFile {
             .and_then(|w| w.signature_key_secret_name.as_deref())
     }
 
+    /// Get the HMAC-SHA256 signing secret name for this channel.
+    ///
+    /// Returns the secret name declared in `webhook.hmac_secret_name`,
+    /// used to look up the HMAC signing secret in the secrets store (Slack-style).
+    pub fn hmac_secret_name(&self) -> Option<&str> {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .and_then(|w| w.hmac_secret_name.as_deref())
+    }
+
     /// Get the webhook secret name for this channel.
     ///
     /// Returns the configured secret name or defaults to "{channel_name}_webhook_secret".
@@ -278,6 +290,10 @@ pub struct WebhookSchema {
     /// for signature verification (e.g., Discord interaction verification).
     #[serde(default)]
     pub signature_key_secret_name: Option<String>,
+
+    /// Secret name in secrets store for HMAC-SHA256 signing (Slack-style).
+    #[serde(default)]
+    pub hmac_secret_name: Option<String>,
 }
 
 /// Setup configuration schema.
