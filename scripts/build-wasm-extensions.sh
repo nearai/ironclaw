@@ -32,8 +32,8 @@ build_extension() {
     local source_dir
     local crate_name
 
-    source_dir=$(python3 -c "import sys,json; print(json.load(sys.stdin)['source']['dir'])" < "$manifest_path")
-    crate_name=$(python3 -c "import sys,json; print(json.load(sys.stdin)['source']['crate_name'])" < "$manifest_path")
+    source_dir=$(jq -r '.source.dir' "$manifest_path")
+    crate_name=$(jq -r '.source.crate_name' "$manifest_path")
     local name
     name=$(basename "$manifest_path" .json)
 

@@ -40,6 +40,21 @@ impl WasiView for TestStoreData {
     }
 }
 
+/// Extension kind from the registry manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionKind {
+    Tool,
+    Channel,
+}
+
+/// A discovered WASM extension from the registry.
+struct DiscoveredExtension {
+    name: String,
+    source_dir: PathBuf,
+    crate_name: String,
+    kind: ExtensionKind,
+}
+
 /// Search paths for WASM artifacts produced by cargo-component.
 fn find_wasm_artifact(source_dir: &Path, crate_name: &str) -> Option<PathBuf> {
     let artifact_name = crate_name.replace('-', "_");
@@ -70,8 +85,8 @@ fn find_wasm_artifact(source_dir: &Path, crate_name: &str) -> Option<PathBuf> {
     }
 
     // Common shared target location (~/.cargo/shared-target)
-    if let Ok(home) = std::env::var("HOME") {
-        let shared = PathBuf::from(home).join(".cargo/shared-target");
+    if let Some(home) = dirs::home_dir() {
+        let shared = home.join(".cargo/shared-target");
         if shared.exists() {
             for target_triple in &["wasm32-wasip2", "wasm32-wasip1", "wasm32-wasi"] {
                 let candidate = shared
@@ -89,8 +104,7 @@ fn find_wasm_artifact(source_dir: &Path, crate_name: &str) -> Option<PathBuf> {
 }
 
 /// Parse registry manifests to discover all WASM extensions.
-/// Returns (name, source_dir, crate_name) tuples.
-fn discover_extensions() -> Vec<(String, PathBuf, String)> {
+fn discover_extensions() -> Vec<DiscoveredExtension> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut extensions = Vec::new();
 
@@ -100,10 +114,8 @@ fn discover_extensions() -> Vec<(String, PathBuf, String)> {
             continue;
         }
 
-        for entry in std::fs::read_dir(&registry_dir)
-            .expect("failed to read registry dir")
-            .flatten()
-        {
+        for entry in std::fs::read_dir(&registry_dir).expect("failed to read registry dir") {
+            let entry = entry.expect("failed to read directory entry");
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -114,6 +126,11 @@ fn discover_extensions() -> Vec<(String, PathBuf, String)> {
                 serde_json::from_str(&content).expect("failed to parse manifest");
 
             let name = manifest["name"].as_str().unwrap_or("unknown").to_string();
+            let kind = match manifest["kind"].as_str() {
+                Some("tool") => ExtensionKind::Tool,
+                Some("channel") => ExtensionKind::Channel,
+                _ => continue,
+            };
             let source_dir = manifest["source"]["dir"]
                 .as_str()
                 .map(|d| repo_root.join(d));
@@ -124,7 +141,12 @@ fn discover_extensions() -> Vec<(String, PathBuf, String)> {
             if let (Some(source_dir), Some(crate_name)) = (source_dir, crate_name)
                 && source_dir.exists()
             {
-                extensions.push((name, source_dir, crate_name));
+                extensions.push(DiscoveredExtension {
+                    name,
+                    source_dir,
+                    crate_name,
+                    kind,
+                });
             }
         }
     }
@@ -140,8 +162,9 @@ fn compile_component(
         .map_err(|e| format!("compilation failed: {e}"))
 }
 
-/// Stub the shared tool host functions on a linker instance builder.
-fn stub_tool_host_functions(
+/// Stub host functions shared between tool and channel interfaces:
+/// log, now-millis, workspace-read, http-request, secret-exists.
+fn stub_shared_host_functions(
     host: &mut wasmtime::component::LinkerInstance<'_, TestStoreData>,
 ) -> Result<(), String> {
     host.func_new("log", |_ctx, _args, _results| Ok(()))
@@ -166,14 +189,6 @@ fn stub_tool_host_functions(
         Ok(())
     })
     .map_err(|e| format!("stub 'http-request': {e}"))?;
-
-    host.func_new("tool-invoke", |_ctx, _args, results| {
-        results[0] = wasmtime::component::Val::Result(Err(Some(Box::new(
-            wasmtime::component::Val::String("stub".into()),
-        ))));
-        Ok(())
-    })
-    .map_err(|e| format!("stub 'tool-invoke': {e}"))?;
 
     host.func_new("secret-exists", |_ctx, _args, results| {
         results[0] = wasmtime::component::Val::Bool(false);
@@ -204,7 +219,17 @@ fn instantiate_tool_component(
         let mut host = root
             .instance("near:agent/host")
             .map_err(|e| format!("failed to create host instance: {e}"))?;
-        stub_tool_host_functions(&mut host)?;
+
+        stub_shared_host_functions(&mut host)?;
+
+        // tool-invoke is only in the tool host interface, not channel-host
+        host.func_new("tool-invoke", |_ctx, _args, results| {
+            results[0] = wasmtime::component::Val::Result(Err(Some(Box::new(
+                wasmtime::component::Val::String("stub".into()),
+            ))));
+            Ok(())
+        })
+        .map_err(|e| format!("stub 'tool-invoke': {e}"))?;
     }
 
     let mut store = Store::new(engine, TestStoreData::new());
@@ -234,8 +259,7 @@ fn instantiate_channel_component(
             .instance("near:agent/channel-host")
             .map_err(|e| format!("failed to create channel-host instance: {e}"))?;
 
-        // Shared tool host functions
-        stub_tool_host_functions(&mut host)?;
+        stub_shared_host_functions(&mut host)?;
 
         // Channel-specific host functions
         host.func_new("emit-message", |_ctx, _args, _results| Ok(()))
@@ -290,12 +314,11 @@ fn create_engine() -> wasmtime::Engine {
 #[test]
 fn wit_compat_tool_components_compile_and_instantiate() {
     let extensions = discover_extensions();
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let engine = create_engine();
 
     let tool_extensions: Vec<_> = extensions
         .iter()
-        .filter(|(_, source_dir, _)| source_dir.starts_with(repo_root.join("tools-src")))
+        .filter(|ext| ext.kind == ExtensionKind::Tool)
         .collect();
 
     if tool_extensions.is_empty() {
@@ -306,19 +329,20 @@ fn wit_compat_tool_components_compile_and_instantiate() {
     let mut found_any = false;
     let mut failures: Vec<String> = Vec::new();
 
-    for (name, source_dir, crate_name) in &tool_extensions {
-        let wasm_path = match find_wasm_artifact(source_dir, crate_name) {
+    for ext in &tool_extensions {
+        let wasm_path = match find_wasm_artifact(&ext.source_dir, &ext.crate_name) {
             Some(p) => p,
             None => {
                 eprintln!(
-                    "  SKIP {name}: no built WASM artifact (run ./scripts/build-wasm-extensions.sh)"
+                    "  SKIP {}: no built WASM artifact (run ./scripts/build-wasm-extensions.sh)",
+                    ext.name
                 );
                 continue;
             }
         };
 
         found_any = true;
-        eprintln!("  TEST {name}: {}", wasm_path.display());
+        eprintln!("  TEST {}: {}", ext.name, wasm_path.display());
 
         let wasm_bytes = std::fs::read(&wasm_path)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", wasm_path.display()));
@@ -326,13 +350,13 @@ fn wit_compat_tool_components_compile_and_instantiate() {
         let component = match compile_component(&engine, &wasm_bytes) {
             Ok(c) => c,
             Err(e) => {
-                failures.push(format!("{name}: {e}"));
+                failures.push(format!("{}: {e}", ext.name));
                 continue;
             }
         };
 
         if let Err(e) = instantiate_tool_component(&engine, &component) {
-            failures.push(format!("{name}: {e}"));
+            failures.push(format!("{}: {e}", ext.name));
         }
     }
 
@@ -351,12 +375,11 @@ fn wit_compat_tool_components_compile_and_instantiate() {
 #[test]
 fn wit_compat_channel_components_compile_and_instantiate() {
     let extensions = discover_extensions();
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let engine = create_engine();
 
     let channel_extensions: Vec<_> = extensions
         .iter()
-        .filter(|(_, source_dir, _)| source_dir.starts_with(repo_root.join("channels-src")))
+        .filter(|ext| ext.kind == ExtensionKind::Channel)
         .collect();
 
     if channel_extensions.is_empty() {
@@ -367,19 +390,20 @@ fn wit_compat_channel_components_compile_and_instantiate() {
     let mut found_any = false;
     let mut failures: Vec<String> = Vec::new();
 
-    for (name, source_dir, crate_name) in &channel_extensions {
-        let wasm_path = match find_wasm_artifact(source_dir, crate_name) {
+    for ext in &channel_extensions {
+        let wasm_path = match find_wasm_artifact(&ext.source_dir, &ext.crate_name) {
             Some(p) => p,
             None => {
                 eprintln!(
-                    "  SKIP {name}: no built WASM artifact (run ./scripts/build-wasm-extensions.sh)"
+                    "  SKIP {}: no built WASM artifact (run ./scripts/build-wasm-extensions.sh)",
+                    ext.name
                 );
                 continue;
             }
         };
 
         found_any = true;
-        eprintln!("  TEST {name}: {}", wasm_path.display());
+        eprintln!("  TEST {}: {}", ext.name, wasm_path.display());
 
         let wasm_bytes = std::fs::read(&wasm_path)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", wasm_path.display()));
@@ -387,13 +411,13 @@ fn wit_compat_channel_components_compile_and_instantiate() {
         let component = match compile_component(&engine, &wasm_bytes) {
             Ok(c) => c,
             Err(e) => {
-                failures.push(format!("{name}: {e}"));
+                failures.push(format!("{}: {e}", ext.name));
                 continue;
             }
         };
 
         if let Err(e) = instantiate_channel_component(&engine, &component) {
-            failures.push(format!("{name}: {e}"));
+            failures.push(format!("{}: {e}", ext.name));
         }
     }
 
@@ -420,7 +444,8 @@ fn wit_compat_all_registry_extensions_have_source() {
             continue;
         }
 
-        for entry in std::fs::read_dir(&registry_dir).unwrap().flatten() {
+        for entry in std::fs::read_dir(&registry_dir).expect("failed to read registry dir") {
+            let entry = entry.expect("failed to read directory entry");
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
