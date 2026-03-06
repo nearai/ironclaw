@@ -376,9 +376,10 @@ impl SessionManager {
     /// NEAR AI Cloud API key entry flow.
     ///
     /// Prompts the user to enter a NEAR AI Cloud API key from
-    /// cloud.near.ai. The key is set as `NEARAI_API_KEY` env var so
-    /// `LlmConfig::resolve()` auto-selects ChatCompletions mode, and
-    /// saved to `~/.ironclaw/.env` for persistence across restarts.
+    /// cloud.near.ai. The key is stored in the thread-safe runtime
+    /// env overlay (via `set_runtime_env`) so `LlmConfig::resolve()`
+    /// auto-selects ChatCompletions mode, and persisted to
+    /// `~/.ironclaw/.env` for survival across restarts.
     /// No session token is saved and no `/v1/users/me` validation is
     /// performed (different auth model).
     async fn api_key_login(&self) -> Result<(), LlmError> {
