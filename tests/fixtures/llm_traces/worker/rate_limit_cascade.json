@@ -36,10 +36,136 @@
     },
     {
       "response": {
-        "type": "text",
-        "content": "The tool is rate limited. I was unable to complete the request due to repeated rate limiting.",
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_3",
+            "name": "stub_rate_limit",
+            "arguments": {}
+          }
+        ],
         "input_tokens": 300,
         "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_4",
+            "name": "stub_rate_limit",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 400,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_5",
+            "name": "stub_rate_limit",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 500,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_6",
+            "name": "stub_rate_limit",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 600,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_7",
+            "name": "stub_rate_limit",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 700,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_8",
+            "name": "stub_rate_limit",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 800,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_9",
+            "name": "stub_rate_limit",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 900,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_10",
+            "name": "stub_rate_limit",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 1000,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rl_11",
+            "name": "stub_rate_limit",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 1100,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I have been rate limited repeatedly and cannot complete this request. The tool is consistently unavailable due to rate limiting after 11 consecutive attempts.",
+        "input_tokens": 1200,
+        "output_tokens": 40
       }
     }
   ]
