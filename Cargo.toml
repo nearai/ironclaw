@@ -56,7 +56,7 @@ rustls = { version = "0.23", optional = true, default-features = false }
 rustls-native-certs = { version = "0.8", optional = true }
 
 # Database - libSQL/Turso (optional embedded database)
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 
 # Error handling
 thiserror = "2"
