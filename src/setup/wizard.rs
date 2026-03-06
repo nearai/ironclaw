@@ -1278,6 +1278,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            fallback: None,
         };
 
         match create_llm_provider(&config, session) {

@@ -369,35 +369,69 @@ pub fn build_provider_chain(
     };
 
     // 3. Failover
-    let llm: Arc<dyn LlmProvider> = if let Some(ref fallback_model) = config.nearai.fallback_model {
-        if fallback_model == &config.nearai.model {
-            tracing::warn!(
-                "fallback_model is the same as primary model, failover may not be effective"
+    //
+    // Builds a provider chain with up to three tiers:
+    //   1. Primary provider (always present)
+    //   2. Same-backend fallback (NEARAI_FALLBACK_MODEL): swap model, keep provider
+    //   3. Cross-provider fallback (FALLBACK_BACKEND + FALLBACK_*): entirely
+    //      different backend for last-resort resilience
+    //
+    // The FailoverProvider tries each in order on retryable errors, with
+    // per-provider cooldown so degraded providers are skipped.
+    let llm: Arc<dyn LlmProvider> = {
+        let mut providers: Vec<Arc<dyn LlmProvider>> = vec![llm];
+
+        // (a) Same-backend fallback: different model, same base_url/api_key
+        if let Some(ref fallback_model) = config.nearai.fallback_model {
+            if fallback_model == &config.nearai.model {
+                tracing::warn!(
+                    "fallback_model is the same as primary model, failover may not be effective"
+                );
+            }
+            let mut fb_config = config.nearai.clone();
+            fb_config.model = fallback_model.clone();
+            let fb = create_llm_provider_with_config(&fb_config, session.clone())?;
+            tracing::info!(
+                primary = %providers[0].model_name(),
+                same_backend_fallback = %fb.model_name(),
+                "Same-backend LLM failover enabled"
             );
+            let fb: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+                Arc::new(RetryProvider::new(fb, retry_config.clone()))
+            } else {
+                fb
+            };
+            providers.push(fb);
         }
-        let mut fallback_config = config.nearai.clone();
-        fallback_config.model = fallback_model.clone();
-        let fallback = create_llm_provider_with_config(&fallback_config, session.clone())?;
-        tracing::info!(
-            primary = %llm.model_name(),
-            fallback = %fallback.model_name(),
-            "LLM failover enabled"
-        );
-        let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
-            Arc::new(RetryProvider::new(fallback, retry_config.clone()))
+
+        // (b) Cross-provider fallback: entirely different backend
+        if let Some(ref fallback_config) = config.fallback {
+            let fb = create_llm_provider(fallback_config, session.clone())?;
+            tracing::info!(
+                primary = %providers[0].model_name(),
+                cross_provider_fallback = %fb.model_name(),
+                fallback_backend = %fallback_config.backend,
+                "Cross-provider LLM failover enabled"
+            );
+            let fb: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+                Arc::new(RetryProvider::new(fb, retry_config.clone()))
+            } else {
+                fb
+            };
+            providers.push(fb);
+        }
+
+        if providers.len() > 1 {
+            let cooldown_config = CooldownConfig {
+                cooldown_duration: std::time::Duration::from_secs(
+                    config.nearai.failover_cooldown_secs,
+                ),
+                failure_threshold: config.nearai.failover_cooldown_threshold,
+            };
+            Arc::new(FailoverProvider::with_cooldown(providers, cooldown_config)?)
         } else {
-            fallback
-        };
-        let cooldown_config = CooldownConfig {
-            cooldown_duration: std::time::Duration::from_secs(config.nearai.failover_cooldown_secs),
-            failure_threshold: config.nearai.failover_cooldown_threshold,
-        };
-        Arc::new(FailoverProvider::with_cooldown(
-            vec![llm, fallback],
-            cooldown_config,
-        )?)
-    } else {
-        llm
+            providers.into_iter().next().unwrap()
+        }
     };
 
     // 4. Circuit breaker
@@ -489,6 +523,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            fallback: None,
         }
     }
 
