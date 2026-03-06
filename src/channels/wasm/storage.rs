@@ -38,7 +38,7 @@ pub struct StoredWasmChannel {
 /// Full channel data including binary.
 #[derive(Debug)]
 pub struct StoredWasmChannelWithBinary {
-    pub tool: StoredWasmChannel,
+    pub channel: StoredWasmChannel,
     pub wasm_binary: Vec<u8>,
     pub binary_hash: Vec<u8>,
 }
@@ -122,7 +122,7 @@ impl WasmChannelStore for PostgresWasmChannelStore {
         &self,
         params: StoreChannelParams,
     ) -> Result<StoredWasmChannel, WasmChannelStoreError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
@@ -132,16 +132,21 @@ impl WasmChannelStore for PostgresWasmChannelStore {
         let id = Uuid::new_v4();
         let now = Utc::now();
 
-        // Delete any existing version for this (user_id, name) — upgrade-in-place
-        client
-            .execute(
-                "DELETE FROM wasm_channels WHERE user_id = $1 AND name = $2",
-                &[&params.user_id, &params.name],
-            )
+        // Wrap delete + insert in a transaction for atomicity
+        let tx = client
+            .transaction()
             .await
             .map_err(|e| WasmChannelStoreError::Database(e.to_string()))?;
 
-        let row = client
+        // Delete any existing version for this (user_id, name) — upgrade-in-place
+        tx.execute(
+            "DELETE FROM wasm_channels WHERE user_id = $1 AND name = $2",
+            &[&params.user_id, &params.name],
+        )
+        .await
+        .map_err(|e| WasmChannelStoreError::Database(e.to_string()))?;
+
+        let row = tx
             .query_one(
                 r#"
                 INSERT INTO wasm_channels (
@@ -168,7 +173,13 @@ impl WasmChannelStore for PostgresWasmChannelStore {
             .await
             .map_err(|e| WasmChannelStoreError::Database(e.to_string()))?;
 
-        pg_row_to_channel(&row)
+        let channel = pg_row_to_channel(&row)?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WasmChannelStoreError::Database(e.to_string()))?;
+
+        Ok(channel)
     }
 
     async fn get(
@@ -254,7 +265,7 @@ impl WasmChannelStore for PostgresWasmChannelStore {
                 };
 
                 Ok(StoredWasmChannelWithBinary {
-                    tool: channel,
+                    channel,
                     wasm_binary,
                     binary_hash,
                 })
@@ -509,7 +520,7 @@ impl WasmChannelStore for LibSqlWasmChannelStore {
                 let channel = libsql_row_to_channel_with_offset(&row)?;
 
                 Ok(StoredWasmChannelWithBinary {
-                    tool: channel,
+                    channel,
                     wasm_binary,
                     binary_hash,
                 })

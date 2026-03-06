@@ -25,7 +25,13 @@ fi
 BASE_BRANCH="${GITHUB_BASE_REF:-main}"
 echo "Base branch: $BASE_BRANCH"
 
-CHANGED_FILES=$(git diff --name-only "origin/${BASE_BRANCH}...HEAD" 2>/dev/null || true)
+# Ensure the base branch ref is available
+if ! git rev-parse "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
+    echo "Fetching origin/${BASE_BRANCH}..."
+    git fetch origin "$BASE_BRANCH" --depth=1
+fi
+
+CHANGED_FILES=$(git diff --name-only "origin/${BASE_BRANCH}...HEAD")
 
 if [[ -z "$CHANGED_FILES" ]]; then
     echo "No changed files detected. Nothing to check."

@@ -515,8 +515,8 @@ impl Tool for ExtensionInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Show detailed information about an installed extension, including version, \
-         WIT version, status, and install time."
+        "Show detailed information about an installed extension, including version \
+         and WIT version compatibility."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -641,6 +641,18 @@ mod tests {
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::UnlessAutoApproved
         );
+    }
+
+    #[test]
+    fn test_extension_info_schema() {
+        let tool = ExtensionInfoTool {
+            manager: test_manager_stub(),
+        };
+        assert_eq!(tool.name(), "extension_info");
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"].get("name").is_some());
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("name")));
     }
 
     /// Create a stub manager for schema tests (these don't call execute).

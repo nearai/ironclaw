@@ -96,7 +96,7 @@ impl WasmChannelLoader {
                         cap_file.wit_version.as_deref(),
                         crate::tools::wasm::WIT_CHANNEL_VERSION,
                     )
-                    .map_err(|e| WasmChannelError::Config(e.to_string()))?;
+                    .map_err(|e| WasmChannelError::IncompatibleWitVersion(e.to_string()))?;
 
                     let caps = cap_file.to_capabilities();
 

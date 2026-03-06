@@ -637,7 +637,7 @@ impl ExtensionManager {
         }
     }
 
-    /// Get detailed info about an installed extension (version, wit_version, status).
+    /// Get detailed info about an installed extension (version, wit_version, host compatibility).
     pub async fn extension_info(&self, name: &str) -> Result<serde_json::Value, ExtensionError> {
         Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;

@@ -282,7 +282,7 @@ impl PostgresWasmToolStore {
 #[async_trait]
 impl WasmToolStore for PostgresWasmToolStore {
     async fn store(&self, params: StoreToolParams) -> Result<StoredWasmTool, WasmStorageError> {
-        let client = self
+        let mut client = self
             .pool
             .get()
             .await
@@ -292,16 +292,21 @@ impl WasmToolStore for PostgresWasmToolStore {
         let id = Uuid::new_v4();
         let now = Utc::now();
 
-        // Delete any existing version for this (user_id, name) — upgrade-in-place
-        client
-            .execute(
-                "DELETE FROM wasm_tools WHERE user_id = $1 AND name = $2",
-                &[&params.user_id, &params.name],
-            )
+        // Wrap delete + insert in a transaction for atomicity
+        let tx = client
+            .transaction()
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?;
 
-        let row = client
+        // Delete any existing version for this (user_id, name) — upgrade-in-place
+        tx.execute(
+            "DELETE FROM wasm_tools WHERE user_id = $1 AND name = $2",
+            &[&params.user_id, &params.name],
+        )
+        .await
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        let row = tx
             .query_one(
                 r#"
                 INSERT INTO wasm_tools (
@@ -330,7 +335,13 @@ impl WasmToolStore for PostgresWasmToolStore {
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?;
 
-        row_to_tool(&row)
+        let tool = row_to_tool(&row)?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        Ok(tool)
     }
 
     async fn get(&self, user_id: &str, name: &str) -> Result<StoredWasmTool, WasmStorageError> {
