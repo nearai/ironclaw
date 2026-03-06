@@ -140,6 +140,15 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// Cross-provider fallback configuration.
+    ///
+    /// When set, a secondary provider on a *different* backend is created and
+    /// wrapped in a `FailoverProvider`. This enables automatic failover across
+    /// completely independent providers (e.g. CLIProxyAPI → OpenRouter).
+    ///
+    /// Configured via `FALLBACK_BACKEND`, `FALLBACK_BASE_URL`, `FALLBACK_API_KEY`,
+    /// `FALLBACK_MODEL`, and optionally `FALLBACK_EXTRA_HEADERS`.
+    pub fallback: Option<Box<LlmConfig>>,
 }
 
 /// NEAR AI configuration.
@@ -226,6 +235,7 @@ impl LlmConfig {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            fallback: None,
         }
     }
 
@@ -392,7 +402,132 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            fallback: Self::resolve_fallback(settings)?,
         })
+    }
+
+    /// Resolve cross-provider fallback from `FALLBACK_*` env vars.
+    ///
+    /// Returns `None` when `FALLBACK_BACKEND` is not set. Independent of the
+    /// same-backend `NEARAI_FALLBACK_MODEL` mechanism.
+    fn resolve_fallback(settings: &Settings) -> Result<Option<Box<LlmConfig>>, ConfigError> {
+        let Some(fb_backend_str) = optional_env("FALLBACK_BACKEND")? else {
+            return Ok(None);
+        };
+
+        let backend: LlmBackend = fb_backend_str.parse().map_err(|e| {
+            ConfigError::InvalidValue {
+                key: "FALLBACK_BACKEND".to_string(),
+                message: e,
+            }
+        })?;
+
+        // All FALLBACK_* providers use the same unified env var names, unlike the
+        // primary path where each backend has its own prefix (OPENAI_*, ANTHROPIC_*, …).
+        let api_key = optional_env("FALLBACK_API_KEY")?;
+        let base_url = optional_env("FALLBACK_BASE_URL")?;
+        let model = Self::resolve_model("FALLBACK_MODEL", settings, "default")?;
+
+        tracing::info!(
+            fallback_backend = %backend,
+            %model,
+            "Cross-provider fallback configured"
+        );
+
+        let (openai, anthropic, ollama, openai_compatible, tinfoil) = match backend {
+            LlmBackend::OpenAi => {
+                let key = api_key.map(SecretString::from).ok_or_else(|| {
+                    ConfigError::MissingRequired {
+                        key: "FALLBACK_API_KEY".into(),
+                        hint: "Required when FALLBACK_BACKEND=openai".into(),
+                    }
+                })?;
+                (
+                    Some(OpenAiDirectConfig { api_key: key, model, base_url }),
+                    None, None, None, None,
+                )
+            }
+            LlmBackend::Anthropic => {
+                let key = api_key.map(SecretString::from).ok_or_else(|| {
+                    ConfigError::MissingRequired {
+                        key: "FALLBACK_API_KEY".into(),
+                        hint: "Required when FALLBACK_BACKEND=anthropic".into(),
+                    }
+                })?;
+                (
+                    None,
+                    Some(AnthropicDirectConfig { api_key: key, model, base_url }),
+                    None, None, None,
+                )
+            }
+            LlmBackend::Ollama => {
+                let url = base_url.unwrap_or_else(|| "http://localhost:11434".into());
+                (None, None, Some(OllamaConfig { base_url: url, model }), None, None)
+            }
+            LlmBackend::OpenAiCompatible => {
+                let url = base_url.ok_or_else(|| ConfigError::MissingRequired {
+                    key: "FALLBACK_BASE_URL".into(),
+                    hint: "Required when FALLBACK_BACKEND=openai_compatible".into(),
+                })?;
+                let extra_headers = optional_env("FALLBACK_EXTRA_HEADERS")?
+                    .map(|val| parse_extra_headers(&val))
+                    .transpose()?
+                    .unwrap_or_default();
+                (
+                    None, None, None,
+                    Some(OpenAiCompatibleConfig {
+                        base_url: url,
+                        api_key: api_key.map(SecretString::from),
+                        model,
+                        extra_headers,
+                    }),
+                    None,
+                )
+            }
+            LlmBackend::Tinfoil => {
+                let key = api_key.map(SecretString::from).ok_or_else(|| {
+                    ConfigError::MissingRequired {
+                        key: "FALLBACK_API_KEY".into(),
+                        hint: "Required when FALLBACK_BACKEND=tinfoil".into(),
+                    }
+                })?;
+                (None, None, None, None, Some(TinfoilConfig { api_key: key, model }))
+            }
+            LlmBackend::NearAi => {
+                tracing::warn!("FALLBACK_BACKEND=nearai is not useful — use NEARAI_FALLBACK_MODEL instead");
+                return Ok(None);
+            }
+        };
+
+        let nearai = NearAiConfig {
+            model: "fallback".to_string(),
+            cheap_model: None,
+            base_url: "https://private.near.ai".to_string(),
+            auth_base_url: "https://private.near.ai".to_string(),
+            session_path: default_session_path(),
+            api_key: None,
+            fallback_model: None,
+            max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+            failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
+            failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
+            smart_routing_cascade: false,
+        };
+
+        Ok(Some(Box::new(LlmConfig {
+            backend,
+            nearai,
+            openai,
+            anthropic,
+            ollama,
+            openai_compatible,
+            tinfoil,
+            fallback: None,
+        })))
     }
 }
 
@@ -639,5 +774,122 @@ mod tests {
             compat.model, "llama3.2",
             "model name with dot must not be truncated"
         );
+    }
+
+    fn clear_fallback_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("FALLBACK_BACKEND");
+            std::env::remove_var("FALLBACK_BASE_URL");
+            std::env::remove_var("FALLBACK_API_KEY");
+            std::env::remove_var("FALLBACK_MODEL");
+            std::env::remove_var("FALLBACK_EXTRA_HEADERS");
+        }
+    }
+
+    #[test]
+    fn no_fallback_when_env_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+        clear_fallback_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://127.0.0.1:8317/v1".to_string()),
+            selected_model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(cfg.fallback.is_none(), "fallback should be None when FALLBACK_BACKEND is unset");
+    }
+
+    #[test]
+    fn cross_provider_fallback_openai_compatible() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+        clear_fallback_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("FALLBACK_BACKEND", "openai_compatible");
+            std::env::set_var("FALLBACK_BASE_URL", "https://openrouter.ai/api/v1");
+            std::env::set_var("FALLBACK_API_KEY", "sk-or-test-key");
+            std::env::set_var("FALLBACK_MODEL", "qwen/qwen3-coder:free");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://127.0.0.1:8317/v1".to_string()),
+            selected_model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+
+        let primary = cfg.openai_compatible.expect("primary should be openai_compatible");
+        assert_eq!(primary.base_url, "http://127.0.0.1:8317/v1");
+        assert_eq!(primary.model, "gpt-5.4");
+
+        let fallback = cfg.fallback.expect("fallback should be configured");
+        assert_eq!(fallback.backend, LlmBackend::OpenAiCompatible);
+        let fb_compat = fallback.openai_compatible.as_ref().expect("fallback compat config");
+        assert_eq!(fb_compat.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(fb_compat.model, "qwen/qwen3-coder:free");
+        assert!(fallback.fallback.is_none(), "nested fallback should be None");
+
+        // Cleanup
+        clear_fallback_env();
+    }
+
+    #[test]
+    fn cross_provider_fallback_missing_base_url_errors() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+        clear_fallback_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("FALLBACK_BACKEND", "openai_compatible");
+            std::env::set_var("FALLBACK_MODEL", "some-model");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://127.0.0.1:8317/v1".to_string()),
+            selected_model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        };
+
+        let result = LlmConfig::resolve(&settings);
+        assert!(result.is_err(), "should fail when FALLBACK_BASE_URL is missing");
+
+        // Cleanup
+        clear_fallback_env();
+    }
+
+    #[test]
+    fn cross_provider_fallback_invalid_backend_errors() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+        clear_fallback_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("FALLBACK_BACKEND", "nonexistent_provider");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://127.0.0.1:8317/v1".to_string()),
+            selected_model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        };
+
+        let result = LlmConfig::resolve(&settings);
+        assert!(result.is_err(), "should fail with invalid FALLBACK_BACKEND value");
+
+        // Cleanup
+        clear_fallback_env();
     }
 }
