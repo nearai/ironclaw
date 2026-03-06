@@ -148,8 +148,12 @@ pub struct PendingApproval {
     pub request_id: Uuid,
     /// Tool name requiring approval.
     pub tool_name: String,
-    /// Tool parameters.
+    /// Tool parameters (original values, used for execution).
     pub parameters: serde_json::Value,
+    /// Redacted tool parameters (sensitive values replaced with `[REDACTED]`).
+    /// Used for display in approval UI, logs, and SSE broadcasts.
+    #[serde(default)]
+    pub display_parameters: serde_json::Value,
     /// Description of what the tool will do.
     pub description: String,
     /// Tool call ID from LLM (for proper context continuation).
@@ -950,6 +954,7 @@ mod tests {
             request_id: Uuid::new_v4(),
             tool_name: "shell".to_string(),
             parameters: serde_json::json!({"command": "rm -rf /"}),
+            display_parameters: serde_json::json!({"command": "rm -rf /"}),
             description: "dangerous command".to_string(),
             tool_call_id: "call_123".to_string(),
             context_messages: vec![ChatMessage::user("do it")],
@@ -974,6 +979,7 @@ mod tests {
             request_id: Uuid::new_v4(),
             tool_name: "http".to_string(),
             parameters: serde_json::json!({}),
+            display_parameters: serde_json::json!({}),
             description: "test".to_string(),
             tool_call_id: "call_456".to_string(),
             context_messages: vec![],
