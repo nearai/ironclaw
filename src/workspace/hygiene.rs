@@ -405,10 +405,22 @@ mod tests {
     #[test]
     fn is_identity_path_case_insensitive() {
         // Verify case-insensitive matching for case-insensitive filesystems
-        assert!(is_identity_path("memory.md"), "lowercase memory.md should be excluded");
-        assert!(is_identity_path("Memory.md"), "mixed case Memory.md should be excluded");
-        assert!(is_identity_path("MEMORY.MD"), "uppercase MEMORY.MD should be excluded");
-        assert!(is_identity_path("identity.md"), "lowercase identity.md should be excluded");
+        assert!(
+            is_identity_path("memory.md"),
+            "lowercase memory.md should be excluded"
+        );
+        assert!(
+            is_identity_path("Memory.md"),
+            "mixed case Memory.md should be excluded"
+        );
+        assert!(
+            is_identity_path("MEMORY.MD"),
+            "uppercase MEMORY.MD should be excluded"
+        );
+        assert!(
+            is_identity_path("identity.md"),
+            "lowercase identity.md should be excluded"
+        );
         assert!(
             is_identity_path("conversations/soul.md"),
             "conversations/soul.md should be excluded"
