@@ -23,6 +23,8 @@ pub struct EmbeddingsConfig {
     pub ollama_base_url: String,
     /// Embedding vector dimension. Inferred from the model name when not set explicitly.
     pub dimension: usize,
+    /// Custom base URL for OpenAI-compatible embedding providers (e.g., OpenRouter).
+    pub openai_base_url: Option<String>,
 }
 
 impl Default for EmbeddingsConfig {
@@ -36,6 +38,7 @@ impl Default for EmbeddingsConfig {
             model,
             ollama_base_url: "http://localhost:11434".to_string(),
             dimension,
+            openai_base_url: None,
         }
     }
 }
@@ -72,6 +75,8 @@ impl EmbeddingsConfig {
         let dimension =
             parse_optional_env("EMBEDDING_DIMENSION", default_dimension_for_model(&model))?;
 
+        let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
+
         let enabled = parse_bool_env("EMBEDDING_ENABLED", settings.embeddings.enabled)?;
 
         Ok(Self {
@@ -81,6 +86,7 @@ impl EmbeddingsConfig {
             model,
             ollama_base_url,
             dimension,
+            openai_base_url,
         })
     }
 
@@ -135,11 +141,17 @@ impl EmbeddingsConfig {
                         self.model,
                         self.dimension,
                     );
-                    Some(Arc::new(crate::workspace::OpenAiEmbeddings::with_model(
+                    let provider = crate::workspace::OpenAiEmbeddings::with_model(
                         api_key,
                         &self.model,
                         self.dimension,
-                    )))
+                    );
+                    let provider = if let Some(ref base_url) = self.openai_base_url {
+                        provider.with_base_url(base_url.clone())
+                    } else {
+                        provider
+                    };
+                    Some(Arc::new(provider))
                 } else {
                     tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
                     None
