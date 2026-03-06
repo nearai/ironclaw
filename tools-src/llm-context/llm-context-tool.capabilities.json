@@ -8,7 +8,6 @@
           "host": "api.search.brave.com",
           "path_prefix": "/res/v1/llm/context",
           "methods": [
-            "GET",
             "POST"
           ]
         }
