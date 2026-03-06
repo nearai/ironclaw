@@ -277,6 +277,13 @@ impl LoadedChannel {
             .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()))
     }
 
+    /// Get the HMAC-SHA256 signing secret name from capabilities.
+    pub fn hmac_secret_name(&self) -> Option<String> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()))
+    }
+
     /// Get the webhook secret name from capabilities.
     pub fn webhook_secret_name(&self) -> String {
         self.capabilities_file

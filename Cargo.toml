@@ -128,6 +128,7 @@ wasmparser = "0.220"  # WASM binary parsing for validation
 # Cryptography for secrets management
 aes-gcm = "0.10"
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
 blake3 = "1"
 rand = "0.8"

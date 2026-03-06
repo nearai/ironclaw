@@ -127,7 +127,9 @@ impl Agent {
         let mut context_messages = initial_messages;
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        let mut job_ctx =
+            JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        job_ctx.http_interceptor = self.deps.http_interceptor.clone();
 
         let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination
@@ -686,6 +688,15 @@ impl Agent {
                                     deferred_auth = Some(instructions);
                                 }
 
+                                // Stash full output so subsequent tools can reference it
+                                if let Ok(ref output) = tool_result {
+                                    job_ctx
+                                        .tool_output_stash
+                                        .write()
+                                        .await
+                                        .insert(tc.id.clone(), output.clone());
+                                }
+
                                 // Sanitize and add tool result to context
                                 let result_content = match tool_result {
                                     Ok(output) => {
@@ -1066,6 +1077,7 @@ mod tests {
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
+            http_interceptor: None,
         };
 
         Agent::new(
@@ -1805,6 +1817,7 @@ mod tests {
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
+            http_interceptor: None,
         };
 
         Agent::new(
@@ -1917,6 +1930,7 @@ mod tests {
                 hooks: Arc::new(HookRegistry::new()),
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
                 sse_tx: None,
+                http_interceptor: None,
             };
 
             Agent::new(

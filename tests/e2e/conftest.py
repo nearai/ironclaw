@@ -99,11 +99,12 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server):
         "ONBOARD_COMPLETED": "true",
     }
     # Forward LLVM coverage instrumentation env vars when present
-    # (allows cargo-llvm-cov to collect profraw data from E2E runs)
-    for key in ("LLVM_PROFILE_FILE", "CARGO_LLVM_COV", "CARGO_LLVM_COV_SHOW_ENV",
-                "CARGO_LLVM_COV_TARGET_DIR"):
-        val = os.environ.get(key)
-        if val is not None:
+    # (allows cargo-llvm-cov to collect profraw data from E2E runs).
+    # Use prefix matching to stay resilient to cargo-llvm-cov changes.
+    COV_ENV_PREFIXES = ("CARGO_LLVM_COV", "LLVM_")
+    COV_ENV_EXTRAS = ("CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
+    for key, val in os.environ.items():
+        if key.startswith(COV_ENV_PREFIXES) or key in COV_ENV_EXTRAS:
             env[key] = val
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
