@@ -223,6 +223,7 @@ impl LlmConfig {
             .or_else(|| registry.find("openai_compatible"));
 
         let (
+            canonical_id,
             protocol,
             api_key_env,
             base_url_env,
@@ -234,6 +235,7 @@ impl LlmConfig {
             base_url_required,
         ) = if let Some(def) = def {
             (
+                def.id.as_str(),
                 def.protocol,
                 def.api_key_env.as_deref(),
                 def.base_url_env.as_deref(),
@@ -247,6 +249,7 @@ impl LlmConfig {
         } else {
             // Absolute fallback: treat as generic openai_completions
             (
+                backend,
                 ProviderProtocol::OpenAiCompletions,
                 Some("LLM_API_KEY"),
                 Some("LLM_BASE_URL"),
@@ -319,7 +322,7 @@ impl LlmConfig {
 
         Ok(RegistryProviderConfig {
             protocol,
-            provider_id: backend.to_string(),
+            provider_id: canonical_id.to_string(),
             api_key,
             base_url,
             model,

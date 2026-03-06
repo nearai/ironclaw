@@ -289,17 +289,21 @@ pub async fn inject_llm_keys_from_secrets(
     // so new providers added to providers.json get injection automatically.
     let mut mappings: Vec<(&str, &str)> = vec![("llm_nearai_api_key", "NEARAI_API_KEY")];
 
-    // Dynamically discover secret->env mappings from the provider registry
+    // Dynamically discover secret->env mappings from the provider registry.
+    // Uses selectable() which deduplicates user overrides correctly.
     let registry = crate::llm::ProviderRegistry::load();
-    let mut dynamic_mappings: Vec<(String, String)> = Vec::new();
-    for def in registry.all() {
-        if let Some(ref setup) = def.setup
-            && let Some(secret_name) = setup.secret_name()
-            && let Some(ref env_var) = def.api_key_env
-        {
-            dynamic_mappings.push((secret_name.to_string(), env_var.clone()));
-        }
-    }
+    let dynamic_mappings: Vec<(String, String)> = registry
+        .selectable()
+        .iter()
+        .filter_map(|def| {
+            def.api_key_env.as_ref().and_then(|env_var| {
+                def.setup
+                    .as_ref()
+                    .and_then(|s| s.secret_name())
+                    .map(|secret_name| (secret_name.to_string(), env_var.clone()))
+            })
+        })
+        .collect();
     for (secret, env_var) in &dynamic_mappings {
         mappings.push((secret, env_var));
     }

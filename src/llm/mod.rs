@@ -150,6 +150,9 @@ fn create_openai_compat_from_registry(
         reason: format!("Failed to create OpenAI-compatible client: {e}"),
     })?;
 
+    // Use CompletionsClient (Chat Completions API) instead of the default
+    // Client (Responses API). The Responses API path in rig-core handles
+    // tool results differently, which breaks IronClaw's tool call flow.
     let client = client.completions_api();
     let model = client.completion_model(&config.model);
 

@@ -892,8 +892,13 @@ impl SetupWizard {
                 let env_var = def.api_key_env.as_deref().unwrap_or("LLM_API_KEY");
                 let url = key_url.as_deref().unwrap_or("the provider's website");
 
-                // If the provider has a fixed base URL, store it for backward compat
-                if let Some(ref base_url) = def.default_base_url {
+                // Only store base URL for providers that resolve through
+                // LLM_BASE_URL (openai_compatible, openrouter). Other providers
+                // like groq/nvidia have their own base_url_env and don't need
+                // this backward-compat setting.
+                if def.base_url_env.as_deref() == Some("LLM_BASE_URL")
+                    && let Some(ref base_url) = def.default_base_url
+                {
                     self.settings.openai_compatible_base_url = Some(base_url.clone());
                 }
 

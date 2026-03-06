@@ -239,12 +239,17 @@ impl ProviderRegistry {
         for def in &self.providers {
             seen.insert(def.id.as_str(), def);
         }
-        // Preserve order of first appearance
+        // Preserve order of first appearance, but use the last (overridden)
+        // definition for each ID. A user override that adds `setup` to a
+        // provider that previously lacked it will be included correctly.
         let mut result = Vec::new();
         let mut emitted = std::collections::HashSet::new();
         for def in &self.providers {
-            if emitted.insert(def.id.as_str()) && def.setup.is_some() {
-                result.push(seen[def.id.as_str()]);
+            if emitted.insert(def.id.as_str()) {
+                let final_def = seen[def.id.as_str()];
+                if final_def.setup.is_some() {
+                    result.push(final_def);
+                }
             }
         }
         result
