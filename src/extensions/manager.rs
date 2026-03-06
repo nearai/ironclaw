@@ -2603,19 +2603,30 @@ impl ExtensionManager {
             }
         };
 
-        // Also refresh the webhook secret in the router
-        // Load capabilities file to get the correct secret name (may be overridden)
-        let webhook_secret_name = {
-            let cap_path = self
-                .wasm_channels_dir
-                .join(format!("{}.capabilities.json", name));
-            match tokio::fs::read(&cap_path).await {
-                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
-                    .map(|f| f.webhook_secret_name())
-                    .unwrap_or_else(|_| format!("{}_webhook_secret", name)),
-                Err(_) => format!("{}_webhook_secret", name),
-            }
+        // Load capabilities file once to extract all secret names
+        let cap_path = self
+            .wasm_channels_dir
+            .join(format!("{}.capabilities.json", name));
+        let capabilities_file = match tokio::fs::read(&cap_path).await {
+            Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes).ok(),
+            Err(_) => None,
         };
+
+        // Extract all secret names from the capabilities file
+        let webhook_secret_name = capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_name())
+            .unwrap_or_else(|| format!("{}_webhook_secret", name));
+
+        let sig_key_secret_name = capabilities_file
+            .as_ref()
+            .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()));
+
+        let hmac_secret_name = capabilities_file
+            .as_ref()
+            .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
+
+        // Refresh webhook secret
         if let Ok(secret) = self
             .secrets
             .get_decrypted(&self.user_id, &webhook_secret_name)
@@ -2634,18 +2645,7 @@ impl ExtensionManager {
             existing_channel.update_config(config_updates).await;
         }
 
-        // Also refresh signature key in the router
-        let sig_key_secret_name = {
-            let cap_path = self
-                .wasm_channels_dir
-                .join(format!("{}.capabilities.json", name));
-            match tokio::fs::read(&cap_path).await {
-                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
-                    .ok()
-                    .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string())),
-                Err(_) => None,
-            }
-        };
+        // Refresh signature key
         if let Some(ref sig_key_name) = sig_key_secret_name
             && let Ok(key_secret) = self
                 .secrets
@@ -2665,22 +2665,11 @@ impl ExtensionManager {
             }
         }
 
-        // Also refresh HMAC signing secret in the router
-        let hmac_secret_name_opt = {
-            let cap_path = self
-                .wasm_channels_dir
-                .join(format!("{}.capabilities.json", name));
-            match tokio::fs::read(&cap_path).await {
-                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
-                    .ok()
-                    .and_then(|f| f.hmac_secret_name().map(|s| s.to_string())),
-                Err(_) => None,
-            }
-        };
-        if let Some(ref hmac_secret_name) = hmac_secret_name_opt {
+        // Refresh HMAC signing secret
+        if let Some(ref hmac_secret_name_ref) = hmac_secret_name {
             match self
                 .secrets
-                .get_decrypted(&self.user_id, hmac_secret_name)
+                .get_decrypted(&self.user_id, hmac_secret_name_ref)
                 .await
             {
                 Ok(secret) => {
