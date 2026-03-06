@@ -37,21 +37,20 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Verify the document was persisted via workspace.
-        if let Some(ws) = rig.workspace() {
-            let doc = ws
-                .read("context/architecture.md")
-                .await
-                .expect("architecture.md should exist");
-            assert!(
-                doc.content.contains("Payment Service"),
-                "Document should contain 'Payment Service'"
-            );
-            assert!(
-                doc.content.len() > 1000,
-                "Document should be long (>1000 chars), got {}",
-                doc.content.len()
-            );
-        }
+        let ws = rig.workspace().expect("workspace must be available");
+        let doc = ws
+            .read("context/architecture.md")
+            .await
+            .expect("architecture.md should exist");
+        assert!(
+            doc.content.contains("Payment Service"),
+            "Document should contain 'Payment Service'"
+        );
+        assert!(
+            doc.content.len() > 1000,
+            "Document should be long (>1000 chars), got {}",
+            doc.content.len()
+        );
 
         rig.shutdown();
     }
@@ -80,14 +79,13 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Verify all three documents were written.
-        if let Some(ws) = rig.workspace() {
-            let frontend = ws.read("context/frontend.md").await;
-            let backend = ws.read("context/backend.md").await;
-            let devops = ws.read("context/devops.md").await;
-            assert!(frontend.is_ok(), "frontend.md should exist");
-            assert!(backend.is_ok(), "backend.md should exist");
-            assert!(devops.is_ok(), "devops.md should exist");
-        }
+        let ws = rig.workspace().expect("workspace must be available");
+        let frontend = ws.read("context/frontend.md").await;
+        let backend = ws.read("context/backend.md").await;
+        let devops = ws.read("context/devops.md").await;
+        assert!(frontend.is_ok(), "frontend.md should exist");
+        assert!(backend.is_ok(), "backend.md should exist");
+        assert!(devops.is_ok(), "devops.md should exist");
 
         rig.shutdown();
     }
@@ -191,17 +189,16 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Verify the document has the updated content.
-        if let Some(ws) = rig.workspace() {
-            let doc = ws
-                .read("context/lifecycle.md")
-                .await
-                .expect("lifecycle.md should exist");
-            assert!(
-                doc.content.contains("Version 2"),
-                "Document should contain 'Version 2', got: {:?}",
-                doc.content
-            );
-        }
+        let ws = rig.workspace().expect("workspace must be available");
+        let doc = ws
+            .read("context/lifecycle.md")
+            .await
+            .expect("lifecycle.md should exist");
+        assert!(
+            doc.content.contains("Version 2"),
+            "Document should contain 'Version 2', got: {:?}",
+            doc.content
+        );
 
         // memory_write and memory_read should each be called twice.
         let started = rig.tool_calls_started();
@@ -242,19 +239,18 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Verify the TraceLlm captured requests include a system message.
-        if let Some(trace_llm) = rig.trace_llm() {
-            let captured = trace_llm.captured_requests();
-            assert!(
-                !captured.is_empty(),
-                "Expected at least one captured request"
-            );
-            // The first request should have a system message with identity content.
-            let first_request = &captured[0];
-            let has_system = first_request
-                .iter()
-                .any(|msg| matches!(msg.role, ironclaw::llm::Role::System));
-            assert!(has_system, "Expected a system message in the first request");
-        }
+        let trace_llm = rig.trace_llm().expect("trace_llm must be available");
+        let captured = trace_llm.captured_requests();
+        assert!(
+            !captured.is_empty(),
+            "Expected at least one captured request"
+        );
+        // The first request should have a system message with identity content.
+        let first_request = &captured[0];
+        let has_system = first_request
+            .iter()
+            .any(|msg| matches!(msg.role, ironclaw::llm::Role::System));
+        assert!(has_system, "Expected a system message in the first request");
 
         rig.shutdown();
     }

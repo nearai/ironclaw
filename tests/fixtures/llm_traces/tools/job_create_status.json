@@ -1,7 +1,8 @@
 {
   "model_name": "test-job-create-status",
   "expects": {
-    "tools_used": ["create_job", "job_status"],
+    "tools_used": ["create_job", "list_jobs"],
+    "all_tools_succeeded": true,
     "min_responses": 1
   },
   "steps": [
@@ -15,8 +16,7 @@
             "name": "create_job",
             "arguments": {
               "title": "Test analysis job",
-              "description": "Analyze the test data and summarize findings.",
-              "wait": false
+              "description": "Analyze the test data and summarize findings."
             }
           }
         ],
@@ -29,9 +29,9 @@
         "type": "tool_calls",
         "tool_calls": [
           {
-            "id": "call_js_1",
-            "name": "job_status",
-            "arguments": { "job_id": "latest" }
+            "id": "call_lj_1",
+            "name": "list_jobs",
+            "arguments": {}
           }
         ],
         "input_tokens": 200,
@@ -41,7 +41,7 @@
     {
       "response": {
         "type": "text",
-        "content": "Created a new job titled 'Test analysis job'. Its current status shows it's been registered in the system.",
+        "content": "Created a new job titled 'Test analysis job'. The job list confirms it's registered in the system.",
         "input_tokens": 300,
         "output_tokens": 25
       }

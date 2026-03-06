@@ -162,6 +162,10 @@ mod tests {
             .filter(|(name, _)| name == "deploy_to_production")
             .collect();
         assert!(
+            !deploy_results.is_empty(),
+            "deploy_to_production should have been attempted: {completed:?}"
+        );
+        assert!(
             deploy_results.iter().all(|(_, ok)| !ok),
             "deploy_to_production should fail: {deploy_results:?}"
         );

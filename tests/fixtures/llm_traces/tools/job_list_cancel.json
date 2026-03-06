@@ -14,8 +14,7 @@
             "name": "create_job",
             "arguments": {
               "title": "Cancellable job",
-              "description": "A job that will be cancelled.",
-              "wait": false
+              "description": "A job that will be listed."
             }
           }
         ],
@@ -54,7 +53,7 @@
     {
       "response": {
         "type": "text",
-        "content": "Created a job, verified it appeared in the list, then cancelled it successfully.",
+        "content": "Created a job and verified it in the list. The cancel attempt failed because the job ID could not be resolved.",
         "input_tokens": 400,
         "output_tokens": 20
       }
