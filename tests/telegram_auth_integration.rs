@@ -19,13 +19,20 @@ use ironclaw::channels::wasm::{
 use ironclaw::pairing::PairingStore;
 
 /// Skip the test if the Telegram WASM module hasn't been built.
+/// In CI (detected via the `CI` env var), panic instead of skipping so a
+/// broken WASM build step doesn't silently produce green tests.
 macro_rules! require_telegram_wasm {
     () => {
         if !telegram_wasm_path().exists() {
-            eprintln!(
-                "Skipping test: Telegram WASM module not built. \
-                 Build with: cd channels-src/telegram && cargo build --target wasm32-wasip2 --release"
+            let msg = format!(
+                "Telegram WASM module not found at {:?}. \
+                 Build with: cd channels-src/telegram && cargo build --target wasm32-wasip2 --release",
+                telegram_wasm_path()
             );
+            if std::env::var("CI").is_ok() {
+                panic!("{}", msg);
+            }
+            eprintln!("Skipping test: {}", msg);
             return;
         }
     };
@@ -47,7 +54,9 @@ fn create_test_runtime() -> Arc<WasmChannelRuntime> {
 async fn load_telegram_module(
     runtime: &Arc<WasmChannelRuntime>,
 ) -> Result<Arc<PreparedChannelModule>, Box<dyn std::error::Error>> {
-    let wasm_bytes = std::fs::read(telegram_wasm_path())?;
+    let path = telegram_wasm_path();
+    let wasm_bytes = std::fs::read(&path)
+        .map_err(|e| format!("Failed to read WASM module at {}: {}", path.display(), e))?;
 
     let module = runtime
         .prepare(
