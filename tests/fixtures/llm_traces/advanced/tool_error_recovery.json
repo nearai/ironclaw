@@ -1,0 +1,48 @@
+{
+  "model_name": "advanced-tool-error-recovery",
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "write" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_bad_write",
+            "name": "write_file",
+            "arguments": {
+              "path": "/nonexistent_root_path/deeply/nested/impossible.txt",
+              "content": "this will fail"
+            }
+          }
+        ],
+        "input_tokens": 80,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_good_write",
+            "name": "write_file",
+            "arguments": {
+              "path": "/tmp/ironclaw_recovery_test.txt",
+              "content": "recovered successfully"
+            }
+          }
+        ],
+        "input_tokens": 140,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The first write failed because the directory didn't exist, but I recovered and wrote the file to /tmp/ironclaw_recovery_test.txt successfully.",
+        "input_tokens": 200,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

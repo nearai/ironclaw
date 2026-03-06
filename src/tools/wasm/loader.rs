@@ -128,10 +128,25 @@ impl WasmToolLoader {
                     let cap_bytes = fs::read(cap_path).await?;
                     let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
                         .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
+                    cap_file.validate(name);
                     let caps = cap_file.to_capabilities();
                     let oauth = resolve_oauth_refresh_config(&cap_file);
                     let desc = cap_file.description.clone();
-                    let params = cap_file.parameters.clone();
+                    // Validate parameters schema before accepting it.
+                    let params = cap_file.parameters.clone().and_then(|p| {
+                        let errors = crate::tools::validate_tool_schema(&p, name);
+                        if errors.is_empty() {
+                            Some(p)
+                        } else {
+                            tracing::warn!(
+                                tool = name,
+                                ?errors,
+                                "Invalid parameters schema in capabilities.json, \
+                                 using permissive fallback"
+                            );
+                            None
+                        }
+                    });
                     if desc.is_none() {
                         tracing::warn!(
                             tool = name,
@@ -140,12 +155,12 @@ impl WasmToolLoader {
                              tool will use generic fallback description"
                         );
                     }
-                    if params.is_none() {
+                    if params.is_none() && cap_file.parameters.is_none() {
                         tracing::warn!(
                             tool = name,
                             path = %cap_path.display(),
                             "Capabilities file missing \"parameters\" field; \
-                             tool will accept any JSON input (permissive fallback)"
+                             tool will accept any JSON object (permissive fallback)"
                         );
                     }
                     (caps, oauth, desc, params)
@@ -160,7 +175,7 @@ impl WasmToolLoader {
                 tracing::warn!(
                     tool = name,
                     "No capabilities file for WASM tool; \
-                     tool will use generic fallback description and accept any JSON input"
+                     tool will use generic fallback description and accept any JSON object"
                 );
                 (Capabilities::default(), None, None, None)
             };

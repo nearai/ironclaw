@@ -242,7 +242,7 @@ async fn handle_client_message(
         } => {
             if let Some(ref ext_mgr) = state.extension_manager {
                 match ext_mgr.auth(&extension_name, Some(&token)).await {
-                    Ok(result) if result.status == "authenticated" => {
+                    Ok(result) if result.is_authenticated() => {
                         let msg = match ext_mgr.activate(&extension_name).await {
                             Ok(r) => format!(
                                 "{} authenticated ({} tools loaded)",
@@ -268,9 +268,9 @@ async fn handle_client_message(
                             .sse
                             .broadcast(crate::channels::web::types::SseEvent::AuthRequired {
                                 extension_name,
-                                instructions: result.instructions,
-                                auth_url: result.auth_url,
-                                setup_url: result.setup_url,
+                                instructions: result.instructions().map(String::from),
+                                auth_url: result.auth_url().map(String::from),
+                                setup_url: result.setup_url().map(String::from),
                             });
                     }
                     Err(e) => {
