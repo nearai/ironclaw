@@ -560,13 +560,8 @@ impl TestRigBuilder {
             hooks: components.hooks,
             cost_guard: components.cost_guard,
             sse_tx: None,
-            http_interceptor: if http_exchanges.is_empty() {
-                None
-            } else {
-                Some(Arc::new(
-                    ironclaw::llm::recording::ReplayingHttpInterceptor::new(http_exchanges),
-                ))
-            },
+            http_interceptor: None,
+            wasm_router: None,
         };
 
         // 7. Create TestChannel and ChannelManager.

@@ -533,6 +533,78 @@ impl ExtensionManager {
         Ok(extensions)
     }
 
+    /// Get detailed info about an installed extension (version, wit_version, host compatibility).
+    pub async fn extension_info(&self, name: &str) -> Result<serde_json::Value, ExtensionError> {
+        Self::validate_extension_name(name)?;
+        let kind = self.determine_installed_kind(name).await?;
+
+        match kind {
+            ExtensionKind::WasmTool => {
+                let cap_path = self
+                    .wasm_tools_dir
+                    .join(format!("{}.capabilities.json", name));
+                let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
+
+                let mut info = serde_json::json!({
+                    "name": name,
+                    "kind": "wasm_tool",
+                    "installed": wasm_path.exists(),
+                });
+
+                if cap_path.exists()
+                    && let Ok(bytes) = tokio::fs::read(&cap_path).await
+                    && let Ok(cap) = crate::tools::wasm::CapabilitiesFile::from_bytes(&bytes)
+                {
+                    info["version"] =
+                        serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
+                    info["wit_version"] =
+                        serde_json::json!(cap.wit_version.unwrap_or_else(|| "unknown".into()));
+                }
+
+                info["host_wit_version"] = serde_json::json!(crate::tools::wasm::WIT_TOOL_VERSION);
+
+                Ok(info)
+            }
+            ExtensionKind::WasmChannel => {
+                let cap_path = self
+                    .wasm_channels_dir
+                    .join(format!("{}.capabilities.json", name));
+                let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
+
+                let mut info = serde_json::json!({
+                    "name": name,
+                    "kind": "wasm_channel",
+                    "installed": wasm_path.exists(),
+                    "active": self.active_channel_names.read().await.contains(name),
+                });
+
+                if cap_path.exists()
+                    && let Ok(bytes) = tokio::fs::read(&cap_path).await
+                    && let Ok(cap) =
+                        crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                {
+                    info["version"] =
+                        serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
+                    info["wit_version"] =
+                        serde_json::json!(cap.wit_version.unwrap_or_else(|| "unknown".into()));
+                }
+
+                info["host_wit_version"] =
+                    serde_json::json!(crate::tools::wasm::WIT_CHANNEL_VERSION);
+
+                Ok(info)
+            }
+            ExtensionKind::McpServer => {
+                let info = serde_json::json!({
+                    "name": name,
+                    "kind": "mcp_server",
+                    "connected": self.mcp_clients.read().await.contains_key(name),
+                });
+                Ok(info)
+            }
+        }
+    }
+
     /// Remove an installed extension.
     pub async fn remove(&self, name: &str) -> Result<String, ExtensionError> {
         Self::validate_extension_name(name)?;
@@ -633,78 +705,6 @@ impl ExtensionManager {
                     "Removed channel '{}'. Restart IronClaw for the change to take effect.",
                     name
                 ))
-            }
-        }
-    }
-
-    /// Get detailed info about an installed extension (version, wit_version, host compatibility).
-    pub async fn extension_info(&self, name: &str) -> Result<serde_json::Value, ExtensionError> {
-        Self::validate_extension_name(name)?;
-        let kind = self.determine_installed_kind(name).await?;
-
-        match kind {
-            ExtensionKind::WasmTool => {
-                let cap_path = self
-                    .wasm_tools_dir
-                    .join(format!("{}.capabilities.json", name));
-                let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
-
-                let mut info = serde_json::json!({
-                    "name": name,
-                    "kind": "wasm_tool",
-                    "installed": wasm_path.exists(),
-                });
-
-                if cap_path.exists()
-                    && let Ok(bytes) = tokio::fs::read(&cap_path).await
-                    && let Ok(cap) = crate::tools::wasm::CapabilitiesFile::from_bytes(&bytes)
-                {
-                    info["version"] =
-                        serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
-                    info["wit_version"] =
-                        serde_json::json!(cap.wit_version.unwrap_or_else(|| "unknown".into()));
-                }
-
-                info["host_wit_version"] = serde_json::json!(crate::tools::wasm::WIT_TOOL_VERSION);
-
-                Ok(info)
-            }
-            ExtensionKind::WasmChannel => {
-                let cap_path = self
-                    .wasm_channels_dir
-                    .join(format!("{}.capabilities.json", name));
-                let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
-
-                let mut info = serde_json::json!({
-                    "name": name,
-                    "kind": "wasm_channel",
-                    "installed": wasm_path.exists(),
-                    "active": self.active_channel_names.read().await.contains(name),
-                });
-
-                if cap_path.exists()
-                    && let Ok(bytes) = tokio::fs::read(&cap_path).await
-                    && let Ok(cap) =
-                        crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
-                {
-                    info["version"] =
-                        serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
-                    info["wit_version"] =
-                        serde_json::json!(cap.wit_version.unwrap_or_else(|| "unknown".into()));
-                }
-
-                info["host_wit_version"] =
-                    serde_json::json!(crate::tools::wasm::WIT_CHANNEL_VERSION);
-
-                Ok(info)
-            }
-            ExtensionKind::McpServer => {
-                let info = serde_json::json!({
-                    "name": name,
-                    "kind": "mcp_server",
-                    "connected": self.mcp_clients.read().await.contains_key(name),
-                });
-                Ok(info)
             }
         }
     }
@@ -2468,6 +2468,8 @@ impl ExtensionManager {
         let channel_name = loaded.name().to_string();
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let verification_mode = loaded.verification_mode().map(|s| s.to_string());
+        let message_id_json_pointer = loaded.message_id_json_pointer().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
 
@@ -2530,6 +2532,8 @@ impl ExtensionManager {
                     endpoints,
                     webhook_secret,
                     secret_header,
+                    verification_mode,
+                    message_id_json_pointer,
                 )
                 .await;
             tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
@@ -2554,19 +2558,13 @@ impl ExtensionManager {
                 }
             }
 
-            // Register HMAC signing secret if declared in capabilities
-            if let Some(hmac_name) = &hmac_secret_name {
-                match self.secrets.get_decrypted(&self.user_id, hmac_name).await {
-                    Ok(secret) => {
-                        wasm_channel_router
-                            .register_hmac_secret(&channel_name, secret.expose())
-                            .await;
-                        tracing::info!(channel = %channel_name, "Registered HMAC signing secret for hot-activated channel");
-                    }
-                    Err(e) => {
-                        tracing::warn!(channel = %channel_name, error = %e, "HMAC secret not found");
-                    }
-                }
+            // Register HMAC secret if declared in capabilities (WhatsApp/Slack style)
+            if let Some(ref hmac_name) = hmac_secret_name
+                && let Ok(hmac_secret) = self.secrets.get_decrypted(&self.user_id, hmac_name).await
+            {
+                wasm_channel_router
+                    .register_hmac_secret(&channel_name, hmac_secret.expose().to_string())
+                    .await;
             }
         }
 
@@ -2675,30 +2673,19 @@ impl ExtensionManager {
             }
         };
 
-        // Load capabilities file once to extract all secret names
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-        let capabilities_file = match tokio::fs::read(&cap_path).await {
-            Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes).ok(),
-            Err(_) => None,
+        // Also refresh the webhook secret in the router
+        // Load capabilities file to get the correct secret name (may be overridden)
+        let webhook_secret_name = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .map(|f| f.webhook_secret_name())
+                    .unwrap_or_else(|_| format!("{}_webhook_secret", name)),
+                Err(_) => format!("{}_webhook_secret", name),
+            }
         };
-
-        // Extract all secret names from the capabilities file
-        let webhook_secret_name = capabilities_file
-            .as_ref()
-            .map(|f| f.webhook_secret_name())
-            .unwrap_or_else(|| format!("{}_webhook_secret", name));
-
-        let sig_key_secret_name = capabilities_file
-            .as_ref()
-            .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()));
-
-        let hmac_secret_name = capabilities_file
-            .as_ref()
-            .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
-
-        // Refresh webhook secret
         if let Ok(secret) = self
             .secrets
             .get_decrypted(&self.user_id, &webhook_secret_name)
@@ -2717,7 +2704,18 @@ impl ExtensionManager {
             existing_channel.update_config(config_updates).await;
         }
 
-        // Refresh signature key
+        // Also refresh signature key in the router
+        let sig_key_secret_name = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .ok()
+                    .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string())),
+                Err(_) => None,
+            }
+        };
         if let Some(ref sig_key_name) = sig_key_secret_name
             && let Ok(key_secret) = self
                 .secrets
@@ -2737,21 +2735,24 @@ impl ExtensionManager {
             }
         }
 
-        // Refresh HMAC signing secret
-        if let Some(ref hmac_secret_name_ref) = hmac_secret_name {
-            match self
-                .secrets
-                .get_decrypted(&self.user_id, hmac_secret_name_ref)
-                .await
-            {
-                Ok(secret) => {
-                    router.register_hmac_secret(name, secret.expose()).await;
-                    tracing::info!(channel = %name, "Refreshed HMAC signing secret");
-                }
-                Err(e) => {
-                    tracing::warn!(channel = %name, error = %e, "HMAC secret not found");
-                }
+        // Also refresh HMAC secret in the router (WhatsApp/Slack style)
+        let hmac_secret_name = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .ok()
+                    .and_then(|f| f.webhook_hmac_secret_name().map(|s| s.to_string())),
+                Err(_) => None,
             }
+        };
+        if let Some(ref hmac_name) = hmac_secret_name
+            && let Ok(hmac_secret) = self.secrets.get_decrypted(&self.user_id, hmac_name).await
+        {
+            router
+                .register_hmac_secret(name, hmac_secret.expose().to_string())
+                .await;
         }
 
         // Refresh tunnel_url in case it wasn't set at startup
@@ -3048,9 +3049,8 @@ impl ExtensionManager {
                             .unwrap_or(false);
                         if !already_provided && !already_stored {
                             use rand::RngCore;
-                            use rand::rngs::OsRng;
                             let mut bytes = vec![0u8; auto_gen.length];
-                            OsRng.fill_bytes(&mut bytes);
+                            rand::thread_rng().fill_bytes(&mut bytes);
                             let hex_value: String =
                                 bytes.iter().map(|b| format!("{b:02x}")).collect();
                             let params = CreateSecretParams::new(&secret_def.name, &hex_value)
