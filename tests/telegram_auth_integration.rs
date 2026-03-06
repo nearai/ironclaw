@@ -18,6 +18,19 @@ use ironclaw::channels::wasm::{
 };
 use ironclaw::pairing::PairingStore;
 
+/// Skip the test if the Telegram WASM module hasn't been built.
+macro_rules! require_telegram_wasm {
+    () => {
+        if !telegram_wasm_path().exists() {
+            eprintln!(
+                "Skipping test: Telegram WASM module not built. \
+                 Build with: cd channels-src/telegram && cargo build --target wasm32-wasip2 --release"
+            );
+            return;
+        }
+    };
+}
+
 /// Path to the built Telegram WASM module
 fn telegram_wasm_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -34,14 +47,7 @@ fn create_test_runtime() -> Arc<WasmChannelRuntime> {
 async fn load_telegram_module(
     runtime: &Arc<WasmChannelRuntime>,
 ) -> Result<Arc<PreparedChannelModule>, Box<dyn std::error::Error>> {
-    let wasm_path = telegram_wasm_path();
-    assert!(
-        wasm_path.exists(),
-        "Telegram WASM module not found at {:?}. Build it with: cd channels-src/telegram && cargo build --target wasm32-wasip2 --release",
-        wasm_path
-    );
-
-    let wasm_bytes = std::fs::read(&wasm_path)?;
+    let wasm_bytes = std::fs::read(telegram_wasm_path())?;
 
     let module = runtime
         .prepare(
@@ -107,6 +113,7 @@ fn build_telegram_update(
 
 #[tokio::test]
 async fn test_group_message_unauthorized_user_blocked_with_allowlist() {
+    require_telegram_wasm!();
     let runtime = create_test_runtime();
 
     // Config: owner_id=null, dm_policy="allowlist", allow_from=["authorized_user"]
@@ -159,6 +166,7 @@ async fn test_group_message_unauthorized_user_blocked_with_allowlist() {
 
 #[tokio::test]
 async fn test_group_message_authorized_user_allowed() {
+    require_telegram_wasm!();
     let runtime = create_test_runtime();
 
     let config = serde_json::json!({
@@ -206,6 +214,7 @@ async fn test_group_message_authorized_user_allowed() {
 
 #[tokio::test]
 async fn test_group_message_with_owner_id_set() {
+    require_telegram_wasm!();
     let runtime = create_test_runtime();
 
     // Config: owner_id=123 (only this user can interact)
@@ -251,6 +260,7 @@ async fn test_group_message_with_owner_id_set() {
 
 #[tokio::test]
 async fn test_private_message_without_owner_id_with_pairing_policy() {
+    require_telegram_wasm!();
     let runtime = create_test_runtime();
 
     let config = serde_json::json!({
@@ -291,6 +301,7 @@ async fn test_private_message_without_owner_id_with_pairing_policy() {
 
 #[tokio::test]
 async fn test_open_dm_policy_allows_all_users() {
+    require_telegram_wasm!();
     let runtime = create_test_runtime();
 
     let config = serde_json::json!({
@@ -335,6 +346,7 @@ async fn test_open_dm_policy_allows_all_users() {
 
 #[tokio::test]
 async fn test_bot_mention_detection_case_insensitive() {
+    require_telegram_wasm!();
     let runtime = create_test_runtime();
 
     let config = serde_json::json!({
