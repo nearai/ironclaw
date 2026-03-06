@@ -13,13 +13,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ironclaw::channels::wasm::{
-    ChannelCapabilities, PreparedChannelModule, WasmChannel,
-    WasmChannelRuntime, WasmChannelRuntimeConfig,
+    ChannelCapabilities, PreparedChannelModule, WasmChannel, WasmChannelRuntime,
+    WasmChannelRuntimeConfig,
 };
 use ironclaw::pairing::PairingStore;
 
 /// Path to the built Telegram WASM module
-const TELEGRAM_WASM_PATH: &str = "channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm";
+const TELEGRAM_WASM_PATH: &str =
+    "channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm";
 
 /// Create a test runtime for WASM channel operations.
 fn create_test_runtime() -> Arc<WasmChannelRuntime> {
@@ -40,12 +41,14 @@ async fn load_telegram_module(
 
     let wasm_bytes = std::fs::read(&wasm_path)?;
 
-    let module = runtime.prepare(
-        "telegram",
-        &wasm_bytes,
-        None,
-        Some("Telegram Bot API channel".to_string()),
-    ).await?;
+    let module = runtime
+        .prepare(
+            "telegram",
+            &wasm_bytes,
+            None,
+            Some("Telegram Bot API channel".to_string()),
+        )
+        .await?;
 
     Ok(module)
 }
@@ -55,7 +58,8 @@ async fn create_telegram_channel(
     runtime: Arc<WasmChannelRuntime>,
     config_json: &str,
 ) -> WasmChannel {
-    let module = load_telegram_module(&runtime).await
+    let module = load_telegram_module(&runtime)
+        .await
         .expect("Failed to load Telegram WASM module");
 
     WasmChannel::new(
@@ -94,7 +98,9 @@ fn build_telegram_update(
             },
             "text": text
         }
-    }).to_string().into_bytes()
+    })
+    .to_string()
+    .into_bytes()
 }
 
 #[tokio::test]
@@ -108,7 +114,8 @@ async fn test_group_message_unauthorized_user_blocked_with_allowlist() {
         "dm_policy": "allowlist",
         "allow_from": ["authorized_user"],
         "respond_to_all_group_messages": false
-    }).to_string();
+    })
+    .to_string();
 
     let channel = create_telegram_channel(runtime, &config).await;
 
@@ -116,15 +123,22 @@ async fn test_group_message_unauthorized_user_blocked_with_allowlist() {
     let update = build_telegram_update(
         1,
         100,
-        -123456789,  // group chat ID
+        -123456789, // group chat ID
         "group",
-        999,  // unauthorized user ID
+        999, // unauthorized user ID
         "Unauthorized",
         "Hey @test_bot hello world",
     );
 
     let response = channel
-        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
         .await
         .expect("HTTP callback failed");
 
@@ -148,7 +162,8 @@ async fn test_group_message_authorized_user_allowed() {
         "dm_policy": "allowlist",
         "allow_from": ["authorized_user"],
         "respond_to_all_group_messages": false
-    }).to_string();
+    })
+    .to_string();
 
     let channel = create_telegram_channel(runtime, &config).await;
 
@@ -156,15 +171,22 @@ async fn test_group_message_authorized_user_allowed() {
     let update = build_telegram_update(
         2,
         101,
-        -123456789,  // group chat ID
+        -123456789, // group chat ID
         "group",
-        123,  // This should match "authorized_user" ID for real testing
+        123, // This should match "authorized_user" ID for real testing
         "Authorized",
         "Hey @test_bot hello world",
     );
 
     let response = channel
-        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
         .await
         .expect("HTTP callback failed");
 
@@ -183,7 +205,8 @@ async fn test_group_message_with_owner_id_set() {
         "dm_policy": "allowlist",
         "allow_from": ["anyone"],  // ignored when owner_id is set
         "respond_to_all_group_messages": false
-    }).to_string();
+    })
+    .to_string();
 
     let channel = create_telegram_channel(runtime, &config).await;
 
@@ -193,13 +216,20 @@ async fn test_group_message_with_owner_id_set() {
         102,
         -123456789,
         "group",
-        999,  // Not the owner
+        999, // Not the owner
         "Other",
         "Hey @test_bot hello",
     );
 
     let response = channel
-        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
         .await
         .expect("HTTP callback failed");
 
@@ -216,23 +246,26 @@ async fn test_private_message_without_owner_id_with_pairing_policy() {
         "dm_policy": "pairing",  // pairing mode
         "allow_from": [],
         "respond_to_all_group_messages": false
-    }).to_string();
+    })
+    .to_string();
 
     let channel = create_telegram_channel(runtime, &config).await;
 
     // Private message from unknown user (should trigger pairing)
     let update = build_telegram_update(
-        4,
-        103,
-        999,  // user ID as chat ID (private chat)
-        "private",
-        999,
-        "NewUser",
-        "/start",
+        4, 103, 999, // user ID as chat ID (private chat)
+        "private", 999, "NewUser", "/start",
     );
 
     let response = channel
-        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
         .await
         .expect("HTTP callback failed");
 
@@ -249,7 +282,8 @@ async fn test_open_dm_policy_allows_all_users() {
         "dm_policy": "open",  // open mode: anyone can interact
         "allow_from": [],
         "respond_to_all_group_messages": false
-    }).to_string();
+    })
+    .to_string();
 
     let channel = create_telegram_channel(runtime, &config).await;
 
@@ -259,13 +293,20 @@ async fn test_open_dm_policy_allows_all_users() {
         104,
         -123456789,
         "group",
-        888,  // Random unauthorized user
+        888, // Random unauthorized user
         "Random",
         "Hey @test_bot what's up",
     );
 
     let response = channel
-        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
         .await
         .expect("HTTP callback failed");
 
@@ -282,7 +323,8 @@ async fn test_bot_mention_detection_case_insensitive() {
         "dm_policy": "open",
         "allow_from": [],
         "respond_to_all_group_messages": false
-    }).to_string();
+    })
+    .to_string();
 
     let channel = create_telegram_channel(runtime, &config).await;
 
@@ -294,11 +336,18 @@ async fn test_bot_mention_detection_case_insensitive() {
         "group",
         777,
         "User",
-        "Hey @mybot how are you",  // lowercase mention
+        "Hey @mybot how are you", // lowercase mention
     );
 
     let response = channel
-        .call_on_http_request("POST", "/webhook/telegram", &HashMap::new(), &HashMap::new(), &update, true)
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
         .await
         .expect("HTTP callback failed");
 
