@@ -491,6 +491,9 @@ mod tests {
     fn running_guard_prevents_reentry() {
         let _lock = RUNNING_TESTS.lock().unwrap();
 
+        // Reset the global flag to ensure a clean state
+        RUNNING.store(false, Ordering::SeqCst);
+
         // Simulate acquiring the guard
         assert!(
             RUNNING
