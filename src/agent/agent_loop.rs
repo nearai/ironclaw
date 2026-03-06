@@ -443,6 +443,7 @@ impl Agent {
                         Some(self.scheduler.clone()),
                     ));
 
+
                     // Register routine tools
                     self.deps
                         .tools

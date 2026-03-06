@@ -56,7 +56,7 @@ impl SandboxStore for LibSqlBackend {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
-                FROM agent_jobs WHERE id = ?1 AND source = 'sandbox'
+                FROM agent_jobs WHERE id = ?1
                 "#,
                 params![id.to_string()],
             )
@@ -220,7 +220,7 @@ impl SandboxStore for LibSqlBackend {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
-                FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1
+                FROM agent_jobs WHERE user_id = ?1
                 ORDER BY created_at DESC
                 "#,
                 libsql::params![user_id],
@@ -258,7 +258,7 @@ impl SandboxStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1 GROUP BY status",
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE user_id = ?1 GROUP BY status",
                 libsql::params![user_id],
             )
             .await
@@ -293,7 +293,7 @@ impl SandboxStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT 1 FROM agent_jobs WHERE id = ?1 AND user_id = ?2 AND source = 'sandbox'",
+                "SELECT 1 FROM agent_jobs WHERE id = ?1 AND user_id = ?2",
                 libsql::params![job_id.to_string(), user_id],
             )
             .await

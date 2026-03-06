@@ -748,6 +748,7 @@ pub struct RoutineRunInfo {
     pub status: String,
     pub result_summary: Option<String>,
     pub tokens_used: Option<i32>,
+    pub job_id: Option<Uuid>,
 }
 
 // --- Settings ---

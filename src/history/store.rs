@@ -149,14 +149,16 @@ impl Store {
             r#"
             INSERT INTO agent_jobs (
                 id, conversation_id, title, description, category, status, source,
+                user_id,
                 budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
                 actual_cost, repair_attempts, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title,
                 description = EXCLUDED.description,
                 category = EXCLUDED.category,
                 status = EXCLUDED.status,
+                user_id = EXCLUDED.user_id,
                 estimated_cost = EXCLUDED.estimated_cost,
                 estimated_time_secs = EXCLUDED.estimated_time_secs,
                 actual_cost = EXCLUDED.actual_cost,
@@ -172,6 +174,7 @@ impl Store {
                 &ctx.category,
                 &status,
                 &"direct", // source
+                &ctx.user_id,
                 &ctx.budget,
                 &ctx.budget_token,
                 &ctx.bid_amount,
@@ -574,7 +577,7 @@ impl Store {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
-                FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
+                FROM agent_jobs WHERE id = $1
                 "#,
                 &[&id],
             )
@@ -643,7 +646,7 @@ impl Store {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
-                FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
+                FROM agent_jobs WHERE user_id = $1
                 ORDER BY created_at DESC
                 "#,
                 &[&user_id],
@@ -678,7 +681,7 @@ impl Store {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1 GROUP BY status",
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE user_id = $1 GROUP BY status",
                 &[&user_id],
             )
             .await?;
@@ -710,7 +713,7 @@ impl Store {
         let conn = self.conn().await?;
         let row = conn
             .query_opt(
-                "SELECT 1 FROM agent_jobs WHERE id = $1 AND user_id = $2 AND source = 'sandbox'",
+                "SELECT 1 FROM agent_jobs WHERE id = $1 AND user_id = $2",
                 &[&job_id, &user_id],
             )
             .await?;
