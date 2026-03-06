@@ -1032,11 +1032,14 @@ fn handle_message(message: TelegramMessage) {
                 return;
             }
         }
-    } else if is_private {
-        // No owner_id: apply dm_policy for private chats
+    } else {
+        // No owner_id: apply authorization based on dm_policy and allow_from
+        // This applies to both private and group chats when owner_id is null
         let dm_policy =
             channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
 
+        // For private chats with non-open policy, check allowlist
+        // For group chats with non-open policy, also check allowlist
         if dm_policy != "open" {
             // Build effective allow list: config allow_from + pairing store
             let mut allowed: Vec<String> = channel_host::workspace_read(ALLOW_FROM_PATH)
@@ -1054,8 +1057,8 @@ fn handle_message(message: TelegramMessage) {
                 || username_opt.map_or(false, |u| allowed.contains(&u.to_string()));
 
             if !is_allowed {
-                if dm_policy == "pairing" {
-                    // Upsert pairing request and send reply
+                if is_private && dm_policy == "pairing" {
+                    // Upsert pairing request and send reply (only for private chats)
                     let meta = serde_json::json!({
                         "chat_id": message.chat.id,
                         "user_id": from.id,
@@ -1083,6 +1086,15 @@ fn handle_message(message: TelegramMessage) {
                             );
                         }
                     }
+                } else if !is_private {
+                    // For group chats with non-open dm_policy, just log and drop
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Dropping message from unauthorized user {} in group chat",
+                            from.id
+                        ),
+                    );
                 }
                 return;
             }

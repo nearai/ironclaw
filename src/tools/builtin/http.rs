@@ -1,4 +1,12 @@
 //! HTTP request tool.
+//!
+//! Unified HTTP tool that handles both simple page/API fetches (GET, no auth)
+//! and full API calls (any method, custom headers, credential injection).
+//!
+//! - Plain GET without auth headers/body → no approval needed, follows redirects
+//! - Everything else → requires approval
+//!
+//! Replaces the former `web_fetch` tool which was a separate GET-only tool.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, ToSocketAddrs};
@@ -25,6 +33,16 @@ use crate::tools::builtin::convert_html_to_markdown;
 /// HTTP wrapper uses the same limit for consistency.
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 
+/// Maximum number of redirects to follow for simple GET requests.
+const MAX_REDIRECTS: usize = 3;
+
+/// Descriptive User-Agent so public APIs don't reject bare requests.
+const USER_AGENT: &str = concat!(
+    "IronClaw-Agent/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/nearai/ironclaw)"
+);
+
 /// Tool for making HTTP requests.
 pub struct HttpTool {
     client: Client,
@@ -38,6 +56,7 @@ impl HttpTool {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
+            .user_agent(USER_AGENT)
             .build()
             .expect("Failed to create HTTP client");
 
@@ -201,7 +220,10 @@ impl Tool for HttpTool {
     }
 
     fn description(&self) -> &str {
-        "Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods."
+        "Make HTTP requests. Simple GET requests (no auth, no custom headers) run without \
+         approval and follow redirects — use for fetching weather, public JSON APIs, web pages, \
+         and documentation. Requests with authentication, custom headers, or non-GET methods \
+         (POST, PUT, DELETE, PATCH) require user approval."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -245,7 +267,7 @@ impl Tool for HttpTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -311,7 +333,7 @@ impl Tool for HttpTool {
             let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(host);
             for mapping in &matched {
                 match store
-                    .get_decrypted(&_ctx.user_id, &mapping.secret_name)
+                    .get_decrypted(&ctx.user_id, &mapping.secret_name)
                     .await
                 {
                     Ok(secret) => {
@@ -343,24 +365,132 @@ impl Tool for HttpTool {
             .scan_http_request(parsed_url.as_str(), &headers_vec, body_bytes.as_deref())
             .map_err(|e| ToolError::NotAuthorized(format!("{}", e)))?;
 
-        // Execute request
-        let response = request.send().await.map_err(|e| {
-            if e.is_timeout() {
-                ToolError::Timeout(Duration::from_secs(30))
-            } else {
-                ToolError::ExternalService(e.to_string())
+        // Build the interceptor request descriptor for recording/replay
+        let intercept_req = crate::llm::recording::HttpExchangeRequest {
+            method: method.to_uppercase(),
+            url: parsed_url.to_string(),
+            headers: headers_vec.clone(),
+            body: body_bytes
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).into_owned()),
+        };
+
+        // Check HTTP interceptor (replay mode returns pre-recorded response)
+        if let Some(ref interceptor) = ctx.http_interceptor
+            && let Some(recorded) = interceptor.before_request(&intercept_req).await
+        {
+            let headers: HashMap<String, String> = recorded.headers.iter().cloned().collect();
+            let body: serde_json::Value = serde_json::from_str(&recorded.body)
+                .unwrap_or_else(|_| serde_json::Value::String(recorded.body.clone()));
+            let result = serde_json::json!({
+                "status": recorded.status,
+                "headers": headers,
+                "body": body
+            });
+            return Ok(ToolOutput::success(result, start.elapsed()).with_raw(recorded.body));
+        }
+
+        // Determine if this is a simple GET (eligible for redirect following).
+        let is_simple_get =
+            method.eq_ignore_ascii_case("GET") && headers_vec.is_empty() && body_bytes.is_none();
+
+        // Execute request, optionally following redirects for simple GETs.
+        let response = if is_simple_get {
+            let mut redirects_remaining = MAX_REDIRECTS;
+            loop {
+                let resp = self
+                    .client
+                    .get(parsed_url.clone())
+                    .header(
+                        reqwest::header::ACCEPT,
+                        "text/markdown, text/html;q=0.9, application/json;q=0.9, */*;q=0.8",
+                    )
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        if e.is_timeout() {
+                            ToolError::Timeout(Duration::from_secs(30))
+                        } else {
+                            ToolError::ExternalService(e.to_string())
+                        }
+                    })?;
+
+                let status = resp.status().as_u16();
+                if (300..400).contains(&status) {
+                    if redirects_remaining == 0 {
+                        return Err(ToolError::ExecutionFailed(format!(
+                            "too many redirects (max {})",
+                            MAX_REDIRECTS
+                        )));
+                    }
+
+                    let location = resp
+                        .headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|v| v.to_str().ok())
+                        .ok_or_else(|| {
+                            ToolError::ExecutionFailed(format!(
+                                "redirect (HTTP {}) has no Location header",
+                                status
+                            ))
+                        })?;
+
+                    let next_url_str =
+                        if location.starts_with("http://") || location.starts_with("https://") {
+                            location.to_string()
+                        } else {
+                            parsed_url
+                                .join(location)
+                                .map(|u| u.to_string())
+                                .map_err(|e| {
+                                    ToolError::ExecutionFailed(format!(
+                                        "could not resolve relative redirect '{}': {}",
+                                        location, e
+                                    ))
+                                })?
+                        };
+
+                    // SSRF re-validation on every hop.
+                    parsed_url = validate_url(&next_url_str)?;
+                    let detector = LeakDetector::new();
+                    detector
+                        .scan_http_request(parsed_url.as_str(), &[], None)
+                        .map_err(|e| ToolError::NotAuthorized(e.to_string()))?;
+
+                    redirects_remaining -= 1;
+                    tracing::debug!(
+                        to = %parsed_url,
+                        hops_left = redirects_remaining,
+                        "http tool following redirect"
+                    );
+                    continue;
+                }
+
+                break resp;
             }
-        })?;
+        } else {
+            let resp = request.send().await.map_err(|e| {
+                if e.is_timeout() {
+                    ToolError::Timeout(Duration::from_secs(30))
+                } else {
+                    ToolError::ExternalService(e.to_string())
+                }
+            })?;
+
+            let status = resp.status().as_u16();
+
+            // Block redirects for non-simple requests (potential SSRF)
+            if (300..400).contains(&status) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "request returned redirect (HTTP {}), which is blocked to prevent SSRF",
+                    status
+                )));
+            }
+
+            resp
+        };
 
         let status = response.status().as_u16();
-
-        // Block redirects: the server tried to send us elsewhere (potential SSRF)
-        if (300..400).contains(&status) {
-            return Err(ToolError::NotAuthorized(format!(
-                "request returned redirect (HTTP {}), which is blocked to prevent SSRF",
-                status
-            )));
-        }
 
         let headers: HashMap<String, String> = response
             .headers()
@@ -406,6 +536,24 @@ impl Tool for HttpTool {
         let body_bytes = bytes::Bytes::from(body);
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
+
+        // Record the HTTP exchange if interceptor is present (recording mode)
+        if let Some(ref interceptor) = ctx.http_interceptor {
+            let resp_headers: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            interceptor
+                .after_response(
+                    &intercept_req,
+                    &crate::llm::recording::HttpExchangeResponse {
+                        status,
+                        headers: resp_headers,
+                        body: body_text.clone(),
+                    },
+                )
+                .await;
+        }
 
         #[cfg(feature = "html-to-markdown")]
         let body_text = if is_html_response(&headers) {
@@ -453,6 +601,25 @@ impl Tool for HttpTool {
         {
             return ApprovalRequirement::Always;
         }
+        // 3. Plain GET without headers or body → no approval needed
+        let method = params
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GET");
+        let has_headers = params
+            .get("headers")
+            .map(|h| match h {
+                serde_json::Value::Array(a) => !a.is_empty(),
+                serde_json::Value::Object(o) => !o.is_empty(),
+                _ => false,
+            })
+            .unwrap_or(false);
+        let has_body = params.get("body").is_some();
+
+        if method.eq_ignore_ascii_case("GET") && !has_headers && !has_body {
+            return ApprovalRequirement::Never;
+        }
+
         // Default: outbound HTTP still needs approval unless auto-approved
         ApprovalRequirement::UnlessAutoApproved
     }
@@ -579,11 +746,36 @@ mod tests {
     // ── Approval requirement tests ──────────────────────────────────────
 
     #[test]
-    fn test_no_auth_headers_returns_unless_auto_approved() {
+    fn test_plain_get_returns_never() {
         let tool = HttpTool::new();
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://api.example.com/data"
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
+    }
+
+    #[test]
+    fn test_post_returns_unless_auto_approved() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "POST",
+            "url": "https://api.example.com/data",
+            "body": {"key": "value"}
+        });
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[test]
+    fn test_get_with_headers_returns_unless_auto_approved() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data",
+            "headers": [{"name": "X-Custom", "value": "test"}]
         });
         assert_eq!(
             tool.requires_approval(&params),
@@ -682,30 +874,24 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_headers_return_unless_auto_approved() {
+    fn test_empty_headers_get_returns_never() {
         let tool = HttpTool::new();
 
-        // Empty object
+        // Empty object — still a plain GET
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://example.com",
             "headers": {}
         });
-        assert_eq!(
-            tool.requires_approval(&params),
-            ApprovalRequirement::UnlessAutoApproved
-        );
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
 
-        // Empty array
+        // Empty array — still a plain GET
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://example.com",
             "headers": []
         });
-        assert_eq!(
-            tool.requires_approval(&params),
-            ApprovalRequirement::UnlessAutoApproved
-        );
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
     }
 
     // ── Credential registry approval tests ─────────────────────────────
@@ -740,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_without_credential_mapping_returns_unless_auto_approved() {
+    fn test_host_without_credential_mapping_get_returns_never() {
         use crate::tools::wasm::SharedCredentialRegistry;
 
         let registry = Arc::new(SharedCredentialRegistry::new());
@@ -756,9 +942,18 @@ mod tests {
             ))),
         );
 
+        // Plain GET with no credentials → Never
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://api.example.com/data"
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
+
+        // POST with no credentials → UnlessAutoApproved
+        let params = serde_json::json!({
+            "method": "POST",
+            "url": "https://api.example.com/data",
+            "body": {"key": "value"}
         });
         assert_eq!(
             tool.requires_approval(&params),
@@ -802,5 +997,45 @@ mod tests {
     fn test_extract_host_from_params_missing_url() {
         let params = serde_json::json!({"method": "GET"});
         assert_eq!(extract_host_from_params(&params), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_multi_thread_no_panic() {
+        use crate::secrets::CredentialMapping;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        // Test with credential registry (uses std::sync::RwLock - should be safe)
+        let registry = Arc::new(SharedCredentialRegistry::new());
+        registry.add_mappings(vec![CredentialMapping::bearer("test_key", "api.test.com")]);
+
+        let tool = HttpTool::new().with_credentials(
+            registry,
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    "0123456789abcdef0123456789abcdef".to_string(),
+                ))
+                .unwrap(),
+            ))),
+        );
+
+        // These calls should not panic in multi-thread runtime
+        let params_no_auth = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data"
+        });
+        let _ = tool.requires_approval(&params_no_auth);
+
+        let params_with_cred = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.test.com/v1/models"
+        });
+        let _ = tool.requires_approval(&params_with_cred);
+
+        let params_with_auth = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com",
+            "headers": {"Authorization": "Bearer token"}
+        });
+        let _ = tool.requires_approval(&params_with_auth);
     }
 }

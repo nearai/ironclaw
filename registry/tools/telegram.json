@@ -3,29 +3,36 @@
   "display_name": "Telegram Tool",
   "kind": "tool",
   "version": "0.1.0",
+  "wit_version": "0.2.0",
   "description": "Your agent uses your Telegram account to read and send messages",
-  "keywords": ["messaging", "chat", "telegram", "mtproto"],
-
+  "keywords": [
+    "messaging",
+    "chat",
+    "telegram",
+    "mtproto"
+  ],
   "source": {
     "dir": "tools-src/telegram",
     "capabilities": "telegram-tool.capabilities.json",
     "crate_name": "telegram-tool"
   },
-
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/telegram-mtproto-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "1c3028052f680e2efa7d857d50bcb57dbc171ad197d2527875b9c3cd22f0c830"
     }
   },
-
   "auth_summary": {
     "method": "manual",
     "provider": "Telegram",
-    "secrets": ["telegram_api_id", "telegram_api_hash"],
+    "secrets": [
+      "telegram_api_id",
+      "telegram_api_hash"
+    ],
     "shared_auth": null,
     "setup_url": "https://my.telegram.org/apps"
   },
-
-  "tags": ["messaging"]
+  "tags": [
+    "messaging"
+  ]
 }

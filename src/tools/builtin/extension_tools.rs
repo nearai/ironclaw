@@ -218,7 +218,7 @@ impl Tool for ToolAuthTool {
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
         // Auto-activate after successful auth so tools are available immediately
-        if result.status == "authenticated" {
+        if result.is_authenticated() {
             match self.manager.activate(name).await {
                 Ok(activate_result) => {
                     let output = serde_json::json!({
@@ -324,7 +324,7 @@ impl Tool for ToolActivateTool {
                 // Activation failed due to missing auth; initiate auth flow
                 // so the agent loop can show the auth card.
                 match self.manager.auth(name, None).await {
-                    Ok(auth_result) if auth_result.status == "authenticated" => {
+                    Ok(auth_result) if auth_result.is_authenticated() => {
                         // Auth succeeded (e.g. env var was set); retry activation.
                         let result = self
                             .manager
@@ -496,6 +496,61 @@ impl Tool for ToolRemoveTool {
     }
 }
 
+// ── extension_info ────────────────────────────────────────────────────
+
+pub struct ExtensionInfoTool {
+    manager: Arc<ExtensionManager>,
+}
+
+impl ExtensionInfoTool {
+    pub fn new(manager: Arc<ExtensionManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for ExtensionInfoTool {
+    fn name(&self) -> &str {
+        "extension_info"
+    }
+
+    fn description(&self) -> &str {
+        "Show detailed information about an installed extension, including version \
+         and WIT version compatibility."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Extension name to get info about"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let name = require_str(&params, "name")?;
+
+        let info = self
+            .manager
+            .extension_info(name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        Ok(ToolOutput::success(info, start.elapsed()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +641,18 @@ mod tests {
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::UnlessAutoApproved
         );
+    }
+
+    #[test]
+    fn test_extension_info_schema() {
+        let tool = ExtensionInfoTool {
+            manager: test_manager_stub(),
+        };
+        assert_eq!(tool.name(), "extension_info");
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"].get("name").is_some());
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("name")));
     }
 
     /// Create a stub manager for schema tests (these don't call execute).

@@ -589,8 +589,24 @@ impl WasmToolWrapper {
         Self::add_host_functions(&mut linker)?;
 
         // Instantiate using the generated bindings
-        let instance = SandboxedTool::instantiate(&mut store, &component, &linker)
-            .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+        let instance =
+            SandboxedTool::instantiate(&mut store, &component, &linker).map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("near:agent") || msg.contains("import") {
+                    WasmError::InstantiationFailed(format!(
+                        "{msg}. This usually means the extension was compiled against \
+                         a different WIT version than the host supports. \
+                         Rebuild the extension against the current WIT (host: {}).",
+                        crate::tools::wasm::WIT_TOOL_VERSION
+                    ))
+                } else {
+                    WasmError::InstantiationFailed(msg)
+                }
+            })?;
+
+        // Coerce string-encoded values to their schema-declared types.
+        // LLMs frequently pass numeric values as strings (e.g. "5" instead of 5).
+        let params = coerce_params_to_schema(params, &self.schema);
 
         // Prepare the request
         let params_json = serde_json::to_string(&params)
@@ -652,10 +668,17 @@ impl Tool for WasmToolWrapper {
         // Pre-resolve host credentials from secrets store (async, before blocking task).
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
+        //
+        // BUG FIX: ExtensionManager stores OAuth tokens under user_id "default"
+        // (hardcoded at construction in app.rs), but this was previously looking
+        // them up under ctx.user_id — which could be a Telegram user ID, web
+        // gateway user, etc. — causing credential resolution to silently fail.
+        // Must match the storage key until per-user credential isolation is added.
+        let credential_user_id = "default";
         let host_credentials = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
-            &ctx.user_id,
+            credential_user_id,
             self.oauth_refresh.as_ref(),
         )
         .await;
@@ -1081,6 +1104,61 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
             || (v6.segments()[0] & 0xFFC0) == 0xFE80
         }
     }
+}
+
+/// Coerce parameter values to match their JSON Schema-declared types.
+///
+/// LLMs frequently send numeric values as strings (e.g. `"5"` instead of `5`)
+/// or booleans as strings (`"true"` instead of `true`). This walks the params
+/// object and converts string values where the schema expects a different type.
+fn coerce_params_to_schema(
+    mut params: serde_json::Value,
+    schema: &serde_json::Value,
+) -> serde_json::Value {
+    let properties = schema.get("properties").and_then(|p| p.as_object());
+
+    let properties = match properties {
+        Some(p) => p,
+        None => return params,
+    };
+
+    let obj = match params.as_object_mut() {
+        Some(o) => o,
+        None => return params,
+    };
+
+    for (key, prop_schema) in properties {
+        let declared_type = prop_schema.get("type").and_then(|t| t.as_str());
+        let declared_type = match declared_type {
+            Some(t) => t,
+            None => continue,
+        };
+
+        if let Some(current_value) = obj.get_mut(key)
+            && let Some(s) = current_value.as_str()
+        {
+            if declared_type == "string" {
+                continue;
+            }
+
+            let coerced = match declared_type {
+                "number" => s.parse::<f64>().ok().map(serde_json::Value::from),
+                "integer" => s.parse::<i64>().ok().map(serde_json::Value::from),
+                "boolean" => match s.to_lowercase().as_str() {
+                    "true" => Some(serde_json::json!(true)),
+                    "false" => Some(serde_json::json!(false)),
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            if let Some(new_val) = coerced {
+                *current_value = new_val;
+            }
+        }
+    }
+
+    params
 }
 
 #[cfg(test)]
@@ -1587,5 +1665,84 @@ mod tests {
         // 8.8.8.8 (Google DNS) is public
         let result = super::reject_private_ip("https://8.8.8.8/dns-query");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_coerce_params_string_to_number() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "number" },
+                "name": { "type": "string" }
+            }
+        });
+        let params = serde_json::json!({"count": "5", "name": "test"});
+        let result = super::coerce_params_to_schema(params, &schema);
+        assert_eq!(result["count"], serde_json::json!(5.0));
+        assert_eq!(result["name"], serde_json::json!("test"));
+    }
+
+    #[test]
+    fn test_coerce_params_string_to_integer() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer" }
+            }
+        });
+        let params = serde_json::json!({"limit": "10"});
+        let result = super::coerce_params_to_schema(params, &schema);
+        assert_eq!(result["limit"], serde_json::json!(10));
+    }
+
+    #[test]
+    fn test_coerce_params_string_to_boolean() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "boolean" },
+                "b": { "type": "boolean" },
+                "c": { "type": "boolean" },
+                "d": { "type": "boolean" }
+            }
+        });
+        let params = serde_json::json!({
+            "a": "true",
+            "b": "false",
+            "c": "True",
+            "d": "FALSE"
+        });
+        let result = super::coerce_params_to_schema(params, &schema);
+        assert_eq!(result["a"], serde_json::json!(true));
+        assert_eq!(result["b"], serde_json::json!(false));
+        assert_eq!(result["c"], serde_json::json!(true));
+        assert_eq!(result["d"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn test_coerce_params_already_correct_type() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "number" }
+            }
+        });
+        let params = serde_json::json!({"count": 5});
+        let result = super::coerce_params_to_schema(params, &schema);
+        assert_eq!(result["count"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn test_coerce_params_invalid_string_not_coerced() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "number" }
+            }
+        });
+        let params = serde_json::json!({"count": "not-a-number"});
+        let result = super::coerce_params_to_schema(params, &schema);
+        // Should remain as string since it can't be parsed
+        assert_eq!(result["count"], serde_json::json!("not-a-number"));
     }
 }

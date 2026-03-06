@@ -1,4 +1,6 @@
 {
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
   "capabilities": {
     "http": {
       "allowlist": [
@@ -34,11 +36,19 @@
       ]
     }
   },
+  "auth": {
+    "secret_name": "github_token",
+    "display_name": "GitHub",
+    "instructions": "Create a Personal Access Token at github.com/settings/tokens with repo scope, then paste it here.",
+    "setup_url": "https://github.com/settings/tokens",
+    "token_hint": "Starts with 'ghp_' or 'github_pat_'",
+    "env_var": "GITHUB_TOKEN"
+  },
   "setup": {
     "required_secrets": [
       {
         "name": "github_token",
-        "prompt": "GitHub Personal Access Token (from github.com/settings/tokens)"
+        "prompt": "GitHub Personal Access Token (create one at github.com/settings/tokens with 'repo' scope)"
       }
     ]
   },

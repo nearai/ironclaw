@@ -18,7 +18,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.13.1"
+version = "0.15.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -106,6 +106,9 @@ serde_yml = "0.0.12"
 dirs = "6"
 fs4 = "0.6"
 
+# Semantic versioning
+semver = "1"
+
 # Secrecy for sensitive values
 secrecy = { version = "0.10", features = ["serde"] }
 
@@ -128,6 +131,7 @@ wasmparser = "0.220"  # WASM binary parsing for validation
 # Cryptography for secrets management
 aes-gcm = "0.10"
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
 blake3 = "1"
 rand = "0.8"
@@ -170,6 +174,7 @@ zbus = "4"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tracing-test = "0.2"
 tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"

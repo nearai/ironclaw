@@ -72,6 +72,9 @@ pub enum WasmLoadError {
 
     #[error("Invalid tool name: {0}")]
     InvalidName(String),
+
+    #[error("WIT version mismatch: {0}")]
+    WitVersionMismatch(String),
 }
 
 /// Loads WASM tools from files or storage into the registry.
@@ -126,6 +129,15 @@ impl WasmToolLoader {
                 let cap_bytes = fs::read(cap_path).await?;
                 let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
                     .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
+                cap_file.validate(name);
+
+                // Check WIT version compatibility
+                check_wit_version_compat(
+                    name,
+                    cap_file.wit_version.as_deref(),
+                    crate::tools::wasm::WIT_TOOL_VERSION,
+                )?;
+
                 let caps = cap_file.to_capabilities();
                 let oauth = resolve_oauth_refresh_config(&cap_file);
                 (caps, oauth)
@@ -307,6 +319,61 @@ impl WasmToolLoader {
 
         Ok(results)
     }
+}
+
+/// Check that a declared WIT version is compatible with the host WIT version.
+///
+/// Compatibility rules (semver):
+/// - Same major version required (0.x is special: same minor required)
+/// - Extension WIT version must not be greater than host version
+///
+/// If `declared` is `None`, the check is skipped (pre-versioning extension).
+pub(crate) fn check_wit_version_compat(
+    name: &str,
+    declared: Option<&str>,
+    host_version: &str,
+) -> Result<(), WasmLoadError> {
+    let Some(declared_str) = declared else {
+        return Ok(());
+    };
+
+    let declared = semver::Version::parse(declared_str).map_err(|e| {
+        WasmLoadError::WitVersionMismatch(format!(
+            "Extension '{name}' has invalid wit_version '{declared_str}': {e}"
+        ))
+    })?;
+
+    let host = semver::Version::parse(host_version).map_err(|e| {
+        WasmLoadError::WitVersionMismatch(format!(
+            "Host WIT version '{host_version}' is invalid: {e}"
+        ))
+    })?;
+
+    // Major version must match
+    if declared.major != host.major {
+        return Err(WasmLoadError::WitVersionMismatch(format!(
+            "Extension '{name}' compiled against WIT {declared}, but host supports WIT {host}. \
+             Major version mismatch — rebuild the extension."
+        )));
+    }
+
+    // For 0.x versions, minor must also match (semver: 0.x.y has no compatibility guarantees)
+    if declared.major == 0 && declared.minor != host.minor {
+        return Err(WasmLoadError::WitVersionMismatch(format!(
+            "Extension '{name}' compiled against WIT {declared}, but host supports WIT {host}. \
+             Rebuild the extension against the current WIT."
+        )));
+    }
+
+    // Extension cannot be newer than host
+    if declared > host {
+        return Err(WasmLoadError::WitVersionMismatch(format!(
+            "Extension '{name}' compiled against WIT {declared}, but host only supports WIT {host}. \
+             Update the host or rebuild with an older WIT."
+        )));
+    }
+
+    Ok(())
 }
 
 /// Extract OAuth refresh configuration from a parsed capabilities file.
@@ -614,7 +681,46 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::tools::wasm::loader::{WasmLoadError, discover_tools};
+    use crate::tools::wasm::loader::{WasmLoadError, check_wit_version_compat, discover_tools};
+
+    #[test]
+    fn wit_version_compat_none_is_ok() {
+        // Pre-versioning extensions (no wit_version declared) should always pass
+        assert!(check_wit_version_compat("test", None, "0.2.0").is_ok());
+    }
+
+    #[test]
+    fn wit_version_compat_exact_match() {
+        assert!(check_wit_version_compat("test", Some("0.2.0"), "0.2.0").is_ok());
+    }
+
+    #[test]
+    fn wit_version_compat_patch_older_ok() {
+        // Extension on older patch of same minor is compatible
+        assert!(check_wit_version_compat("test", Some("0.2.0"), "0.2.1").is_ok());
+    }
+
+    #[test]
+    fn wit_version_compat_minor_mismatch_0x() {
+        // For 0.x, different minor is breaking
+        assert!(check_wit_version_compat("test", Some("0.1.0"), "0.2.0").is_err());
+        assert!(check_wit_version_compat("test", Some("0.3.0"), "0.2.0").is_err());
+    }
+
+    #[test]
+    fn wit_version_compat_major_mismatch() {
+        assert!(check_wit_version_compat("test", Some("1.0.0"), "2.0.0").is_err());
+    }
+
+    #[test]
+    fn wit_version_compat_extension_newer_than_host() {
+        assert!(check_wit_version_compat("test", Some("0.2.1"), "0.2.0").is_err());
+    }
+
+    #[test]
+    fn wit_version_compat_invalid_version() {
+        assert!(check_wit_version_compat("test", Some("not-a-version"), "0.2.0").is_err());
+    }
 
     #[tokio::test]
     async fn test_discover_tools_empty_dir() {

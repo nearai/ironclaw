@@ -1,4 +1,6 @@
 {
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
   "type": "channel",
   "name": "telegram",
   "description": "Telegram Bot API channel for receiving and responding to Telegram messages",
@@ -9,7 +11,8 @@
         "prompt": "Enter your Telegram Bot API token (from @BotFather)",
         "optional": false
       }
-    ]
+    ],
+    "setup_url": "https://t.me/BotFather"
   },
   "capabilities": {
     "http": {
@@ -39,6 +42,10 @@
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Telegram-Bot-Api-Secret-Token",
+        "secret_name": "telegram_webhook_secret"
       }
     }
   },

@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
 use rand::Rng;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
@@ -29,6 +30,9 @@ const PAIRING_APPROVE_RATE_WINDOW_SECS: u64 = 5 * 60;
 pub enum PairingStoreError {
     #[error("Invalid channel: {0}")]
     InvalidChannel(String),
+
+    #[error("Invalid path: {0}")]
+    InvalidPath(String),
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -144,7 +148,7 @@ fn is_expired(req: &PairingRequest, now_secs: u64) -> bool {
 }
 
 fn random_code() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     (0..PAIRING_CODE_LENGTH)
         .map(|_| {
             let idx = rng.gen_range(0..PAIRING_ALPHABET.len());
@@ -154,7 +158,7 @@ fn random_code() -> String {
 }
 
 fn generate_unique_code(existing: &HashSet<String>) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     for _ in 0..500 {
         let code = random_code();
         if !existing.contains(&code) {
@@ -224,7 +228,10 @@ impl PairingStore {
         meta: Option<serde_json::Value>,
     ) -> Result<UpsertResult, PairingStoreError> {
         let path = pairing_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().unwrap())?;
+        let parent = path.parent().ok_or_else(|| {
+            PairingStoreError::InvalidPath(format!("path has no parent: {}", path.display()))
+        })?;
+        fs::create_dir_all(parent)?;
 
         let mut file = fs::OpenOptions::new()
             .read(true)
@@ -319,7 +326,10 @@ impl PairingStore {
 
     fn record_failed_approve(&self, channel: &str) -> Result<(), PairingStoreError> {
         let path = approve_attempts_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().unwrap())?;
+        let parent = path.parent().ok_or_else(|| {
+            PairingStoreError::InvalidPath(format!("path has no parent: {}", path.display()))
+        })?;
+        fs::create_dir_all(parent)?;
 
         // Open (or create) and lock before reading so concurrent callers
         // don't clobber each other's writes.
@@ -462,7 +472,10 @@ impl PairingStore {
         }
 
         let path = allow_from_path(&self.base_dir, channel)?;
-        fs::create_dir_all(path.parent().unwrap())?;
+        let parent = path.parent().ok_or_else(|| {
+            PairingStoreError::InvalidPath(format!("path has no parent: {}", path.display()))
+        })?;
+        fs::create_dir_all(parent)?;
 
         let file = fs::OpenOptions::new()
             .read(true)

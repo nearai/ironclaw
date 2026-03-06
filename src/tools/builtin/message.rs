@@ -533,41 +533,53 @@ mod tests {
         );
     }
 
-    /// Regression test: requires_approval() is a sync method called from async context.
-    /// With tokio::sync::RwLock, this would panic with:
-    ///   "Cannot block the current thread from within a runtime"
-    /// because blocking_read() cannot be called inside an async runtime.
-    /// With std::sync::RwLock, it works correctly since std locks are safe
-    /// for short-held locks in sync methods called from async contexts.
-    #[tokio::test]
-    async fn requires_approval_works_from_async_context() {
-        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+    // ── Multi-thread runtime safety tests ─────────────────────────────
 
-        // Set context asynchronously (simulating real usage pattern)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_no_channel_multi_thread() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        // No channel set, no channel param - should not panic in multi-thread runtime
+        let result = tool.requires_approval(&serde_json::json!({"content": "hello"}));
+        assert_eq!(result, ApprovalRequirement::UnlessAutoApproved);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_with_context_multi_thread() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
         tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
             .await;
 
-        // Call requires_approval (sync method) from async context.
-        // This is the critical test: with tokio::sync::RwLock::blocking_read(),
-        // this would panic. With std::sync::RwLock::read(), it works.
-        let approval = tool.requires_approval(&serde_json::json!({
+        // No channel param - uses default, less risky
+        let result = tool.requires_approval(&serde_json::json!({"content": "hello"}));
+        assert_eq!(result, ApprovalRequirement::UnlessAutoApproved);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_cross_channel_multi_thread() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
+            .await;
+
+        // Different channel than default requires approval
+        let result = tool.requires_approval(&serde_json::json!({
             "content": "hello",
             "channel": "telegram"
         }));
-        // Different channel from default -> Always
-        assert!(matches!(approval, ApprovalRequirement::Always));
+        assert_eq!(result, ApprovalRequirement::Always);
+    }
 
-        // No channel specified (uses default) -> UnlessAutoApproved
-        let approval = tool.requires_approval(&serde_json::json!({
-            "content": "hello"
-        }));
-        assert!(matches!(approval, ApprovalRequirement::UnlessAutoApproved));
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_same_channel_explicit_multi_thread() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
+            .await;
 
-        // Explicit channel (even if same as default) -> Always
-        let approval = tool.requires_approval(&serde_json::json!({
+        // Explicit channel that matches default still returns Always
+        // (existing behavior: any explicit channel param triggers Always)
+        let result = tool.requires_approval(&serde_json::json!({
             "content": "hello",
             "channel": "signal"
         }));
-        assert!(matches!(approval, ApprovalRequirement::Always));
+        assert_eq!(result, ApprovalRequirement::Always);
     }
 }

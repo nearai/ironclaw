@@ -933,8 +933,19 @@ impl WasmChannel {
         Self::add_host_functions(&mut linker)?;
 
         // Instantiate using the generated bindings
-        let instance = SandboxedChannel::instantiate(store, &component, &linker)
-            .map_err(|e| WasmChannelError::Instantiation(e.to_string()))?;
+        let instance = SandboxedChannel::instantiate(store, &component, &linker).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("near:agent") || msg.contains("import") {
+                WasmChannelError::Instantiation(format!(
+                    "{msg}. This may indicate a WIT version mismatch — \
+                         the channel was compiled against a different WIT than the host supports \
+                         (host WIT: {}). Rebuild the channel against the current WIT.",
+                    crate::tools::wasm::WIT_CHANNEL_VERSION
+                ))
+            } else {
+                WasmChannelError::Instantiation(msg)
+            }
+        })?;
 
         Ok(instance)
     }
@@ -2479,7 +2490,7 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             message: format!("Tool started: {}", name),
             metadata_json,
         },
-        StatusUpdate::ToolCompleted { name, success } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolCompleted { name, success, .. } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolCompleted,
             message: format!(
                 "Tool completed: {} ({})",
@@ -3387,6 +3398,8 @@ mod tests {
             &crate::channels::StatusUpdate::ToolCompleted {
                 name: "http_request".to_string(),
                 success: true,
+                error: None,
+                parameters: None,
             },
             &metadata,
         );
@@ -3407,6 +3420,8 @@ mod tests {
             &crate::channels::StatusUpdate::ToolCompleted {
                 name: "http_request".to_string(),
                 success: false,
+                error: Some("connection refused".to_string()),
+                parameters: None,
             },
             &metadata,
         );

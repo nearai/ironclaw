@@ -142,7 +142,7 @@ pub async fn chat_auth_token_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if result.status == "authenticated" {
+    if result.is_authenticated() {
         // Auto-activate so tools are available immediately
         let msg = match ext_mgr.activate(&req.extension_name).await {
             Ok(r) => format!(
@@ -170,13 +170,14 @@ pub async fn chat_auth_token_handler(
         // Re-emit auth_required for retry
         state.sse.broadcast(SseEvent::AuthRequired {
             extension_name: req.extension_name.clone(),
-            instructions: result.instructions.clone(),
-            auth_url: result.auth_url.clone(),
-            setup_url: result.setup_url.clone(),
+            instructions: result.instructions().map(String::from),
+            auth_url: result.auth_url().map(String::from),
+            setup_url: result.setup_url().map(String::from),
         });
         Ok(Json(ActionResponse::fail(
             result
-                .instructions
+                .instructions()
+                .map(String::from)
                 .unwrap_or_else(|| "Invalid token".to_string()),
         )))
     }

@@ -288,6 +288,18 @@ impl SkillRegistry {
         self.skills.len()
     }
 
+    /// Retain only skills whose names are in the given allowlist.
+    ///
+    /// If `names` is empty, this is a no-op (all skills are kept).
+    pub fn retain_only(&mut self, names: &[&str]) {
+        if names.is_empty() {
+            return;
+        }
+        let names_set: HashSet<&str> = names.iter().copied().collect();
+        self.skills
+            .retain(|s| names_set.contains(s.manifest.name.as_str()));
+    }
+
     /// Check if a skill with the given name is loaded.
     pub fn has(&self, name: &str) -> bool {
         self.skills.iter().any(|s| s.manifest.name == name)
@@ -980,6 +992,27 @@ mod tests {
         let skill = registry.find_by_name("case-skill").unwrap();
         assert_eq!(skill.lowercased_keywords, vec!["write", "edit"]);
         assert_eq!(skill.lowercased_tags, vec!["email", "prose"]);
+    }
+
+    #[tokio::test]
+    async fn test_retain_only_empty_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("SKILL.md"),
+            "---\nname: keep-me\ndescription: test\nactivation:\n  keywords: [\"test\"]\n---\n\nKeep this skill.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.discover_all().await;
+        assert_eq!(registry.count(), 1);
+
+        registry.retain_only(&[]);
+        assert_eq!(
+            registry.count(),
+            1,
+            "empty retain_only should keep all skills"
+        );
     }
 
     #[test]
