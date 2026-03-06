@@ -357,11 +357,12 @@ pub async fn start_server(
             header::HeaderName::from_static("content-security-policy"),
             header::HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; \
+                 script-src 'self' https://cdn.jsdelivr.net; \
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src https://fonts.gstatic.com; \
                  connect-src 'self'; \
                  img-src 'self' data:; \
+                 object-src 'none'; \
                  frame-ancestors 'none'; \
                  base-uri 'self'; \
                  form-action 'self'",
@@ -2245,5 +2246,81 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_csp_header_present_on_responses() {
+        use std::net::SocketAddr;
+
+        let state = Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: crate::channels::web::sse::SseManager::new(),
+            workspace: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            scheduler: None,
+            user_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            chat_rate_limiter: RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            startup_time: std::time::Instant::now(),
+        });
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let bound = start_server(addr, state.clone(), "test-token".to_string())
+            .await
+            .expect("server should start");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/health", bound))
+            .send()
+            .await
+            .expect("health request should succeed");
+
+        assert_eq!(resp.status(), 200);
+
+        let csp = resp
+            .headers()
+            .get("content-security-policy")
+            .expect("CSP header must be present");
+
+        let csp_str = csp.to_str().expect("CSP header should be valid UTF-8");
+        assert!(
+            csp_str.contains("default-src 'self'"),
+            "CSP must contain default-src"
+        );
+        assert!(
+            csp_str.contains("script-src 'self' https://cdn.jsdelivr.net"),
+            "CSP must allow cdn.jsdelivr.net scripts"
+        );
+        assert!(
+            !csp_str.contains("cdnjs.cloudflare.com"),
+            "CSP must not allow cdnjs.cloudflare.com (not used in this codebase)"
+        );
+        assert!(
+            csp_str.contains("object-src 'none'"),
+            "CSP must contain object-src 'none'"
+        );
+        assert!(
+            csp_str.contains("frame-ancestors 'none'"),
+            "CSP must contain frame-ancestors 'none'"
+        );
+
+        // Shut down gracefully.
+        if let Some(tx) = state.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
     }
 }
