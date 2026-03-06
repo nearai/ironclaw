@@ -1,4 +1,6 @@
 {
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
   "type": "channel",
   "name": "discord",
   "description": "Discord Gateway/Webhook channel for handling slash commands, buttons, and messages",

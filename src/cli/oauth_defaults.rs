@@ -353,7 +353,7 @@ pub fn build_oauth_url(
     // Generate PKCE verifier and challenge
     let (code_verifier, code_challenge) = if use_pkce {
         let mut verifier_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut verifier_bytes);
+        rand::rngs::OsRng.fill_bytes(&mut verifier_bytes);
         let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
         let mut hasher = Sha256::new();
@@ -367,7 +367,7 @@ pub fn build_oauth_url(
 
     // Generate random state for CSRF protection
     let mut state_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut state_bytes);
+    rand::rngs::OsRng.fill_bytes(&mut state_bytes);
     let state = URL_SAFE_NO_PAD.encode(state_bytes);
 
     // Build authorization URL

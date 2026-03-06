@@ -3,29 +3,35 @@
   "display_name": "Google Slides",
   "kind": "tool",
   "version": "0.1.0",
+  "wit_version": "0.2.0",
   "description": "Create and edit Google Slides presentations",
-  "keywords": ["presentations", "google", "slides"],
-
+  "keywords": [
+    "presentations",
+    "google",
+    "slides"
+  ],
   "source": {
     "dir": "tools-src/google-slides",
     "capabilities": "google-slides-tool.capabilities.json",
     "crate_name": "google-slides-tool"
   },
-
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/google-slides-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "68365b764f2366142d1f5388189ab1bd7f826f4ac6540547efc6750bde1591d3"
     }
   },
-
   "auth_summary": {
     "method": "oauth",
     "provider": "Google",
-    "secrets": ["google_oauth_token"],
+    "secrets": [
+      "google_oauth_token"
+    ],
     "shared_auth": "google_oauth_token",
     "setup_url": "https://console.cloud.google.com/apis/credentials"
   },
-
-  "tags": ["google", "productivity"]
+  "tags": [
+    "google",
+    "productivity"
+  ]
 }

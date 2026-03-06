@@ -16,11 +16,12 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
-    JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
-    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WebFetchTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
+    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
+    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
+    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+    WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -69,6 +70,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_remove",
     "message",
     "web_fetch",
+    "restart",
 ];
 
 /// Registry of available tools.
@@ -156,7 +158,8 @@ impl ToolRegistry {
 
     /// Get a tool by name.
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.read().await.get(name).cloned()
+        let tools = self.tools.read().await;
+        tools.get(name).map(Arc::clone)
     }
 
     /// Check if a tool exists.
@@ -193,7 +196,8 @@ impl ToolRegistry {
 
     /// Get tool definitions for LLM function calling.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
             .read()
             .await
             .values()
@@ -202,7 +206,9 @@ impl ToolRegistry {
                 description: tool.description().to_string(),
                 parameters: tool.parameters_schema(),
             })
-            .collect()
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// Get tool definitions for specific tools.
@@ -210,11 +216,12 @@ impl ToolRegistry {
         let tools = self.tools.read().await;
         names
             .iter()
-            .filter_map(|name| tools.get(*name))
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
+            .filter_map(|name| {
+                tools.get(*name).map(|tool| ToolDefinition {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters: tool.parameters_schema(),
+                })
             })
             .collect()
     }
@@ -230,7 +237,6 @@ impl ToolRegistry {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
         }
         self.register_sync(Arc::new(http));
-        self.register_sync(Arc::new(WebFetchTool::new()));
 
         tracing::info!("Registered {} built-in tools", self.count());
     }
@@ -381,8 +387,9 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
-        tracing::info!("Registered 6 extension management tools");
+        self.register_sync(Arc::new(ToolRemoveTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ExtensionInfoTool::new(manager)));
+        tracing::info!("Registered 7 extension management tools");
     }
 
     /// Register skill management tools (list, search, install, remove).
@@ -756,6 +763,90 @@ mod tests {
             .to_string();
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_register_and_read_no_panic() {
+        use std::sync::Arc as StdArc;
+
+        let registry = StdArc::new(ToolRegistry::new());
+        registry.register_builtin_tools();
+
+        // Spawn concurrent readers and check they don't panic
+        let mut handles = Vec::new();
+
+        // Readers
+        for _ in 0..10 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                let tools = reg.all().await;
+                assert!(!tools.is_empty());
+                let names = reg.list().await;
+                assert!(!names.is_empty());
+                let _ = reg.get("echo").await;
+                let _ = reg.has("echo").await;
+                let _ = reg.tool_definitions().await;
+            }));
+        }
+
+        // Concurrent register attempts (will be rejected as shadowing)
+        for _ in 0..5 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                // This will be rejected (echo is protected) but should not panic
+                reg.register(Arc::new(EchoTool)).await;
+            }));
+        }
+
+        for handle in handles {
+            handle.await.expect("task should not panic");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_definitions_sorted_alphabetically() {
+        // Create tools with names that would NOT be alphabetical if inserted in this order.
+        struct ToolZ;
+        struct ToolA;
+        struct ToolM;
+
+        macro_rules! impl_tool {
+            ($ty:ident, $name:expr) => {
+                #[async_trait::async_trait]
+                impl Tool for $ty {
+                    fn name(&self) -> &str {
+                        $name
+                    }
+                    fn description(&self) -> &str {
+                        $name
+                    }
+                    fn parameters_schema(&self) -> serde_json::Value {
+                        serde_json::json!({})
+                    }
+                    async fn execute(
+                        &self,
+                        _: serde_json::Value,
+                        _: &crate::context::JobContext,
+                    ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                        unreachable!()
+                    }
+                }
+            };
+        }
+
+        impl_tool!(ToolZ, "zebra");
+        impl_tool!(ToolA, "alpha");
+        impl_tool!(ToolM, "middle");
+
+        let registry = ToolRegistry::new();
+        // Register in non-alphabetical order
+        registry.register(Arc::new(ToolZ)).await;
+        registry.register(Arc::new(ToolA)).await;
+        registry.register(Arc::new(ToolM)).await;
+
+        let defs = registry.tool_definitions().await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "middle", "zebra"]);
     }
 
     #[tokio::test]
