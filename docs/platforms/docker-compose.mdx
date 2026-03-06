@@ -238,16 +238,21 @@ docker compose exec -T postgres pg_restore \
 ### Volume Backup
 
 ```bash
+# Discover the ironclaw_data volume name (project prefix may vary)
+# This picks the first volume whose name contains "ironclaw_data"
+
+VOLUME_NAME=$(docker volume ls -q --filter name='ironclaw_data' | head -n 1)
+
 # Back up ironclaw_data volume (workspace, skills, config)
 docker run --rm \
-  -v ironclaw_ironclaw_data:/source:ro \
-  -v $(pwd)/backups:/dest \
+  -v "${VOLUME_NAME}":/source:ro \
+  -v "$(pwd)"/backups:/dest \
   alpine tar czf /dest/ironclaw-data-$(date +%Y%m%d).tar.gz -C /source .
-
+  
 # Restore
 docker run --rm \
-  -v ironclaw_ironclaw_data:/dest \
-  -v $(pwd)/backups:/source:ro \
+  -v "${VOLUME_NAME}":/dest \
+  -v "$(pwd)"/backups:/source:ro \
   alpine tar xzf /source/ironclaw-data-20240101.tar.gz -C /dest
 ```
 

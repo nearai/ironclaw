@@ -99,7 +99,7 @@ ironclaw onboard
 **Important:** IronClaw's orchestrator binds to `0.0.0.0:50051` on Linux for container communication. This port should **not** be exposed externally.
 
 ```bash
-# Block orchestrator port from external access
+# After installing and enabling UFW, block orchestrator port from external access
 sudo ufw deny 50051
 ```
 </Warning>
