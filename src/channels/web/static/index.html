@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>IronClaw</title>
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -38,6 +38,48 @@
     </div>
   </div>
 
+  <!-- Restart Confirmation Modal -->
+  <div id="restart-confirm-modal" class="restart-modal" style="display: none;">
+    <div class="restart-modal-overlay" onclick="cancelRestart()"></div>
+    <div class="restart-modal-content">
+      <div class="restart-modal-header">
+        <h2>Restart IronClaw Instance</h2>
+        <button class="restart-modal-close" onclick="cancelRestart()" title="Close">×</button>
+      </div>
+      <div class="restart-modal-body">
+        <p class="restart-modal-description">
+          Are you sure you want to restart the IronClaw instance? This will gracefully restart the process.
+        </p>
+        <div class="restart-modal-warning">
+          <span class="restart-modal-warning-icon">⚠️</span>
+          <p>Any in-progress jobs may be interrupted. The restart will complete within a few seconds.</p>
+        </div>
+      </div>
+      <div class="restart-modal-footer">
+        <button class="restart-modal-btn cancel" onclick="cancelRestart()">Cancel</button>
+        <button class="restart-modal-btn confirm" onclick="confirmRestart()">Confirm Restart</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Restart Progress Modal -->
+  <div id="restart-loader" class="restart-loader" style="display: none;">
+    <div class="restart-loader-overlay"></div>
+    <div class="restart-loader-content">
+      <div class="restart-spinner"></div>
+      <div class="restart-loader-text">
+        <p class="restart-title">Restarting IronClaw</p>
+        <p class="restart-subtitle">Please wait while the process restarts...</p>
+      </div>
+      <div class="restart-progress-bar">
+        <div class="restart-progress-fill"></div>
+      </div>
+      <p class="restart-modal-info">
+        Check the Logs tab for details after the restart completes.
+      </p>
+    </div>
+  </div>
+
   <!-- Main App (hidden until authenticated) -->
   <div id="app">
     <!-- Tab Bar -->
@@ -62,6 +104,14 @@
         <span id="sse-status">Connected</span>
         <div class="gateway-popover" id="gateway-popover"></div>
       </div>
+      <button class="restart-btn" id="restart-btn" onclick="triggerRestart()" title="Gracefully restart the process">
+        <svg id="restart-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 4v6h-6"></path>
+          <path d="M1 20v-6h6"></path>
+          <path d="M3.51 9a9 9 0 0114.85-3.36M20.49 15a9 9 0 01-14.85 3.36"></path>
+        </svg>
+        <span>Restart</span>
+      </button>
     </div>
 
     <!-- Chat Tab -->

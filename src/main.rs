@@ -652,6 +652,17 @@ async fn async_main() -> anyhow::Result<()> {
         ext_mgr.set_sse_sender(sender.clone()).await;
     }
 
+    // Snapshot memory for trace recording before the agent starts
+    if let Some(ref recorder) = components.recording_handle
+        && let Some(ref ws) = components.workspace
+    {
+        recorder.snapshot_memory(ws).await;
+    }
+
+    let http_interceptor = components
+        .recording_handle
+        .as_ref()
+        .map(|r| r.http_interceptor());
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -666,6 +677,7 @@ async fn async_main() -> anyhow::Result<()> {
         hooks: components.hooks,
         cost_guard: components.cost_guard,
         sse_tx: sse_sender,
+        http_interceptor,
     };
 
     let agent = Agent::new(
@@ -685,6 +697,13 @@ async fn async_main() -> anyhow::Result<()> {
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+
+    // Flush LLM trace recording if enabled
+    if let Some(ref recorder) = components.recording_handle
+        && let Err(e) = recorder.flush().await
+    {
+        tracing::warn!("Failed to write LLM trace: {}", e);
+    }
 
     if let Some(ref mut server) = webhook_server {
         server.shutdown().await;
@@ -931,6 +950,7 @@ async fn setup_wasm_channels(
 
         let secret_name = loaded.webhook_secret_name();
         let sig_key_secret_name = loaded.signature_key_secret_name();
+        let hmac_secret_name = loaded.hmac_secret_name();
 
         let webhook_secret = if let Some(secrets) = secrets_store {
             secrets
@@ -1023,6 +1043,17 @@ async fn setup_wasm_channels(
                     tracing::error!(channel = %channel_name, error = %e, "Invalid signature key in secrets store")
                 }
             }
+        }
+
+        // Register HMAC signing secret if declared in capabilities
+        if let Some(ref hmac_secret_name) = hmac_secret_name
+            && let Some(secrets) = secrets_store
+            && let Ok(secret) = secrets.get_decrypted("default", hmac_secret_name).await
+        {
+            wasm_router
+                .register_hmac_secret(&channel_name, secret.expose())
+                .await;
+            tracing::info!(channel = %channel_name, "Registered HMAC signing secret");
         }
 
         if let Some(secrets) = secrets_store {

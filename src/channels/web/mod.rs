@@ -63,13 +63,11 @@ impl GatewayChannel {
     /// If no auth token is configured, generates a random one and prints it.
     pub fn new(config: GatewayConfig) -> Self {
         let auth_token = config.auth_token.clone().unwrap_or_else(|| {
-            use rand::Rng;
-            let token: String = rand::thread_rng()
-                .sample_iter(&rand::distributions::Alphanumeric)
-                .take(32)
-                .map(char::from)
-                .collect();
-            token
+            use rand::RngCore;
+            use rand::rngs::OsRng;
+            let mut bytes = [0u8; 32];
+            OsRng.fill_bytes(&mut bytes);
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
         });
 
         let state = Arc::new(GatewayState {
@@ -304,9 +302,16 @@ impl Channel for GatewayChannel {
                 name,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolCompleted { name, success } => SseEvent::ToolCompleted {
+            StatusUpdate::ToolCompleted {
                 name,
                 success,
+                error,
+                parameters,
+            } => SseEvent::ToolCompleted {
+                name,
+                success,
+                error,
+                parameters,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult {
