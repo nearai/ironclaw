@@ -1154,7 +1154,6 @@ mod tests {
             None,
             Some(Arc::new(ContextManager::new(1))),
             None,
-            None,
         )
     }
 
@@ -1909,7 +1908,6 @@ mod tests {
             None,
             Some(Arc::new(ContextManager::new(1))),
             None,
-            None,
         )
     }
 
@@ -2024,7 +2022,6 @@ mod tests {
                 None,
                 None,
                 Some(Arc::new(ContextManager::new(1))),
-                None,
                 None,
             )
         };

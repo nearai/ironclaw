@@ -659,7 +659,6 @@ impl TestRigBuilder {
             routine_config,
             None, // context_manager
             None, // session_manager
-            None, // gateway_state
         );
 
         // 9. Spawn agent in background task.
