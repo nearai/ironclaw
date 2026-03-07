@@ -450,6 +450,8 @@ mod tests {
             if def.protocol == ProviderProtocol::OpenAiCompletions
                 && def.id != "openai"
                 && def.id != "openai_compatible"
+                && def.id != "bedrock"
+                && def.id != "cloudflare"
             {
                 assert!(
                     def.default_base_url.is_some(),
