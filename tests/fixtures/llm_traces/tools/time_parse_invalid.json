@@ -1,0 +1,32 @@
+{
+  "model_name": "test-time-parse-invalid",
+  "expects": {
+    "tools_used": ["time"],
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "parse" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_time_bad",
+            "name": "time",
+            "arguments": { "operation": "parse", "timestamp": "not-a-valid-timestamp" }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The timestamp 'not-a-valid-timestamp' could not be parsed. Please provide a valid ISO 8601 timestamp like '2024-01-15T10:30:00Z'.",
+        "input_tokens": 200,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

@@ -706,6 +706,15 @@ impl Agent {
                                     deferred_auth = Some(instructions);
                                 }
 
+                                // Stash full output so subsequent tools can reference it
+                                if let Ok(ref output) = tool_result {
+                                    job_ctx
+                                        .tool_output_stash
+                                        .write()
+                                        .await
+                                        .insert(tc.id.clone(), output.clone());
+                                }
+
                                 // Sanitize and add tool result to context
                                 let result_content = match tool_result {
                                     Ok(output) => {
@@ -717,7 +726,7 @@ impl Agent {
                                             sanitized.was_modified,
                                         )
                                     }
-                                    Err(e) => format!("Error: {}", e),
+                                    Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                                 };
 
                                 context_messages.push(ChatMessage::tool_result(
@@ -2036,5 +2045,26 @@ mod tests {
         let input = "This is a normal response with [brackets] inside.";
         let result = super::strip_internal_tool_call_text(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_tool_error_format_includes_tool_name() {
+        // Regression test for issue #487: tool errors sent to the LLM should
+        // include the tool name so the model can reason about which tool failed
+        // and try alternatives.
+        let tool_name = "http";
+        let err = crate::error::ToolError::ExecutionFailed {
+            name: tool_name.to_string(),
+            reason: "connection refused".to_string(),
+        };
+        let formatted = format!("Tool '{}' failed: {}", tool_name, err);
+        assert!(
+            formatted.contains("Tool 'http' failed:"),
+            "Error should identify the tool by name, got: {formatted}"
+        );
+        assert!(
+            formatted.contains("connection refused"),
+            "Error should include the underlying reason, got: {formatted}"
+        );
     }
 }

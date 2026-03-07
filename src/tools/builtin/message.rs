@@ -207,26 +207,10 @@ impl Tool for MessageTool {
         }
     }
 
-    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
-        // Require approval when sending to a different channel than the default
-        // (cross-channel messages are more sensitive)
-        let param_channel = params.get("channel").and_then(|v| v.as_str());
-        if let Some(channel) = param_channel {
-            // Check if it differs from the default channel
-            let default_channel = self
-                .default_channel
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(default) = default_channel.as_ref()
-                && channel != default
-            {
-                return ApprovalRequirement::Always;
-            }
-            // No default set - require approval for explicit channel selection
-            return ApprovalRequirement::Always;
-        }
-        // No channel specified in params - uses default, less risky
-        ApprovalRequirement::UnlessAutoApproved
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        // Message tool only delivers to channels the user has configured
+        // (TUI, Telegram, Slack, web gateway, etc.) via ChannelManager::broadcast.
+        ApprovalRequirement::Never
     }
 
     fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
@@ -533,41 +517,17 @@ mod tests {
         );
     }
 
-    /// Regression test: requires_approval() is a sync method called from async context.
-    /// With tokio::sync::RwLock, this would panic with:
-    ///   "Cannot block the current thread from within a runtime"
-    /// because blocking_read() cannot be called inside an async runtime.
-    /// With std::sync::RwLock, it works correctly since std locks are safe
-    /// for short-held locks in sync methods called from async contexts.
-    #[tokio::test]
-    async fn requires_approval_works_from_async_context() {
+    #[test]
+    fn requires_approval_always_never() {
+        // Message tool only sends to user-owned channels, so never needs approval.
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-
-        // Set context asynchronously (simulating real usage pattern)
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
-
-        // Call requires_approval (sync method) from async context.
-        // This is the critical test: with tokio::sync::RwLock::blocking_read(),
-        // this would panic. With std::sync::RwLock::read(), it works.
-        let approval = tool.requires_approval(&serde_json::json!({
-            "content": "hello",
-            "channel": "telegram"
-        }));
-        // Different channel from default -> Always
-        assert!(matches!(approval, ApprovalRequirement::Always));
-
-        // No channel specified (uses default) -> UnlessAutoApproved
-        let approval = tool.requires_approval(&serde_json::json!({
-            "content": "hello"
-        }));
-        assert!(matches!(approval, ApprovalRequirement::UnlessAutoApproved));
-
-        // Explicit channel (even if same as default) -> Always
-        let approval = tool.requires_approval(&serde_json::json!({
-            "content": "hello",
-            "channel": "signal"
-        }));
-        assert!(matches!(approval, ApprovalRequirement::Always));
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"content": "hello"})),
+            ApprovalRequirement::Never,
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"content": "hi", "channel": "telegram"})),
+            ApprovalRequirement::Never,
+        );
     }
 }

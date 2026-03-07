@@ -185,7 +185,7 @@ impl PkceChallenge {
     /// Generate a new PKCE challenge pair.
     pub fn generate() -> Self {
         let mut verifier_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut verifier_bytes);
+        rand::rngs::OsRng.fill_bytes(&mut verifier_bytes);
         let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
         let mut hasher = Sha256::new();

@@ -1,0 +1,47 @@
+{
+  "model_name": "test-time-parse-diff",
+  "expects": {
+    "tools_used": ["time"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "time" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_time_parse",
+            "name": "time",
+            "arguments": { "operation": "parse", "timestamp": "2024-01-15T10:30:00Z" }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_time_diff",
+            "name": "time",
+            "arguments": { "operation": "diff", "timestamp": "2024-01-15T10:30:00Z", "timestamp2": "2024-01-16T14:45:00Z" }
+          }
+        ],
+        "input_tokens": 200,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The timestamp 2024-01-15T10:30:00Z was parsed successfully. The difference between the two timestamps is 1 day, 4 hours, and 15 minutes (101700 seconds).",
+        "input_tokens": 300,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

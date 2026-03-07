@@ -309,6 +309,7 @@ async fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> 
 /// Detect running cloudflared processes or managed services that could conflict
 /// with IronClaw's tunnel management.
 fn detect_existing_cloudflared() -> Option<String> {
+    #[allow(unused_mut)]
     let mut conflicts: Vec<String> = Vec::new();
 
     // Check for running cloudflared processes (all platforms)
@@ -901,9 +902,9 @@ fn validate_cloudflare_token_format(token: &str) -> bool {
 /// Generate a random secret of specified length (in bytes).
 fn generate_secret_with_length(length: usize) -> String {
     use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    use rand::rngs::OsRng;
     let mut bytes = vec![0u8; length];
-    rng.fill_bytes(&mut bytes);
+    OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 

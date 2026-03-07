@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
 use rand::Rng;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
@@ -147,7 +148,7 @@ fn is_expired(req: &PairingRequest, now_secs: u64) -> bool {
 }
 
 fn random_code() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     (0..PAIRING_CODE_LENGTH)
         .map(|_| {
             let idx = rng.gen_range(0..PAIRING_ALPHABET.len());
@@ -157,7 +158,7 @@ fn random_code() -> String {
 }
 
 fn generate_unique_code(existing: &HashSet<String>) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     for _ in 0..500 {
         let code = random_code();
         if !existing.contains(&code) {

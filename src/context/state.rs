@@ -156,6 +156,14 @@ pub struct JobContext {
     /// returns pre-recorded responses.
     #[serde(skip)]
     pub http_interceptor: Option<Arc<dyn HttpInterceptor>>,
+    /// Stash of full tool outputs keyed by tool_call_id.
+    ///
+    /// Tool outputs may be truncated before reaching the LLM context window,
+    /// but subsequent tools (e.g., `json`) may need the full output. This
+    /// stash stores the complete, unsanitized output so tools can reference
+    /// previous results by ID via `$tool_call_id` parameter syntax.
+    #[serde(skip)]
+    pub tool_output_stash: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
 }
 
 impl JobContext {
@@ -194,6 +202,7 @@ impl JobContext {
             extra_env: Arc::new(HashMap::new()),
             http_interceptor: None,
             metadata: serde_json::Value::Null,
+            tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 

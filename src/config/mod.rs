@@ -36,10 +36,7 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsq
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
-pub use self::llm::{
-    AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
-    OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
-};
+pub use self::llm::{LlmConfig, NearAiConfig, RegistryProviderConfig};
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
@@ -47,6 +44,7 @@ pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
+pub use crate::llm::session::SessionConfig;
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///
@@ -286,12 +284,29 @@ pub async fn inject_llm_keys_from_secrets(
     secrets: &dyn crate::secrets::SecretsStore,
     user_id: &str,
 ) {
-    let mappings = [
-        ("llm_openai_api_key", "OPENAI_API_KEY"),
-        ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
-        ("llm_compatible_api_key", "LLM_API_KEY"),
-        ("llm_nearai_api_key", "NEARAI_API_KEY"),
-    ];
+    // Static mappings for well-known providers.
+    // The registry's setup hints define secret_name -> env_var mappings,
+    // so new providers added to providers.json get injection automatically.
+    let mut mappings: Vec<(&str, &str)> = vec![("llm_nearai_api_key", "NEARAI_API_KEY")];
+
+    // Dynamically discover secret->env mappings from the provider registry.
+    // Uses selectable() which deduplicates user overrides correctly.
+    let registry = crate::llm::ProviderRegistry::load();
+    let dynamic_mappings: Vec<(String, String)> = registry
+        .selectable()
+        .iter()
+        .filter_map(|def| {
+            def.api_key_env.as_ref().and_then(|env_var| {
+                def.setup
+                    .as_ref()
+                    .and_then(|s| s.secret_name())
+                    .map(|secret_name| (secret_name.to_string(), env_var.clone()))
+            })
+        })
+        .collect();
+    for (secret, env_var) in &dynamic_mappings {
+        mappings.push((secret, env_var));
+    }
 
     let mut injected = HashMap::new();
 

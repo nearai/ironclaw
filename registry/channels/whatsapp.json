@@ -3,29 +3,36 @@
   "display_name": "WhatsApp Channel",
   "kind": "channel",
   "version": "0.1.0",
+  "wit_version": "0.2.0",
   "description": "Talk to your agent through WhatsApp",
-  "keywords": ["messaging", "chat", "whatsapp", "meta"],
-
+  "keywords": [
+    "messaging",
+    "chat",
+    "whatsapp",
+    "meta"
+  ],
   "source": {
     "dir": "channels-src/whatsapp",
     "capabilities": "whatsapp.capabilities.json",
     "crate_name": "whatsapp-channel"
   },
-
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/whatsapp-wasm32-wasip2.tar.gz",
       "sha256": null
     }
   },
-
   "auth_summary": {
     "method": "manual",
     "provider": "Meta",
-    "secrets": ["whatsapp_access_token", "whatsapp_verify_token"],
+    "secrets": [
+      "whatsapp_access_token",
+      "whatsapp_verify_token"
+    ],
     "shared_auth": null,
     "setup_url": "https://developers.facebook.com/apps/"
   },
-
-  "tags": ["messaging"]
+  "tags": [
+    "messaging"
+  ]
 }

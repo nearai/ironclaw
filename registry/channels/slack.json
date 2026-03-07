@@ -3,29 +3,37 @@
   "display_name": "Slack Channel",
   "kind": "channel",
   "version": "0.1.0",
+  "wit_version": "0.2.0",
   "description": "Talk to your agent in Slack",
-  "keywords": ["messaging", "chat", "workspace", "slack"],
-
+  "keywords": [
+    "messaging",
+    "chat",
+    "workspace",
+    "slack"
+  ],
   "source": {
     "dir": "channels-src/slack",
     "capabilities": "slack.capabilities.json",
     "crate_name": "slack-channel"
   },
-
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/slack-wasm32-wasip2.tar.gz",
       "sha256": null
     }
   },
-
   "auth_summary": {
     "method": "manual",
     "provider": "Slack",
-    "secrets": ["slack_bot_token", "slack_signing_secret"],
+    "secrets": [
+      "slack_bot_token",
+      "slack_signing_secret"
+    ],
     "shared_auth": null,
     "setup_url": "https://api.slack.com/apps"
   },
-
-  "tags": ["default", "messaging"]
+  "tags": [
+    "default",
+    "messaging"
+  ]
 }
