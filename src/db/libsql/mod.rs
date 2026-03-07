@@ -147,10 +147,18 @@ pub(crate) fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
     }
     // Naive with fractional seconds (legacy or SQLite datetime() output)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        tracing::warn!(
+            timestamp = %s,
+            "parsed naive timestamp, assuming UTC — consider migrating to RFC 3339"
+        );
         return Ok(ndt.and_utc());
     }
     // Naive without fractional seconds (legacy format)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        tracing::warn!(
+            timestamp = %s,
+            "parsed naive timestamp, assuming UTC — consider migrating to RFC 3339"
+        );
         return Ok(ndt.and_utc());
     }
     Err(format!("unparseable timestamp: {:?}", s))
@@ -380,6 +388,8 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Datelike, Timelike};
+
     use crate::db::Database;
     use crate::db::libsql::LibSqlBackend;
 
@@ -458,5 +468,60 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let count: i64 = row.get(0).unwrap();
         assert_eq!(count, 20);
+    }
+
+    #[test]
+    fn test_parse_timestamp_rfc3339() {
+        let result = crate::db::libsql::parse_timestamp("2024-01-15T10:30:00.123Z");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(dt.year(), 2024);
+        assert_eq!(dt.month(), 1);
+        assert_eq!(dt.day(), 15);
+        assert_eq!(dt.hour(), 10);
+        assert_eq!(dt.minute(), 30);
+        assert_eq!(dt.second(), 0);
+        assert_eq!(dt.nanosecond(), 123_000_000);
+    }
+
+    #[test]
+    fn test_parse_timestamp_naive_with_fractional() {
+        let result = crate::db::libsql::parse_timestamp("2024-01-15 10:30:00.123");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(dt.year(), 2024);
+        assert_eq!(dt.month(), 1);
+        assert_eq!(dt.day(), 15);
+        assert_eq!(dt.hour(), 10);
+        assert_eq!(dt.minute(), 30);
+        assert_eq!(dt.second(), 0);
+        assert_eq!(dt.nanosecond(), 123_000_000);
+    }
+
+    #[test]
+    fn test_parse_timestamp_naive_without_fractional() {
+        let result = crate::db::libsql::parse_timestamp("2024-01-15 10:30:00");
+        assert!(result.is_ok());
+        let dt = result.unwrap();
+        assert_eq!(dt.year(), 2024);
+        assert_eq!(dt.month(), 1);
+        assert_eq!(dt.day(), 15);
+        assert_eq!(dt.hour(), 10);
+        assert_eq!(dt.minute(), 30);
+        assert_eq!(dt.second(), 0);
+        assert_eq!(dt.nanosecond(), 0);
+    }
+
+    #[test]
+    fn test_parse_timestamp_both_formats_return_utc() {
+        let rfc = crate::db::libsql::parse_timestamp("2024-06-01T12:00:00.000Z").unwrap();
+        let naive = crate::db::libsql::parse_timestamp("2024-06-01 12:00:00.000").unwrap();
+        assert_eq!(rfc, naive, "RFC 3339 and naive formats should produce the same UTC time");
+    }
+
+    #[test]
+    fn test_parse_timestamp_invalid() {
+        let result = crate::db::libsql::parse_timestamp("not-a-timestamp");
+        assert!(result.is_err());
     }
 }
