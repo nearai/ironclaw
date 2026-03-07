@@ -588,6 +588,12 @@ async fn load_and_validate_skill(
         .iter()
         .map(|k| k.to_lowercase())
         .collect();
+    let lowercased_exclude_keywords = manifest
+        .activation
+        .exclude_keywords
+        .iter()
+        .map(|k| k.to_lowercase())
+        .collect();
     let lowercased_tags = manifest
         .activation
         .tags
@@ -604,6 +610,7 @@ async fn load_and_validate_skill(
         content_hash,
         compiled_patterns,
         lowercased_keywords,
+        lowercased_exclude_keywords,
         lowercased_tags,
     };
 
