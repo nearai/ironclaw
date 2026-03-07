@@ -231,7 +231,70 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 3: routine_cooldown
+    // Test 3: webhook_trigger_fires
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn webhook_trigger_fires() {
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        let trace = LlmTrace::single_turn(
+            "test-webhook-fire",
+            "hook",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "WEBHOOK_OK".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None,
+        ));
+
+        let routine = make_routine(
+            "webhook-test",
+            Trigger::Webhook {
+                path: Some("incoming".to_string()),
+                secret: Some("topsecret".to_string()),
+            },
+            "Handle webhook payload.",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+
+        let run_id = engine
+            .fire_webhook(routine.id, Some("default"), Some("/incoming".to_string()))
+            .await
+            .expect("fire_webhook");
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs");
+        let run = runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .expect("run record");
+        assert_eq!(run.trigger_type, "webhook");
+        assert_eq!(run.trigger_detail.as_deref(), Some("/incoming"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: routine_cooldown
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -310,7 +373,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 4: heartbeat_findings
+    // Test 5: heartbeat_findings
     // -----------------------------------------------------------------------
 
     #[tokio::test]

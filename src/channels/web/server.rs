@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     middleware,
     response::{
         IntoResponse,
@@ -19,6 +19,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::Deserialize;
+use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -200,7 +201,8 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
-        .route("/oauth/callback", get(oauth_callback_handler));
+        .route("/oauth/callback", get(oauth_callback_handler))
+        .route("/api/webhooks/{*path}", post(webhook_trigger_handler));
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -2110,6 +2112,115 @@ async fn routines_runs_handler(
         "routine_id": routine_id,
         "runs": run_infos,
     })))
+}
+
+#[derive(Deserialize)]
+struct WebhookTriggerQuery {
+    #[serde(default)]
+    secret: Option<String>,
+}
+
+async fn webhook_trigger_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(path): Path<String>,
+    Query(query): Query<WebhookTriggerQuery>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let engine = {
+        let guard = state.routine_engine.read().await;
+        guard.as_ref().cloned().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Routine engine not available".to_string(),
+        ))?
+    };
+
+    let requested_path = normalize_webhook_path(&path);
+
+    let routines = store
+        .list_all_routines()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut matches: Vec<crate::agent::routine::Routine> = routines
+        .into_iter()
+        .filter(|routine| routine.user_id == state.user_id)
+        .filter(|routine| {
+            webhook_path_for_routine(routine).as_deref() == Some(requested_path.as_str())
+        })
+        .collect();
+
+    if matches.is_empty() {
+        return Err((StatusCode::NOT_FOUND, "Webhook not found".to_string()));
+    }
+
+    if matches.len() > 1 {
+        return Err((
+            StatusCode::CONFLICT,
+            "Multiple routines configured for this webhook path".to_string(),
+        ));
+    }
+
+    let routine = matches.remove(0);
+
+    if let crate::agent::routine::Trigger::Webhook { secret, .. } = &routine.trigger {
+        if let Some(expected) = secret {
+            let header_secret = headers
+                .get("X-Webhook-Secret")
+                .and_then(|value| value.to_str().ok());
+            let provided = header_secret.or(query.secret.as_deref());
+            match provided {
+                Some(provided) if bool::from(provided.as_bytes().ct_eq(expected.as_bytes())) => {}
+                Some(_) => {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "Invalid webhook secret".to_string(),
+                    ));
+                }
+                None => {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "Webhook secret required".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    let run_id = engine
+        .fire_webhook(routine.id, Some(&state.user_id), Some(requested_path.clone()))
+        .await
+        .map_err(|e| (routine_error_status(&e), e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "triggered",
+        "routine_id": routine.id,
+        "run_id": run_id,
+        "path": requested_path,
+    })))
+}
+
+fn normalize_webhook_path(raw: &str) -> String {
+    let trimmed = raw.trim_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", trimmed)
+    }
+}
+
+fn webhook_path_for_routine(routine: &crate::agent::routine::Routine) -> Option<String> {
+    match &routine.trigger {
+        crate::agent::routine::Trigger::Webhook { path, .. } => {
+            let raw = path.clone().unwrap_or_else(|| routine.id.to_string());
+            Some(normalize_webhook_path(&raw))
+        }
+        _ => None,
+    }
 }
 
 /// Convert a Routine to the trimmed RoutineInfo for list display.
