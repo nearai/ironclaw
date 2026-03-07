@@ -963,18 +963,25 @@ async fn chat_history_handler(
                 tool_calls: t
                     .tool_calls
                     .iter()
-                    .map(|tc| ToolCallInfo {
-                        name: tc.name.clone(),
-                        has_result: tc.result.is_some(),
-                        has_error: tc.error.is_some(),
-                        result_preview: tc.result.as_ref().map(|r| {
-                            let s = match r {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            };
-                            truncate_preview(&s, 500)
-                        }),
-                        error: tc.error.clone(),
+                    .map(|tc| {
+                        // Image tools need full results (large base64 data), don't truncate
+                        let limit = match tc.name.as_str() {
+                            "image_generate" | "image_edit" | "image_analyze" => usize::MAX,
+                            _ => 500,
+                        };
+                        ToolCallInfo {
+                            name: tc.name.clone(),
+                            has_result: tc.result.is_some(),
+                            has_error: tc.error.is_some(),
+                            result_preview: tc.result.as_ref().map(|r| {
+                                let s = match r {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                truncate_preview(&s, limit)
+                            }),
+                            error: tc.error.clone(),
+                        }
                     })
                     .collect(),
             })

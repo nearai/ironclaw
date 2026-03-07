@@ -17,6 +17,16 @@ use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
 use crate::tools::redact_params;
 
+/// Represents image generation sentinel data in tool output.
+#[derive(serde::Deserialize)]
+struct ImageGeneratedSentinel<'a> {
+    #[serde(rename = "type")]
+    ty: &'a str,
+    data: &'a str,
+    media_type: &'a str,
+    path: &'a str,
+}
+
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
@@ -642,25 +652,21 @@ impl Agent {
                                         .await;
 
                                     // Check for image_generated sentinel and emit SSE event
-                                    if let Ok(result_json) =
-                                        serde_json::from_str::<serde_json::Value>(output)
-                                        && let Some("image_generated") =
-                                            result_json.get("type").and_then(|v| v.as_str())
-                                        && let (Some(data), Some(media_type), Some(path)) = (
-                                            result_json.get("data").and_then(|v| v.as_str()),
-                                            result_json.get("media_type").and_then(|v| v.as_str()),
-                                            result_json.get("path").and_then(|v| v.as_str()),
-                                        )
+                                    if let Ok(sentinel) =
+                                        serde_json::from_str::<ImageGeneratedSentinel>(output)
+                                        && sentinel.ty == "image_generated"
                                     {
-                                        let data_url =
-                                            format!("data:{};base64,{}", media_type, data);
+                                        let data_url = format!(
+                                            "data:{};base64,{}",
+                                            sentinel.media_type, sentinel.data
+                                        );
                                         let _ = self
                                             .channels
                                             .send_status(
                                                 &message.channel,
                                                 StatusUpdate::ImageGenerated {
                                                     data_url,
-                                                    path: path.to_string(),
+                                                    path: sentinel.path.to_string(),
                                                 },
                                                 &message.metadata,
                                             )

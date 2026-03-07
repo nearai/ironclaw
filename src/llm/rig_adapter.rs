@@ -236,7 +236,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                     // User message with images: create multi-part content
                     let mut parts: Vec<UserContent> = vec![UserContent::text(&msg.content)];
                     for img in &msg.images {
-                        let media_type = match img.media_type.as_str() {
+                        let media_type = match img.media_type.to_lowercase().as_str() {
                             "image/jpeg" => ImageMediaType::JPEG,
                             "image/png" => ImageMediaType::PNG,
                             "image/gif" => ImageMediaType::GIF,

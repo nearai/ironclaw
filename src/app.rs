@@ -380,19 +380,17 @@ impl AppBuilder {
             // Register image tools if image generation models are available
             match llm.list_models().await {
                 Ok(models) => {
-                    if crate::llm::image_models::has_image_generation_model(&models) {
-                        if let Some(image_model) =
-                            crate::llm::image_models::suggest_image_model(&models)
-                        {
-                            tools.register_image_tools(
-                                self.config.llm.nearai.clone(),
-                                Arc::clone(&ws),
-                            );
-                            tracing::info!(
-                                "Image generation tools registered (model: {})",
-                                image_model
-                            );
-                        }
+                    if let Some(image_model) =
+                        crate::llm::image_models::suggest_image_model(&models)
+                    {
+                        tools.register_image_tools(
+                            self.config.llm.nearai.clone(),
+                            Arc::clone(&ws),
+                        );
+                        tracing::info!(
+                            "Image generation tools registered (model: {})",
+                            image_model
+                        );
                     } else {
                         tracing::debug!(
                             "No image generation models detected in available models: {:?}",
@@ -401,16 +399,14 @@ impl AppBuilder {
                     }
 
                     // Register vision analysis tool if vision models are available
-                    if crate::llm::vision_models::has_vision_model(&models) {
-                        if let Some(vision_model) =
-                            crate::llm::vision_models::suggest_vision_model(&models)
-                        {
-                            tools.register_vision_tools(Arc::clone(&ws));
-                            tracing::info!(
-                                "Image analysis tool registered (vision model: {})",
-                                vision_model
-                            );
-                        }
+                    if let Some(vision_model) =
+                        crate::llm::vision_models::suggest_vision_model(&models)
+                    {
+                        tools.register_vision_tools(Arc::clone(&ws));
+                        tracing::info!(
+                            "Image analysis tool registered (vision model: {})",
+                            vision_model
+                        );
                     } else {
                         tracing::debug!("No vision-capable models detected in available models");
                     }

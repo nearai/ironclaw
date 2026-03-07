@@ -392,7 +392,12 @@ function connectSSE() {
 
   eventSource.addEventListener('image_generated', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    console.log('Received image_generated event:', { thread_id: data.thread_id, path: data.path, data_url_len: data.data_url ? data.data_url.length : 0 });
+    if (!isCurrentThread(data.thread_id)) {
+      console.log('Image event ignored: not current thread', { currentThreadId, eventThreadId: data.thread_id });
+      return;
+    }
+    console.log('Adding generated image to chat');
     addGeneratedImage(data.data_url, data.path);
   });
 
@@ -950,6 +955,7 @@ function finalizeActivityGroup() {
 
 function addGeneratedImage(dataUrl, path) {
   const container = document.getElementById('chat-messages');
+  console.log('addGeneratedImage called', { dataUrl_len: dataUrl ? dataUrl.length : 0, path });
   const card = document.createElement('div');
   card.className = 'generated-image-card';
 
@@ -957,6 +963,8 @@ function addGeneratedImage(dataUrl, path) {
   img.src = dataUrl;
   img.alt = 'Generated image';
   img.className = 'generated-image';
+  img.onerror = () => console.error('Failed to load image from data URL:', dataUrl.substring(0, 100));
+  img.onload = () => console.log('Image loaded successfully from data URL');
 
   const pathLabel = document.createElement('div');
   pathLabel.className = 'generated-image-path';
@@ -965,6 +973,7 @@ function addGeneratedImage(dataUrl, path) {
   card.appendChild(img);
   card.appendChild(pathLabel);
   container.appendChild(card);
+  console.log('Image card appended to DOM');
   container.scrollTop = container.scrollHeight;
 }
 
@@ -1333,10 +1342,33 @@ function createToolCallsSummaryElement(toolCalls) {
     item.appendChild(nameSpan);
 
     if (tc.result_preview) {
-      const preview = document.createElement('div');
-      preview.className = 'tool-call-preview';
-      preview.textContent = tc.result_preview;
-      item.appendChild(preview);
+      // Check if this is an image result
+      try {
+        const parsed = JSON.parse(tc.result_preview);
+        if (parsed.type === 'image_generated' && parsed.data && parsed.media_type) {
+          const dataUrl = `data:${parsed.media_type};base64,${parsed.data}`;
+          const imgDiv = document.createElement('div');
+          imgDiv.className = 'generated-image-card';
+          const img = document.createElement('img');
+          img.src = dataUrl;
+          img.alt = 'Generated image';
+          img.className = 'generated-image';
+          imgDiv.appendChild(img);
+          item.appendChild(imgDiv);
+        } else {
+          // Regular text result
+          const preview = document.createElement('div');
+          preview.className = 'tool-call-preview';
+          preview.textContent = tc.result_preview;
+          item.appendChild(preview);
+        }
+      } catch {
+        // Not JSON, display as text
+        const preview = document.createElement('div');
+        preview.className = 'tool-call-preview';
+        preview.textContent = tc.result_preview;
+        item.appendChild(preview);
+      }
     }
     if (tc.error) {
       const errDiv = document.createElement('div');

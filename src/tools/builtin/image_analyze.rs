@@ -25,13 +25,14 @@ impl ImageAnalyzeTool {
 
     /// Infer media type from file extension.
     fn infer_media_type(path: &str) -> &'static str {
-        if path.ends_with(".png") || path.ends_with(".b64") {
+        let lower_path = path.to_lowercase();
+        if lower_path.ends_with(".png") || lower_path.ends_with(".b64") {
             "image/png"
-        } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        } else if lower_path.ends_with(".jpg") || lower_path.ends_with(".jpeg") {
             "image/jpeg"
-        } else if path.ends_with(".gif") {
+        } else if lower_path.ends_with(".gif") {
             "image/gif"
-        } else if path.ends_with(".webp") {
+        } else if lower_path.ends_with(".webp") {
             "image/webp"
         } else {
             "image/png" // Default to PNG
@@ -202,14 +203,14 @@ mod tests {
 
     #[test]
     fn test_infer_media_type_uppercase_extension_defaults() {
-        // Uppercase extensions don't match the lowercase checks, so defaults to PNG
+        // Uppercase extensions are now case-insensitively matched
         assert_eq!(
             ImageAnalyzeTool::infer_media_type("images/test.PNG"),
-            "image/png" // Defaults to PNG for unknown extension
+            "image/png"
         );
         assert_eq!(
             ImageAnalyzeTool::infer_media_type("images/test.JPG"),
-            "image/png" // Defaults to PNG for unknown extension
+            "image/jpeg"
         );
     }
 
