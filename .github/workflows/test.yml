@@ -25,7 +25,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
@@ -45,8 +44,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          profile: minimal
       - uses: Swatinem/rust-cache@v2
       - name: Run Telegram Channel Tests
         run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
@@ -69,8 +66,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          profile: minimal
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-${{ matrix.name }}
@@ -86,7 +81,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:

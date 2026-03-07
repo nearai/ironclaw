@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pre-commit hook: run version bump checks when WIT or extension sources change.
+# Install: git config core.hooksPath .githooks
+
+# Only run the check if relevant files are staged
+STAGED=$(git diff --cached --name-only)
+
+NEEDS_CHECK=false
+if echo "$STAGED" | grep -qE '^wit/|^channels-src/|^tools-src/'; then
+    NEEDS_CHECK=true
+fi
+
+if $NEEDS_CHECK; then
+    echo "pre-commit: checking version bumps..."
+    if ! ./scripts/check-version-bumps.sh; then
+        echo ""
+        echo "Commit blocked: version bump check failed."
+        echo "Bump versions in the relevant registry JSON and/or WIT package declaration."
+        echo "To bypass: git commit --no-verify"
+        exit 1
+    fi
+fi

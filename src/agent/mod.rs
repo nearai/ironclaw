@@ -11,6 +11,7 @@
 //! - Context compaction for long conversations
 
 mod agent_loop;
+mod attachments;
 mod commands;
 pub mod compaction;
 pub mod context_monitor;

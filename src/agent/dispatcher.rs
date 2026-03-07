@@ -1127,6 +1127,8 @@ mod tests {
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
         };
 
         Agent::new(
@@ -1879,6 +1881,8 @@ mod tests {
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
         };
 
         Agent::new(
@@ -1992,6 +1996,8 @@ mod tests {
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
                 sse_tx: None,
                 http_interceptor: None,
+                transcription: None,
+                document_extraction: None,
             };
 
             Agent::new(

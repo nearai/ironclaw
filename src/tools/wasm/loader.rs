@@ -328,7 +328,7 @@ impl WasmToolLoader {
 /// - Extension WIT version must not be greater than host version
 ///
 /// If `declared` is `None`, the check is skipped (pre-versioning extension).
-pub(crate) fn check_wit_version_compat(
+pub fn check_wit_version_compat(
     name: &str,
     declared: Option<&str>,
     host_version: &str,

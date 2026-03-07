@@ -496,6 +496,68 @@ impl Tool for ToolRemoveTool {
     }
 }
 
+// ── tool_upgrade ─────────────────────────────────────────────────────
+
+pub struct ToolUpgradeTool {
+    manager: Arc<ExtensionManager>,
+}
+
+impl ToolUpgradeTool {
+    pub fn new(manager: Arc<ExtensionManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for ToolUpgradeTool {
+    fn name(&self) -> &str {
+        "tool_upgrade"
+    }
+
+    fn description(&self) -> &str {
+        "Upgrade installed WASM extensions (channels and tools) to match the current \
+         host WIT version. If name is omitted, checks and upgrades all installed WASM \
+         extensions. Authentication and secrets are preserved."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Extension name to upgrade (omit to upgrade all)"
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let name = params.get("name").and_then(|v| v.as_str());
+
+        let result = self
+            .manager
+            .upgrade(name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        let output = serde_json::to_value(&result)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
+
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
 // ── extension_info ────────────────────────────────────────────────────
 
 pub struct ExtensionInfoTool {
@@ -640,6 +702,26 @@ mod tests {
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[test]
+    fn test_tool_upgrade_schema() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = ToolUpgradeTool {
+            manager: test_manager_stub(),
+        };
+        assert_eq!(tool.name(), "tool_upgrade");
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+        let schema = tool.parameters_schema();
+        // name is optional (omit to upgrade all)
+        assert!(schema["properties"].get("name").is_some());
+        assert!(
+            schema.get("required").is_none(),
+            "tool_upgrade should have no required params"
         );
     }
 
