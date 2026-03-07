@@ -808,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_never_always_passes() {
+    fn test_approval_context_never_is_not_blocked() {
         let ctx = ApprovalContext::autonomous();
         assert!(!ctx.is_blocked("any_tool", ApprovalRequirement::Never));
     }

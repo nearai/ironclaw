@@ -21,7 +21,7 @@ use crate::agent::routine::{
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
 use crate::db::Database;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
 // ==================== routine_create ====================
 
@@ -583,6 +583,12 @@ impl Tool for RoutineFireTool {
 
     fn description(&self) -> &str {
         "Manually trigger a routine to run immediately, bypassing schedule, trigger type, and cooldown."
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        // Firing a routine can dispatch a full_job with pre-authorized Always-gated tools,
+        // so this is a meaningful escalation that warrants auto-approval gating.
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
