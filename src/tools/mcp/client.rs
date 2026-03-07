@@ -527,7 +527,7 @@ mod tests {
     fn test_mcp_request_list_tools() {
         let req = McpRequest::list_tools(1);
         assert_eq!(req.method, "tools/list");
-        assert_eq!(req.id, 1);
+        assert_eq!(req.id, Some(1));
     }
 
     #[test]

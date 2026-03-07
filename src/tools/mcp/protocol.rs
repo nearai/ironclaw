@@ -168,7 +168,7 @@ pub struct McpResponse {
     /// JSON-RPC version.
     pub jsonrpc: String,
     /// Request ID (may be missing for notifications or non-standard for errors).
-    #[serde(default, deserialize_with = "deserialize_flexible_id")]
+    #[serde(deserialize_with = "deserialize_flexible_id")]
     pub id: Option<u64>,
     /// Result (on success).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -372,7 +372,7 @@ mod tests {
     fn test_initialize_request() {
         let req = McpRequest::initialize(42);
         assert_eq!(req.jsonrpc, "2.0");
-        assert_eq!(req.id, 42);
+        assert_eq!(req.id, Some(42));
         assert_eq!(req.method, "initialize");
 
         let params = req.params.expect("initialize must have params");
@@ -396,7 +396,7 @@ mod tests {
     fn test_call_tool_request() {
         let args = serde_json::json!({"query": "rust async"});
         let req = McpRequest::call_tool(7, "search", args.clone());
-        assert_eq!(req.id, 7);
+        assert_eq!(req.id, Some(7));
         assert_eq!(req.method, "tools/call");
 
         let params = req.params.expect("call_tool must have params");
@@ -412,7 +412,7 @@ mod tests {
             "result": { "tools": [] }
         });
         let resp: McpResponse = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(resp.id, 1);
+        assert_eq!(resp.id, Some(1));
         assert!(resp.result.is_some());
         assert!(resp.error.is_none());
     }
