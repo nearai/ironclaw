@@ -1,6 +1,19 @@
 //! MCP protocol types.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Flexibly deserialize a JSON-RPC id that may be a number, string, or null.
+fn deserialize_flexible_id<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        Some(serde_json::Value::Number(n)) => Ok(n.as_u64()),
+        Some(serde_json::Value::String(s)) => Ok(s.parse::<u64>().ok()),
+        _ => Ok(None),
+    }
+}
 
 /// MCP protocol version.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -80,8 +93,9 @@ impl McpTool {
 pub struct McpRequest {
     /// JSON-RPC version.
     pub jsonrpc: String,
-    /// Request ID.
-    pub id: u64,
+    /// Request ID (None for notifications per JSON-RPC spec).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     /// Method name.
     pub method: String,
     /// Request parameters.
@@ -94,7 +108,7 @@ impl McpRequest {
     pub fn new(id: u64, method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
-            id,
+            id: Some(id),
             method: method.into(),
             params,
         }
@@ -120,15 +134,11 @@ impl McpRequest {
     }
 
     /// Create an initialized notification (sent after initialize).
-    ///
-    /// Note: JSON-RPC 2.0 notifications should omit the `id` field entirely.
-    /// We set `id: 0` because `McpRequest` uses `u64` (not `Option<u64>`).
-    /// Most MCP servers tolerate this; a proper fix would use a separate
-    /// `McpNotification` type or make `id` optional with `skip_serializing_if`.
+    /// Per JSON-RPC spec, notifications MUST NOT have an id field.
     pub fn initialized_notification() -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
-            id: 0,
+            id: None,
             method: "notifications/initialized".to_string(),
             params: None,
         }
@@ -157,8 +167,9 @@ impl McpRequest {
 pub struct McpResponse {
     /// JSON-RPC version.
     pub jsonrpc: String,
-    /// Request ID.
-    pub id: u64,
+    /// Request ID (may be missing for notifications or non-standard for errors).
+    #[serde(default, deserialize_with = "deserialize_flexible_id")]
+    pub id: Option<u64>,
     /// Result (on success).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
