@@ -429,7 +429,10 @@ impl TraceLlm {
     }
 
     /// Strip `<tool_output name="..." sanitized="...">...\n</tool_output>`
-    /// wrapper and unescape XML entities from safety-layer output.
+    /// wrapper from safety-layer output.
+    ///
+    /// Note: XML entity unescaping is no longer needed since the safety layer
+    /// no longer escapes content (see issue #598).
     fn unwrap_tool_output(content: &str) -> std::borrow::Cow<'_, str> {
         let trimmed = content.trim();
         if let Some(rest) = trimmed.strip_prefix("<tool_output")
@@ -437,16 +440,7 @@ impl TraceLlm {
         {
             let inner = &rest[tag_end + 1..];
             if let Some(close) = inner.rfind("</tool_output>") {
-                let body = inner[..close].trim();
-                // Reverse XML escaping applied by safety layer.
-                if body.contains("&amp;") || body.contains("&lt;") || body.contains("&gt;") {
-                    return std::borrow::Cow::Owned(
-                        body.replace("&amp;", "&")
-                            .replace("&lt;", "<")
-                            .replace("&gt;", ">"),
-                    );
-                }
-                return std::borrow::Cow::Borrowed(body);
+                return std::borrow::Cow::Borrowed(inner[..close].trim());
             }
         }
         std::borrow::Cow::Borrowed(content)

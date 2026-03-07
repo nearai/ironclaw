@@ -159,12 +159,17 @@ impl SafetyLayer {
     ///
     /// This creates a clear structural boundary between trusted instructions
     /// and untrusted external data.
+    ///
+    /// Note: Content is NOT XML-escaped to preserve structured output (e.g., JSON).
+    /// The XML wrapper tags provide a semantic boundary that the LLM understands
+    /// from context; escaping would corrupt tool outputs without adding meaningful
+    /// security (the sanitizer + policy system handles injection defense).
     pub fn wrap_for_llm(&self, tool_name: &str, content: &str, sanitized: bool) -> String {
         format!(
             "<tool_output name=\"{}\" sanitized=\"{}\">\n{}\n</tool_output>",
             escape_xml_attr(tool_name),
             sanitized,
-            escape_xml_content(content)
+            content
         )
     }
 
@@ -213,13 +218,6 @@ fn escape_xml_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Escape XML content.
-fn escape_xml_content(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,7 +233,25 @@ mod tests {
         let wrapped = safety.wrap_for_llm("test_tool", "Hello <world>", true);
         assert!(wrapped.contains("name=\"test_tool\""));
         assert!(wrapped.contains("sanitized=\"true\""));
-        assert!(wrapped.contains("Hello &lt;world&gt;"));
+        // Content should NOT be XML-escaped to preserve structured output (e.g., JSON)
+        assert!(wrapped.contains("Hello <world>"));
+        assert!(!wrapped.contains("&lt;") && !wrapped.contains("&gt;"));
+    }
+
+    #[test]
+    fn test_wrap_for_llm_preserves_json() {
+        let config = SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        };
+        let safety = SafetyLayer::new(&config);
+
+        let json_output = r#"{"job_id": "abc-123", "status": "pending"}"#;
+        let wrapped = safety.wrap_for_llm("create_job", json_output, true);
+
+        // JSON should be preserved exactly, not escaped
+        assert!(wrapped.contains(json_output));
+        assert!(!wrapped.contains("&quot;"));
     }
 
     #[test]
