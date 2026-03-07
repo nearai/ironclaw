@@ -1641,7 +1641,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             messages: vec![ChatCompletionMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()),
+                content: Some(MessageContent::Text("Hello".to_string())),
                 tool_call_id: None,
                 name: None,
                 tool_calls: None,
@@ -1998,7 +1998,7 @@ mod tests {
     fn test_flatten_tool_result_missing_name_uses_unknown() {
         let messages = vec![ChatCompletionMessage {
             role: "tool".to_string(),
-            content: Some("result data".to_string()),
+            content: Some(MessageContent::Text("result data".to_string())),
             tool_call_id: Some("call_1".to_string()),
             name: None,
             tool_calls: None,
@@ -2009,6 +2009,8 @@ mod tests {
             result[0]
                 .content
                 .as_ref()
+                .unwrap()
+                .as_text()
                 .unwrap()
                 .contains("[Tool `unknown` returned:")
         );
@@ -2029,6 +2031,8 @@ mod tests {
             result[0]
                 .content
                 .as_ref()
+                .unwrap()
+                .as_text()
                 .unwrap()
                 .contains("[Tool `my_tool` returned: ]")
         );
@@ -2063,14 +2067,14 @@ mod tests {
             },
             ChatCompletionMessage {
                 role: "tool".to_string(),
-                content: Some("found".to_string()),
+                content: Some(MessageContent::Text("found".to_string())),
                 tool_call_id: Some("call_1".to_string()),
                 name: Some("search".to_string()),
                 tool_calls: None,
             },
             ChatCompletionMessage {
                 role: "tool".to_string(),
-                content: Some("fetched".to_string()),
+                content: Some(MessageContent::Text("fetched".to_string())),
                 tool_call_id: Some("call_2".to_string()),
                 name: Some("fetch".to_string()),
                 tool_calls: None,
@@ -2079,7 +2083,7 @@ mod tests {
         let result = flatten_tool_messages(messages);
         assert_eq!(result.len(), 3);
         // Assistant message has both calls described
-        let assistant_text = result[0].content.as_ref().unwrap();
+        let assistant_text = result[0].content.as_ref().unwrap().as_text().unwrap();
         assert!(assistant_text.contains("[Called tool `search`"));
         assert!(assistant_text.contains("[Called tool `fetch`"));
         assert!(result[0].tool_calls.is_none());
@@ -2115,8 +2119,8 @@ mod tests {
         let chat_msg: ChatCompletionMessage = msg.into();
         assert_eq!(chat_msg.role, "system");
         assert_eq!(
-            chat_msg.content,
-            Some("You are a helpful assistant.".to_string())
+            chat_msg.content.as_ref().unwrap().as_text().unwrap(),
+            "You are a helpful assistant."
         );
         assert!(chat_msg.tool_calls.is_none());
         assert!(chat_msg.tool_call_id.is_none());

@@ -68,9 +68,7 @@ impl DocumentExtractionMiddleware {
             // Use inline data only — downloading from source_url is intentionally
             // not supported to prevent SSRF. Channels must populate attachment.data
             // via store_attachment_data before emitting the message.
-            let data = if !attachment.data.is_empty() {
-                attachment.data.clone()
-            } else {
+            if attachment.data.is_empty() {
                 extractions.push((
                     i,
                     "[Document has no inline data. \
@@ -78,11 +76,11 @@ impl DocumentExtractionMiddleware {
                         .to_string(),
                 ));
                 continue;
-            };
+            }
 
-            // Enforce size limit on actual data (size_bytes may be missing or underreported)
-            if data.len() as u64 > MAX_DOCUMENT_SIZE {
-                let mb = data.len() as f64 / (1024.0 * 1024.0);
+            // Enforce size limit before cloning to avoid unnecessary allocation
+            if attachment.data.len() as u64 > MAX_DOCUMENT_SIZE {
+                let mb = attachment.data.len() as f64 / (1024.0 * 1024.0);
                 let max_mb = MAX_DOCUMENT_SIZE as f64 / (1024.0 * 1024.0);
                 extractions.push((
                     i,
@@ -93,6 +91,8 @@ impl DocumentExtractionMiddleware {
                 ));
                 continue;
             }
+
+            let data = attachment.data.clone();
 
             let mime = &attachment.mime_type;
             let filename = attachment.filename.as_deref();

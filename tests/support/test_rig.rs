@@ -502,10 +502,8 @@ impl TestRigBuilder {
             .map(|t| t.http_exchanges.clone())
             .unwrap_or_default();
 
-        #[allow(unused_assignments)]
         let mut trace_llm_ref: Option<Arc<TraceLlm>> = None;
         let base_llm: Arc<dyn LlmProvider> = if let Some(llm) = llm {
-            trace_llm_ref = None;
             llm
         } else if let Some(trace) = trace {
             let tlm = Arc::new(TraceLlm::from_trace(trace));

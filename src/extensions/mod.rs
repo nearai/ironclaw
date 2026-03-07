@@ -795,6 +795,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         };
         let sr = SearchResult {
             entry,
@@ -824,6 +825,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::None,
+            version: None,
         };
         let sr = SearchResult {
             entry,
@@ -911,6 +913,7 @@ mod tests {
             has_auth: true,
             installed: false,
             activation_error: Some("token expired".to_string()),
+            version: None,
         };
         let json = serde_json::to_value(&ext).unwrap();
         assert_eq!(json["display_name"], "Gmail Tool");
