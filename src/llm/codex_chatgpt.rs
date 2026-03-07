@@ -342,6 +342,26 @@ impl CodexChatGptProvider {
 
         Ok(result)
     }
+
+    /// Remove keys with empty-string values from a JSON object.
+    ///
+    /// gpt-5.2-codex fills optional tool parameters with `""` (e.g.
+    /// `"timestamp": ""`). IronClaw's tool validation treats these as
+    /// invalid "non-empty input expected". Stripping them makes the
+    /// tool see only the actually-provided values.
+    fn strip_empty_string_values(value: Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let cleaned: serde_json::Map<String, Value> = map
+                    .into_iter()
+                    .filter(|(_, v)| !matches!(v, Value::String(s) if s.is_empty()))
+                    .map(|(k, v)| (k, Self::strip_empty_string_values(v)))
+                    .collect();
+                Value::Object(cleaned)
+            }
+            other => other,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -403,6 +423,10 @@ impl LlmProvider for CodexChatGptProvider {
             .map(|tc| {
                 let args: Value = serde_json::from_str(&tc.arguments)
                     .unwrap_or_else(|_| json!(tc.arguments));
+                // gpt-5.2-codex fills optional parameters with empty strings (e.g.
+                // `"timestamp": ""`), which IronClaw's tool validation rejects.
+                // Strip them so only actually-provided values reach the tool.
+                let args = Self::strip_empty_string_values(args);
                 ToolCall {
                     id: tc.call_id,
                     name: tc.name,
@@ -541,5 +565,17 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
         assert_eq!(tc.call_id, "call_1");
         assert_eq!(tc.name, "search");
         assert_eq!(tc.arguments, "{\"query\":\"rust\"}");
+    }
+
+    #[test]
+    fn test_strip_empty_string_values() {
+        let input = json!({
+            "format": "%Y-%m-%d",
+            "operation": "now",
+            "timestamp": "",
+            "timestamp2": "",
+        });
+        let cleaned = CodexChatGptProvider::strip_empty_string_values(input);
+        assert_eq!(cleaned, json!({"format": "%Y-%m-%d", "operation": "now"}));
     }
 }
