@@ -10,7 +10,6 @@ use crate::error::LlmError;
 use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
 };
-use crate::safety::SafetyLayer;
 
 /// Token the agent returns when it has nothing to say (e.g. in group chats).
 /// The dispatcher should check for this and suppress the message.
@@ -342,8 +341,6 @@ pub struct RespondOutput {
 /// Reasoning engine for the agent.
 pub struct Reasoning {
     llm: Arc<dyn LlmProvider>,
-    #[allow(dead_code)] // Will be used for sanitizing tool outputs
-    safety: Arc<SafetyLayer>,
     /// Optional workspace for loading identity/system prompts.
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
@@ -361,10 +358,9 @@ pub struct Reasoning {
 
 impl Reasoning {
     /// Create a new reasoning engine.
-    pub fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
+    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
         Self {
             llm,
-            safety,
             workspace_system_prompt: None,
             skill_context: None,
             channel: None,
@@ -2086,15 +2082,9 @@ That's my plan."#;
     // ---- System prompt building tests (issue #565) ----
 
     fn make_test_reasoning() -> Reasoning {
-        use crate::config::SafetyConfig;
-        use crate::safety::SafetyLayer;
         use crate::testing::StubLlm;
         let llm = Arc::new(StubLlm::new("test"));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
-        Reasoning::new(llm, safety)
+        Reasoning::new(llm)
     }
 
     #[test]

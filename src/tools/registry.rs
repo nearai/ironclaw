@@ -10,7 +10,6 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
-use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
@@ -484,17 +483,15 @@ impl ToolRegistry {
     pub async fn register_builder_tool(
         self: &Arc<Self>,
         llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
         config: Option<BuilderConfig>,
     ) {
         // First register dev tools needed by the builder
         self.register_dev_tools();
 
-        // Create the builder (arg order: config, llm, safety, tools)
+        // Create the builder (arg order: config, llm, tools)
         let builder = Arc::new(LlmSoftwareBuilder::new(
             config.unwrap_or_default(),
             llm,
-            safety,
             Arc::clone(self),
         ));
 

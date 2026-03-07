@@ -103,7 +103,7 @@ impl Agent {
             None
         };
 
-        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
+        let mut reasoning = Reasoning::new(self.llm().clone())
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
             .with_group_chat(is_group_chat);
@@ -1593,12 +1593,8 @@ mod tests {
         use crate::testing::StubLlm;
 
         let stub = Arc::new(StubLlm::failing_non_transient("ctx-bomb"));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
 
-        let reasoning = Reasoning::new(stub.clone(), safety);
+        let reasoning = Reasoning::new(stub.clone());
 
         // Build a fat context with lots of history.
         let messages = vec![
@@ -1708,11 +1704,7 @@ mod tests {
         use crate::llm::{Reasoning, ReasoningContext, RespondResult, ToolDefinition};
 
         let provider = Arc::new(AlwaysToolCallProvider);
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
-        let reasoning = Reasoning::new(provider, safety);
+        let reasoning = Reasoning::new(provider);
 
         let tool_def = ToolDefinition {
             name: "echo".to_string(),

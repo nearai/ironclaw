@@ -230,7 +230,7 @@ impl Agent {
                     )
                     .await;
 
-                let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+                let compactor = ContextCompactor::new(self.llm().clone());
                 if let Err(e) = compactor
                     .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
                     .await
@@ -618,7 +618,7 @@ impl Agent {
                 crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
             );
 
-        let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+        let compactor = ContextCompactor::new(self.llm().clone());
         match compactor
             .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
             .await
