@@ -326,6 +326,17 @@ impl LlmConfig {
             None
         };
 
+        // Codex auth.json fallback: when no API key is found from env vars,
+        // try loading one from the Codex CLI's auth.json file.
+        let api_key = if api_key.is_none() && parse_optional_env("LLM_USE_CODEX_AUTH", false)? {
+            let path = optional_env("CODEX_AUTH_PATH")?
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(crate::codex_auth::default_codex_auth_path);
+            crate::codex_auth::load_codex_api_key(&path).map(SecretString::from)
+        } else {
+            api_key
+        };
+
         if api_key_required && api_key.is_none() {
             // Don't hard-fail here. The key might be injected later from the secrets store
             // via inject_llm_keys_from_secrets(). Log a warning instead.
