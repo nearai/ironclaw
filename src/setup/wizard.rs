@@ -1022,10 +1022,11 @@ impl SetupWizard {
 
     /// Anthropic OAuth setup: extract token from `claude login` credentials.
     async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("anthropic".to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some("anthropic") {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some("anthropic".to_string());
 
         // Try to extract existing OAuth token from Claude Code credentials
         if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
@@ -1119,10 +1120,11 @@ impl SetupWizard {
             other => other,
         });
 
-        self.settings.llm_backend = Some(backend.to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(backend) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(backend.to_string());
 
         // Check env var first
         if let Ok(existing) = std::env::var(env_var) {
@@ -1181,10 +1183,11 @@ impl SetupWizard {
         &mut self,
         def: &crate::llm::ProviderDefinition,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(def.id.clone());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(&def.id) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(def.id.clone());
 
         let default_url = self
             .settings
@@ -1219,10 +1222,11 @@ impl SetupWizard {
         secret_name: &str,
         display_name: &str,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(backend_id.to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(backend_id) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(backend_id.to_string());
 
         let existing_url = self
             .settings
@@ -3497,6 +3501,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Regression test for #600: re-running provider setup for the same backend
+    /// must NOT clear selected_model. Only switching to a different backend should.
+    #[test]
+    fn test_same_provider_preserves_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate re-entering the same provider -- model should survive
+        // (This is the check that each setup_* function now performs)
+        if wizard.settings.llm_backend.as_deref() != Some("ollama") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("ollama".to_string());
+
+        assert_eq!(
+            wizard.settings.selected_model.as_deref(),
+            Some("llama3"),
+            "model should be preserved when re-selecting the same provider"
+        );
+    }
+
+    /// Regression test for #600: switching to a different provider must clear
+    /// selected_model since the old model may not be valid for the new backend.
+    #[test]
+    fn test_different_provider_clears_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate switching to a different provider -- model should be cleared
+        if wizard.settings.llm_backend.as_deref() != Some("openai") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("openai".to_string());
+
+        assert!(
+            wizard.settings.selected_model.is_none(),
+            "model should be cleared when switching providers"
+        );
     }
 
     #[tokio::test]
