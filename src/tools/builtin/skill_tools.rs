@@ -380,8 +380,8 @@ impl Tool for SkillInstallTool {
 /// - Non-HTTPS URLs (except in tests)
 /// - URLs pointing to private, loopback, or link-local IP addresses
 /// - URLs without a host
-pub fn validate_fetch_url(url_str: &str) -> Result<(), ToolError> {
-    let parsed = url::Url::parse(url_str)
+pub fn validate_fetch_url(url_str: &str) -> Result<reqwest::Url, ToolError> {
+    let parsed = reqwest::Url::parse(url_str)
         .map_err(|e| ToolError::ExecutionFailed(format!("Invalid URL '{}': {}", url_str, e)))?;
 
     // Require HTTPS
@@ -397,33 +397,16 @@ pub fn validate_fetch_url(url_str: &str) -> Result<(), ToolError> {
         .ok_or_else(|| ToolError::ExecutionFailed("URL has no host".to_string()))?;
 
     // Check if host is an IP address and reject private ranges.
-    // Use url::Host variants to get proper IpAddr values -- host_str()
+    // Use reqwest::Url host variants to get proper IpAddr values -- host_str()
     // returns bracketed IPv6 (e.g. "[::1]") which IpAddr cannot parse.
     // Unwrap IPv4-mapped IPv6 addresses (e.g. ::ffff:192.168.1.1) to catch
     // SSRF bypasses that encode private IPv4 addresses as IPv6.
-    let raw_ip = match &host {
-        url::Host::Ipv4(v4) => Some(std::net::IpAddr::V4(*v4)),
-        url::Host::Ipv6(v6) => Some(std::net::IpAddr::V6(*v6)),
-        url::Host::Domain(_) => None,
-    };
-    if let Some(raw_ip) = raw_ip {
-        let ip = match raw_ip {
-            std::net::IpAddr::V6(v6) => v6
-                .to_ipv4_mapped()
-                .map(std::net::IpAddr::V4)
-                .unwrap_or(std::net::IpAddr::V6(v6)),
-            other => other,
-        };
-        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local_ip(&ip) {
-            return Err(ToolError::ExecutionFailed(format!(
-                "URL points to a private/loopback/link-local address: {}",
-                host
-            )));
-        }
+    if let Some(ip) = host_ip_addr(&host) {
+        validate_fetch_ip(&ip, &host.to_string())?;
     }
 
-    // Reject common internal hostnames
-    let host_lower = host.to_string().to_lowercase();
+    // Reject common internal hostnames, including FQDN forms with a trailing dot.
+    let host_lower = normalize_domain(host.to_string().as_str()).to_lowercase();
     if host_lower == "localhost"
         || host_lower == "metadata.google.internal"
         || host_lower.ends_with(".internal")
@@ -435,7 +418,98 @@ pub fn validate_fetch_url(url_str: &str) -> Result<(), ToolError> {
         )));
     }
 
+    Ok(parsed)
+}
+
+fn host_ip_addr(host: &url::Host<&str>) -> Option<std::net::IpAddr> {
+    match host {
+        url::Host::Ipv4(v4) => Some(std::net::IpAddr::V4(*v4)),
+        url::Host::Ipv6(v6) => Some(normalize_ip(std::net::IpAddr::V6(*v6))),
+        url::Host::Domain(_) => None,
+    }
+}
+
+fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(v6)),
+        other => other,
+    }
+}
+
+fn validate_fetch_ip(ip: &std::net::IpAddr, display_host: &str) -> Result<(), ToolError> {
+    if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) || is_link_local_ip(ip) {
+        return Err(ToolError::ExecutionFailed(format!(
+            "URL points to a private/loopback/link-local address: {}",
+            display_host
+        )));
+    }
+
     Ok(())
+}
+
+fn normalize_domain(host: &str) -> &str {
+    host.trim_end_matches('.')
+}
+
+fn validate_resolved_addrs(host: &str, addrs: &[std::net::SocketAddr]) -> Result<(), ToolError> {
+    if addrs.is_empty() {
+        return Err(ToolError::ExecutionFailed(format!(
+            "DNS resolution returned no addresses for {}",
+            host
+        )));
+    }
+
+    for addr in addrs {
+        let ip = normalize_ip(addr.ip());
+        validate_fetch_ip(&ip, host)?;
+    }
+
+    Ok(())
+}
+
+fn build_fetch_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("ironclaw/0.1")
+        .redirect(reqwest::redirect::Policy::none())
+}
+
+async fn build_safe_fetch_client(parsed: &reqwest::Url) -> Result<reqwest::Client, ToolError> {
+    let host = parsed
+        .host()
+        .ok_or_else(|| ToolError::ExecutionFailed("URL has no host".to_string()))?;
+
+    match host {
+        url::Host::Ipv4(_) | url::Host::Ipv6(_) => build_fetch_client_builder()
+            .build()
+            .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {}", e))),
+        url::Host::Domain(domain) => {
+            let lookup_host = normalize_domain(domain);
+            let port = parsed
+                .port_or_known_default()
+                .ok_or_else(|| ToolError::ExecutionFailed("URL has no valid port".to_string()))?;
+
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((lookup_host, port))
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!(
+                        "DNS resolution failed for {}: {}",
+                        lookup_host, e
+                    ))
+                })?
+                .collect();
+
+            validate_resolved_addrs(domain, &addrs)?;
+
+            build_fetch_client_builder()
+                .resolve_to_addrs(domain, &addrs)
+                .build()
+                .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {}", e)))
+        }
+    }
 }
 
 fn is_private_ip(ip: &std::net::IpAddr) -> bool {
@@ -470,16 +544,10 @@ fn is_link_local_ip(ip: &std::net::IpAddr) -> bool {
 /// `PK\x03\x04` magic bytes) and extracts `SKILL.md` automatically. Plain
 /// text responses are returned as-is.
 pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
-    validate_fetch_url(url)?;
+    let parsed = validate_fetch_url(url)?;
+    let client = build_safe_fetch_client(&parsed).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .user_agent("ironclaw/0.1")
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {}", e)))?;
-
-    let response = client.get(url).send().await.map_err(|e| {
+    let response = client.get(parsed.clone()).send().await.map_err(|e| {
         ToolError::ExecutionFailed(format!("Failed to fetch skill from {}: {}", url, e))
     })?;
 
@@ -805,6 +873,12 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_fetch_url_rejects_localhost_fqdn() {
+        let err = super::validate_fetch_url("https://localhost./skill.md").unwrap_err();
+        assert!(err.to_string().contains("internal hostname"));
+    }
+
+    #[test]
     fn test_validate_fetch_url_rejects_metadata_endpoint() {
         let err =
             super::validate_fetch_url("https://169.254.169.254/latest/meta-data/").unwrap_err();
@@ -822,6 +896,41 @@ mod tests {
     fn test_validate_fetch_url_rejects_file_scheme() {
         let err = super::validate_fetch_url("file:///etc/passwd").unwrap_err();
         assert!(err.to_string().contains("Only HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_fetch_url_rejects_ipv4_mapped_ipv6_loopback() {
+        let err = super::validate_fetch_url("https://[::ffff:127.0.0.1]/skill.md").unwrap_err();
+        assert!(err.to_string().contains("private") || err.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn test_validate_fetch_url_rejects_ipv6_loopback() {
+        let err = super::validate_fetch_url("https://[::1]/skill.md").unwrap_err();
+        assert!(err.to_string().contains("private") || err.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn test_validate_resolved_addrs_rejects_loopback_hostname() {
+        let addrs = vec![
+            "127.0.0.1:443".parse::<std::net::SocketAddr>().unwrap(),
+            "[::1]:443".parse::<std::net::SocketAddr>().unwrap(),
+        ];
+
+        let err = super::validate_resolved_addrs("example.com", &addrs).unwrap_err();
+        assert!(err.to_string().contains("private") || err.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn test_validate_resolved_addrs_allows_public_hostname() {
+        let addrs = vec![
+            "8.8.8.8:443".parse::<std::net::SocketAddr>().unwrap(),
+            "[2606:4700:4700::1111]:443"
+                .parse::<std::net::SocketAddr>()
+                .unwrap(),
+        ];
+
+        assert!(super::validate_resolved_addrs("example.com", &addrs).is_ok());
     }
 
     #[test]
