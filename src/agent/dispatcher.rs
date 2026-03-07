@@ -278,12 +278,18 @@ impl Agent {
 
             // Record cost and track token usage
             let model_name = self.llm().active_model_name();
+            let read_discount = self.llm().cache_read_discount();
+            let write_multiplier = self.llm().cache_write_multiplier();
             let call_cost = self
                 .cost_guard()
                 .record_llm_call(
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
+                    output.usage.cache_read_input_tokens,
+                    output.usage.cache_creation_input_tokens,
+                    read_discount,
+                    write_multiplier,
                     Some(self.llm().cost_per_token()),
                 )
                 .await;
@@ -1062,6 +1068,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1075,6 +1083,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1635,6 +1645,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1650,6 +1662,8 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 });
             }
             // Tools available: always call one.
@@ -1663,6 +1677,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1787,6 +1803,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 2,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1801,6 +1819,8 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 2,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 });
             }
             // Always call a tool that does not exist in the registry.
@@ -1814,6 +1834,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }

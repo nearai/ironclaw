@@ -9,6 +9,50 @@ use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
 
+/// Prompt cache retention policy for Anthropic.
+///
+/// Controls Anthropic's automatic prompt caching via a top-level
+/// `cache_control` field injected through rig-core's `additional_params`.
+/// - `None` — caching disabled, no `cache_control` injected.
+/// - `Short` — 5-minute TTL (default), `{"type": "ephemeral"}`, 1.25× write surcharge.
+/// - `Long` — 1-hour TTL, `{"type": "ephemeral", "ttl": "1h"}`, 2× write surcharge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheRetention {
+    /// No prompt caching.
+    None,
+    /// 5-minute TTL (default). Write cost: 1.25× base input.
+    #[default]
+    Short,
+    /// 1-hour TTL. Write cost: 2× base input.
+    Long,
+}
+
+impl std::str::FromStr for CacheRetention {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" | "off" | "disabled" => Ok(Self::None),
+            "short" | "5m" | "ephemeral" => Ok(Self::Short),
+            "long" | "1h" => Ok(Self::Long),
+            _ => Err(format!(
+                "invalid cache retention '{}', expected one of: none, short, long",
+                s
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for CacheRetention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Short => write!(f, "short"),
+            Self::Long => write!(f, "long"),
+        }
+    }
+}
+
 /// Resolved configuration for a registry-based provider.
 ///
 /// This single struct replaces what used to be five separate config types
@@ -753,6 +797,88 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
+        }
+    }
+
+    #[test]
+    fn cache_retention_from_str_primary_values() {
+        assert_eq!(
+            "none".parse::<CacheRetention>().unwrap(),
+            CacheRetention::None
+        );
+        assert_eq!(
+            "short".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            "long".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Long
+        );
+    }
+
+    #[test]
+    fn cache_retention_from_str_aliases() {
+        assert_eq!(
+            "off".parse::<CacheRetention>().unwrap(),
+            CacheRetention::None
+        );
+        assert_eq!(
+            "disabled".parse::<CacheRetention>().unwrap(),
+            CacheRetention::None
+        );
+        assert_eq!(
+            "5m".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            "ephemeral".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            "1h".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Long
+        );
+    }
+
+    #[test]
+    fn cache_retention_from_str_case_insensitive() {
+        assert_eq!(
+            "NONE".parse::<CacheRetention>().unwrap(),
+            CacheRetention::None
+        );
+        assert_eq!(
+            "Short".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Short
+        );
+        assert_eq!(
+            "LONG".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Long
+        );
+        assert_eq!(
+            "Ephemeral".parse::<CacheRetention>().unwrap(),
+            CacheRetention::Short
+        );
+    }
+
+    #[test]
+    fn cache_retention_from_str_invalid() {
+        let err = "bogus".parse::<CacheRetention>().unwrap_err();
+        assert!(
+            err.contains("bogus"),
+            "error should mention the invalid value"
+        );
+    }
+
+    #[test]
+    fn cache_retention_display_round_trip() {
+        for variant in [
+            CacheRetention::None,
+            CacheRetention::Short,
+            CacheRetention::Long,
+        ] {
+            let s = variant.to_string();
+            let parsed: CacheRetention = s.parse().unwrap();
+            assert_eq!(parsed, variant, "round-trip failed for {s}");
         }
     }
 }

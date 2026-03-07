@@ -578,6 +578,8 @@ impl LlmProvider for TraceLlm {
                 input_tokens,
                 output_tokens,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }),
             TraceResponse::ToolCalls { .. } => Err(LlmError::RequestFailed {
                 provider: self.model_name.clone(),
@@ -610,6 +612,8 @@ impl LlmProvider for TraceLlm {
                 input_tokens,
                 output_tokens,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -630,6 +634,8 @@ impl LlmProvider for TraceLlm {
                     input_tokens,
                     output_tokens,
                     finish_reason: FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 })
             }
             TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {
