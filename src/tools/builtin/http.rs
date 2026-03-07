@@ -302,7 +302,9 @@ impl Tool for HttpTool {
                     }
                 },
                 "body": {
-                    "description": "Request body (for POST/PUT/PATCH). Can be a JSON object, array, string, or other value."
+                    "type": ["object", "array", "string", "number", "boolean", "null"],
+                    "description": "Request body (for POST/PUT/PATCH). Can be a JSON object, array, string, or other value.",
+                    "items": {}
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -704,19 +706,20 @@ mod tests {
     }
 
     #[test]
-    fn test_http_tool_schema_body_is_freeform() {
+    fn test_http_tool_schema_body_has_type_and_items() {
         let schema = HttpTool::new().parameters_schema();
         let body = schema
             .get("properties")
             .and_then(|p| p.get("body"))
             .expect("body schema missing");
 
-        // Body is intentionally freeform (no "type" constraint) for OpenAI
-        // compatibility. OpenAI rejects union types containing "array" unless
-        // "items" is also specified, and body accepts any JSON value.
+        // Body uses a union type with items:{} so strict schema validators
+        // (e.g. OpenAI) accept array-typed parameters.
+        let type_val = body.get("type").expect("body should have 'type'");
+        assert!(type_val.is_array(), "body type should be a union array");
         assert!(
-            body.get("type").is_none(),
-            "body schema should not have a 'type' to be freeform for OpenAI compatibility"
+            body.get("items").is_some(),
+            "body should have 'items' for array type compatibility"
         );
     }
 
