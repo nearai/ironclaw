@@ -13,6 +13,10 @@ configurations.
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
 | Google Gemini | `gemini` | `GEMINI_API_KEY` | Gemini models |
 | AWS Bedrock | `bedrock` | `BEDROCK_ACCESS_KEY` | Requires OpenAI proxy (e.g. LiteLLM) |
+| io.net | `ionet` | `IONET_API_KEY` | Intelligence API |
+| Mistral | `mistral` | `MISTRAL_API_KEY` | Mistral models |
+| Yandex AI Studio | `yandex` | `YANDEX_API_KEY` | YandexGPT models |
+| Cloudflare Workers AI | `cloudflare` | `CLOUDFLARE_API_KEY` | Access to Workers AI |
 | Ollama | `ollama` | No | Local inference |
 | OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
