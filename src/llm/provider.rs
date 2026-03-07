@@ -16,11 +16,38 @@ pub enum Role {
     Tool,
 }
 
+/// A part of multimodal message content (OpenAI Chat Completions format).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// Text content part.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// Image URL content part (supports data: URLs for inline base64 images).
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// Image URL reference for multimodal content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// URL or data: URI (e.g., "data:image/jpeg;base64,...").
+    pub url: String,
+    /// Detail level hint: "auto", "low", or "high".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// A message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    /// Multimodal content parts (images, etc.).
+    /// When non-empty, providers serialize content as an array of parts
+    /// (with `content` included as a text part) instead of a plain string.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_parts: Vec<ContentPart>,
     /// Tool call ID if this is a tool result message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -39,6 +66,7 @@ impl ChatMessage {
         Self {
             role: Role::System,
             content: content.into(),
+            content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -50,6 +78,21 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: content.into(),
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Create a user message with multimodal content parts (e.g., images).
+    ///
+    /// The text `content` is included as the primary text alongside the parts.
+    pub fn user_with_parts(content: impl Into<String>, parts: Vec<ContentPart>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+            content_parts: parts,
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -61,6 +104,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: content.into(),
+            content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -75,6 +119,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: content.unwrap_or_default(),
+            content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
             tool_calls: if tool_calls.is_empty() {
@@ -94,6 +139,7 @@ impl ChatMessage {
         Self {
             role: Role::Tool,
             content: content.into(),
+            content_parts: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,

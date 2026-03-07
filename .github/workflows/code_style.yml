@@ -12,7 +12,6 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         components: rustfmt
     - name: Check formatting
       run: cargo fmt --all -- --check
@@ -36,7 +35,6 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         components: clippy
     - uses: Swatinem/rust-cache@v2
       with:
@@ -63,7 +61,6 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         components: clippy
     - uses: Swatinem/rust-cache@v2
       with:

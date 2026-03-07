@@ -70,6 +70,9 @@ pub struct RegistryEntry {
     pub fallback_source: Option<Box<ExtensionSource>>,
     /// How authentication works.
     pub auth_hint: AuthHint,
+    /// Extension version (semver), if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// Where the extension binary or server lives.
@@ -144,6 +147,26 @@ pub struct InstallResult {
     pub name: String,
     pub kind: ExtensionKind,
     pub message: String,
+}
+
+/// Result of upgrading one or more extensions.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UpgradeResult {
+    /// Per-extension upgrade outcomes.
+    pub results: Vec<UpgradeOutcome>,
+    /// Summary message.
+    pub message: String,
+}
+
+/// Outcome for a single extension upgrade.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UpgradeOutcome {
+    pub name: String,
+    pub kind: ExtensionKind,
+    /// What happened: "upgraded", "already_up_to_date", "failed", "not_in_registry".
+    pub status: String,
+    /// Human-readable detail.
+    pub detail: String,
 }
 
 /// Auth readiness state for the extensions list UI.
@@ -453,6 +476,9 @@ pub struct InstalledExtension {
     /// Last activation error for WASM channels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
+    /// Extension version from capabilities file (semver).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// Error type for extension operations.
@@ -769,6 +795,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         };
         let sr = SearchResult {
             entry,
@@ -798,6 +825,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::None,
+            version: None,
         };
         let sr = SearchResult {
             entry,
@@ -885,6 +913,7 @@ mod tests {
             has_auth: true,
             installed: false,
             activation_error: Some("token expired".to_string()),
+            version: None,
         };
         let json = serde_json::to_value(&ext).unwrap();
         assert_eq!(json["display_name"], "Gmail Tool");
