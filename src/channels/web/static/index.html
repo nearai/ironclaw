@@ -127,11 +127,22 @@
         <div class="thread-list" id="thread-list"></div>
       </div>
       <div class="chat-container">
+        <div class="chat-header" id="chat-header" style="display:none">
+          <div class="cherry-pick-bar">
+            <span id="cherry-pick-count">0 selected</span>
+            <button id="cherry-pick-btn" onclick="cherryPickSelected('copy')" disabled title="Copy selected items to new conversation">Copy</button>
+            <button id="cherry-move-btn" onclick="cherryPickSelected('move')" disabled title="Move selected items to new conversation">Move</button>
+            <button id="cherry-delete-btn" onclick="deleteSelectedMessages()" disabled title="Delete currently selected items">Delete</button>
+            <button onclick="exitSelectionMode()">Cancel</button>
+          </div>
+        </div>
         <div class="chat-messages" id="chat-messages"></div>
         <div id="slash-autocomplete" class="slash-autocomplete" style="display:none"></div>
         <div class="chat-input">
           <textarea id="chat-input" placeholder="Message or / for commands..." rows="1"></textarea>
           <button id="send-btn" onclick="sendMessage()">Send</button>
+          <button id="select-mode-btn" class="select-mode-btn" onclick="enterSelectionMode()" title="Select messages to copy">Select</button>
+          <button class="select-mode-btn" onclick="selectAllMessages()" title="Select all messages">Select All</button>
         </div>
       </div>
     </div>

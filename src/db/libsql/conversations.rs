@@ -352,4 +352,173 @@ impl ConversationStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(found.is_some())
     }
+
+    async fn delete_conversation(&self, id: Uuid) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let id_str = id.to_string();
+
+        // Nullify FK references (no cascade on these columns)
+        tx.execute(
+            "UPDATE agent_jobs SET conversation_id = NULL WHERE conversation_id = ?1",
+            params![id_str.clone()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        tx.execute(
+            "UPDATE llm_calls SET conversation_id = NULL WHERE conversation_id = ?1",
+            params![id_str.clone()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Delete conversation (messages cascade via ON DELETE CASCADE)
+        tx.execute("DELETE FROM conversations WHERE id = ?1", params![id_str])
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn cherry_pick_messages(
+        &self,
+        message_ids: &[Uuid],
+        channel: &str,
+        user_id: &str,
+        delete_source: bool,
+    ) -> Result<(Uuid, usize), DatabaseError> {
+        let conn = self.connect().await?;
+
+        // Build dynamic IN clause (libSQL has no array params)
+        let placeholders: Vec<String> = message_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let in_clause = placeholders.join(", ");
+        let query = format!(
+            "SELECT id, role, content, created_at FROM conversation_messages \
+             WHERE id IN ({in_clause}) \
+             ORDER BY created_at ASC, rowid ASC"
+        );
+
+        let mut query_params: Vec<libsql::Value> = Vec::new();
+        for mid in message_ids {
+            query_params.push(libsql::Value::from(mid.to_string()));
+        }
+
+        let mut rows = conn
+            .query(&query, libsql::params_from_iter(query_params))
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut source_messages = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            source_messages.push((get_text(&row, 1), get_text(&row, 2)));
+        }
+        // Drop the rows/statement before starting a transaction on the same connection
+        drop(rows);
+
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Create new conversation
+        let new_id = Uuid::new_v4();
+        let metadata = serde_json::json!({"thread_type": "thread"});
+        tx.execute(
+            "INSERT INTO conversations (id, channel, user_id, metadata) VALUES (?1, ?2, ?3, ?4)",
+            params![new_id.to_string(), channel, user_id, metadata.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Copy messages with fresh UUIDs and monotonically increasing timestamps
+        let base_ts = Utc::now();
+        let mut copied = 0usize;
+        for (i, (role, content)) in source_messages.iter().enumerate() {
+            let fresh_id = Uuid::new_v4();
+            let ts = base_ts + chrono::TimeDelta::milliseconds(i as i64);
+
+            tx.execute(
+                "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![fresh_id.to_string(), new_id.to_string(), role.as_str(), content.as_str(), fmt_ts(&ts)],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            copied += 1;
+        }
+
+        // For move: delete originals within the same transaction
+        if delete_source {
+            let del_placeholders: Vec<String> = message_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect();
+            let del_in = del_placeholders.join(", ");
+            let del_query =
+                format!("DELETE FROM conversation_messages WHERE id IN ({del_in})");
+            let del_params: Vec<libsql::Value> = message_ids
+                .iter()
+                .map(|id| libsql::Value::from(id.to_string()))
+                .collect();
+            tx.execute(&del_query, libsql::params_from_iter(del_params))
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+
+        // Touch conversation activity within the transaction
+        let now = fmt_ts(&Utc::now());
+        tx.execute(
+            "UPDATE conversations SET last_activity = ?2 WHERE id = ?1",
+            params![new_id.to_string(), now],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok((new_id, copied))
+    }
+
+    async fn delete_messages_by_ids(&self, message_ids: &[Uuid]) -> Result<usize, DatabaseError> {
+        let conn = self.connect().await?;
+
+        let placeholders: Vec<String> = message_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let in_clause = placeholders.join(", ");
+        let query = format!("DELETE FROM conversation_messages WHERE id IN ({in_clause})");
+
+        let params: Vec<libsql::Value> = message_ids
+            .iter()
+            .map(|id| libsql::Value::from(id.to_string()))
+            .collect();
+
+        let deleted = conn
+            .execute(&query, libsql::params_from_iter(params))
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(deleted as usize)
+    }
 }

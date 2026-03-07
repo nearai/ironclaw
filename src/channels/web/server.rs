@@ -209,6 +209,18 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
+        .route(
+            "/api/chat/thread/{id}",
+            axum::routing::delete(chat_delete_thread_handler),
+        )
+        .route(
+            "/api/chat/thread/cherry-pick",
+            post(chat_cherry_pick_handler),
+        )
+        .route(
+            "/api/chat/messages/delete",
+            post(chat_delete_messages_handler),
+        )
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
         .route("/api/memory/list", get(memory_list_handler))
@@ -965,6 +977,7 @@ async fn chat_history_handler(
                         error: tc.error.clone(),
                     })
                     .collect(),
+                message_ids: Vec::new(),
             })
             .collect();
 
@@ -1148,6 +1161,120 @@ async fn chat_new_thread_handler(
     }
 
     Ok(Json(info))
+}
+
+async fn chat_delete_thread_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<Json<DeleteThreadResponse>, (StatusCode, String)> {
+    let thread_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid thread ID".to_string()))?;
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    // Verify ownership
+    let owned = store
+        .conversation_belongs_to_user(thread_id, &state.user_id)
+        .await
+        .unwrap_or(false);
+    if !owned {
+        return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
+    }
+
+    // Prevent deleting the assistant thread
+    let metadata = store
+        .get_conversation_metadata(thread_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(meta) = &metadata
+        && meta.get("thread_type").and_then(|v| v.as_str()) == Some("assistant")
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Cannot delete the assistant thread".to_string(),
+        ));
+    }
+
+    // Delete from DB
+    store
+        .delete_conversation(thread_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Clean up session state
+    if let Some(ref sm) = state.session_manager {
+        sm.remove_thread(&state.user_id, thread_id).await;
+    }
+
+    Ok(Json(DeleteThreadResponse { deleted: true }))
+}
+
+async fn chat_cherry_pick_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<CherryPickRequest>,
+) -> Result<(StatusCode, Json<CherryPickResponse>), (StatusCode, String)> {
+    if req.message_ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "message_ids must not be empty".to_string(),
+        ));
+    }
+
+    let is_move = req.action == "move";
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    // Copy (and optionally delete originals) atomically in one transaction
+    let (new_id, count) = store
+        .cherry_pick_messages(&req.message_ids, "gateway", &state.user_id, is_move)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Create in-memory thread in the session so it's immediately available
+    if let Some(ref sm) = state.session_manager {
+        let session = sm.get_or_create_session(&state.user_id).await;
+        let mut sess = session.lock().await;
+        let thread = crate::agent::session::Thread::with_id(new_id, sess.id);
+        sess.threads.insert(new_id, thread);
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CherryPickResponse {
+            thread_id: new_id,
+            message_count: count,
+        }),
+    ))
+}
+
+async fn chat_delete_messages_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<DeleteMessagesRequest>,
+) -> Result<Json<DeleteMessagesResponse>, (StatusCode, String)> {
+    if req.message_ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "message_ids must not be empty".to_string(),
+        ));
+    }
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let deleted = store
+        .delete_messages_by_ids(&req.message_ids)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(DeleteMessagesResponse { deleted }))
 }
 
 // --- Memory handlers ---

@@ -3213,9 +3213,100 @@ mark {
   font-size: 12px;
 }
 
+.thread-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-shrink: 0;
+  align-self: stretch;
+}
+
 .thread-meta {
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+.thread-delete-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 20px;
+  padding: 0;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.thread-item:hover .thread-delete-btn {
+  opacity: 0.6;
+}
+
+.thread-delete-btn:hover {
+  opacity: 1 !important;
+  color: #ef4444;
+}
+
+/* --- Chat header (cherry-pick bar) --- */
+
+.chat-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+}
+
+.cherry-pick-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.cherry-pick-bar button {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.cherry-pick-bar button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.cherry-pick-bar button:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+}
+
+/* --- Selection checkboxes --- */
+
+.select-cb {
+  margin-right: 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.select-mode-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin-left: 4px;
+}
+
+.select-mode-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text);
 }
 
 /* --- Memory editing --- */
