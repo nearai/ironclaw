@@ -43,6 +43,7 @@ use crate::channels::web::types::*;
 use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
+use crate::llm::ImageAttachment;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -626,6 +627,17 @@ async fn chat_send_handler(
         msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
     }
 
+    // Convert image data to ImageAttachment
+    let images: Vec<ImageAttachment> = req
+        .images
+        .into_iter()
+        .map(|img| ImageAttachment {
+            media_type: img.media_type,
+            data: img.data,
+        })
+        .collect();
+    msg = msg.with_images(images);
+
     let msg_id = msg.id;
     tracing::debug!(
         "[chat_send_handler] Created message id={}, content={:?}",
@@ -951,18 +963,25 @@ async fn chat_history_handler(
                 tool_calls: t
                     .tool_calls
                     .iter()
-                    .map(|tc| ToolCallInfo {
-                        name: tc.name.clone(),
-                        has_result: tc.result.is_some(),
-                        has_error: tc.error.is_some(),
-                        result_preview: tc.result.as_ref().map(|r| {
-                            let s = match r {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            };
-                            truncate_preview(&s, 500)
-                        }),
-                        error: tc.error.clone(),
+                    .map(|tc| {
+                        // Image tools need full results (large base64 data), don't truncate
+                        let limit = match tc.name.as_str() {
+                            "image_generate" | "image_edit" | "image_analyze" => usize::MAX,
+                            _ => 500,
+                        };
+                        ToolCallInfo {
+                            name: tc.name.clone(),
+                            has_result: tc.result.is_some(),
+                            has_error: tc.error.is_some(),
+                            result_preview: tc.result.as_ref().map(|r| {
+                                let s = match r {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                truncate_preview(&s, limit)
+                            }),
+                            error: tc.error.clone(),
+                        }
                     })
                     .collect(),
             })

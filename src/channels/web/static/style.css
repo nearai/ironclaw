@@ -1093,6 +1093,37 @@ body {
   font-style: italic;
 }
 
+/* Generated image card */
+.generated-image-card {
+  align-self: flex-start;
+  width: 50%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  margin: 8px 0;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.generated-image {
+  display: block;
+  width: 100%;
+  border-radius: var(--radius-lg);
+  object-fit: contain;
+}
+
+.generated-image-path {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border-top: 1px solid var(--border);
+  word-break: break-all;
+}
+
 /* Tool calls summary (persisted between user/assistant messages) */
 .tool-calls-summary {
   background: var(--bg-secondary);
@@ -1323,6 +1354,73 @@ body {
 .chat-input button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.attach-btn {
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 16px;
+  transition: all 0.2s;
+}
+
+.attach-btn:hover {
+  background: var(--bg);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.image-preview-strip {
+  display: flex;
+  padding: 12px 16px 0 16px;
+  gap: 12px;
+  background: var(--bg-secondary);
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
+}
+
+.image-preview {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.image-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.image-preview-remove {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.6);
+  color: white;
+  border: none;
+  border-radius: 0;
+  font-size: 18px;
+  font-weight: bold;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+.image-preview-remove:hover {
+  background: rgba(0, 0, 0, 0.8);
 }
 
 /* Memory Tab */

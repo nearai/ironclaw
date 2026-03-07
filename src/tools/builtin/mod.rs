@@ -4,6 +4,9 @@ mod echo;
 pub mod extension_tools;
 mod file;
 mod http;
+mod image_analyze;
+mod image_edit;
+mod image_gen;
 mod job;
 mod json;
 mod memory;
@@ -23,6 +26,9 @@ pub use extension_tools::{
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;
+pub use image_analyze::ImageAnalyzeTool;
+pub use image_edit::ImageEditTool;
+pub use image_gen::ImageGenerateTool;
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
     PromptQueue, SchedulerSlot,

@@ -264,7 +264,11 @@ impl Agent {
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thread.start_turn(content);
+            if message.images.is_empty() {
+                thread.start_turn(content);
+            } else {
+                thread.start_turn_with_images(content, message.images.clone());
+            }
             thread.messages()
         };
 

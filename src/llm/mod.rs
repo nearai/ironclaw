@@ -10,6 +10,7 @@
 pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
+pub mod image_models;
 mod nearai_chat;
 mod provider;
 mod reasoning;
@@ -20,13 +21,15 @@ pub mod retry;
 mod rig_adapter;
 pub mod session;
 pub mod smart_routing;
+pub mod vision_models;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai_chat::{ModelInfo, NearAiChatProvider};
 pub use provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, ImageAttachment, LlmProvider,
+    ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ToolResult,
 };
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,

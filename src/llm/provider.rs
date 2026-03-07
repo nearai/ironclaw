@@ -16,6 +16,15 @@ pub enum Role {
     Tool,
 }
 
+/// An image attachment for user messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    /// MIME type (e.g., "image/jpeg", "image/png", "image/gif", "image/webp")
+    pub media_type: String,
+    /// Base64-encoded image data (without data URL prefix)
+    pub data: String,
+}
+
 /// A message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -31,6 +40,9 @@ pub struct ChatMessage {
     /// to appear on the assistant message preceding tool result messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Images attached to user messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
 }
 
 impl ChatMessage {
@@ -42,6 +54,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            images: Vec::new(),
         }
     }
 
@@ -53,6 +66,19 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            images: Vec::new(),
+        }
+    }
+
+    /// Create a user message with image attachments.
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImageAttachment>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+            images,
         }
     }
 
@@ -64,6 +90,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            images: Vec::new(),
         }
     }
 
@@ -82,6 +109,7 @@ impl ChatMessage {
             } else {
                 Some(tool_calls)
             },
+            images: Vec::new(),
         }
     }
 
@@ -97,6 +125,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
+            images: Vec::new(),
         }
     }
 }

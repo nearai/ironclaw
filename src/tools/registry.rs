@@ -17,11 +17,11 @@ use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
-    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    WriteFileTool,
+    ImageEditTool, ImageGenerateTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
+    ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
+    PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool,
+    SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
+    ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -71,6 +71,9 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "message",
     "web_fetch",
     "restart",
+    "image_generate",
+    "image_edit",
+    "image_analyze",
 ];
 
 /// Registry of available tools.
@@ -300,6 +303,34 @@ impl ToolRegistry {
         self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
 
         tracing::info!("Registered 4 memory tools");
+    }
+
+    /// Register image generation tools with NEAR AI config and workspace.
+    ///
+    /// Image tools require NEAR AI cloud-api access and workspace for storing generated images.
+    pub fn register_image_tools(
+        &self,
+        config: crate::config::NearAiConfig,
+        workspace: Arc<Workspace>,
+    ) {
+        self.register_sync(Arc::new(ImageGenerateTool::new(
+            config.clone(),
+            Arc::clone(&workspace),
+        )));
+        self.register_sync(Arc::new(ImageEditTool::new(config, workspace)));
+
+        tracing::info!("Registered 2 image tools (NEAR AI FLUX)");
+    }
+
+    /// Register image analysis tool with workspace access.
+    ///
+    /// Vision tool allows analyzing images using the LLM's vision capabilities.
+    pub fn register_vision_tools(&self, workspace: Arc<Workspace>) {
+        self.register_sync(Arc::new(crate::tools::builtin::ImageAnalyzeTool::new(
+            workspace,
+        )));
+
+        tracing::info!("Registered 1 vision tool (image analysis)");
     }
 
     /// Register job management tools.

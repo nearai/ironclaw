@@ -22,6 +22,7 @@ use crate::agent::submission::Submission;
 use crate::channels::IncomingMessage;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::{WsClientMessage, WsServerMessage};
+use crate::llm::ImageAttachment;
 
 /// Tracks active WebSocket connections.
 pub struct WsConnectionTracker {
@@ -156,11 +157,25 @@ async fn handle_client_message(
     direct_tx: &mpsc::Sender<WsServerMessage>,
 ) {
     match msg {
-        WsClientMessage::Message { content, thread_id } => {
+        WsClientMessage::Message {
+            content,
+            thread_id,
+            images,
+        } => {
             let mut incoming = IncomingMessage::new("gateway", user_id, &content);
             if let Some(ref tid) = thread_id {
                 incoming = incoming.with_thread(tid);
             }
+
+            // Convert image data to ImageAttachment
+            let image_attachments: Vec<ImageAttachment> = images
+                .into_iter()
+                .map(|img| ImageAttachment {
+                    media_type: img.media_type,
+                    data: img.data,
+                })
+                .collect();
+            incoming = incoming.with_images(image_attachments);
 
             let tx_guard = state.msg_tx.read().await;
             if let Some(ref tx) = *tx_guard {
@@ -349,6 +364,7 @@ mod tests {
             WsClientMessage::Message {
                 content: "hello agent".to_string(),
                 thread_id: Some("t1".to_string()),
+                images: vec![],
             },
             &state,
             "user1",
@@ -373,6 +389,7 @@ mod tests {
             WsClientMessage::Message {
                 content: "hello".to_string(),
                 thread_id: None,
+                images: vec![],
             },
             &state,
             "user1",

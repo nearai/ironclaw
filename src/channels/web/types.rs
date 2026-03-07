@@ -5,10 +5,18 @@ use uuid::Uuid;
 
 // --- Chat ---
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImageData {
+    pub media_type: String,
+    pub data: String, // base64-encoded
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     pub content: String,
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub images: Vec<ImageData>,
 }
 
 #[derive(Debug, Serialize)]
@@ -224,6 +232,17 @@ pub enum SseEvent {
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+    },
+
+    /// An image was generated or edited.
+    #[serde(rename = "image_generated")]
+    ImageGenerated {
+        /// Base64 data URL: "data:image/png;base64,..."
+        data_url: String,
+        /// Workspace path where the image is saved.
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
 }
 
@@ -606,6 +625,8 @@ pub enum WsClientMessage {
     Message {
         content: String,
         thread_id: Option<String>,
+        #[serde(default)]
+        images: Vec<ImageData>,
     },
     /// Approve or deny a pending tool execution.
     #[serde(rename = "approval")]
@@ -673,6 +694,7 @@ impl WsServerMessage {
             SseEvent::JobStatus { .. } => "job_status",
             SseEvent::JobResult { .. } => "job_result",
             SseEvent::ExtensionStatus { .. } => "extension_status",
+            SseEvent::ImageGenerated { .. } => "image_generated",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         WsServerMessage::Event {
@@ -791,9 +813,14 @@ mod tests {
         let json = r#"{"type":"message","content":"hello","thread_id":"t1"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            WsClientMessage::Message { content, thread_id } => {
+            WsClientMessage::Message {
+                content,
+                thread_id,
+                images,
+            } => {
                 assert_eq!(content, "hello");
                 assert_eq!(thread_id.as_deref(), Some("t1"));
+                assert!(images.is_empty());
             }
             _ => panic!("Expected Message variant"),
         }
@@ -804,9 +831,14 @@ mod tests {
         let json = r#"{"type":"message","content":"hi"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            WsClientMessage::Message { content, thread_id } => {
+            WsClientMessage::Message {
+                content,
+                thread_id,
+                images,
+            } => {
                 assert_eq!(content, "hi");
                 assert!(thread_id.is_none());
+                assert!(images.is_empty());
             }
             _ => panic!("Expected Message variant"),
         }

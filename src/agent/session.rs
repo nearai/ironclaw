@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::llm::{ChatMessage, ToolCall};
+use crate::llm::{ChatMessage, ImageAttachment, ToolCall};
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +250,22 @@ impl Thread {
         &mut self.turns[turn_number]
     }
 
+    /// Start a new turn with user input and image attachments.
+    pub fn start_turn_with_images(
+        &mut self,
+        user_input: impl Into<String>,
+        images: Vec<ImageAttachment>,
+    ) -> &mut Turn {
+        let turn_number = self.turns.len();
+        let mut turn = Turn::new(turn_number, user_input);
+        turn.images = images;
+        self.turns.push(turn);
+        self.state = ThreadState::Processing;
+        self.updated_at = Utc::now();
+        // turn_number was len() before push, so it's a valid index after push
+        &mut self.turns[turn_number]
+    }
+
     /// Complete the current turn with a response.
     pub fn complete_turn(&mut self, response: impl Into<String>) {
         if let Some(turn) = self.turns.last_mut() {
@@ -320,7 +336,14 @@ impl Thread {
     pub fn messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         for turn in &self.turns {
-            messages.push(ChatMessage::user(&turn.user_input));
+            if turn.images.is_empty() {
+                messages.push(ChatMessage::user(&turn.user_input));
+            } else {
+                messages.push(ChatMessage::user_with_images(
+                    &turn.user_input,
+                    turn.images.clone(),
+                ));
+            }
             if let Some(ref response) = turn.response {
                 messages.push(ChatMessage::assistant(response));
             }
@@ -407,6 +430,9 @@ pub struct Turn {
     pub completed_at: Option<DateTime<Utc>>,
     /// Error message (if failed).
     pub error: Option<String>,
+    /// Images attached to this turn's user input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
 }
 
 impl Turn {
@@ -421,6 +447,7 @@ impl Turn {
             started_at: Utc::now(),
             completed_at: None,
             error: None,
+            images: Vec::new(),
         }
     }
 

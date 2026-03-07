@@ -369,6 +369,19 @@ impl Channel for GatewayChannel {
                 success,
                 message,
             },
+            StatusUpdate::ImageGenerated { data_url, path } => {
+                tracing::debug!(
+                    path = %path,
+                    data_url_len = data_url.len(),
+                    thread_id = ?thread_id,
+                    "Broadcasting ImageGenerated SSE event"
+                );
+                SseEvent::ImageGenerated {
+                    data_url,
+                    path,
+                    thread_id,
+                }
+            }
         };
 
         self.state.sse.broadcast(event);

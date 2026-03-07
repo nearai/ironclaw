@@ -585,6 +585,9 @@ impl Channel for ReplChannel {
                     eprintln!("\x1b[31m  {extension_name}: {message}\x1b[0m");
                 }
             }
+            StatusUpdate::ImageGenerated { path, .. } => {
+                eprintln!("  \x1b[36m[image]\x1b[0m {path}");
+            }
         }
         Ok(())
     }

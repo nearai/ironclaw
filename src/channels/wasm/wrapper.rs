@@ -2591,6 +2591,11 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             ),
             metadata_json,
         },
+        StatusUpdate::ImageGenerated { path, .. } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!("Image generated: {}", path),
+            metadata_json,
+        },
     }
 }
 

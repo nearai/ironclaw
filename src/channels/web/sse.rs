@@ -55,6 +55,10 @@ impl SseManager {
 
     /// Broadcast an event to all connected clients.
     pub fn broadcast(&self, event: SseEvent) {
+        // Log image events for debugging
+        if matches!(&event, SseEvent::ImageGenerated { .. }) {
+            tracing::debug!("Broadcasting image_generated SSE event to all connected clients");
+        }
         // Ignore send errors (no receivers is fine)
         let _ = self.tx.send(event);
     }
@@ -143,6 +147,7 @@ impl SseManager {
                     SseEvent::JobResult { .. } => "job_result",
                     SseEvent::Heartbeat => "heartbeat",
                     SseEvent::ExtensionStatus { .. } => "extension_status",
+                    SseEvent::ImageGenerated { .. } => "image_generated",
                 };
                 Ok(Event::default().event(event_type).data(data))
             });

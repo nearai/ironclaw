@@ -17,6 +17,16 @@ use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
 use crate::tools::redact_params;
 
+/// Represents image generation sentinel data in tool output.
+#[derive(serde::Deserialize)]
+struct ImageGeneratedSentinel<'a> {
+    #[serde(rename = "type")]
+    ty: &'a str,
+    data: &'a str,
+    media_type: &'a str,
+    path: &'a str,
+}
+
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
@@ -640,6 +650,28 @@ impl Agent {
                                             &message.metadata,
                                         )
                                         .await;
+
+                                    // Check for image_generated sentinel and emit SSE event
+                                    if let Ok(sentinel) =
+                                        serde_json::from_str::<ImageGeneratedSentinel>(output)
+                                        && sentinel.ty == "image_generated"
+                                    {
+                                        let data_url = format!(
+                                            "data:{};base64,{}",
+                                            sentinel.media_type, sentinel.data
+                                        );
+                                        let _ = self
+                                            .channels
+                                            .send_status(
+                                                &message.channel,
+                                                StatusUpdate::ImageGenerated {
+                                                    data_url,
+                                                    path: sentinel.path.to_string(),
+                                                },
+                                                &message.metadata,
+                                            )
+                                            .await;
+                                    }
                                 }
 
                                 // Record result in thread

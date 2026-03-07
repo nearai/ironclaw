@@ -247,6 +247,7 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                     tool_call_id: None,
                     name: m.name.clone(),
                     tool_calls: None,
+                    images: Vec::new(),
                 }),
             }
         })

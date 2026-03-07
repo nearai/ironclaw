@@ -10,8 +10,8 @@ use rig::completion::{
     ToolDefinition as RigToolDefinition, Usage as RigUsage,
 };
 use rig::message::{
-    Message as RigMessage, ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult,
-    ToolResultContent, UserContent,
+    DocumentSourceKind, Image, ImageMediaType, Message as RigMessage, ToolChoice as RigToolChoice,
+    ToolFunction, ToolResult as RigToolResult, ToolResultContent, UserContent,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -230,7 +230,33 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 }
             }
             crate::llm::Role::User => {
-                history.push(RigMessage::user(&msg.content));
+                if msg.images.is_empty() {
+                    history.push(RigMessage::user(&msg.content));
+                } else {
+                    // User message with images: create multi-part content
+                    let mut parts: Vec<UserContent> = vec![UserContent::text(&msg.content)];
+                    for img in &msg.images {
+                        let media_type = match img.media_type.to_lowercase().as_str() {
+                            "image/jpeg" => ImageMediaType::JPEG,
+                            "image/png" => ImageMediaType::PNG,
+                            "image/gif" => ImageMediaType::GIF,
+                            "image/webp" => ImageMediaType::WEBP,
+                            _ => ImageMediaType::JPEG,
+                        };
+                        parts.push(UserContent::Image(Image {
+                            data: DocumentSourceKind::Base64(img.data.clone()),
+                            media_type: Some(media_type),
+                            detail: None,
+                            additional_params: Default::default(),
+                        }));
+                    }
+                    if let Ok(many) = OneOrMany::many(parts) {
+                        history.push(RigMessage::User { content: many });
+                    } else {
+                        // Fallback to text only
+                        history.push(RigMessage::user(&msg.content));
+                    }
+                }
             }
             crate::llm::Role::Assistant => {
                 if let Some(ref tool_calls) = msg.tool_calls {
@@ -635,6 +661,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            images: vec![],
         }];
         let (_preamble, history) = convert_messages(&messages);
         match &history[0] {
@@ -784,6 +811,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            images: vec![],
         };
         let messages = vec![assistant_msg, tool_result_msg];
         let (_preamble, history) = convert_messages(&messages);

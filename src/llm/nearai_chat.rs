@@ -671,7 +671,7 @@ struct ChatCompletionRequest {
 struct ChatCompletionMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -839,10 +839,15 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
             if let (true, Some(calls)) = (msg.role == "assistant", &msg.tool_calls) {
                 // Convert assistant tool_calls into descriptive text
                 let mut parts: Vec<String> = Vec::new();
-                if let Some(ref text) = msg.content
-                    && !text.is_empty()
-                {
-                    parts.push(text.clone());
+                if let Some(content) = &msg.content {
+                    // Extract string from JSON value
+                    let text = match content {
+                        serde_json::Value::String(s) => s.as_str(),
+                        _ => "",
+                    };
+                    if !text.is_empty() {
+                        parts.push(text.to_string());
+                    }
                 }
                 for tc in calls {
                     parts.push(format!(
@@ -852,7 +857,7 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
                 }
                 ChatCompletionMessage {
                     role: "assistant".to_string(),
-                    content: Some(parts.join("\n")),
+                    content: Some(serde_json::json!(parts.join("\n"))),
 
                     tool_call_id: None,
                     name: None,
@@ -861,10 +866,16 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
             } else if msg.role == "tool" {
                 // Convert tool result into a user message
                 let tool_name = msg.name.as_deref().unwrap_or("unknown");
-                let result = msg.content.as_deref().unwrap_or("");
+                let result = match &msg.content {
+                    Some(serde_json::Value::String(s)) => s.as_str(),
+                    _ => "",
+                };
                 ChatCompletionMessage {
                     role: "user".to_string(),
-                    content: Some(format!("[Tool `{}` returned: {}]", tool_name, result)),
+                    content: Some(serde_json::json!(format!(
+                        "[Tool `{}` returned: {}]",
+                        tool_name, result
+                    ))),
 
                     tool_call_id: None,
                     name: None,
@@ -902,8 +913,23 @@ impl From<ChatMessage> for ChatCompletionMessage {
 
         let content = if role == "assistant" && tool_calls.is_some() && msg.content.is_empty() {
             None
+        } else if !msg.images.is_empty() && role == "user" {
+            // User message with images: create a content array with text and image parts
+            let mut parts = vec![serde_json::json!({
+                "type": "text",
+                "text": msg.content
+            })];
+            for img in msg.images {
+                parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", img.media_type, img.data)
+                    }
+                }));
+            }
+            Some(serde_json::Value::Array(parts))
         } else {
-            Some(msg.content)
+            Some(serde_json::json!(msg.content))
         };
 
         Self {
@@ -1068,7 +1094,7 @@ mod tests {
         let msg = ChatMessage::user("Hello");
         let chat_msg: ChatCompletionMessage = msg.into();
         assert_eq!(chat_msg.role, "user");
-        assert_eq!(chat_msg.content, Some("Hello".to_string()));
+        assert_eq!(chat_msg.content, Some(serde_json::json!("Hello")));
     }
 
     #[test]
@@ -1142,14 +1168,14 @@ mod tests {
         let messages = vec![
             ChatCompletionMessage {
                 role: "system".to_string(),
-                content: Some("You are helpful.".to_string()),
+                content: Some(serde_json::json!("You are helpful.")),
                 tool_call_id: None,
                 name: None,
                 tool_calls: None,
             },
             ChatCompletionMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()),
+                content: Some(serde_json::json!("Hello")),
                 tool_call_id: None,
                 name: None,
                 tool_calls: None,
@@ -1166,7 +1192,7 @@ mod tests {
         let messages = vec![
             ChatCompletionMessage {
                 role: "user".to_string(),
-                content: Some("test".to_string()),
+                content: Some(serde_json::json!("test")),
                 tool_call_id: None,
                 name: None,
                 tool_calls: None,
@@ -1187,7 +1213,7 @@ mod tests {
             },
             ChatCompletionMessage {
                 role: "tool".to_string(),
-                content: Some("hi".to_string()),
+                content: Some(serde_json::json!("hi")),
                 tool_call_id: Some("call_1".to_string()),
                 name: Some("echo".to_string()),
                 tool_calls: None,
@@ -1200,24 +1226,28 @@ mod tests {
         // Assistant tool_calls → plain assistant text
         assert_eq!(result[1].role, "assistant");
         assert!(result[1].tool_calls.is_none());
-        assert!(
-            result[1]
-                .content
-                .as_ref()
-                .unwrap()
-                .contains("[Called tool `echo`")
-        );
+        if let Some(content) = &result[1].content {
+            if let serde_json::Value::String(s) = content {
+                assert!(s.contains("[Called tool `echo`"));
+            } else {
+                panic!("Content should be a string");
+            }
+        } else {
+            panic!("Content should be present");
+        }
 
         // Tool result → user message
         assert_eq!(result[2].role, "user");
         assert!(result[2].tool_call_id.is_none());
-        assert!(
-            result[2]
-                .content
-                .as_ref()
-                .unwrap()
-                .contains("[Tool `echo` returned: hi]")
-        );
+        if let Some(content) = &result[2].content {
+            if let serde_json::Value::String(s) = content {
+                assert!(s.contains("[Tool `echo` returned: hi]"));
+            } else {
+                panic!("Content should be a string");
+            }
+        } else {
+            panic!("Content should be present");
+        }
     }
 
     #[test]
@@ -1225,7 +1255,7 @@ mod tests {
         let messages = vec![
             ChatCompletionMessage {
                 role: "assistant".to_string(),
-                content: Some("Let me check that.".to_string()),
+                content: Some(serde_json::json!("Let me check that.")),
                 tool_call_id: None,
                 name: None,
                 tool_calls: Some(vec![ChatCompletionToolCall {
@@ -1239,7 +1269,7 @@ mod tests {
             },
             ChatCompletionMessage {
                 role: "tool".to_string(),
-                content: Some("found it".to_string()),
+                content: Some(serde_json::json!("found it")),
                 tool_call_id: Some("call_1".to_string()),
                 name: Some("search".to_string()),
                 tool_calls: None,
@@ -1247,9 +1277,16 @@ mod tests {
         ];
 
         let result = flatten_tool_messages(messages);
-        let text = result[0].content.as_ref().unwrap();
-        assert!(text.starts_with("Let me check that."));
-        assert!(text.contains("[Called tool `search`"));
+        if let Some(content) = result[0].content.as_ref() {
+            if let serde_json::Value::String(text) = content {
+                assert!(text.starts_with("Let me check that."));
+                assert!(text.contains("[Called tool `search`"));
+            } else {
+                panic!("Content should be a string");
+            }
+        } else {
+            panic!("Content should be present");
+        }
     }
 
     #[test]
