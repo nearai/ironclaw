@@ -875,12 +875,16 @@ impl SetupWizard {
             .find(provider_id)
             .ok_or_else(|| SetupError::Config(format!("Unknown provider: {}", provider_id)))?;
 
-        let setup = def.setup.as_ref().ok_or_else(|| {
-            SetupError::Config(format!(
-                "Provider '{}' has no setup configuration",
+        // Providers without a setup hint (e.g., user-defined providers configured
+        // purely via env vars) skip credential setup and go to model selection.
+        let Some(setup) = def.setup.as_ref() else {
+            print_info(&format!(
+                "Provider '{}' has no setup wizard. Configure via environment variables.",
                 provider_id
-            ))
-        })?;
+            ));
+            self.settings.llm_backend = Some(provider_id.to_string());
+            return Ok(());
+        };
 
         match setup {
             crate::llm::registry::SetupHint::ApiKey {
@@ -3285,5 +3289,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_provider_setup_no_setup_hint() {
+        // A provider with setup: None should not error. It should set the
+        // backend and return Ok, allowing env-var-only configured providers
+        // to be kept during re-onboarding.
+        let mut wizard = SetupWizard::new();
+
+        let mut providers: Vec<crate::llm::registry::ProviderDefinition> =
+            serde_json::from_str(include_str!("../../providers.json")).unwrap();
+        // Add a provider with no setup hint
+        providers.push(crate::llm::registry::ProviderDefinition {
+            id: "custom_no_setup".to_string(),
+            aliases: vec![],
+            protocol: crate::llm::registry::ProviderProtocol::OpenAiCompletions,
+            default_base_url: Some("http://localhost:9999/v1".to_string()),
+            base_url_env: None,
+            base_url_required: false,
+            api_key_env: None,
+            api_key_required: false,
+            model_env: "CUSTOM_MODEL".to_string(),
+            default_model: "custom-model".to_string(),
+            description: "Custom provider with no setup wizard".to_string(),
+            extra_headers_env: None,
+            setup: None,
+        });
+        let registry = crate::llm::ProviderRegistry::new(providers);
+
+        let result = wizard
+            .run_provider_setup("custom_no_setup", &registry)
+            .await;
+        assert!(result.is_ok(), "setup: None provider should not error");
+        assert_eq!(
+            wizard.settings.llm_backend.as_deref(),
+            Some("custom_no_setup"),
+            "backend should be set even without setup hint"
+        );
     }
 }

@@ -139,34 +139,44 @@ impl NearAiChatProvider {
 
     /// Resolve the Bearer token for the current auth mode.
     ///
-    /// For session token auth: if no token exists yet, triggers the
-    /// interactive login flow (OAuth or API key entry). This makes the
-    /// provider self-sufficient for authentication, no caller needs to
-    /// pre-check `ensure_authenticated`.
+    /// Priority order:
+    /// 1. `config.api_key` (set at construction from env/config)
+    /// 2. Session token (OAuth flow)
+    /// 3. `NEARAI_API_KEY` env var (set by interactive `api_key_login()`)
     ///
-    /// After `ensure_authenticated()`, re-checks `NEARAI_API_KEY` env var
-    /// because the user may have entered an API key during the interactive
-    /// login flow (choice 4), which sets the env var but not a session token.
+    /// The env var fallback (#3) only triggers after `ensure_authenticated()`
+    /// runs, because `api_key_login()` sets the env var but not a session token.
     async fn resolve_bearer_token(&self) -> Result<String, LlmError> {
+        // 1. Config-level API key takes priority
         if let Some(ref api_key) = self.config.api_key {
             return Ok(api_key.expose_secret().to_string());
         }
 
-        if !self.session.has_token().await {
-            self.session.ensure_authenticated().await?;
+        // 2. Existing session token (OAuth was already completed)
+        if self.session.has_token().await {
+            let token = self.session.get_token().await?;
+            return Ok(token.expose_secret().to_string());
         }
 
-        // The interactive login may have set NEARAI_API_KEY (api_key_login path)
-        // without storing a session token. Check for it before falling through
-        // to get_token() which would fail.
+        // No token yet, trigger interactive login
+        self.session.ensure_authenticated().await?;
+
+        // 3. After login, check if a session token was stored (OAuth path)
+        if self.session.has_token().await {
+            let token = self.session.get_token().await?;
+            return Ok(token.expose_secret().to_string());
+        }
+
+        // 4. api_key_login() sets NEARAI_API_KEY env var but not a session token
         if let Ok(key) = std::env::var("NEARAI_API_KEY")
             && !key.is_empty()
         {
             return Ok(key);
         }
 
-        let token = self.session.get_token().await?;
-        Ok(token.expose_secret().to_string())
+        Err(LlmError::AuthFailed {
+            provider: "nearai".to_string(),
+        })
     }
 
     /// Send a single request to the chat completions API.
@@ -1421,27 +1431,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_bearer_token_picks_up_env_api_key() {
-        // Simulate the api_key_login() path: config has no api_key, but
-        // NEARAI_API_KEY is set in the environment. When the session already
-        // has a token (OAuth path), resolve_bearer_token uses the session token.
-        // But when the session has no token and the env var is set (api_key_login
-        // path), the env var fallback kicks in.
-        //
-        // We can't test the full interactive flow (ensure_authenticated prompts
-        // for input), but we CAN test the pre-existing-session-token path and
-        // the api_key config path to verify the method works correctly.
-        let mut cfg = test_nearai_config("http://localhost:8318");
-
-        // Path 1: config.api_key is set, should use it directly
-        let provider = NearAiChatProvider::new(cfg.clone(), test_session()).expect("provider");
+    async fn test_resolve_bearer_token_config_api_key() {
+        // When config.api_key is set, it takes top priority.
+        let cfg = test_nearai_config("http://localhost:8318");
+        let provider = NearAiChatProvider::new(cfg, test_session()).expect("provider");
         let token = provider
             .resolve_bearer_token()
             .await
             .expect("should resolve");
         assert_eq!(token, "test-key");
+    }
 
-        // Path 2: config.api_key is None, session has a token via set_token()
+    #[tokio::test]
+    async fn test_resolve_bearer_token_session_token() {
+        // When config.api_key is None but session has a token, use session token.
+        let mut cfg = test_nearai_config("http://localhost:8318");
         cfg.api_key = None;
         let session = test_session();
         session
@@ -1453,5 +1457,38 @@ mod tests {
             .await
             .expect("should resolve");
         assert_eq!(token, "session-tok-123");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_bearer_token_session_beats_env_var() {
+        // Session token takes priority over NEARAI_API_KEY env var.
+        // This prevents unexpected auth mode switches mid-run.
+        let mut cfg = test_nearai_config("http://localhost:8318");
+        cfg.api_key = None;
+        let session = test_session();
+        session
+            .set_token(secrecy::SecretString::from("oauth-token".to_string()))
+            .await;
+
+        // Set env var that should NOT be used when session token exists
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("NEARAI_API_KEY", "env-api-key-should-not-win");
+        }
+
+        let provider = NearAiChatProvider::new(cfg, session).expect("provider");
+        let token = provider
+            .resolve_bearer_token()
+            .await
+            .expect("should resolve");
+        assert_eq!(
+            token, "oauth-token",
+            "session token must take priority over env var"
+        );
+
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::remove_var("NEARAI_API_KEY");
+        }
     }
 }
