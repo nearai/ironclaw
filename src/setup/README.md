@@ -179,7 +179,7 @@ env-var mode or skipped secrets.
 OpenRouter is stored as `llm_backend = "openai_compatible"` under the hood.
 Switching between them overwrites the same credential slot.
 
-**OpenRouter** (`setup_openrouter`):
+**OpenRouter** (via `run_provider_setup()` and `setup_api_key_provider()`):
 - Pre-configured OpenAI-compatible preset with base URL `https://openrouter.ai/api/v1`
 - Delegates to `setup_api_key_provider()` with a display name override ("OpenRouter")
 - Sets `llm_backend = "openai_compatible"` and `openai_compatible_base_url` automatically
