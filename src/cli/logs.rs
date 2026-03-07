@@ -2,61 +2,38 @@
 //!
 //! Provides `ironclaw logs --lines N` to tail the application log file.
 
-use anyhow::{Context, Result};
-use clap::Args;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use anyhow::{Context, Result};
+use clap::Args;
 
 #[derive(Args, Debug)]
 pub struct Logs {
     /// Number of recent lines to display
+    /// 
+    /// Default: 100 (matches `tail -n 100` convention for debugging)
     #[arg(short, long, default_value = "100")]
     pub lines: usize,
 }
 
-/// Core implementation: stream last N lines from any log file path.
-/// Uses memory-efficient VecDeque to avoid loading entire file.
-pub fn run_logs_command(args: &Logs, log_path: &Path) -> Result<()> {
-    if !log_path.exists() {
-        eprintln!("Log file not found at: {}", log_path.display());
-        eprintln!("Hint: Check if IronClaw has generated logs yet, or verify the path.");
-        return Ok(());
-    }
-
-    let file = File::open(log_path)
-        .with_context(|| format!("Failed to open log file: {}", log_path.display()))?;
-
-    let reader = BufReader::new(file);
-    let mut recent_lines: VecDeque<String> = VecDeque::with_capacity(args.lines);
-
-    for line_result in reader.lines() {
-        let line = line_result?;
-        recent_lines.push_back(line);
-        if recent_lines.len() > args.lines {
-            recent_lines.pop_front();
-        }
-    }
-
-    for line in recent_lines {
-        println!("{}", line);
-    }
-
-    Ok(())
-}
-
-// ✅ Helper for tests: defined BEFORE mod tests
-#[cfg(test)]
-fn read_last_n_lines(log_path: &Path, n: usize) -> Result<Vec<String>> {
+/// Core logic: read last N lines from a file using memory-efficient VecDeque.
+/// Returns lines in original order (oldest → newest).
+/// 
+/// This function is used by both `run_logs_command` (production) and tests,
+/// ensuring tests verify the actual production code path.
+fn tail_lines(log_path: &Path, n: usize) -> Result<Vec<String>> {
     if !log_path.exists() {
         return Ok(Vec::new());
     }
 
-    let file = File::open(log_path)?;
+    let file = File::open(log_path)
+        .with_context(|| format!("Failed to open log file: {}", log_path.display()))?;
+    
     let reader = BufReader::new(file);
     let mut recent_lines: VecDeque<String> = VecDeque::with_capacity(n);
-
+    
     for line_result in reader.lines() {
         let line = line_result?;
         recent_lines.push_back(line);
@@ -64,11 +41,28 @@ fn read_last_n_lines(log_path: &Path, n: usize) -> Result<Vec<String>> {
             recent_lines.pop_front();
         }
     }
-
+    
     Ok(recent_lines.into_iter().collect())
 }
 
-// ✅ Tests defined AFTER all helper functions
+/// CLI entry point: stream last N lines from log file to stdout.
+pub fn run_logs_command(args: &Logs, log_path: &Path) -> Result<()> {
+    let lines = tail_lines(log_path, args.lines)?;
+    
+    if lines.is_empty() && !log_path.exists() {
+        eprintln!("Log file not found at: {}", log_path.display());
+        eprintln!("Hint: Check if IronClaw has generated logs yet, or verify the path.");
+        return Ok(());
+    }
+    
+    for line in lines {
+        println!("{}", line);
+    }
+    
+    Ok(())
+}
+
+// ✅ Tests use the same tail_lines function as production code
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,7 +81,7 @@ mod tests {
         file.flush()?;
 
         let args = Logs { lines: 3 };
-        let result = read_last_n_lines(&log_path, args.lines)?;
+        let result = tail_lines(&log_path, args.lines)?;
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0], "Log line 8");
@@ -103,9 +97,10 @@ mod tests {
         let nonexistent_path = temp_dir.path().join("nonexistent.log");
 
         let args = Logs { lines: 10 };
-        let result = run_logs_command(&args, &nonexistent_path);
+        let result = tail_lines(&nonexistent_path, args.lines);
 
         assert!(result.is_ok());
+        assert!(result?.is_empty());
         Ok(())
     }
 
@@ -116,51 +111,28 @@ mod tests {
         File::create(&log_path)?;
 
         let args = Logs { lines: 10 };
-        let result = run_logs_command(&args, &log_path);
+        let result = tail_lines(&log_path, args.lines);
 
         assert!(result.is_ok());
+        assert!(result?.is_empty());
         Ok(())
     }
 
-    // ✅ Regression test: ensures log_path parameter is actually used (not ignored/hardcoded).
-
+    /// Regression test: verifies log_path parameter is used (not hardcoded).
     #[test]
     fn test_logs_uses_injected_path_regression() -> Result<()> {
         let temp_dir = TempDir::new()?;
-
-        // Create a log file at a CUSTOM path (NOT the default ~/.ironclaw/logs/ironclaw.log)
-        let custom_log_path = temp_dir.path().join("custom_subdir").join("my_custom.log");
-        std::fs::create_dir_all(custom_log_path.parent().unwrap())?;
-
-        let mut file = File::create(&custom_log_path)?;
-        // Write unique marker that we'll assert on
-        writeln!(file, "REGRESSION_TEST_MARKER_ABC123")?;
-        writeln!(file, "Another line for tail context")?;
+        let custom_path = temp_dir.path().join("unique_test.log");
+        
+        let mut file = File::create(&custom_path)?;
+        writeln!(file, "UNIQUE_MARKER_XYZ789")?;
         file.flush()?;
 
-        // Request last 1 line from the CUSTOM path
         let args = Logs { lines: 1 };
-        let result = read_last_n_lines(&custom_log_path, args.lines)?;
+        let result = tail_lines(&custom_path, args.lines)?;
 
-        // Verify the function read from the injected path, not a hardcoded default
-        assert_eq!(result.len(), 1, "Should return exactly 1 line");
-
-        // Check for the unique marker — this proves we read from injected path
-        assert_eq!(
-            result[0], "Another line for tail context",
-            "Should return the last line from the injected path"
-        );
-
-        // Additional check: ensure the unique marker exists in the file and could be read
-        // (if we requested 2 lines, we'd see both)
-        let args_all = Logs { lines: 2 };
-        let result_all = read_last_n_lines(&custom_log_path, args_all.lines)?;
-        assert!(
-            result_all
-                .iter()
-                .any(|line| line.contains("REGRESSION_TEST_MARKER")),
-            "File should contain the regression marker when reading more lines"
-        );
+        assert_eq!(result.len(), 1);
+        assert!(result[0].contains("UNIQUE_MARKER_XYZ789"));
 
         Ok(())
     }

@@ -259,9 +259,4 @@ mod tests {
         assert_snapshot!(help);
     }
 
-    #[test]
-    fn test_logs() {
-        let _cmd = Cli::command();
-        // Assert subcommand exists
-    }
 }
