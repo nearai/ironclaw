@@ -99,6 +99,15 @@ pub fn prefilter_skills<'a>(
 
 /// Score a skill against a user message.
 fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str) -> u32 {
+    // Exclusion veto: if any exclude_keyword is present in the message, score 0
+    if skill
+        .lowercased_exclude_keywords
+        .iter()
+        .any(|excl| message_lower.contains(excl.as_str()))
+    {
+        return 0;
+    }
+
     let mut score: u32 = 0;
 
     // Keyword scoring with cap to prevent gaming via keyword stuffing
@@ -158,6 +167,7 @@ mod tests {
                 description: format!("{} skill", name),
                 activation: ActivationCriteria {
                     keywords: kw_vec,
+                    exclude_keywords: vec![],
                     patterns: pattern_strings,
                     tags: tag_vec,
                     max_context_tokens: 1000,
@@ -170,6 +180,7 @@ mod tests {
             content_hash: "sha256:000".to_string(),
             compiled_patterns: compiled,
             lowercased_keywords,
+            lowercased_exclude_keywords: vec![],
             lowercased_tags,
         }
     }
