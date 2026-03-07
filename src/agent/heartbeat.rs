@@ -29,6 +29,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
+use crate::db::Database;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
 use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
@@ -132,6 +133,7 @@ pub struct HeartbeatRunner {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
+    store: Option<Arc<dyn Database>>,
     consecutive_failures: u32,
 }
 
@@ -151,6 +153,7 @@ impl HeartbeatRunner {
             llm,
             safety,
             response_tx: None,
+            store: None,
             consecutive_failures: 0,
         }
     }
@@ -158,6 +161,12 @@ impl HeartbeatRunner {
     /// Set the response channel for notifications.
     pub fn with_response_channel(mut self, tx: mpsc::Sender<OutgoingResponse>) -> Self {
         self.response_tx = Some(tx);
+        self
+    }
+
+    /// Set the database store for persistent heartbeat conversations.
+    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+        self.store = Some(store);
         self
     }
 
@@ -327,9 +336,32 @@ impl HeartbeatRunner {
             return;
         };
 
+        let user_id = self.config.notify_user_id.as_deref().unwrap_or("default");
+
+        // Persist to heartbeat conversation and get thread_id
+        let thread_id = if let Some(ref store) = self.store {
+            match store.get_or_create_heartbeat_conversation(user_id).await {
+                Ok(conv_id) => {
+                    if let Err(e) = store
+                        .add_conversation_message(conv_id, "assistant", message)
+                        .await
+                    {
+                        tracing::error!("Failed to persist heartbeat message: {}", e);
+                    }
+                    Some(conv_id.to_string())
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get heartbeat conversation: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let response = OutgoingResponse {
             content: format!("🔔 *Heartbeat Alert*\n\n{}", message),
-            thread_id: None,
+            thread_id,
             attachments: Vec::new(),
             metadata: serde_json::json!({
                 "source": "heartbeat",
@@ -391,10 +423,14 @@ pub fn spawn_heartbeat(
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
+    store: Option<Arc<dyn Database>>,
 ) -> tokio::task::JoinHandle<()> {
     let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
+    }
+    if let Some(s) = store {
+        runner = runner.with_store(s);
     }
 
     tokio::spawn(async move {
@@ -561,5 +597,23 @@ mod tests {
         };
         // start == end means zero-width window, should be false
         assert!(!config.is_quiet_hours());
+    }
+
+    #[test]
+    fn test_spawn_heartbeat_accepts_store_param() {
+        // Regression: spawn_heartbeat must accept an optional Database store
+        // for persisting heartbeat notifications to a dedicated conversation.
+        // Compile-time check: the 7th parameter is `Option<Arc<dyn Database>>`.
+        #[allow(clippy::type_complexity)]
+        let _fn_ptr: fn(
+            HeartbeatConfig,
+            HygieneConfig,
+            Arc<crate::workspace::Workspace>,
+            Arc<dyn crate::llm::LlmProvider>,
+            Arc<crate::safety::SafetyLayer>,
+            Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
+            Option<Arc<dyn crate::db::Database>>,
+        ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;
+        let _ = _fn_ptr;
     }
 }

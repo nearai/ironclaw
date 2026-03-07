@@ -57,6 +57,10 @@ pub type PromptQueue = Arc<
     >,
 >;
 
+/// Slot for the routine engine, filled at runtime after the agent starts.
+pub type RoutineEngineSlot =
+    Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>;
+
 /// Simple sliding-window rate limiter.
 ///
 /// Tracks the number of requests in the current window. Resets when the window expires.
@@ -165,6 +169,8 @@ pub struct GatewayState {
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
     /// Cost guard for token/cost tracking.
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
+    /// Routine engine slot for manual routine triggering (filled at runtime).
+    pub routine_engine: RoutineEngineSlot,
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
 }
@@ -1046,7 +1052,7 @@ async fn chat_threads_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-            .list_conversations_with_preview(&state.user_id, "gateway", 50)
+            .list_conversations_all_channels(&state.user_id, 50)
             .await
         {
             let mut assistant_thread = None;
@@ -1061,6 +1067,7 @@ async fn chat_threads_handler(
                     updated_at: s.last_activity.to_rfc3339(),
                     title: s.title.clone(),
                     thread_type: s.thread_type.clone(),
+                    channel: Some(s.channel.clone()),
                 };
 
                 if s.id == assistant_id {
@@ -1080,6 +1087,7 @@ async fn chat_threads_handler(
                     updated_at: chrono::Utc::now().to_rfc3339(),
                     title: None,
                     thread_type: Some("assistant".to_string()),
+                    channel: Some("gateway".to_string()),
                 });
             }
 
@@ -1092,9 +1100,10 @@ async fn chat_threads_handler(
     }
 
     // Fallback: in-memory only (no assistant thread without DB)
-    let threads: Vec<ThreadInfo> = sess
-        .threads
-        .values()
+    let mut sorted_threads: Vec<_> = sess.threads.values().collect();
+    sorted_threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let threads: Vec<ThreadInfo> = sorted_threads
+        .into_iter()
         .map(|t| ThreadInfo {
             id: t.id,
             state: format!("{:?}", t.state),
@@ -1103,6 +1112,7 @@ async fn chat_threads_handler(
             updated_at: t.updated_at.to_rfc3339(),
             title: None,
             thread_type: None,
+            channel: Some("gateway".to_string()),
         })
         .collect();
 
@@ -1122,38 +1132,39 @@ async fn chat_new_thread_handler(
     ))?;
 
     let session = session_manager.get_or_create_session(&state.user_id).await;
-    let mut sess = session.lock().await;
-    let thread = sess.create_thread();
-    let thread_id = thread.id;
-    let info = ThreadInfo {
-        id: thread.id,
-        state: format!("{:?}", thread.state),
-        turn_count: thread.turns.len(),
-        created_at: thread.created_at.to_rfc3339(),
-        updated_at: thread.updated_at.to_rfc3339(),
-        title: None,
-        thread_type: Some("thread".to_string()),
+    let (thread_id, info) = {
+        let mut sess = session.lock().await;
+        let thread = sess.create_thread();
+        let id = thread.id;
+        let info = ThreadInfo {
+            id: thread.id,
+            state: format!("{:?}", thread.state),
+            turn_count: thread.turns.len(),
+            created_at: thread.created_at.to_rfc3339(),
+            updated_at: thread.updated_at.to_rfc3339(),
+            title: None,
+            thread_type: Some("thread".to_string()),
+            channel: Some("gateway".to_string()),
+        };
+        (id, info)
     };
 
-    // Persist the empty conversation row with thread_type metadata
+    // Persist the empty conversation row with thread_type metadata synchronously
+    // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
-        let store = Arc::clone(store);
-        let user_id = state.user_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store
-                .ensure_conversation(thread_id, "gateway", &user_id, None)
-                .await
-            {
-                tracing::warn!("Failed to persist new thread: {}", e);
-            }
-            let metadata_val = serde_json::json!("thread");
-            if let Err(e) = store
-                .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
-                .await
-            {
-                tracing::warn!("Failed to set thread_type metadata: {}", e);
-            }
-        });
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", &state.user_id, None)
+            .await
+        {
+            tracing::warn!("Failed to persist new thread: {}", e);
+        }
+        let metadata_val = serde_json::json!("thread");
+        if let Err(e) = store
+            .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
+            .await
+        {
+            tracing::warn!("Failed to set thread_type metadata: {}", e);
+        }
     }
 
     Ok(Json(info))
@@ -1974,47 +1985,35 @@ async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    let engine = {
+        let guard = state.routine_engine.read().await;
+        guard.as_ref().cloned().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Routine engine not available".to_string(),
+        ))?
+    };
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
-    let routine = store
-        .get_routine(routine_id)
+    let run_id = engine
+        .fire_manual(routine_id, Some(&state.user_id))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    // Send the routine prompt through the message pipeline as a manual trigger.
-    let prompt = match &routine.action {
-        crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
-        crate::agent::routine::RoutineAction::FullJob {
-            title, description, ..
-        } => format!("{}: {}", title, description),
-    };
-
-    let content = format!("[routine:{}] {}", routine.name, prompt);
-    let msg = IncomingMessage::new("gateway", &state.user_id, content);
-
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
-
-    tx.send(msg).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
-        )
-    })?;
+        .map_err(|e| {
+            let status = match &e {
+                crate::error::RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
+                crate::error::RoutineError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
+                crate::error::RoutineError::Disabled { .. }
+                | crate::error::RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",
         "routine_id": routine_id,
+        "run_id": run_id,
     })))
 }
 
@@ -2472,6 +2471,7 @@ mod tests {
             chat_rate_limiter: RateLimiter::new(30, 60),
             registry_entries: vec![],
             cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
         })
     }

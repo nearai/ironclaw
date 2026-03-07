@@ -184,7 +184,11 @@ impl RoutineEngine {
     ///
     /// Bypasses cooldown checks (those only apply to cron/event triggers).
     /// Still enforces enabled check and concurrent run limit.
-    pub async fn fire_manual(&self, routine_id: Uuid) -> Result<Uuid, RoutineError> {
+    pub async fn fire_manual(
+        &self,
+        routine_id: Uuid,
+        user_id: Option<&str>,
+    ) -> Result<Uuid, RoutineError> {
         let routine = self
             .store
             .get_routine(routine_id)
@@ -193,6 +197,13 @@ impl RoutineEngine {
                 reason: e.to_string(),
             })?
             .ok_or(RoutineError::NotFound { id: routine_id })?;
+
+        // Enforce ownership when a user_id is provided (gateway calls).
+        if let Some(uid) = user_id
+            && routine.user_id != uid
+        {
+            return Err(RoutineError::NotAuthorized { id: routine_id });
+        }
 
         if !routine.enabled {
             return Err(RoutineError::Disabled {
@@ -400,6 +411,39 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
     }
 
+    // Persist routine result to its dedicated conversation thread
+    let thread_id = match ctx
+        .store
+        .get_or_create_routine_conversation(routine.id, &routine.name, &routine.user_id)
+        .await
+    {
+        Ok(conv_id) => {
+            tracing::debug!(
+                routine = %routine.name,
+                routine_id = %routine.id,
+                conversation_id = %conv_id,
+                "Resolved routine conversation thread"
+            );
+            // Record the run result as a conversation message
+            let msg = match (&summary, status) {
+                (Some(s), _) => format!("[{}] {}: {}", run.trigger_type, status, s),
+                (None, _) => format!("[{}] {}", run.trigger_type, status),
+            };
+            if let Err(e) = ctx
+                .store
+                .add_conversation_message(conv_id, "assistant", &msg)
+                .await
+            {
+                tracing::error!(routine = %routine.name, "Failed to persist routine message: {}", e);
+            }
+            Some(conv_id.to_string())
+        }
+        Err(e) => {
+            tracing::error!(routine = %routine.name, "Failed to get routine conversation: {}", e);
+            None
+        }
+    };
+
     // Send notifications based on config
     send_notification(
         &ctx.notify_tx,
@@ -407,6 +451,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         &routine.name,
         status,
         summary.as_deref(),
+        thread_id.as_deref(),
     )
     .await;
 }
@@ -615,6 +660,7 @@ async fn send_notification(
     routine_name: &str,
     status: RunStatus,
     summary: Option<&str>,
+    thread_id: Option<&str>,
 ) {
     let should_notify = match status {
         RunStatus::Ok => notify.on_success,
@@ -641,7 +687,7 @@ async fn send_notification(
 
     let response = OutgoingResponse {
         content: message,
-        thread_id: None,
+        thread_id: thread_id.map(String::from),
         attachments: Vec::new(),
         metadata: serde_json::json!({
             "source": "routine",

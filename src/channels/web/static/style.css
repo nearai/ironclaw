@@ -3074,7 +3074,7 @@ mark {
 }
 
 .thread-sidebar {
-  width: 200px;
+  width: 240px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
@@ -3082,6 +3082,8 @@ mark {
   flex-shrink: 0;
   transition: width 0.2s ease;
   overflow: hidden;
+  padding: 6px;
+  gap: 2px;
 }
 
 .thread-sidebar.collapsed {
@@ -3099,8 +3101,7 @@ mark {
 .thread-sidebar-header {
   display: flex;
   align-items: center;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
+  padding: 10px 10px;
   font-size: 13px;
   font-weight: 600;
   gap: 8px;
@@ -3134,21 +3135,22 @@ mark {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 12px 14px;
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-secondary);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  margin-bottom: 2px;
 }
 
 .assistant-item:hover {
-  background: var(--bg-tertiary);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .assistant-item.active {
-  background: rgba(52, 211, 153, 0.08);
+  background: rgba(52, 211, 153, 0.1);
   color: var(--accent);
   border-left: 2px solid var(--accent);
 }
@@ -3166,7 +3168,7 @@ mark {
 }
 
 .threads-section-header {
-  padding: 8px 12px 4px;
+  padding: 10px 10px 4px;
   font-size: 11px;
   font-weight: 500;
   text-transform: uppercase;
@@ -3196,11 +3198,11 @@ mark {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 12px;
+  padding: 10px 14px;
   cursor: pointer;
   font-size: 13px;
   color: var(--text-secondary);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius);
 }
 
 .thread-item:hover {
@@ -3222,6 +3224,43 @@ mark {
 .thread-meta {
   font-size: 11px;
   color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.thread-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.thread-badge-routine { background: rgba(52, 211, 153, 0.15); color: var(--accent); }
+.thread-badge-heartbeat { background: rgba(245, 166, 35, 0.15); color: var(--warning); }
+.thread-badge-telegram { background: rgba(0, 136, 204, 0.15); color: #0088cc; }
+.thread-badge-signal { background: rgba(59, 118, 240, 0.15); color: #3b76f0; }
+.thread-badge-slack { background: rgba(74, 21, 75, 0.15); color: #e01e5a; }
+
+.thread-unread {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--accent);
+  color: var(--bg);
+  border-radius: 8px;
+  padding: 0 4px;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 /* --- Memory editing --- */
@@ -3620,7 +3659,7 @@ mark {
     left: 0;
     top: 0;
     bottom: 0;
-    width: 200px;
+    width: 240px;
     z-index: 50;
   }
 

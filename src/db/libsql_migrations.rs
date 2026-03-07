@@ -45,6 +45,15 @@ CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity);
 
+-- Partial unique indexes to prevent duplicate singleton conversations.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_routine
+ON conversations (user_id, json_extract(metadata, '$.routine_id'))
+WHERE json_extract(metadata, '$.routine_id') IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_heartbeat
+ON conversations (user_id)
+WHERE json_extract(metadata, '$.thread_type') = 'heartbeat';
+
 CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

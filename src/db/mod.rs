@@ -125,6 +125,21 @@ pub trait ConversationStore: Send + Sync {
         channel: &str,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError>;
+    async fn list_conversations_all_channels(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError>;
+    async fn get_or_create_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        routine_name: &str,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn get_or_create_heartbeat_conversation(
+        &self,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError>;
     async fn get_or_create_assistant_conversation(
         &self,
         user_id: &str,

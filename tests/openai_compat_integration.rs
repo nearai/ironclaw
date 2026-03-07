@@ -211,6 +211,7 @@ async fn start_test_server_with_provider(
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
+        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
     });
 
@@ -700,6 +701,7 @@ async fn test_no_llm_provider_returns_503() {
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
+        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
     });
 

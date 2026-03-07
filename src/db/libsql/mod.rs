@@ -118,15 +118,37 @@ impl LibSqlBackend {
     /// Sets `PRAGMA busy_timeout = 5000` on every connection so concurrent
     /// writers wait up to 5 seconds instead of failing instantly with
     /// "database is locked".
+    ///
+    /// Retries up to 3 times with exponential backoff to handle transient
+    /// "unable to open database file" errors from concurrent connection
+    /// creation (e.g. cron ticker vs main thread).
     pub async fn connect(&self) -> Result<Connection, DatabaseError> {
-        let conn = self
-            .db
-            .connect()
-            .map_err(|e| DatabaseError::Pool(format!("Failed to create connection: {}", e)))?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
-            .await
-            .map_err(|e| DatabaseError::Pool(format!("Failed to set busy_timeout: {}", e)))?;
-        Ok(conn)
+        let mut last_err = None;
+        for attempt in 0..3u32 {
+            match self.db.connect() {
+                Ok(conn) => {
+                    conn.query("PRAGMA busy_timeout = 5000", ())
+                        .await
+                        .map_err(|e| {
+                            DatabaseError::Pool(format!("Failed to set busy_timeout: {}", e))
+                        })?;
+                    return Ok(conn);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            50 * 2u64.pow(attempt),
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+        Err(DatabaseError::Pool(format!(
+            "Failed to create connection after 3 attempts: {}",
+            last_err.map(|e| e.to_string()).unwrap_or_default()
+        )))
     }
 }
 
@@ -458,5 +480,34 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let count: i64 = row.get(0).unwrap();
         assert_eq!(count, 20);
+    }
+
+    #[tokio::test]
+    async fn test_connect_retry_succeeds_on_valid_db() {
+        // Verify connect() works with retry logic on a file-backed DB
+        // (exercises the retry path even though transient failures are hard
+        // to reproduce deterministically).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_retry.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Multiple concurrent connect() calls should all succeed
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let b = LibSqlBackend {
+                db: backend.shared_db(),
+            };
+            handles.push(tokio::spawn(async move { b.connect().await }));
+        }
+
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(
+                result.is_ok(),
+                "concurrent connect failed: {:?}",
+                result.err()
+            );
+        }
     }
 }

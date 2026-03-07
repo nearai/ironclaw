@@ -475,6 +475,7 @@ async fn async_main() -> anyhow::Result<()> {
     let mut sse_sender: Option<
         tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
     > = None;
+    let mut routine_engine_slot: Option<ironclaw::channels::web::server::RoutineEngineSlot> = None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw =
             GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
@@ -528,10 +529,11 @@ async fn async_main() -> anyhow::Result<()> {
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
-        // Capture SSE sender before moving gw into channels.
+        // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
         sse_sender = Some(gw.state().sse.sender());
+        routine_engine_slot = Some(Arc::clone(&gw.state().routine_engine));
 
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
@@ -678,7 +680,7 @@ async fn async_main() -> anyhow::Result<()> {
         )),
     };
 
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         config.agent.clone(),
         deps,
         channels,
@@ -691,6 +693,11 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Fill the scheduler slot now that Agent (and its Scheduler) exist.
     *scheduler_slot.write().await = Some(agent.scheduler());
+
+    // Give the agent the routine engine slot so it can expose the engine to the gateway.
+    if let Some(slot) = routine_engine_slot {
+        agent.set_routine_engine_slot(slot);
+    }
 
     agent.run().await?;
 
