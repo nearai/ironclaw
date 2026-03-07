@@ -1,0 +1,305 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "IronClaw",
+  "description": "Secure personal AI assistant. Your data stays yours.",
+  "theme": "mint",
+  "icons": {
+    "library": "lucide"
+  },
+  "logo": {
+    "light": "/assets/ironclaw.png",
+    "dark": "/assets/ironclaw.png"
+  },
+  "favicon": "/assets/ironclaw.png",
+  "colors": {
+    "primary": "#5B6FFF",
+    "dark": "#5B6FFF",
+    "light": "#8B9AFF"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/nearai/ironclaw",
+        "icon": "github"
+      },
+      {
+        "label": "Releases",
+        "href": "https://github.com/nearai/ironclaw/releases",
+        "icon": "package"
+      }
+    ]
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Get Started",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "index"
+            ]
+          },
+          {
+            "group": "Quick Start",
+            "pages": [
+              "start/getting-started",
+              "start/wizard"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Install",
+        "groups": [
+          {
+            "group": "Installation",
+            "pages": [
+              "install/index",
+              "install/local",
+              "install/docker",
+              "install/vps",
+              "install/nearai-cloud"
+            ]
+          },
+          {
+            "group": "Maintenance",
+            "pages": [
+              "install/updating",
+              "install/uninstalling"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Channels",
+        "groups": [
+          {
+            "group": "Channels",
+            "pages": [
+              "channels/index",
+              "channels/tui",
+              "channels/telegram",
+              "channels/webhook",
+              "channels/signal"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Agents",
+        "groups": [
+          {
+            "group": "Agent Runtime",
+            "pages": [
+              "agents/index",
+              "agents/jobs",
+              "agents/self-repair"
+            ]
+          },
+          {
+            "group": "Skills",
+            "pages": [
+              "agents/skills",
+              "agents/skills-format",
+              "agents/clawhub"
+            ]
+          },
+          {
+            "group": "Routines",
+            "pages": [
+              "agents/routines",
+              "agents/routines-cron",
+              "agents/routines-reactive"
+            ]
+          },
+          {
+            "group": "Memory",
+            "pages": [
+              "agents/memory",
+              "agents/memory-search",
+              "agents/identity-files",
+              "agents/heartbeat"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Tools",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "tools/index"
+            ]
+          },
+          {
+            "group": "Built-in Tools",
+            "pages": [
+              "tools/builtin",
+              "tools/file-tools",
+              "tools/shell-tool",
+              "tools/memory-tools",
+              "tools/http-tool",
+              "tools/job-tools"
+            ]
+          },
+          {
+            "group": "Extensions",
+            "pages": [
+              "tools/extensions",
+              "tools/wasm",
+              "tools/mcp",
+              "tools/building"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Models",
+        "groups": [
+          {
+            "group": "LLM Providers",
+            "pages": [
+              "providers/index",
+              "providers/nearai",
+              "providers/anthropic",
+              "providers/openai",
+              "providers/ollama",
+              "providers/openai-compatible",
+              "providers/tinfoil",
+              "providers/moonshot"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Platforms",
+        "groups": [
+          {
+            "group": "Linux",
+            "pages": [
+              "platforms/linux",
+              "platforms/raspberry-pi"
+            ]
+          },
+          {
+            "group": "macOS",
+            "pages": [
+              "platforms/macos"
+            ]
+          },
+          {
+            "group": "Windows",
+            "pages": [
+              "platforms/windows-wsl2",
+              "platforms/windows-native"
+            ]
+          },
+          {
+            "group": "Cloud & Containers",
+            "pages": [
+              "platforms/vps",
+              "platforms/docker-compose"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Gateway & Ops",
+        "groups": [
+          {
+            "group": "Web Gateway",
+            "pages": [
+              "channels/web-gateway",
+              "ops/websocket-sse"
+            ]
+          },
+          {
+            "group": "UI Reference",
+            "pages": [
+              "ui-reference/chat",
+              "ui-reference/skills",
+              "ui-reference/memory",
+              "ui-reference/routines",
+              "ui-reference/extensions",
+              "ui-reference/settings"
+            ]
+          },
+          {
+            "group": "Security",
+            "pages": [
+              "security/index",
+              "security/safety-layer",
+              "security/secrets",
+              "security/sandbox"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "setup/configuration",
+              "setup/database"
+            ]
+          },
+          {
+            "group": "Monitoring",
+            "pages": [
+              "ops/logging"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "API Reference",
+            "pages": [
+              "ops/api",
+              "ops/orchestrator"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "reference/cli",
+              "reference/changelog"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Help",
+        "groups": [
+          {
+            "group": "Help",
+            "pages": [
+              "help/troubleshooting",
+              "help/faq"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "cname": "docs.ironclaw.ai",
+  "custom": {
+    "css": [
+      "/custom.css"
+    ]
+  },
+  "metadata": {
+    "og:site_name": "IronClaw Docs",
+    "og:type": "website",
+    "og:title": "IronClaw — Secure Personal AI Assistant",
+    "og:description": "Self-hosted AI assistant with defense-in-depth security. Your data stays yours, encrypted and local. Multi-channel access, parallel jobs, WASM sandbox, and skills system.",
+    "og:image": "https://docs.ironclaw.ai/assets/ironclaw.png",
+    "twitter:card": "summary_large_image",
+    "twitter:site": "@ironclawai",
+    "twitter:title": "IronClaw — Secure Personal AI Assistant",
+    "twitter:description": "Self-hosted AI assistant with defense-in-depth security. Your data stays yours, encrypted and local.",
+    "twitter:image": "https://docs.ironclaw.ai/assets/ironclaw.png"
+  }
+}

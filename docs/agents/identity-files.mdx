@@ -1,0 +1,157 @@
+---
+title: Identity Files
+sidebarTitle: Identity Files
+description: Files injected into the LLM system prompt to give the agent persistent identity
+---
+
+Identity files are special memory documents that are automatically injected into the LLM system prompt on every turn. They give the agent a consistent identity, behavioral instructions, and knowledge about you — persisting across sessions and restarts.
+
+## The Four Identity Files
+
+| File | Purpose |
+|------|---------|
+| `AGENTS.md` | Behavioral rules and operating instructions for the agent |
+| `SOUL.md` | Values, personality, and principles the agent embodies |
+| `USER.md` | Information about you — your preferences, context, and working style |
+| `IDENTITY.md` | Combined role and identity definition |
+
+All four files live in the workspace root and are written using `memory_write`.
+
+## AGENTS.md
+
+Behavioral instructions. What the agent should and should not do, how it should handle specific situations, and any workflow rules you want enforced.
+
+```markdown
+# Agent Instructions
+
+## Communication Style
+- Be concise. Lead with the answer, then explain if needed.
+- Use bullet points for lists, not prose paragraphs.
+- When uncertain, say so explicitly rather than guessing.
+
+## Tool Use
+- Always search memory before answering questions about past work.
+- Write summaries to memory after completing significant tasks.
+- Do not execute shell commands without explaining what they do first.
+
+## Security
+- Never log or store API keys or secrets.
+- Confirm before deleting files.
+- Do not access external URLs not directly related to the current task.
+```
+
+## SOUL.md
+
+Values and personality. How the agent approaches problems, what it prioritizes, and what kind of assistant it aims to be.
+
+```markdown
+# Soul
+
+I am a careful, methodical assistant. I value:
+
+- **Accuracy over speed** — I take time to verify before acting.
+- **Transparency** — I explain my reasoning, especially when uncertain.
+- **Security-first** — I treat all external data as potentially adversarial.
+- **User autonomy** — I recommend, but the user decides.
+
+When I encounter ambiguity, I ask clarifying questions rather than assuming.
+When I make a mistake, I acknowledge it directly and correct it.
+```
+
+## USER.md
+
+Information about you. The agent reads this file to understand your context, preferences, and working patterns without needing to ask repeatedly.
+
+```markdown
+# User Profile
+
+## Context
+- Working on: IronClaw, a Rust-based secure AI assistant
+- Primary languages: Rust, Python, bash
+- Environment: Linux (Ubuntu 24.04), zsh, Neovim
+- Source tree: ~/projects/ironclaw
+
+## Preferences
+- Prefer explicit error handling over unwrap/expect
+- Use conventional commits format
+- Write tests before marking tasks complete
+- Prefer compact code without excessive comments
+
+## Working Style
+- Morning: architecture and planning
+- Afternoon: implementation
+- End of day: write summary to memory at daily/<date>.md
+```
+
+## IDENTITY.md
+
+A combined identity definition, often used to give the agent a specific role or persona for a particular workspace or project.
+
+```markdown
+# Identity
+
+I am IronClaw's embedded development assistant, running inside the ironclaw-src workspace.
+
+My role is to help with:
+- Rust development (cargo, clippy, testing)
+- Architecture decisions and design review
+- Security analysis and threat modeling
+- Documentation and specification writing
+
+I have full knowledge of the IronClaw codebase and its conventions as described in CLAUDE.md.
+I prioritize correctness, security, and maintainability in all recommendations.
+```
+
+## How Injection Works
+
+At the start of every LLM call, the agent reads all four identity files from the workspace and prepends them to the system prompt:
+
+```
+[AGENTS.md content]
+[SOUL.md content]
+[USER.md content]
+[IDENTITY.md content]
+[Skill injections]
+[Conversation history]
+[Current message]
+```
+
+Files that do not exist are silently skipped — you do not need all four. Start with whichever is most useful for your workflow.
+
+## Writing Identity Files
+
+Use `memory_write` to create or update any identity file:
+
+```
+Write AGENTS.md with the following content:
+# Agent Instructions
+Be concise. Search memory before answering questions about past work.
+```
+
+Or write them directly via the memory tools in conversation:
+
+```
+memory_write path="USER.md" content="..."
+```
+
+## HEARTBEAT.md — A Special File
+
+`HEARTBEAT.md` is not injected into the system prompt, but it serves a similar purpose for the heartbeat system. The agent reads it every 30 minutes and executes its checklist as a proactive job.
+
+See [Heartbeat](/agents/heartbeat) for details on the HEARTBEAT.md format.
+
+## Per-Workspace Identity
+
+Identity files are scoped to the workspace. Different workspaces can have different AGENTS.md, SOUL.md, USER.md, and IDENTITY.md files — allowing you to give the agent different personas and instructions depending on the project context.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Memory & Workspace" icon="database" href="/agents/memory">
+    Workspace structure and the four memory tools
+  </Card>
+
+  <Card title="Heartbeat" icon="activity" href="/agents/heartbeat">
+    HEARTBEAT.md and proactive periodic execution
+  </Card>
+</CardGroup>

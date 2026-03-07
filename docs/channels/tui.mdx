@@ -1,0 +1,115 @@
+---
+title: Terminal UI
+sidebarTitle: TUI
+description: Terminal-based interface for IronClaw
+---
+
+The Terminal UI (TUI) provides a rich chat interface directly in your terminal using Ratatui.
+
+## Features
+
+- **Real-time chat**: Message history with timestamps
+- **Message composer**: Multi-line input with editing
+- **Approval overlays**: Interactive tool approval
+- **Status bar**: Connection and system status
+- **Keyboard shortcuts**: Efficient navigation
+
+## Enabling TUI
+
+The TUI is enabled by default. To disable:
+
+```bash
+export CLI_ENABLED=false
+```
+
+## Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Send message |
+| `Shift+Enter` | New line in composer |
+| `Ctrl+C` | Quit |
+| `Ctrl+L` | Clear screen |
+| `Tab` | Focus next element |
+| `Esc` | Cancel / Back |
+| `↑/↓` | Scroll history |
+
+## Message Composer
+
+The composer supports multi-line messages:
+
+1. Type your message
+2. Use `Shift+Enter` for new lines
+3. Press `Enter` to send
+4. Press `Esc` to cancel
+
+## Approval Overlays
+
+When IronClaw needs approval:
+
+```
+┌─────────────────────────────────────┐
+│ Tool Approval Required              │
+├─────────────────────────────────────┤
+│ Tool: WriteFile                     │
+│ Path: /home/user/project/README.md  │
+├─────────────────────────────────────┤
+│ [Y] Yes  [N] No  [A] Always         │
+└─────────────────────────────────────┘
+```
+
+Options:
+- **Yes**: Approve this once
+- **No**: Deny this once
+- **Always**: Auto-approve this tool in future
+
+## Customization
+
+### Color Scheme
+
+TUI respects your terminal's color scheme. For best results:
+
+- Use a terminal with 256-color support
+- Set `TERM=xterm-256color` or similar
+
+### Font
+
+Recommended fonts for best experience:
+
+- [Nerd Fonts](https://www.nerdfonts.com/) (for icons)
+- [JetBrains Mono](https://www.jetbrains.com/lp/mono/)
+- [Fira Code](https://github.com/tonsky/FiraCode)
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Display issues" icon="monitor">
+    - Check terminal supports Unicode
+    - Set `TERM=xterm-256color`
+    - Try different terminal emulator
+  </Accordion>
+
+  <Accordion title="Input not working" icon="keyboard">
+    - Check terminal focus
+    - Try `reset` command
+    - Disable terminal mouse mode if interfering
+  </Accordion>
+
+  <Accordion title="Text wrapping issues" icon="wrap">
+    - Ensure terminal width ≥ 80 columns
+    - Disable terminal line wrapping
+    - Resize terminal and restart
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Web Gateway" icon="globe" href="/channels/web-gateway">
+    Browser-based chat interface
+  </Card>
+
+  <Card title="Channels" icon="message-circle" href="/channels">
+    Other ways to interact with IronClaw
+  </Card>
+</CardGroup>

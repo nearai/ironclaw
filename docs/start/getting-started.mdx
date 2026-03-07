@@ -1,0 +1,214 @@
+---
+title: Getting Started
+sidebarTitle: Quickstart
+description: Zero to running IronClaw in under 10 minutes
+---
+
+This guide will get you from zero to a running IronClaw instance in under 10 minutes.
+
+## Prerequisites
+
+<AccordionGroup>
+  <Accordion title="Operating System" icon="monitor">
+    IronClaw runs on:
+    - **Linux** (Ubuntu 22.04+, Debian 12+, Fedora 39+)
+    - **macOS** (14 Sonoma+)
+    - **Windows** (native or WSL2 recommended)
+
+    For Windows, WSL2 is recommended for the best experience.
+  </Accordion>
+
+  <Accordion title="Optional: Docker" icon="container">
+    Docker is **optional** for basic operation, but required if you want to use:
+    - Sandboxed job execution (Claude Code mode)
+    - WASM tool building with automatic compilation
+
+    ```bash
+    # Verify Docker is installed (optional)
+    docker --version
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Choose Your Path
+
+<Tabs>
+  <Tab title="Local (Recommended)">
+    Best for personal use on your own machine. Uses libSQL (embedded SQLite) — no separate database server required.
+
+    **Time:** ~5 minutes
+
+    ```bash
+    # Install IronClaw
+    curl -fsSL https://install.ironclaw.ai | bash
+
+    # Or with Homebrew on macOS
+    brew tap ironclaw-ai/tap
+    brew install ironclaw
+    ```
+  </Tab>
+
+  <Tab title="Docker">
+    Run IronClaw in a container. Good for testing or if you prefer containerized deployments.
+
+    **Time:** ~10 minutes
+
+    ```bash
+    # Create data directory
+    mkdir -p ~/.ironclaw
+
+    # Run IronClaw
+    docker run -d \
+      --name ironclaw \
+      -v ~/.ironclaw:/home/ironclaw/.ironclaw \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -p 3000:3000 \
+      -p 8080:8080 \
+      nearai/ironclaw:latest
+    ```
+
+    See [Docker install](/install/docker) for docker compose and full details.
+  </Tab>
+
+  <Tab title="VPS / Cloud">
+    Deploy to a remote server (AWS, DigitalOcean, Hetzner, etc.).
+
+    **Time:** ~15 minutes
+
+    <Warning>
+    **Browser OAuth blocked on VPS.** The default NEAR AI authentication requires a browser on the same machine. On a VPS, either:
+    - Use NEAR AI Cloud API key (recommended)
+    - Set `IRONCLAW_OAUTH_CALLBACK_URL` to a publicly reachable URL
+
+    See [VPS install](/install/vps) for details.
+    </Warning>
+
+    ```bash
+    # SSH into your server, then:
+    curl -fsSL https://install.ironclaw.ai | bash
+    ```
+  </Tab>
+</Tabs>
+
+## Run the Onboarding Wizard
+
+IronClaw includes an interactive wizard that configures everything:
+
+```bash
+ironclaw onboard
+```
+
+The wizard will guide you through 8 steps:
+
+<Steps>
+  <Step title="Database" icon="database">
+    Choose PostgreSQL (production) or libSQL (zero-dependency, recommended for local).
+  </Step>
+
+  <Step title="Security" icon="shield">
+    Configure secret encryption (OS keychain, env var, or skip).
+  </Step>
+
+  <Step title="Inference Provider" icon="brain">
+    Select your LLM: NEAR AI, Anthropic, OpenAI, Ollama, or OpenAI-compatible.
+  </Step>
+
+  <Step title="Model Selection" icon="cpu">
+    Pick a specific model (fetched from provider API).
+  </Step>
+
+  <Step title="Embeddings" icon="search">
+    Enable semantic search for workspace memory (optional).
+  </Step>
+
+  <Step title="Channels" icon="message-square">
+    Enable input channels: Web Gateway, Telegram, HTTP webhook, TUI.
+  </Step>
+
+  <Step title="Extensions" icon="puzzle">
+    Install tools from the registry (optional).
+  </Step>
+
+  <Step title="Heartbeat" icon="activity">
+    Configure periodic background execution (optional).
+  </Step>
+</Steps>
+
+See the [Wizard Walkthrough](/start/wizard) for detailed explanations of each step.
+
+## Start IronClaw
+
+Once the wizard completes, start IronClaw:
+
+```bash
+ironclaw run
+```
+
+You should see output similar to:
+
+```
+[2024-01-15T10:30:00Z INFO] IronClaw v0.13.0 starting...
+[2024-01-15T10:30:00Z INFO] Database: libSQL at ~/.ironclaw/ironclaw.db
+[2024-01-15T10:30:00Z INFO] LLM Backend: nearai
+[2024-01-15T10:30:00Z INFO] Web Gateway: http://127.0.0.1:3000
+[2024-01-15T10:30:00Z INFO] Gateway auth token: ic_xxxxxxxxxxxx
+[2024-01-15T10:30:00Z INFO] Agent ready
+```
+
+## Access the Web Gateway
+
+If you enabled the Web Gateway during setup:
+
+1. Open `http://127.0.0.1:3000` in your browser
+2. Enter the auth token from the logs (or set `GATEWAY_AUTH_TOKEN` for a persistent token)
+3. Start chatting!
+
+<Note>
+The default auth token is randomly generated on each startup. For a persistent token, set the `GATEWAY_AUTH_TOKEN` environment variable before running IronClaw.
+</Note>
+
+## Success Check
+
+✅ **You're ready when:**
+- The `ironclaw run` command shows "Agent ready"
+- You can access the Web Gateway at `http://127.0.0.1:3000`
+- The chat interface loads and accepts messages
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Wizard Details" icon="settings" href="/start/wizard">
+    Deep dive into each of the 8 wizard steps
+  </Card>
+
+  <Card title="Configuration" icon="file-cog" href="/setup/configuration">
+    Complete environment variable reference
+  </Card>
+
+  <Card title="Channels" icon="message-circle" href="/channels">
+    Set up Telegram, webhooks, and other input channels
+  </Card>
+
+  <Card title="Troubleshooting" icon="alert-circle" href="/help/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>
+
+## Quick Commands Reference
+
+```bash
+# Start IronClaw
+ironclaw run
+
+# Re-run just the channel setup
+ironclaw onboard --channels-only
+
+# Skip auth (use existing session)
+ironclaw onboard --skip-auth
+
+# Check status
+ironclaw status
+
+# Run diagnostics
+ironclaw doctor
+```

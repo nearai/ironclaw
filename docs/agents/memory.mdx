@@ -1,0 +1,127 @@
+---
+title: Memory & Workspace
+sidebarTitle: Memory
+description: Persistent memory with hybrid search and filesystem-like workspace
+---
+
+IronClaw's memory system gives the agent durable, searchable storage that persists across sessions, restarts, and jobs. The guiding principle: **memory is database, not RAM** — if the agent needs to remember something, it writes it explicitly.
+
+## Memory is Database, Not RAM
+
+The LLM context window is temporary. Everything in it disappears when the conversation ends. The memory system is permanent: documents written to memory survive indefinitely and are retrievable via search from any session.
+
+This means the agent must be proactive about writing. Before answering a question about prior work, the agent should search memory. Before ending a task that produced useful information, the agent should write a summary.
+
+<Note>
+The agent is instructed to call `memory_search` before answering questions about past work, prior decisions, or previously stored information. If you feel the agent has forgotten something, try asking it to search memory explicitly.
+</Note>
+
+## Workspace Structure
+
+The workspace uses a filesystem-like path hierarchy. Documents live at paths you define:
+
+| Example Path | Use Case |
+|-------------|----------|
+| `context/vision.md` | Project goals and direction |
+| `context/architecture.md` | System design decisions |
+| `daily/2024-01-15.md` | Daily notes and logs |
+| `daily/standup.md` | Latest standup draft (overwritten daily) |
+| `projects/ironclaw/notes.md` | Project-specific notes |
+| `inbox/task-20240115.md` | Incoming tasks to process |
+| `processed/task-20240115.md` | Processed and archived tasks |
+| `ops/incidents/2024-01-15.md` | Incident records |
+| `AGENTS.md` | Agent behavior instructions |
+| `SOUL.md` | Agent values and personality |
+
+Paths are arbitrary strings. Use whatever structure makes sense for your workflow. The `memory_tree` tool shows all paths organized as a directory tree.
+
+## Four Memory Tools
+
+| Tool | Description |
+|------|-------------|
+| `memory_search` | Hybrid FTS + vector search. Call this before answering questions about prior work. Returns ranked results. |
+| `memory_write` | Write a document to a path. Creates or overwrites. Supports structured content (markdown, JSON, plain text). |
+| `memory_read` | Read a specific document by exact path. |
+| `memory_tree` | List all paths in the workspace as a tree. Use for discovery and navigation. |
+
+### memory_search
+
+```
+memory_search "kubernetes deployment errors last week"
+
+# Returns: ranked documents with excerpt, path, and relevance score
+# Combines keyword (FTS) and semantic (vector) search via RRF
+```
+
+### memory_write
+
+```
+memory_write path="daily/2024-01-15.md" content="..."
+
+# Creates the document if it doesn't exist
+# Overwrites if it does
+# Triggers chunking and re-indexing for search
+```
+
+### memory_read
+
+```
+memory_read path="context/vision.md"
+
+# Returns full document content
+# Use when you know the exact path
+# Use memory_search when you're not sure where information is stored
+```
+
+### memory_tree
+
+```
+memory_tree
+
+# Returns:
+# context/
+#   architecture.md
+#   vision.md
+# daily/
+#   2024-01-14.md
+#   2024-01-15.md
+# AGENTS.md
+# SOUL.md
+```
+
+## Identity Files
+
+Four special files are automatically injected into the LLM system prompt on every turn:
+
+| File | Purpose |
+|------|---------|
+| `AGENTS.md` | Behavioral instructions for the agent |
+| `SOUL.md` | Agent values, personality, and operating principles |
+| `USER.md` | Information about you — preferences, working style, context |
+| `IDENTITY.md` | Combined identity and role definition |
+
+Write to these files via `memory_write` to shape persistent agent behavior. See [Identity Files](/agents/identity-files) for details.
+
+## Heartbeat Integration
+
+The heartbeat system reads `HEARTBEAT.md` every 30 minutes and runs its checklist as a proactive job. Use it to schedule recurring memory operations without creating explicit routines. See [Heartbeat](/agents/heartbeat) for details.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Hybrid Search" icon="search" href="/agents/memory-search">
+    How FTS + vector search are combined via RRF, and embedding configuration
+  </Card>
+
+  <Card title="Identity Files" icon="user" href="/agents/identity-files">
+    AGENTS.md, SOUL.md, USER.md, IDENTITY.md — injected into every prompt
+  </Card>
+
+  <Card title="Heartbeat" icon="activity" href="/agents/heartbeat">
+    Proactive periodic execution driven by HEARTBEAT.md
+  </Card>
+
+  <Card title="Routines" icon="clock" href="/agents/routines">
+    Automate memory operations on a schedule or trigger
+  </Card>
+</CardGroup>

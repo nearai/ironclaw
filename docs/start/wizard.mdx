@@ -1,0 +1,331 @@
+---
+title: Onboarding Wizard
+sidebarTitle: Wizard Walkthrough
+description: Complete walkthrough of IronClaw's 8-step setup wizard
+---
+
+The IronClaw onboarding wizard is an interactive 8-step process that configures everything needed to run your personal AI assistant. This guide explains each step in detail.
+
+## Starting the Wizard
+
+```bash
+# Full wizard (all 8 steps)
+ironclaw onboard
+
+# Skip authentication (use existing session)
+ironclaw onboard --skip-auth
+
+# Channels only (add a new channel to existing setup)
+ironclaw onboard --channels-only
+```
+
+The wizard automatically runs on first launch if no database is configured:
+
+```bash
+ironclaw run    # Triggers wizard if not yet configured
+```
+
+## The 8 Steps
+
+<Steps>
+  <Step title="Step 1: Database Connection" icon="database">
+    **Goal:** Select and configure your database backend.
+
+    **Options:**
+    - **libSQL** (recommended for local): Zero-dependency embedded SQLite, auto-created at `~/.ironclaw/ironclaw.db`
+    - **PostgreSQL** (recommended for production): Requires PostgreSQL 15+ with pgvector extension
+    - **Turso** (optional): Cloud-synced libSQL database
+
+    **What happens:**
+    - Tests database connectivity
+    - Runs migrations automatically
+    - Stores connection in `~/.ironclaw/.env`
+
+    <Note>
+    libSQL is the simplest choice for personal use. PostgreSQL is better for multi-user or high-throughput deployments.
+    </Note>
+  </Step>
+
+  <Step title="Step 2: Security / Master Key" icon="shield">
+    **Goal:** Configure encryption for API tokens and secrets.
+
+    **Options:**
+    - **OS Keychain** (recommended): Securely stores master key in macOS Keychain or Linux Secret Service
+    - **Environment Variable**: Generate a key and print an `export` command
+    - **Skip**: Disable encryption (not recommended for production)
+
+    **Platform notes:**
+
+    <AccordionGroup>
+      <Accordion title="macOS" icon="apple">
+        Two system dialogs are normal:
+        1. "Enter your password to unlock the keychain"
+        2. "Allow ironclaw to access this keychain item"
+
+        This is OS-level behavior we cannot prevent. Cache the result to minimize prompts.
+      </Accordion>
+
+      <Accordion title="Linux" icon="linux">
+        Requires `gnome-keyring` or `kwallet` daemon running. Collection unlock may prompt for your login password.
+
+        ```bash
+        # Install on Ubuntu/Debian
+        sudo apt install gnome-keyring
+
+        # Or use environment variable mode if keyring unavailable
+        ```
+      </Accordion>
+    </AccordionGroup>
+  </Step>
+
+  <Step title="Step 3: Inference Provider" icon="brain">
+    **Goal:** Choose your LLM backend and authenticate.
+
+    **Available providers:**
+
+    | Provider | Auth | Best For |
+    |----------|------|----------|
+    | NEAR AI | OAuth or API key | Default, privacy-focused |
+    | Anthropic | API key | Claude models |
+    | OpenAI | API key | GPT models |
+    | Ollama | None | Local models |
+    | OpenRouter | API key | Access to many providers |
+    | OpenAI-compatible | Optional | vLLM, LiteLLM, custom endpoints |
+
+    **NEAR AI Authentication:**
+    - **Browser OAuth** (options 1-2): Opens browser for GitHub/Google login
+    - **NEAR AI Cloud API key** (option 4): Paste key from https://cloud.near.ai
+
+    <Warning>
+    **VPS / Remote servers:** Browser OAuth requires a browser on the same machine. On VPS, use:
+    1. NEAR AI Cloud API key (recommended)
+    2. Or set `IRONCLAW_OAUTH_CALLBACK_URL` to a publicly reachable URL
+    </Warning>
+  </Step>
+
+  <Step title="Step 4: Model Selection" icon="cpu">
+    **Goal:** Choose a specific model from your provider.
+
+    **What happens:**
+    - Fetches available models from provider API (5-second timeout)
+    - Falls back to static list if API unreachable
+    - Presents list with "Custom model ID" option
+
+    **Popular choices:**
+    - **NEAR AI**: `claude-3-5-sonnet-20241022`, `claude-sonnet-4-20250514`
+    - **Anthropic**: `claude-sonnet-4-20250514`
+    - **OpenAI**: `gpt-4o`, `gpt-4o-mini`
+    - **Ollama**: `llama3.1`, `qwen2.5`
+  </Step>
+
+  <Step title="Step 5: Embeddings" icon="search">
+    **Goal:** Configure semantic search for workspace memory.
+
+    **Decision:**
+    - **Enable** (recommended): Allows natural language search of your saved documents
+    - **Disable**: Skip if you don't need semantic search
+
+    **Provider auto-detection:**
+    - If using NEAR AI → uses NEAR AI embeddings
+    - If OpenAI API key configured → can use OpenAI embeddings
+    - Default model: `text-embedding-3-small`
+
+    **What it enables:**
+    - `memory_search` tool with semantic results
+    - Hybrid search (FTS + vector via RRF)
+    - Identity file awareness
+  </Step>
+
+  <Step title="Step 6: Channel Configuration" icon="message-square">
+    **Goal:** Enable input channels for interacting with IronClaw.
+
+    **Available channels:**
+    - **CLI/TUI** (Terminal UI): Enabled by default
+    - **Web Gateway**: Browser UI at `http://127.0.0.1:3000`
+    - **HTTP Webhook**: REST API for external integrations
+    - **Telegram**: Bot integration
+    - **Signal** (if installed): Encrypted messaging
+
+    **Sub-steps:**
+    1. **Tunnel setup** (if using webhooks): ngrok, Cloudflare Tunnel, or custom URL
+    2. **Channel discovery**: Loads WASM channels from `~/.ironclaw/channels/`
+    3. **Multi-select**: Choose which channels to enable
+    4. **Install missing**: Downloads bundled and registry channels
+    5. **Configure each**: API tokens, webhook secrets, owner binding
+
+    **Telegram special handling:**
+    - Validates bot token via Telegram API
+    - Waits 120 seconds for first message to bind owner
+    - Optional webhook secret generation
+  </Step>
+
+  <Step title="Step 7: Extensions / Tools" icon="puzzle">
+    **Goal:** Install additional tools from the registry.
+
+    **What happens:**
+    - Discovers tools in `registry/tools/`
+    - Shows available tools with descriptions
+    - Pre-checks tools tagged `"default"`
+    - Installs selected tools (download-first, source fallback)
+
+    **Examples:**
+    - Google Calendar integration
+    - GitHub repository tools
+    - Weather lookup
+    - Web scraping utilities
+
+    **Post-install:**
+    - Auth hints are printed (e.g., "Set GOOGLE_OAUTH_TOKEN for Google tools")
+    - Tools become available immediately after wizard completes
+  </Step>
+
+  <Step title="Step 8: Heartbeat" icon="activity">
+    **Goal:** Configure periodic background execution.
+
+    **Decision:**
+    - **Enable**: IronClaw runs periodic tasks automatically
+    - **Disable** (default): Manual operation only
+
+    **If enabled:**
+    - Interval: Default 30 minutes
+    - Notification channel: Where to send results
+    - Reads `HEARTBEAT.md` file for task definitions
+
+    **What it does:**
+    - Periodic checks (monitoring, data sync)
+    - Scheduled reminders
+    - Proactive notifications
+  </Step>
+</Steps>
+
+## Settings Persistence
+
+Settings are saved after **each successful step**, not just at the end. This prevents data loss if the wizard is interrupted.
+
+**Two-layer storage:**
+
+1. **`~/.ironclaw/.env`** (bootstrap vars):
+   - `DATABASE_BACKEND`, `DATABASE_URL`, `LIBSQL_PATH`
+   - `LLM_BACKEND`, `LLM_BASE_URL`
+   - `NEARAI_API_KEY` (if using Cloud mode)
+   - `ONBOARD_COMPLETED=true`
+
+2. **Database** (everything else):
+   - Model selection, channel settings, heartbeat config
+   - Encrypted secrets (API tokens)
+
+If you re-run the wizard:
+- Previously saved settings are loaded automatically
+- You can modify only what changed
+
+## Re-running the Wizard
+
+### Add a new channel later
+
+```bash
+ironclaw onboard --channels-only
+```
+
+This skips steps 1-5 and 7-8, going straight to channel configuration.
+
+### Change your LLM provider
+
+```bash
+ironclaw onboard --skip-auth
+```
+
+Skips step 2 (security) if already configured, lets you switch providers.
+
+### Full reconfiguration
+
+```bash
+ironclaw onboard
+```
+
+Runs all 8 steps, pre-filled with existing values.
+
+## Platform-Specific Notes
+
+### Remote Servers (VPS)
+
+When running on a remote server without a local browser:
+
+**Option 1: NEAR AI Cloud API key**
+```bash
+# In Step 3, select option 4: "NEAR AI Cloud API key"
+# Paste your key from https://cloud.near.ai
+```
+
+**Option 2: Custom callback URL**
+```bash
+export IRONCLAW_OAUTH_CALLBACK_URL=https://your-server.com:9876
+ironclaw onboard
+```
+
+### Windows
+
+- Use WSL2 for best compatibility
+- Native Windows support available but requires manual PATH setup
+- PowerShell install script: `irm https://install.ironclaw.ai | iex`
+
+### macOS
+
+- Homebrew recommended: `brew install ironclaw`
+- Keychain dialogs are normal (see Step 2 above)
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Wizard exits with database error" icon="x-circle">
+    Check that PostgreSQL is running (if selected):
+    ```bash
+    sudo systemctl status postgresql
+    # or
+    brew services list | grep postgresql
+    ```
+
+    For libSQL, ensure `~/.ironclaw/` is writable:
+    ```bash
+    mkdir -p ~/.ironclaw && chmod 755 ~/.ironclaw
+    ```
+  </Accordion>
+
+  <Accordion title="Browser didn't open for OAuth" icon="globe">
+    - Check that a browser is installed and configured as default
+    - On VPS: use NEAR AI Cloud API key instead (see above)
+    - Or manually visit the URL printed in the terminal
+  </Accordion>
+
+  <Accordion title="Keychain prompts repeatedly" icon="refresh-cw">
+    On macOS, click "Always Allow" in the keychain dialog to prevent repeated prompts. This is expected OS behavior.
+  </Accordion>
+
+  <Accordion title="Model list is empty" icon="list">
+    - Check your API key is correct
+    - Verify network connectivity to the provider
+    - Wizard will fall back to static list after 5 seconds
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+Once the wizard completes:
+
+```bash
+ironclaw run
+```
+
+Then:
+- Open the Web Gateway: `http://127.0.0.1:3000`
+- Or chat via Telegram (if configured)
+- Or use the TUI: it launches automatically in the terminal
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="settings" href="/setup/configuration">
+    Full environment variable reference
+  </Card>
+
+  <Card title="Troubleshooting" icon="tool" href="/help/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

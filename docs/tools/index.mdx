@@ -1,0 +1,132 @@
+---
+title: Tools Overview
+sidebarTitle: Overview
+description: Three delivery mechanisms for extending IronClaw capabilities
+---
+
+IronClaw's tool system gives the agent the ability to act — reading files, calling APIs, executing code, managing jobs, and more. Every action the agent takes goes through a tool. Tools are extensible: you can add your own via WASM or MCP without touching IronClaw's core.
+
+## Three Delivery Mechanisms
+
+| | **Built-in (Rust)** | **WASM** | **MCP** |
+|---|---|---|---|
+| **Language** | Rust (compiled in) | Any language targeting `wasm32-wasi` | Any language |
+| **Isolation** | None (process-level) | wasmtime sandbox, fuel metering, memory limits | Separate process or server |
+| **Credential access** | Via secrets store directly | Injected at proxy boundary, never in module | Managed by MCP server |
+| **Network control** | Unrestricted (built-in) | Domain allowlist via `capabilities.json` | MCP server controls |
+| **Performance** | Fastest | Near-native | Network overhead |
+| **Best for** | Core agent capabilities | Custom integrations needing isolation | Ecosystem tools, existing MCP servers |
+
+## The Tool Trait
+
+Every tool — built-in, WASM wrapper, or MCP adapter — satisfies the same interface:
+
+```rust
+#[async_trait]
+impl Tool for MyTool {
+    // Unique tool identifier used in LLM tool calls
+    fn name(&self) -> &str {
+        "my_tool"
+    }
+
+    // Human-readable description sent to the LLM
+    fn description(&self) -> &str {
+        "Does something useful with the given input"
+    }
+
+    // JSON Schema describing accepted parameters
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "The value to process"
+                }
+            },
+            "required": ["input"]
+        })
+    }
+
+    // Async execution — receives validated params and job context
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let input = params["input"].as_str().unwrap_or_default();
+        // ... do work ...
+        Ok(ToolOutput::text("result text", start.elapsed()))
+    }
+
+    // Return true if this tool surfaces external data that needs sanitization
+    fn requires_sanitization(&self) -> bool {
+        true
+    }
+}
+```
+
+The `requires_sanitization()` flag tells the Safety Layer to run the tool's output through the sanitizer and leak detector before passing it to the LLM. Any tool that fetches external data — HTTP responses, file contents, shell output — should return `true`.
+
+## Tool Output Wrapping
+
+When a tool returns output, IronClaw wraps it before it reaches the LLM:
+
+```xml
+<tool_output name="http_request" sanitized="true">
+  [escaped content]
+</tool_output>
+```
+
+The `sanitized="true"` attribute signals that the content has been processed by the Safety Layer.
+
+## Tool Discovery
+
+Tools are registered at startup in the `ToolRegistry`. The registry aggregates:
+
+1. All built-in tools compiled into IronClaw
+2. WASM tools discovered in `~/.ironclaw/tools/` and workspace `tools/` directories
+3. MCP tools from configured MCP servers
+
+The LLM receives the full list of available tools (name + description + schema) at the start of each reasoning turn.
+
+## Explore Tools
+
+<CardGroup cols={2}>
+  <Card title="Built-in Tools" icon="wrench" href="/tools/builtin">
+    Complete reference for all tools compiled into IronClaw: file, shell, memory, HTTP, jobs, routines, skills, and extensions.
+  </Card>
+
+  <Card title="Extensions" icon="puzzle" href="/tools/extensions">
+    Install and configure third-party tools: Google Suite, Web Search, Telegram, Slack, Notion, GitHub, and more.
+  </Card>
+
+  <Card title="WASM Tools" icon="blocks" href="/tools/wasm">
+    Sandboxed tool execution via wasmtime with fuel metering, network allowlisting, and credential injection.
+  </Card>
+
+  <Card title="MCP Servers" icon="server" href="/tools/mcp">
+    Connect any Model Context Protocol server to extend IronClaw's capabilities.
+  </Card>
+
+  <Card title="Building Custom Tools" icon="hammer" href="/tools/building">
+    Build your own WASM tool or use the dynamic tool builder to create tools on demand.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Built-in Tools" icon="wrench" href="/tools/builtin">
+    Full reference table
+  </Card>
+
+  <Card title="WASM Tools" icon="blocks" href="/tools/wasm">
+    Sandboxed custom tools
+  </Card>
+
+  <Card title="Safety Layer" icon="shield" href="/security/safety-layer">
+    How tool outputs are protected
+  </Card>
+</CardGroup>

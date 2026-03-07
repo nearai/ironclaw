@@ -1,0 +1,178 @@
+---
+title: Heartbeat System
+sidebarTitle: Heartbeat
+description: Proactive periodic execution every 30 minutes
+---
+
+The heartbeat system gives IronClaw agency between conversations. Every 30 minutes, it reads `HEARTBEAT.md` from the workspace and executes a checklist of proactive tasks — without you having to ask.
+
+## What Heartbeat Does
+
+On each heartbeat tick:
+
+1. Reads `HEARTBEAT.md` from the workspace root
+2. Runs the checklist items as an agent job
+3. If the job produces findings or output, sends a notification to the configured channel
+4. Records the run in the `heartbeat_state` table
+
+If `HEARTBEAT.md` does not exist or is empty, the tick is a no-op.
+
+The heartbeat job runs through the full agent loop — LLM reasoning, tool calls, safety layer — with the same capabilities as a manually triggered job.
+
+## HEARTBEAT.md Format
+
+Write `HEARTBEAT.md` as a checklist of tasks. The agent reads this as its instructions for each periodic run:
+
+```markdown
+# Heartbeat Checklist
+
+## Daily Tasks
+- [ ] Check memory at daily/ for yesterday's notes. If missing, remind the user.
+- [ ] Search memory for any items tagged as "follow-up" or "urgent" and list them.
+- [ ] Read ops/stuck-jobs.md if it exists and summarize any unresolved incidents.
+
+## Weekly Tasks (run only on Mondays)
+- [ ] Summarize the week's daily notes into a weekly summary at weekly/<date>.md
+- [ ] Check for any routines that haven't run in the past 7 days and flag them.
+
+## Always
+- [ ] If any of the above produce findings, write a summary to memory at heartbeat/latest.md
+- [ ] Only notify the user if there are actionable items — do not send empty pings.
+```
+
+The agent interprets the checklist and executes each item using available tools. Conditional items ("run only on Mondays") are evaluated by the LLM using the current date.
+
+## Notification Behavior
+
+After each tick, if the job produces output that warrants user attention, the heartbeat system sends a notification to the configured channel. If nothing actionable was found, no notification is sent — heartbeat is designed to be quiet unless it has something useful to say.
+
+Findings are also written to memory at `heartbeat/latest.md` (if your HEARTBEAT.md instructs this), making them searchable in future sessions.
+
+## Configuration
+
+```bash
+# Enable heartbeat (default: true)
+HEARTBEAT_ENABLED=true
+
+# Interval between ticks in seconds (default: 1800 = 30 minutes)
+HEARTBEAT_INTERVAL_SECS=1800
+
+# Channel to send notifications to
+HEARTBEAT_NOTIFY_CHANNEL=tui     # tui, web, telegram, webhook
+
+# User ID to notify
+HEARTBEAT_NOTIFY_USER=default
+```
+
+<Note>
+Set `HEARTBEAT_INTERVAL_SECS=3600` (1 hour) or higher if the heartbeat job is too frequent for your LLM API rate limits or budget. The heartbeat runs as a normal job and consumes tokens.
+</Note>
+
+## Writing HEARTBEAT.md
+
+Use `memory_write` to create or update the heartbeat checklist:
+
+```
+Write HEARTBEAT.md with tasks to check my inbox/ folder every 30 minutes
+and summarize any new items.
+```
+
+Or write it directly:
+
+```
+memory_write path="HEARTBEAT.md" content="
+# Heartbeat Checklist
+
+- [ ] List all memory documents in inbox/ — if any exist, summarize and move to processed/
+- [ ] Check if daily/<today>.md exists — if not, create a daily entry template
+- [ ] Only notify if inbox/ had items or daily notes were missing
+"
+```
+
+## Example HEARTBEAT.md Files
+
+### Minimal — Inbox Monitor
+
+```markdown
+# Heartbeat
+
+- [ ] Check inbox/ for new documents. Process and move to processed/. Notify only if items were found.
+```
+
+### Developer Workflow
+
+```markdown
+# Heartbeat Checklist
+
+## Checks
+- [ ] Read ops/incidents/ — summarize any open incidents older than 24 hours
+- [ ] Check for stuck jobs in the last hour
+- [ ] Look for daily/<today>.md — create it with a timestamp if missing
+
+## Output
+- [ ] Write findings to heartbeat/latest.md
+- [ ] Notify only if there are open incidents or stuck jobs
+```
+
+### Personal Assistant
+
+```markdown
+# Heartbeat
+
+- [ ] Search memory for items tagged "reminder" or "todo"
+- [ ] Check if any items are due today based on their content
+- [ ] Summarize time-sensitive items and notify
+- [ ] Do not notify if nothing is due
+```
+
+## Heartbeat vs Routines
+
+Heartbeat and cron routines serve similar purposes but differ in design:
+
+| Feature | Heartbeat | Cron Routine |
+|---------|-----------|--------------|
+| Configuration | Single HEARTBEAT.md file | Per-routine configuration |
+| Schedule | Fixed global interval | Custom per-routine cron expression |
+| Scope | Single checklist job | Multiple independent jobs |
+| Complexity | Simple — edit one file | Flexible — manage multiple routines |
+
+Use heartbeat for a unified set of periodic checks. Use cron routines when you need different schedules for different tasks, or when tasks should run independently.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Heartbeat not firing" icon="clock">
+    - Verify `HEARTBEAT_ENABLED=true` in your configuration
+    - Check startup logs for `heartbeat` to confirm the system started
+    - Confirm `HEARTBEAT_INTERVAL_SECS` is set to a reasonable value
+    - Verify `HEARTBEAT.md` exists in the workspace root via `memory_read path="HEARTBEAT.md"`
+  </Accordion>
+
+  <Accordion title="Getting too many notifications" icon="bell">
+    - Update HEARTBEAT.md to add a condition: "only notify if there are actionable items"
+    - Increase `HEARTBEAT_INTERVAL_SECS` to reduce frequency
+    - Make checklist items more specific so the agent doesn't over-report
+  </Accordion>
+
+  <Accordion title="Heartbeat job consuming too many tokens" icon="coins">
+    - Simplify HEARTBEAT.md — fewer checklist items mean fewer LLM calls
+    - Increase `HEARTBEAT_INTERVAL_SECS` to reduce frequency
+    - Add guardrails-style instructions to HEARTBEAT.md: "Use at most 5 tool calls per run"
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Identity Files" icon="user" href="/agents/identity-files">
+    AGENTS.md, SOUL.md, USER.md — injected into every system prompt
+  </Card>
+
+  <Card title="Memory & Workspace" icon="database" href="/agents/memory">
+    How the workspace filesystem and memory tools work
+  </Card>
+
+  <Card title="Routines" icon="clock" href="/agents/routines">
+    Cron and reactive routines for more fine-grained scheduling
+  </Card>
+</CardGroup>

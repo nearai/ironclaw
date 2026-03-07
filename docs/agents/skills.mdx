@@ -1,0 +1,87 @@
+---
+title: Skills Overview
+sidebarTitle: Skills
+description: SKILL.md prompt extensions that activate based on context
+---
+
+Skills are SKILL.md files that extend the agent's prompt with domain-specific instructions. When a skill activates, its markdown body is injected into the LLM context — giving the agent specialized knowledge and behavior without retraining.
+
+## What Skills Do
+
+A skill is a self-contained expertise module. It defines:
+
+- **When to activate** — patterns, keywords, and regex that match incoming messages
+- **What to inject** — a markdown body with instructions, examples, and domain knowledge
+- **What tools to require** — binaries, environment variables, and configuration needed
+- **How much context to use** — a token budget cap per activation
+
+Skills are evaluated on every turn. The agent selects the most relevant skills that fit within the prompt budget and injects them before the LLM reasons about the request.
+
+## Activation Pipeline
+
+Skills pass through four stages before injection:
+
+<Steps>
+  <Step title="Gate">
+    Check that all prerequisites are met: required binaries exist on `PATH`, required environment variables are set, required configuration is present. Skills that fail gating are skipped entirely — they never score or consume budget.
+  </Step>
+
+  <Step title="Score">
+    Each gated skill is scored against the current message using a deterministic algorithm: keyword matches, tag overlaps, and regex pattern matches. Higher scores indicate stronger relevance.
+  </Step>
+
+  <Step title="Budget">
+    Skills are sorted by score descending. Starting from the highest-scoring skill, each is selected until the `SKILLS_MAX_TOKENS` budget is exhausted. Lower-scoring skills that don't fit are dropped for this turn.
+  </Step>
+
+  <Step title="Attenuate">
+    Trust-based tool ceiling is applied. Installed skills (from ClawHub) lose access to dangerous tools regardless of what the skill requests. Trusted skills retain full tool access. See Trust Levels below.
+  </Step>
+</Steps>
+
+## Trust Levels
+
+| Trust Level | Source | Tool Access |
+|-------------|--------|-------------|
+| **Trusted** | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent |
+| **Installed** | Downloaded from ClawHub registry via `skill_install` | Read-only tools only — no shell, no file write, no HTTP |
+
+<Warning>
+Never place a skill file in the trusted directories unless you have reviewed its contents. A skill in `~/.ironclaw/skills/` has the same tool access as you do.
+</Warning>
+
+## Skill Directories
+
+IronClaw discovers skills from three locations, checked in order:
+
+| Directory | Trust | Description |
+|-----------|-------|-------------|
+| `~/.ironclaw/skills/` | Trusted | User's global skills, available in all sessions |
+| `<workspace>/skills/` | Trusted | Per-workspace skills, activated in that workspace's context |
+| `~/.ironclaw/installed_skills/` | Installed | Registry-installed skills from ClawHub |
+
+Skills in trusted directories are loaded as-is. Skills in `installed_skills/` have their tool access capped by the attenuation layer regardless of what they declare.
+
+## Auto-Discovery
+
+When `SKILLS_AUTO_DISCOVER=true` (the default), IronClaw scans all skill directories at startup and indexes all valid SKILL.md files. New skills added while the agent is running are picked up on the next restart.
+
+```bash
+# Enable auto-discovery (default: true)
+SKILLS_AUTO_DISCOVER=true
+
+# Max tokens injected per turn across all active skills
+SKILLS_MAX_TOKENS=4000
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="SKILL.md Format" icon="file-text" href="/agents/skills-format">
+    Write your own skills — YAML frontmatter schema and markdown body
+  </Card>
+
+  <Card title="ClawHub Registry" icon="package" href="/agents/clawhub">
+    Discover and install community skills from the registry
+  </Card>
+</CardGroup>

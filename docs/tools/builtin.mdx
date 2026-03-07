@@ -1,0 +1,124 @@
+---
+title: Built-in Tools
+sidebarTitle: Built-in Tools
+description: Complete reference for all built-in IronClaw tools
+---
+
+Built-in tools are compiled directly into IronClaw. They are always available to the agent — no installation required. The agent selects them automatically based on the task at hand.
+
+<Note>
+File and shell tools require `ALLOW_LOCAL_TOOLS=true` to be set. They are disabled by default to prevent accidental filesystem or command access in hosted or shared environments.
+</Note>
+
+## File Tools
+
+| Tool | Description | Config required |
+|------|-------------|-----------------|
+| `read_file` | Read the contents of a file at a given path | `ALLOW_LOCAL_TOOLS=true` |
+| `write_file` | Write or overwrite a file at a given path | `ALLOW_LOCAL_TOOLS=true` |
+| `list_dir` | List files and directories at a given path | `ALLOW_LOCAL_TOOLS=true` |
+| `apply_patch` | Apply a unified diff patch to a file | `ALLOW_LOCAL_TOOLS=true` |
+
+See [File Tools](/tools/file-tools) for parameter schemas and examples.
+
+## Shell Tool
+
+| Tool | Description | Config required |
+|------|-------------|-----------------|
+| `shell` | Execute a shell command with environment scrubbing and injection detection | `ALLOW_LOCAL_TOOLS=true` |
+
+See [Shell Tool](/tools/shell-tool) for security details and examples.
+
+## Memory Tools
+
+| Tool | Description | Config required |
+|------|-------------|-----------------|
+| `memory_search` | Hybrid search (FTS + vector) across workspace memory | None |
+| `memory_write` | Write a document to the persistent workspace | None |
+| `memory_read` | Read a document from the workspace by path | None |
+| `memory_tree` | List the workspace filesystem tree | None |
+
+See [Memory Tools](/tools/memory-tools) for parameter schemas and path conventions.
+
+## HTTP Tool
+
+| Tool | Description | Config required |
+|------|-------------|-----------------|
+| `http_request` | Make an outbound HTTP request with optional credential injection | None |
+
+See [HTTP Tool](/tools/http-tool) for credential injection details and examples.
+
+## Job Tools
+
+| Tool | Description | Config required |
+|------|-------------|-----------------|
+| `create_job` | Create a new background job | None |
+| `list_jobs` | List all jobs with status | None |
+| `job_status` | Get the current status and output of a job | None |
+| `cancel_job` | Cancel a running job | None |
+
+## Routine Tools
+
+| Tool | Description | Config required |
+|------|-------------|-----------------|
+| `routine_create` | Create a scheduled or reactive routine | `ROUTINES_ENABLED=true` |
+| `routine_list` | List all configured routines | `ROUTINES_ENABLED=true` |
+| `routine_update` | Update an existing routine | `ROUTINES_ENABLED=true` |
+| `routine_delete` | Delete a routine | `ROUTINES_ENABLED=true` |
+| `routine_history` | View execution history for a routine | `ROUTINES_ENABLED=true` |
+
+See [Job & Routine Tools](/tools/job-tools) for parameter schemas and examples.
+
+## Skill Tools
+
+| Tool | Description | Config required |
+|------|-------------|-----------------|
+| `skill_list` | List all discovered skills with trust level and status | `SKILLS_ENABLED=true` |
+| `skill_search` | Search the ClawHub registry for available skills | `SKILLS_ENABLED=true` |
+| `skill_install` | Download and install a skill from ClawHub | `SKILLS_ENABLED=true` |
+| `skill_remove` | Remove an installed skill | `SKILLS_ENABLED=true` |
+
+## Extension Tools
+
+| Tool | Description | Config required |
+|------|-------------|-----------------|
+| `tool_search` | Search for available extensions | None |
+| `tool_install` | Install a WASM tool or MCP extension | None |
+| `tool_auth` | Configure authentication for an extension | None |
+| `tool_activate` | Activate an installed extension | None |
+| `tool_list` | List installed and available extensions | None |
+| `tool_remove` | Remove an installed extension | None |
+
+See the [Extensions documentation](/tools/extensions) for details on installing and configuring Google tools, web search, Telegram, Slack, and more.
+
+## Utility Tools
+
+| Tool | Description | Config required |
+|------|-------------|-----------------|
+| `echo` | Return the input text unchanged — useful for testing | None |
+| `time` | Return the current UTC time | None |
+| `json` | Parse, query, or transform a JSON value | None |
+
+## Security Notes
+
+All tools that surface external data set `requires_sanitization = true`. This means their output passes through the Safety Layer (sanitizer + leak detector) before the LLM sees it. Tools that return only internal state (like `list_jobs` or `time`) do not require sanitization.
+
+<Warning>
+`shell` and file tools give the agent direct access to your filesystem and command environment. Only enable `ALLOW_LOCAL_TOOLS=true` on machines where you trust the agent to operate at that level.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="File Tools" icon="file" href="/tools/file-tools">
+    read_file, write_file, list_dir, apply_patch
+  </Card>
+
+  <Card title="Shell Tool" icon="terminal" href="/tools/shell-tool">
+    Env scrubbing and injection detection
+  </Card>
+
+  <Card title="Memory Tools" icon="database" href="/tools/memory-tools">
+    memory_search, memory_write, memory_read, memory_tree
+  </Card>
+</CardGroup>

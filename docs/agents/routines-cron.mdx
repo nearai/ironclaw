@@ -1,0 +1,177 @@
+---
+title: Cron Routines
+sidebarTitle: Cron
+description: Schedule recurring tasks with cron expressions
+---
+
+Cron routines fire on a repeating schedule using standard cron expressions. Use them for any task that should happen at a predictable time — daily reports, weekly cleanups, hourly checks.
+
+## Cron Expression Format
+
+IronClaw uses standard 5-field cron syntax:
+
+```
+┌─────────── minute (0–59)
+│ ┌───────── hour (0–23)
+│ │ ┌─────── day of month (1–31)
+│ │ │ ┌───── month (1–12)
+│ │ │ │ ┌─── day of week (0–7, 0 and 7 = Sunday)
+│ │ │ │ │
+* * * * *
+```
+
+### Common Expressions
+
+| Expression | Meaning |
+|-----------|---------|
+| `0 * * * *` | Every hour on the hour |
+| `0 9 * * *` | Every day at 9:00 AM |
+| `0 9 * * 1-5` | Weekdays at 9:00 AM |
+| `0 9 * * 1` | Every Monday at 9:00 AM |
+| `30 8 * * 1` | Every Monday at 8:30 AM |
+| `0 0 * * *` | Every day at midnight |
+| `0 0 1 * *` | First day of every month at midnight |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 8,12,18 * * *` | Daily at 8am, noon, and 6pm |
+
+## Creating a Cron Routine
+
+### Via Chat
+
+Describe the schedule and task to the agent. It will call `routine_create` on your behalf:
+
+```
+Create a routine that runs every weekday at 9am and summarizes
+what I worked on yesterday by reading my daily notes, then
+writes a standup draft to memory at daily/standup.md.
+```
+
+### Via the routine_create Tool
+
+```json
+{
+  "name": "daily-standup",
+  "trigger": {
+    "type": "cron",
+    "schedule": "0 9 * * 1-5"
+  },
+  "action": {
+    "prompt": "Read memory at daily/ to find yesterday's notes. Write a standup draft to memory at daily/standup.md covering: what was done, what's next, and any blockers."
+  },
+  "guardrails": {
+    "max_tool_calls": 10,
+    "timeout_secs": 120
+  }
+}
+```
+
+### Via Web UI
+
+<Steps>
+  <Step title="Open the Routines tab">
+    In the web gateway, click the **Routines** tab in the sidebar.
+  </Step>
+
+  <Step title="Click New Routine">
+    Click the **New Routine** button in the top right.
+  </Step>
+
+  <Step title="Set the trigger">
+    Select **Cron** as the trigger type. Enter your cron expression in the schedule field. A preview shows the next 5 scheduled run times.
+  </Step>
+
+  <Step title="Write the action prompt">
+    Enter the prompt the agent will receive when the routine fires. Be specific — the agent has no conversational context from previous turns.
+  </Step>
+
+  <Step title="Configure guardrails (optional)">
+    Set token limits, tool call limits, and timeout to bound resource usage.
+  </Step>
+
+  <Step title="Save and enable">
+    Click **Save**. The routine is active immediately. The first run will occur at the next scheduled time.
+  </Step>
+</Steps>
+
+## Execution Model
+
+When a cron routine fires:
+
+1. The routine engine creates a new agent job with the action prompt
+2. The job runs through the full agent loop — LLM reasoning, tool calls, safety layer
+3. Output is written to memory or sent via a channel notification (if configured)
+4. The run is recorded in routine history, accessible via `routine_history`
+
+Routine jobs run as standard jobs and count against `MAX_PARALLEL_JOBS`. If the limit is reached when a cron fires, the routine job queues as Pending.
+
+## Practical Examples
+
+### Daily Morning Summary
+
+Reads yesterday's memory entries and writes a morning briefing:
+
+```json
+{
+  "name": "morning-briefing",
+  "trigger": { "type": "cron", "schedule": "0 7 * * *" },
+  "action": {
+    "prompt": "Search memory for entries from the last 24 hours. Write a morning briefing to memory at daily/briefing.md. Include: key tasks completed, items that need follow-up, and anything time-sensitive today."
+  },
+  "guardrails": { "timeout_secs": 180, "max_tool_calls": 15 }
+}
+```
+
+### Weekly Backup Reminder
+
+Sends a reminder to the TUI channel every Sunday evening:
+
+```json
+{
+  "name": "backup-reminder",
+  "trigger": { "type": "cron", "schedule": "0 18 * * 0" },
+  "action": {
+    "prompt": "Remind the user to run a backup of their workspace and verify that recent important files are committed to version control."
+  },
+  "guardrails": { "timeout_secs": 30, "max_tool_calls": 2 }
+}
+```
+
+### Hourly Health Check
+
+Checks for stuck jobs and logs a summary:
+
+```json
+{
+  "name": "hourly-health-check",
+  "trigger": { "type": "cron", "schedule": "0 * * * *" },
+  "action": {
+    "prompt": "List all jobs. If any are in Stuck state for more than 30 minutes, write an alert to memory at ops/stuck-jobs.md with the job IDs and descriptions."
+  },
+  "guardrails": { "timeout_secs": 60, "max_tool_calls": 5 }
+}
+```
+
+## Configuration
+
+```bash
+# Enable routines
+ROUTINES_ENABLED=true
+
+# Cron tick interval (how often the engine checks for due jobs)
+ROUTINES_CRON_INTERVAL=60    # seconds
+
+# Max routines running simultaneously
+ROUTINES_MAX_CONCURRENT=3
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Reactive Routines" icon="zap" href="/agents/routines-reactive">
+    Event and webhook triggers for non-scheduled automation
+  </Card>
+
+  <Card title="Routines Overview" icon="clock" href="/agents/routines">
+    Routine anatomy, tools, and configuration reference
+  </Card>
+</CardGroup>
