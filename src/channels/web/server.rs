@@ -1039,18 +1039,11 @@ async fn chat_cherry_pick_handler(
         "Database not available".to_string(),
     ))?;
 
+    // Copy (and optionally delete originals) atomically in one transaction
     let (new_id, count) = store
-        .cherry_pick_messages(&req.message_ids, "gateway", &state.user_id)
+        .cherry_pick_messages(&req.message_ids, "gateway", &state.user_id, is_move)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // For move: delete the original messages after successful copy
-    if is_move {
-        store
-            .delete_messages_by_ids(&req.message_ids)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
 
     // Create in-memory thread in the session so it's immediately available
     if let Some(ref sm) = state.session_manager {

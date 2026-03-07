@@ -1656,38 +1656,45 @@ impl Store {
 
     /// Delete a conversation, nullifying FK refs in agent_jobs and llm_calls first.
     pub async fn delete_conversation(&self, id: Uuid) -> Result<(), DatabaseError> {
-        let conn = self.conn().await?;
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
 
         // Nullify FK references (no cascade on these columns)
-        conn.execute(
+        tx.execute(
             "UPDATE agent_jobs SET conversation_id = NULL WHERE conversation_id = $1",
             &[&id],
         )
         .await?;
-        conn.execute(
+        tx.execute(
             "UPDATE llm_calls SET conversation_id = NULL WHERE conversation_id = $1",
             &[&id],
         )
         .await?;
 
         // Delete conversation (messages cascade via ON DELETE CASCADE)
-        conn.execute("DELETE FROM conversations WHERE id = $1", &[&id])
+        tx.execute("DELETE FROM conversations WHERE id = $1", &[&id])
             .await?;
+
+        tx.commit().await?;
 
         Ok(())
     }
 
     /// Cherry-pick messages from a source conversation into a new one.
+    /// If `delete_source` is true, the original messages are deleted within the
+    /// same transaction (move semantics).
     pub async fn cherry_pick_messages(
         &self,
         message_ids: &[Uuid],
         channel: &str,
         user_id: &str,
+        delete_source: bool,
     ) -> Result<(Uuid, usize), DatabaseError> {
-        let conn = self.conn().await?;
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
 
         // Fetch selected messages by ID (cross-thread), preserving original order
-        let rows = conn
+        let rows = tx
             .query(
                 r#"
                 SELECT id, role, content, created_at
@@ -1702,7 +1709,7 @@ impl Store {
         // Create new conversation
         let new_id = Uuid::new_v4();
         let metadata = serde_json::json!({"thread_type": "thread"});
-        conn.execute(
+        tx.execute(
             "INSERT INTO conversations (id, channel, user_id, metadata) VALUES ($1, $2, $3, $4)",
             &[&new_id, &channel, &user_id, &metadata],
         )
@@ -1717,7 +1724,7 @@ impl Store {
             let content: String = row.get("content");
             let ts = base_ts + chrono::TimeDelta::milliseconds(i as i64);
 
-            conn.execute(
+            tx.execute(
                 r#"
                 INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
                 VALUES ($1, $2, $3, $4, $5)
@@ -1728,8 +1735,23 @@ impl Store {
             copied += 1;
         }
 
+        // For move: delete originals within the same transaction
+        if delete_source {
+            tx.execute(
+                "DELETE FROM conversation_messages WHERE id = ANY($1)",
+                &[&message_ids],
+            )
+            .await?;
+        }
+
         // Touch conversation activity
-        self.touch_conversation(new_id).await?;
+        tx.execute(
+            "UPDATE conversations SET last_activity = NOW() WHERE id = $1",
+            &[&new_id],
+        )
+        .await?;
+
+        tx.commit().await?;
 
         Ok((new_id, copied))
     }

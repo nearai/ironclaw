@@ -39,6 +39,10 @@ const SLASH_COMMANDS = [
 ];
 
 let _slashSelected = -1;
+// Message history (up/down arrow recall)
+const _msgHistory = [];
+let _msgHistoryIdx = 0;
+let _msgDraft = '';
 let _slashMatches = [];
 
 // --- Tool Activity State ---
@@ -300,6 +304,13 @@ function sendMessage() {
   }
   const content = input.value.trim();
   if (!content) return;
+
+  // Save to message history
+  if (_msgHistory.length === 0 || _msgHistory[_msgHistory.length - 1] !== content) {
+    _msgHistory.push(content);
+  }
+  _msgHistoryIdx = _msgHistory.length;
+  _msgDraft = '';
 
   addMessage('user', content);
   input.value = '';
@@ -978,7 +989,7 @@ function loadHistory(before) {
   const isPaginating = !!before;
   if (isPaginating) loadingOlder = true;
 
-  apiFetch(historyUrl).then((data) => {
+  return apiFetch(historyUrl).then((data) => {
     const container = document.getElementById('chat-messages');
 
     if (!isPaginating) {
@@ -1234,38 +1245,25 @@ function enterSelectionMode() {
   renderSelectionCheckboxes();
 }
 
-function selectAllMessages() {
+async function selectAllMessages() {
   if (!_selectionMode) {
     _selectionMode = true;
     _selectedMessageIds.clear();
     document.getElementById('chat-header').style.display = '';
     renderSelectionCheckboxes();
   }
-  // Load all pages first, then check everything
-  _selectAllAfterLoad();
-}
-
-function _selectAllAfterLoad() {
-  if (hasMore && !loadingOlder) {
-    // Trigger pagination, then retry after it completes
-    loadHistory(oldestTimestamp);
-    // Poll until pagination finishes, then recurse
-    const check = setInterval(() => {
-      if (!loadingOlder) {
-        clearInterval(check);
-        _selectAllAfterLoad();
-      }
-    }, 200);
-  } else if (!loadingOlder) {
-    // All pages loaded — check every checkbox and scroll to top
-    document.querySelectorAll('#chat-messages .select-cb').forEach((cb) => {
-      if (!cb.checked) {
-        cb.checked = true;
-        cb.dispatchEvent(new Event('change'));
-      }
-    });
-    document.getElementById('chat-messages').scrollTop = 0;
+  // Load all remaining pages, then check everything
+  while (hasMore && !loadingOlder) {
+    await loadHistory(oldestTimestamp);
   }
+  // All pages loaded — check every checkbox and scroll to top
+  document.querySelectorAll('#chat-messages .select-cb').forEach((cb) => {
+    if (!cb.checked) {
+      cb.checked = true;
+      cb.dispatchEvent(new Event('change'));
+    }
+  });
+  document.getElementById('chat-messages').scrollTop = 0;
 }
 
 function exitSelectionMode() {
@@ -1380,6 +1378,29 @@ chatInput.addEventListener('keydown', (e) => {
       hideSlashAutocomplete();
       return;
     }
+  }
+
+  // Message history navigation (only when autocomplete is not visible)
+  if (e.key === 'ArrowUp' && chatInput.value.indexOf('\n') === -1) {
+    if (_msgHistory.length > 0 && _msgHistoryIdx > 0) {
+      e.preventDefault();
+      if (_msgHistoryIdx === _msgHistory.length) {
+        _msgDraft = chatInput.value;
+      }
+      _msgHistoryIdx--;
+      chatInput.value = _msgHistory[_msgHistoryIdx];
+      autoResizeTextarea(chatInput);
+    }
+    return;
+  }
+  if (e.key === 'ArrowDown' && chatInput.value.indexOf('\n') === -1) {
+    if (_msgHistoryIdx < _msgHistory.length) {
+      e.preventDefault();
+      _msgHistoryIdx++;
+      chatInput.value = _msgHistoryIdx < _msgHistory.length ? _msgHistory[_msgHistoryIdx] : _msgDraft;
+      autoResizeTextarea(chatInput);
+    }
+    return;
   }
 
   if (e.key === 'Enter' && !e.shiftKey) {

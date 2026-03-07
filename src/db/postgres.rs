@@ -192,9 +192,10 @@ impl ConversationStore for PgBackend {
         message_ids: &[Uuid],
         channel: &str,
         user_id: &str,
+        delete_source: bool,
     ) -> Result<(Uuid, usize), DatabaseError> {
         self.store
-            .cherry_pick_messages(message_ids, channel, user_id)
+            .cherry_pick_messages(message_ids, channel, user_id, delete_source)
             .await
     }
 

@@ -174,12 +174,15 @@ pub trait ConversationStore: Send + Sync {
     /// Creates a new conversation, copies the selected messages (preserving order)
     /// with fresh UUIDs and monotonically increasing timestamps.
     /// Messages can come from any conversation(s) — they are fetched by ID directly.
+    /// If `delete_source` is true, the original messages are deleted atomically
+    /// within the same transaction (move semantics).
     /// Returns `(new_conversation_id, messages_copied)`.
     async fn cherry_pick_messages(
         &self,
         message_ids: &[Uuid],
         channel: &str,
         user_id: &str,
+        delete_source: bool,
     ) -> Result<(Uuid, usize), DatabaseError>;
 
     /// Delete specific messages by their IDs (used by move operation).
