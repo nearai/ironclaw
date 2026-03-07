@@ -708,10 +708,7 @@ impl Agent {
                                             sanitized.was_modified,
                                         )
                                     }
-                                    Err(e) => format!(
-                                    "Tool '{}' failed: {}",
-                                    tc.name, e
-                                ),
+                                    Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                                 };
 
                                 context_messages.push(ChatMessage::tool_result(
