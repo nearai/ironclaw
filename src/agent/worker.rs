@@ -15,7 +15,8 @@ use crate::db::Database;
 use crate::error::Error;
 use crate::hooks::HookRegistry;
 use crate::llm::{
-    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
+    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolCall,
+    ToolSelection,
 };
 use crate::safety::SafetyLayer;
 use crate::tools::rate_limiter::RateLimitResult;
@@ -557,36 +558,52 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         }
                     }
                 }
-            } else if selections.len() == 1 {
-                // Single tool: execute directly
-                let selection = &selections[0];
-                tracing::debug!(
-                    "Job {} selecting tool: {} - {}",
-                    self.job_id,
-                    selection.tool_name,
-                    selection.reasoning
-                );
-
-                let result = self
-                    .execute_tool(&selection.tool_name, &selection.parameters)
-                    .await;
-
-                self.process_tool_result(reason_ctx, selection, result)
-                    .await?;
             } else {
-                // Multiple tools: execute in parallel
-                tracing::debug!(
-                    "Job {} executing {} tools in parallel",
-                    self.job_id,
-                    selections.len()
-                );
+                // Record the assistant tool_calls message so that tool_result
+                // messages have a matching parent (prevents orphaned rewrites).
+                let tool_calls: Vec<ToolCall> = selections
+                    .iter()
+                    .map(|s| ToolCall {
+                        id: s.tool_call_id.clone(),
+                        name: s.tool_name.clone(),
+                        arguments: s.parameters.clone(),
+                    })
+                    .collect();
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::assistant_with_tool_calls(None, tool_calls));
 
-                let results = self.execute_tools_parallel(&selections).await;
+                if selections.len() == 1 {
+                    // Single tool: execute directly
+                    let selection = &selections[0];
+                    tracing::debug!(
+                        "Job {} selecting tool: {} - {}",
+                        self.job_id,
+                        selection.tool_name,
+                        selection.reasoning
+                    );
 
-                // Process all results
-                for (selection, result) in selections.iter().zip(results) {
-                    self.process_tool_result(reason_ctx, selection, result.result)
+                    let result = self
+                        .execute_tool(&selection.tool_name, &selection.parameters)
+                        .await;
+
+                    self.process_tool_result(reason_ctx, selection, result)
                         .await?;
+                } else {
+                    // Multiple tools: execute in parallel
+                    tracing::debug!(
+                        "Job {} executing {} tools in parallel",
+                        self.job_id,
+                        selections.len()
+                    );
+
+                    let results = self.execute_tools_parallel(&selections).await;
+
+                    // Process all results
+                    for (selection, result) in selections.iter().zip(results) {
+                        self.process_tool_result(reason_ctx, selection, result.result)
+                            .await?;
+                    }
                 }
             }
 
@@ -1067,11 +1084,6 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 action.reasoning
             );
 
-            // Execute the planned tool
-            let result = self
-                .execute_tool(&action.tool_name, &action.parameters)
-                .await;
-
             // Create a synthetic ToolSelection for process_tool_result.
             // Plan actions don't originate from an LLM tool_call response so
             // there is no real tool_call_id; generate a unique one.
@@ -1082,6 +1094,24 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 alternatives: vec![],
                 tool_call_id: format!("plan_{}_{}", self.job_id, i),
             };
+
+            // Record the assistant tool_calls message so that the tool_result
+            // has a matching parent (prevents orphaned rewrites).
+            reason_ctx
+                .messages
+                .push(ChatMessage::assistant_with_tool_calls(
+                    None,
+                    vec![ToolCall {
+                        id: selection.tool_call_id.clone(),
+                        name: selection.tool_name.clone(),
+                        arguments: selection.parameters.clone(),
+                    }],
+                ));
+
+            // Execute the planned tool
+            let result = self
+                .execute_tool(&action.tool_name, &action.parameters)
+                .await;
 
             // Process the result
             let completed = self

@@ -3068,7 +3068,7 @@ mark {
 }
 
 .thread-sidebar {
-  width: 200px;
+  width: 240px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
@@ -3076,6 +3076,8 @@ mark {
   flex-shrink: 0;
   transition: width 0.2s ease;
   overflow: hidden;
+  padding: 6px;
+  gap: 2px;
 }
 
 .thread-sidebar.collapsed {
@@ -3093,8 +3095,7 @@ mark {
 .thread-sidebar-header {
   display: flex;
   align-items: center;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border);
+  padding: 10px 10px;
   font-size: 13px;
   font-weight: 600;
   gap: 8px;
@@ -3128,21 +3129,22 @@ mark {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 12px 14px;
   cursor: pointer;
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-secondary);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  margin-bottom: 2px;
 }
 
 .assistant-item:hover {
-  background: var(--bg-tertiary);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .assistant-item.active {
-  background: rgba(52, 211, 153, 0.08);
+  background: rgba(52, 211, 153, 0.1);
   color: var(--accent);
   border-left: 2px solid var(--accent);
 }
@@ -3160,7 +3162,7 @@ mark {
 }
 
 .threads-section-header {
-  padding: 8px 12px 4px;
+  padding: 10px 10px 4px;
   font-size: 11px;
   font-weight: 500;
   text-transform: uppercase;
@@ -3190,11 +3192,11 @@ mark {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 12px;
+  padding: 10px 14px;
   cursor: pointer;
   font-size: 13px;
   color: var(--text-secondary);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  border-radius: var(--radius);
 }
 
 .thread-item:hover {
@@ -3651,7 +3653,7 @@ mark {
     left: 0;
     top: 0;
     bottom: 0;
-    width: 200px;
+    width: 240px;
     z-index: 50;
   }
 

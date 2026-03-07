@@ -1154,7 +1154,9 @@ function loadHistory(before) {
       // Fresh load: clear and render
       container.innerHTML = '';
       for (const turn of data.turns) {
-        addMessage('user', turn.user_input);
+        if (turn.user_input) {
+          addMessage('user', turn.user_input);
+        }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
         }
@@ -1176,8 +1178,10 @@ function loadHistory(before) {
       const savedHeight = container.scrollHeight;
       const fragment = document.createDocumentFragment();
       for (const turn of data.turns) {
-        const userDiv = createMessageElement('user', turn.user_input);
-        fragment.appendChild(userDiv);
+        if (turn.user_input) {
+          const userDiv = createMessageElement('user', turn.user_input);
+          fragment.appendChild(userDiv);
+        }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           fragment.appendChild(createToolCallsSummaryElement(turn.tool_calls));
         }
@@ -1318,7 +1322,7 @@ function loadThreads() {
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
         const at = data.assistant_thread;
-        labelEl.textContent = at.title || (at.turn_count === 0 ? 'New chat' : 'Assistant');
+        labelEl.textContent = 'Assistant';
       }
       const meta = document.getElementById('assistant-meta');
       meta.textContent = relativeTime(data.assistant_thread.updated_at);
