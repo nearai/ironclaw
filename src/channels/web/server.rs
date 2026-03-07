@@ -1062,49 +1062,35 @@ async fn chat_auth_token_handler(
         "Extension manager not available".to_string(),
     ))?;
 
-    let result = ext_mgr
-        .auth(&req.extension_name, Some(&req.token))
+    match ext_mgr
+        .configure_token(&req.extension_name, &req.token)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    {
+        Ok(result) => {
+            // Clear auth mode on the active thread
+            clear_auth_mode(&state).await;
 
-    if result.is_authenticated() {
-        // Auto-activate so tools are available immediately
-        let msg = match ext_mgr.activate(&req.extension_name).await {
-            Ok(r) => format!(
-                "{} authenticated ({} tools loaded)",
-                req.extension_name,
-                r.tools_loaded.len()
-            ),
-            Err(e) => format!(
-                "{} authenticated but activation failed: {}",
-                req.extension_name, e
-            ),
-        };
+            state.sse.broadcast(SseEvent::AuthCompleted {
+                extension_name: req.extension_name.clone(),
+                success: true,
+                message: result.message.clone(),
+            });
 
-        // Clear auth mode on the active thread
-        clear_auth_mode(&state).await;
-
-        state.sse.broadcast(SseEvent::AuthCompleted {
-            extension_name: req.extension_name,
-            success: true,
-            message: msg.clone(),
-        });
-
-        Ok(Json(ActionResponse::ok(msg)))
-    } else {
-        // Re-emit auth_required for retry
-        state.sse.broadcast(SseEvent::AuthRequired {
-            extension_name: req.extension_name.clone(),
-            instructions: result.instructions().map(String::from),
-            auth_url: result.auth_url().map(String::from),
-            setup_url: result.setup_url().map(String::from),
-        });
-        Ok(Json(ActionResponse::fail(
-            result
-                .instructions()
-                .map(String::from)
-                .unwrap_or_else(|| "Invalid token".to_string()),
-        )))
+            Ok(Json(ActionResponse::ok(result.message)))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            // Re-emit auth_required for retry on validation errors
+            if msg.contains("Invalid token") || msg.contains("API returned") {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: req.extension_name.clone(),
+                    instructions: Some(msg.clone()),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            }
+            Ok(Json(ActionResponse::fail(msg)))
+        }
     }
 }
 
@@ -1853,7 +1839,7 @@ async fn extensions_install_handler(
                 // expansion and for first-time auth when credentials are already
                 // configured (e.g., built-in providers). We only surface an auth_url
                 // when the extension reports it is awaiting authorization.
-                match ext_mgr.auth(&req.name, None).await {
+                match ext_mgr.auth(&req.name).await {
                     Ok(auth_result) if auth_result.auth_url().is_some() => {
                         // Scope expansion or initial OAuth: user needs to authorize
                         resp.auth_url = auth_result.auth_url().map(String::from);
@@ -1884,7 +1870,7 @@ async fn extensions_activate_handler(
             // already has a token but missing the documents scope).
             // Initial OAuth setup is triggered via save_setup_secrets.
             let mut resp = ActionResponse::ok(result.message);
-            if let Ok(auth_result) = ext_mgr.auth(&name, None).await
+            if let Ok(auth_result) = ext_mgr.auth(&name).await
                 && auth_result.auth_url().is_some()
             {
                 resp.auth_url = auth_result.auth_url().map(String::from);
@@ -1902,7 +1888,7 @@ async fn extensions_activate_handler(
             }
 
             // Activation failed due to auth; try authenticating first.
-            match ext_mgr.auth(&name, None).await {
+            match ext_mgr.auth(&name).await {
                 Ok(auth_result) if auth_result.is_authenticated() => {
                     // Auth succeeded, retry activation.
                     match ext_mgr.activate(&name).await {
@@ -2109,7 +2095,7 @@ async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.save_setup_secrets(&name, &req.secrets).await {
+    match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
             // Broadcast auth_completed so the chat UI can dismiss any in-progress
             // auth card or setup modal that was triggered by tool_auth/tool_activate.

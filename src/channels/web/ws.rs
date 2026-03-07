@@ -255,36 +255,15 @@ async fn handle_client_message(
             token,
         } => {
             if let Some(ref ext_mgr) = state.extension_manager {
-                match ext_mgr.auth(&extension_name, Some(&token)).await {
-                    Ok(result) if result.is_authenticated() => {
-                        let msg = match ext_mgr.activate(&extension_name).await {
-                            Ok(r) => format!(
-                                "{} authenticated ({} tools loaded)",
-                                extension_name,
-                                r.tools_loaded.len()
-                            ),
-                            Err(e) => format!(
-                                "{} authenticated but activation failed: {}",
-                                extension_name, e
-                            ),
-                        };
+                match ext_mgr.configure_token(&extension_name, &token).await {
+                    Ok(result) => {
                         crate::channels::web::server::clear_auth_mode(state).await;
                         state
                             .sse
                             .broadcast(crate::channels::web::types::SseEvent::AuthCompleted {
                                 extension_name,
                                 success: true,
-                                message: msg,
-                            });
-                    }
-                    Ok(result) => {
-                        state
-                            .sse
-                            .broadcast(crate::channels::web::types::SseEvent::AuthRequired {
-                                extension_name,
-                                instructions: result.instructions().map(String::from),
-                                auth_url: result.auth_url().map(String::from),
-                                setup_url: result.setup_url().map(String::from),
+                                message: result.message,
                             });
                     }
                     Err(e) => {
