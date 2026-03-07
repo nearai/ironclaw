@@ -9,6 +9,7 @@ use crate::error::LlmError;
 
 use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
+    normalize_tool_reasoning,
 };
 use crate::safety::SafetyLayer;
 
@@ -510,15 +511,13 @@ impl Reasoning {
 
         let response = self.llm.complete_with_tools(request).await?;
 
-        let reasoning = response.content.unwrap_or_default();
-
         let selections: Vec<ToolSelection> = response
             .tool_calls
             .into_iter()
             .map(|tool_call| ToolSelection {
                 tool_name: tool_call.name,
                 parameters: tool_call.arguments,
-                reasoning: reasoning.clone(),
+                reasoning: normalize_tool_reasoning(&tool_call.reasoning),
                 alternatives: vec![],
                 tool_call_id: tool_call.id,
             })
@@ -639,9 +638,19 @@ Respond in JSON format:
 
             // If there were tool calls, return them for execution
             if !response.tool_calls.is_empty() {
+                let tool_calls = response
+                    .tool_calls
+                    .into_iter()
+                    .map(|tool_call| ToolCall {
+                        id: tool_call.id,
+                        name: tool_call.name,
+                        arguments: tool_call.arguments,
+                        reasoning: normalize_tool_reasoning(&tool_call.reasoning),
+                    })
+                    .collect();
                 return Ok(RespondOutput {
                     result: RespondResult::ToolCalls {
-                        tool_calls: response.tool_calls,
+                        tool_calls,
                         content: response.content.map(|c| clean_response(&c)),
                     },
                     usage,
@@ -1275,6 +1284,7 @@ fn recover_tool_calls_from_content(
                     id: format!("recovered_{}", calls.len()),
                     name: name.to_string(),
                     arguments,
+                    reasoning: normalize_tool_reasoning(""),
                 });
                 continue;
             }
@@ -1286,6 +1296,7 @@ fn recover_tool_calls_from_content(
                     id: format!("recovered_{}", calls.len()),
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
+                    reasoning: normalize_tool_reasoning(""),
                 });
             }
         }
@@ -1635,7 +1646,52 @@ fn collapse_newlines(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+
     use super::*;
+    use crate::config::SafetyConfig;
+    use crate::llm::{
+        CompletionRequest, CompletionResponse, DEFAULT_TOOL_RATIONALE, FinishReason, LlmProvider,
+        ToolCompletionRequest, ToolCompletionResponse,
+    };
+    use crate::safety::SafetyLayer;
+
+    struct StaticToolCompletionProvider {
+        tool_response: ToolCompletionResponse,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StaticToolCompletionProvider {
+        fn model_name(&self) -> &str {
+            "static-tool-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Ok(self.tool_response.clone())
+        }
+    }
 
     // ---- Utility / structural tests ----
 
@@ -2027,6 +2083,71 @@ That's my plan."#;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "memory_search");
         assert_eq!(calls[0].arguments, serde_json::json!({"query": "test"}));
+    }
+
+    #[tokio::test]
+    async fn test_toolcall_reasoning_threaded_from_selection() {
+        let provider = Arc::new(StaticToolCompletionProvider {
+            tool_response: ToolCompletionResponse {
+                content: Some("planning".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "memory_search".to_string(),
+                    arguments: serde_json::json!({"query": "reasoning"}),
+                    reasoning: "  consult prior context first  ".to_string(),
+                }],
+                input_tokens: 12,
+                output_tokens: 7,
+                finish_reason: FinishReason::ToolUse,
+            },
+        });
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let reasoning = Reasoning::new(provider, safety);
+
+        let context = ReasoningContext::new().with_tools(make_tools(&["memory_search"]));
+        let selections = reasoning
+            .select_tools(&context)
+            .await
+            .expect("select tools");
+
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].tool_name, "memory_search");
+        assert_eq!(selections[0].reasoning, "consult prior context first");
+    }
+
+    #[tokio::test]
+    async fn test_toolcall_reasoning_falls_back_when_empty() {
+        let provider = Arc::new(StaticToolCompletionProvider {
+            tool_response: ToolCompletionResponse {
+                content: Some("planning".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "memory_search".to_string(),
+                    arguments: serde_json::json!({"query": "reasoning"}),
+                    reasoning: "   ".to_string(),
+                }],
+                input_tokens: 12,
+                output_tokens: 7,
+                finish_reason: FinishReason::ToolUse,
+            },
+        });
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let reasoning = Reasoning::new(provider, safety);
+
+        let context = ReasoningContext::new().with_tools(make_tools(&["memory_search"]));
+        let selections = reasoning
+            .select_tools(&context)
+            .await
+            .expect("select tools");
+
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].reasoning, DEFAULT_TOOL_RATIONALE);
     }
 
     #[test]
