@@ -92,6 +92,8 @@ pub struct SetupWizard {
     secrets_crypto: Option<Arc<SecretsCrypto>>,
     /// Cached API key from provider setup (used by model fetcher without env mutation).
     llm_api_key: Option<SecretString>,
+    /// Generated secrets master key (for env var mode, written to .env).
+    secrets_master_key_hex: Option<String>,
 }
 
 impl SetupWizard {
@@ -107,6 +109,7 @@ impl SetupWizard {
             db_backend: None,
             secrets_crypto: None,
             llm_api_key: None,
+            secrets_master_key_hex: None,
         }
     }
 
@@ -122,6 +125,7 @@ impl SetupWizard {
             db_backend: None,
             secrets_crypto: None,
             llm_api_key: None,
+            secrets_master_key_hex: None,
         }
     }
 
@@ -769,15 +773,25 @@ impl SetupWizard {
             }
             1 => {
                 // Env var mode
-                print_info("Generate a key and add it to your environment:");
+                print_info("Generating master key...");
                 let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+                // Initialize crypto so API keys can be encrypted during setup
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                        .map_err(|e| SetupError::Config(e.to_string()))?,
+                ));
+
+                // Store for writing to .env later
+                self.secrets_master_key_hex = Some(key_hex.clone());
+
                 println!();
-                println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                print_info(&format!("SECRETS_MASTER_KEY={}", key_hex));
                 println!();
-                print_info("Add this to your shell profile or .env file.");
+                print_info("This key will be written to ~/.ironclaw/.env automatically.");
 
                 self.settings.secrets_master_key_source = KeySource::Env;
-                print_success("Configured for environment variable");
+                print_success("Master key generated for environment variable");
             }
             _ => {
                 self.settings.secrets_master_key_source = KeySource::None;
@@ -2146,6 +2160,12 @@ impl SetupWizard {
             env_vars.push(("ONBOARD_COMPLETED".to_string(), "true".to_string()));
         }
 
+        // Secrets master key: needed before DB is connected to decrypt API keys
+        // stored in the secrets table. Only written when user chose env var mode.
+        if let Some(ref key_hex) = self.secrets_master_key_hex {
+            env_vars.push(("SECRETS_MASTER_KEY".to_string(), key_hex.clone()));
+        }
+
         // Signal channel env vars (chicken-and-egg: config resolves before DB).
         if let Some(ref url) = self.settings.channels.signal_http_url {
             env_vars.push(("SIGNAL_HTTP_URL".to_string(), url.clone()));
@@ -3325,7 +3345,68 @@ mod tests {
         assert_eq!(
             wizard.settings.llm_backend.as_deref(),
             Some("custom_no_setup"),
-            "backend should be set even without setup hint"
+            "backend should be set even without setup hint"        
+        );
+    }
+
+    /// Regression test for issue #666: Environment variable option for secrets
+    /// must initialize secrets_crypto and store the key for writing to .env.
+    #[test]
+    fn test_secrets_master_key_hex_field_initialized() {
+        let mut wizard = SetupWizard::new();
+
+        // Simulate what step_security does for env var mode (option 1)
+        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+        wizard.secrets_crypto = Some(Arc::new(
+            SecretsCrypto::new(SecretString::from(key_hex.clone())).unwrap(),
+        ));
+        wizard.secrets_master_key_hex = Some(key_hex.clone());
+
+        // Verify crypto is initialized (API key encryption will work)
+        assert!(
+            wizard.secrets_crypto.is_some(),
+            "secrets_crypto must be initialized for env var mode"
+        );
+
+        // Verify key is stored for writing to .env
+        assert!(
+            wizard.secrets_master_key_hex.is_some(),
+            "secrets_master_key_hex must be set for env var mode"
+        );
+        assert_eq!(
+            wizard.secrets_master_key_hex.as_deref().unwrap().len(),
+            64,
+            "master key hex should be 64 chars (32 bytes)"
+        );
+    }
+
+    /// Test that write_bootstrap_env includes SECRETS_MASTER_KEY when set.
+    #[test]
+    fn test_write_bootstrap_env_includes_secrets_master_key() {
+        use std::io::Read;
+
+        let mut wizard = SetupWizard::new();
+
+        // Set a test key
+        let test_key = "0123456789abcdef".repeat(4); // 64 hex chars = 32 bytes
+        wizard.secrets_master_key_hex = Some(test_key.clone());
+        wizard.settings.onboard_completed = true;
+
+        // Write bootstrap env
+        wizard.write_bootstrap_env().unwrap();
+
+        // Read and check the .env file
+        let env_path = crate::bootstrap::ironclaw_base_dir().join(".env");
+        let mut content = String::new();
+        std::fs::File::open(&env_path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+
+        // save_bootstrap_env wraps values in quotes
+        assert!(
+            content.contains(&format!("SECRETS_MASTER_KEY=\"{}\"", test_key)),
+            ".env should contain SECRETS_MASTER_KEY"
         );
     }
 }
