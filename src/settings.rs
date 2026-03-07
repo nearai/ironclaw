@@ -99,6 +99,10 @@ pub struct Settings {
     /// Builder configuration.
     #[serde(default)]
     pub builder: BuilderSettings,
+
+    /// Transcription configuration.
+    #[serde(default)]
+    pub transcription: Option<TranscriptionSettings>,
 }
 
 /// Source for the secrets master key.
@@ -598,6 +602,14 @@ impl Default for BuilderSettings {
             auto_register: true,
         }
     }
+}
+
+/// Transcription pipeline settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionSettings {
+    /// Whether audio transcription is enabled.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Settings {

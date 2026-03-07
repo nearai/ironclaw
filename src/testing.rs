@@ -451,6 +451,8 @@ impl TestHarnessBuilder {
             cost_guard,
             sse_tx: None,
             http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
         };
 
         TestHarness {
