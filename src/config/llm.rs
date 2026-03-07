@@ -84,6 +84,9 @@ pub struct RegistryProviderConfig {
     /// OAuth token for providers that support Bearer auth (e.g. Anthropic via `claude login`).
     /// When set, the provider factory routes to the OAuth-specific provider implementation.
     pub oauth_token: Option<SecretString>,
+    /// When true, use the Codex ChatGPT Responses API provider instead of
+    /// the standard OpenAI-compatible Chat Completions client.
+    pub is_codex_chatgpt: bool,
 }
 
 /// LLM provider configuration.
@@ -357,6 +360,7 @@ impl LlmConfig {
         }
 
         // Resolve base URL: codex override > env var > settings (backward compat) > registry default
+        let is_codex_chatgpt = codex_base_url_override.is_some();
         let base_url = codex_base_url_override
             .or_else(|| {
                 if let Some(env_var) = base_url_env {
@@ -425,6 +429,7 @@ impl LlmConfig {
             model,
             extra_headers,
             oauth_token,
+            is_codex_chatgpt,
         })
     }
 }

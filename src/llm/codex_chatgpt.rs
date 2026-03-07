@@ -1,0 +1,546 @@
+//! Codex ChatGPT Responses API provider.
+//!
+//! Implements `LlmProvider` by speaking the OpenAI Responses API protocol
+//! (`POST /responses`) used by the ChatGPT backend at
+//! `chatgpt.com/backend-api/codex`. This bypasses `rig-core`'s Chat
+//! Completions path, which is incompatible with this endpoint.
+
+use async_trait::async_trait;
+use reqwest::Client;
+use rust_decimal::Decimal;
+use serde_json::{json, Value};
+
+use crate::error::LlmError;
+
+use super::provider::{
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+};
+
+/// Provider that speaks the Responses API protocol against the ChatGPT backend.
+pub struct CodexChatGptProvider {
+    client: Client,
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+impl CodexChatGptProvider {
+    pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
+        Self {
+            client: Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            model: model.to_string(),
+        }
+    }
+
+    /// Create a provider, auto-detecting the default model from the `/models` endpoint.
+    ///
+    /// If model discovery fails or the configured model is already Codex-specific,
+    /// falls back to `fallback_model`.
+    pub async fn with_auto_model(
+        base_url: &str,
+        api_key: &str,
+        fallback_model: &str,
+    ) -> Self {
+        let base = base_url.trim_end_matches('/');
+        let model = Self::fetch_default_model(base, api_key)
+            .await
+            .unwrap_or_else(|| fallback_model.to_string());
+        tracing::info!(model = %model, "Codex ChatGPT: resolved model");
+        Self::new(base_url, api_key, &model)
+    }
+
+    /// Query `/models?client_version=0.1.0` and return the default model slug.
+    async fn fetch_default_model(base_url: &str, api_key: &str) -> Option<String> {
+        let url = format!("{base_url}/models?client_version=0.1.0");
+        let client = Client::new();
+        let resp = client
+            .get(&url)
+            .bearer_auth(api_key)
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            tracing::warn!(status = %resp.status(), "Failed to fetch Codex models");
+            return None;
+        }
+        let body: Value = resp.json().await.ok()?;
+        // The response has { "models": [ { "slug": "...", ... }, ... ] }
+        let models = body.get("models")?.as_array()?;
+        // Find the model with highest priority or is_default
+        models
+            .iter()
+            .filter_map(|m| m.get("slug").and_then(|s| s.as_str()).map(|s| s.to_string()))
+            .next()
+    }
+
+    /// Convert IronClaw messages to Responses API request JSON.
+    fn build_request_body(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[ToolDefinition],
+        tool_choice: Option<&str>,
+    ) -> Value {
+        // Extract system instructions
+        let instructions: String = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        // Convert non-system messages to Responses API input items
+        let input: Vec<Value> = messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .flat_map(|m| Self::message_to_input_items(m))
+            .collect();
+
+        // Convert tool definitions
+        let api_tools: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })
+            })
+            .collect();
+
+        let mut body = json!({
+            "model": self.model,
+            "instructions": instructions,
+            "input": input,
+            "stream": true,
+            "store": false,
+        });
+
+        if !api_tools.is_empty() {
+            body["tools"] = json!(api_tools);
+            body["tool_choice"] = json!(tool_choice.unwrap_or("auto"));
+        }
+
+        body
+    }
+
+    /// Convert a single ChatMessage to one or more Responses API input items.
+    fn message_to_input_items(msg: &ChatMessage) -> Vec<Value> {
+        let mut items = Vec::new();
+
+        match msg.role {
+            Role::User => {
+                items.push(json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": msg.content,
+                    }],
+                }));
+            }
+            Role::Assistant => {
+                // If the assistant message has tool calls, emit function_call items
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    // Emit the assistant text as a message if non-empty
+                    if !msg.content.is_empty() {
+                        items.push(json!({
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": msg.content,
+                            }],
+                        }));
+                    }
+                    for tc in tool_calls {
+                        let args = if tc.arguments.is_string() {
+                            tc.arguments.as_str().unwrap_or("{}").to_string()
+                        } else {
+                            serde_json::to_string(&tc.arguments).unwrap_or_default()
+                        };
+                        items.push(json!({
+                            "type": "function_call",
+                            "name": tc.name,
+                            "arguments": args,
+                            "call_id": tc.id,
+                        }));
+                    }
+                } else {
+                    items.push(json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": msg.content,
+                        }],
+                    }));
+                }
+            }
+            Role::Tool => {
+                items.push(json!({
+                    "type": "function_call_output",
+                    "call_id": msg.tool_call_id.as_deref().unwrap_or(""),
+                    "output": msg.content,
+                }));
+            }
+            Role::System => {
+                // System messages are handled via `instructions` field
+            }
+        }
+
+        items
+    }
+
+    /// Send a request and parse the SSE response.
+    async fn send_request(&self, body: Value) -> Result<ResponsesResult, LlmError> {
+        let url = format!("{}/responses", self.base_url);
+
+        tracing::debug!(
+            url = %url,
+            model = %body.get("model").and_then(|m| m.as_str()).unwrap_or("?"),
+            "Codex ChatGPT: sending request"
+        );
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "codex_chatgpt".to_string(),
+                reason: format!("HTTP request failed: {e}"),
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            // Read the error body with a timeout to avoid hanging
+            let body_text = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                resp.text(),
+            )
+            .await
+            .unwrap_or(Ok(String::new()))
+            .unwrap_or_default();
+            return Err(LlmError::RequestFailed {
+                provider: "codex_chatgpt".to_string(),
+                reason: format!(
+                    "HTTP {status} from {url}: {body_text}",
+                ),
+            });
+        }
+
+        // Read the entire SSE stream
+        let sse_text = resp.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "codex_chatgpt".to_string(),
+            reason: format!("Failed to read SSE response: {e}"),
+        })?;
+
+        Self::parse_sse_response(&sse_text)
+    }
+
+    /// Parse SSE events from the response text.
+    fn parse_sse_response(sse_text: &str) -> Result<ResponsesResult, LlmError> {
+        let mut result = ResponsesResult::default();
+        let mut current_event_type = String::new();
+
+        for line in sse_text.lines() {
+            if let Some(event) = line.strip_prefix("event: ") {
+                current_event_type = event.trim().to_string();
+                continue;
+            }
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                let data = data.trim();
+                if data.is_empty() {
+                    continue;
+                }
+
+                let parsed: Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                match current_event_type.as_str() {
+                    "response.output_text.delta" => {
+                        if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str()) {
+                            result.text.push_str(delta);
+                        }
+                    }
+                    "response.function_call_arguments.delta" => {
+                        if let Some(call_id) =
+                            parsed.get("call_id").and_then(|v| v.as_str())
+                        {
+                            let entry = result
+                                .pending_tool_calls
+                                .entry(call_id.to_string())
+                                .or_insert_with(|| PendingToolCall {
+                                    id: call_id.to_string(),
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                });
+                            if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str())
+                            {
+                                entry.arguments.push_str(delta);
+                            }
+                        }
+                    }
+                    "response.output_item.added" => {
+                        // Capture function call name when the item is first added
+                        if parsed.get("type").and_then(|t| t.as_str()) == Some("function_call")
+                            || parsed
+                                .get("item")
+                                .and_then(|i| i.get("type"))
+                                .and_then(|t| t.as_str())
+                                == Some("function_call")
+                        {
+                            let item = parsed.get("item").unwrap_or(&parsed);
+                            let call_id = item
+                                .get("call_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let name = item
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let entry = result
+                                .pending_tool_calls
+                                .entry(call_id.clone())
+                                .or_insert_with(|| PendingToolCall {
+                                    id: call_id,
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                });
+                            if !name.is_empty() {
+                                entry.name = name;
+                            }
+                        }
+                    }
+                    "response.completed" => {
+                        if let Some(response) = parsed.get("response") {
+                            if let Some(usage) = response.get("usage") {
+                                result.input_tokens = usage
+                                    .get("input_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                                    as u32;
+                                result.output_tokens = usage
+                                    .get("output_tokens")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                                    as u32;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ResponsesResult {
+    text: String,
+    pending_tool_calls: std::collections::HashMap<String, PendingToolCall>,
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+#[derive(Debug)]
+struct PendingToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+#[async_trait]
+impl LlmProvider for CodexChatGptProvider {
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        // ChatGPT backend doesn't expose per-token pricing
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let body = self.build_request_body(&request.messages, &[], None);
+        let result = self.send_request(body).await?;
+
+        Ok(CompletionResponse {
+            content: result.text,
+            input_tokens: result.input_tokens,
+            output_tokens: result.output_tokens,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let body = self.build_request_body(
+            &request.messages,
+            &request.tools,
+            request.tool_choice.as_deref(),
+        );
+        let result = self.send_request(body).await?;
+
+        let tool_calls: Vec<ToolCall> = result
+            .pending_tool_calls
+            .into_values()
+            .map(|tc| {
+                let args: Value = serde_json::from_str(&tc.arguments)
+                    .unwrap_or_else(|_| json!(tc.arguments));
+                ToolCall {
+                    id: tc.id,
+                    name: tc.name,
+                    arguments: args,
+                }
+            })
+            .collect();
+
+        let finish_reason = if tool_calls.is_empty() {
+            FinishReason::Stop
+        } else {
+            FinishReason::ToolUse
+        };
+
+        Ok(ToolCompletionResponse {
+            content: if result.text.is_empty() {
+                None
+            } else {
+                Some(result.text)
+            },
+            tool_calls,
+            input_tokens: result.input_tokens,
+            output_tokens: result.output_tokens,
+            finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_conversion_user() {
+        let items = CodexChatGptProvider::message_to_input_items(&ChatMessage::user("hello"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "message");
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[0]["content"][0]["type"], "input_text");
+        assert_eq!(items[0]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn test_message_conversion_assistant() {
+        let items = CodexChatGptProvider::message_to_input_items(&ChatMessage::assistant("hi"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "message");
+        assert_eq!(items[0]["role"], "assistant");
+        assert_eq!(items[0]["content"][0]["type"], "output_text");
+    }
+
+    #[test]
+    fn test_message_conversion_tool_result() {
+        let msg = ChatMessage::tool_result("call_1", "search", "result text");
+        let items = CodexChatGptProvider::message_to_input_items(&msg);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "function_call_output");
+        assert_eq!(items[0]["call_id"], "call_1");
+        assert_eq!(items[0]["output"], "result text");
+    }
+
+    #[test]
+    fn test_message_conversion_assistant_with_tool_calls() {
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "search".to_string(),
+            arguments: json!({"query": "rust"}),
+        };
+        let msg = ChatMessage::assistant_with_tool_calls(Some("thinking...".into()), vec![tc]);
+        let items = CodexChatGptProvider::message_to_input_items(&msg);
+        // Should produce: 1 text message + 1 function_call
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "message");
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[1]["name"], "search");
+        assert_eq!(items[1]["call_id"], "call_1");
+    }
+
+    #[test]
+    fn test_build_request_extracts_system_as_instructions() {
+        let provider = CodexChatGptProvider::new("https://example.com", "key", "gpt-4o");
+        let messages = vec![
+            ChatMessage::system("You are helpful."),
+            ChatMessage::user("hello"),
+        ];
+        let body = provider.build_request_body(&messages, &[], None);
+        assert_eq!(body["instructions"], "You are helpful.");
+        // input should only contain the user message, not the system message
+        assert_eq!(body["input"].as_array().unwrap().len(), 1);
+        // store must be false for ChatGPT backend
+        assert_eq!(body["store"], false);
+    }
+
+    #[test]
+    fn test_parse_sse_text_response() {
+        let sse = r#"event: response.output_text.delta
+data: {"delta":"Hello"}
+
+event: response.output_text.delta
+data: {"delta":" world!"}
+
+event: response.completed
+data: {"response":{"usage":{"input_tokens":10,"output_tokens":5}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "Hello world!");
+        assert_eq!(result.input_tokens, 10);
+        assert_eq!(result.output_tokens, 5);
+        assert!(result.pending_tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_tool_call() {
+        let sse = r#"event: response.output_item.added
+data: {"item":{"type":"function_call","call_id":"call_1","name":"search"}}
+
+event: response.function_call_arguments.delta
+data: {"call_id":"call_1","delta":"{\"query\":"}
+
+event: response.function_call_arguments.delta
+data: {"call_id":"call_1","delta":"\"rust\"}"}
+
+event: response.completed
+data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert!(result.text.is_empty());
+        assert_eq!(result.pending_tool_calls.len(), 1);
+        let tc = result.pending_tool_calls.get("call_1").unwrap();
+        assert_eq!(tc.name, "search");
+        assert_eq!(tc.arguments, "{\"query\":\"rust\"}");
+    }
+}
