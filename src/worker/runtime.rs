@@ -222,6 +222,8 @@ Work independently to complete this job. Report when done."#,
     ) -> Result<String, WorkerError> {
         let max_iterations = self.config.max_iterations;
         let mut last_output = String::new();
+        const MAX_TOOL_INTENT_NUDGES: u32 = 2;
+        let mut consecutive_tool_intent_nudges: u32 = 0;
 
         // Load tool definitions
         reason_ctx.available_tools = self.tools.tool_definitions().await;
@@ -280,11 +282,26 @@ Work independently to complete this job. Report when done."#,
                             return Ok(last_output);
                         }
                         reason_ctx.messages.push(ChatMessage::assistant(&response));
+
+                        // Nudge the LLM if it expressed tool intent without calling tools
+                        if !reason_ctx.available_tools.is_empty()
+                            && consecutive_tool_intent_nudges < MAX_TOOL_INTENT_NUDGES
+                            && crate::llm::llm_signals_tool_intent(&response)
+                        {
+                            consecutive_tool_intent_nudges += 1;
+                            tracing::info!(
+                                "LLM expressed tool intent without calling a tool, nudging"
+                            );
+                            reason_ctx
+                                .messages
+                                .push(ChatMessage::user(crate::llm::TOOL_INTENT_NUDGE));
+                        }
                     }
                     RespondResult::ToolCalls {
                         tool_calls,
                         content,
                     } => {
+                        consecutive_tool_intent_nudges = 0;
                         if let Some(ref text) = content {
                             self.post_event(
                                 "message",
@@ -344,6 +361,7 @@ Work independently to complete this job. Report when done."#,
                     }
                 }
             } else {
+                consecutive_tool_intent_nudges = 0;
                 // Execute selected tools
                 for selection in &selections {
                     self.post_event(
