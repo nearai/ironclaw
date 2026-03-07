@@ -796,7 +796,7 @@ impl Agent {
                             tool_call_id: tc.id.clone(),
                             context_messages: context_messages.clone(),
                             deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
-                            user_timezone: message.timezone.clone(),
+                            user_timezone: Some(user_tz.name().to_string()),
                         };
 
                         return Ok(AgenticLoopResult::NeedApproval { pending });

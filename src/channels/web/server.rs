@@ -604,6 +604,7 @@ async fn oauth_callback_handler(
 
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     tracing::debug!(
@@ -620,7 +621,12 @@ async fn chat_send_handler(
     }
 
     let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
-    if let Some(ref tz) = req.timezone {
+    // Prefer timezone from JSON body, fall back to X-Timezone header
+    let tz = req
+        .timezone
+        .as_deref()
+        .or_else(|| headers.get("X-Timezone").and_then(|v| v.to_str().ok()));
+    if let Some(tz) = tz {
         msg = msg.with_timezone(tz);
     }
 

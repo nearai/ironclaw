@@ -1116,7 +1116,8 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
-                    user_timezone: message.timezone.clone(),
+                    // Carry forward the resolved timezone from the original pending approval
+                    user_timezone: pending.user_timezone.clone(),
                 };
 
                 let request_id = new_pending.request_id;
