@@ -143,6 +143,13 @@ impl Tool for RoutineCreateTool {
                                 "cron trigger requires 'schedule'".to_string(),
                             )
                         })?;
+                // Auto-convert 5-field unix cron to 6-field quartz (prepend seconds=0)
+                let schedule = if schedule.split_whitespace().count() == 5 {
+                    std::borrow::Cow::Owned(format!("0 {schedule}"))
+                } else {
+                    std::borrow::Cow::Borrowed(schedule)
+                };
+                let schedule = schedule.as_ref();
                 // Validate cron expression
                 next_cron_fire(schedule).map_err(|e| {
                     ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
@@ -454,6 +461,13 @@ impl Tool for RoutineUpdateTool {
         }
 
         if let Some(schedule) = params.get("schedule").and_then(|v| v.as_str()) {
+            // Auto-convert 5-field unix cron to 6-field quartz (prepend seconds=0)
+            let schedule = if schedule.split_whitespace().count() == 5 {
+                std::borrow::Cow::Owned(format!("0 {schedule}"))
+            } else {
+                std::borrow::Cow::Borrowed(schedule)
+            };
+            let schedule = schedule.as_ref();
             // Validate
             next_cron_fire(schedule)
                 .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
