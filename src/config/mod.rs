@@ -378,7 +378,9 @@ pub fn inject_single_var(key: &str, value: &str) {
             map.insert(key.to_string(), value.to_string());
         }
         Err(poisoned) => {
-            poisoned.into_inner().insert(key.to_string(), value.to_string());
+            poisoned
+                .into_inner()
+                .insert(key.to_string(), value.to_string());
         }
     }
 }

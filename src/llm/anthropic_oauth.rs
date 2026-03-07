@@ -140,14 +140,12 @@ impl AnthropicOAuthProvider {
                             reason: e.to_string(),
                         })?;
                     if retry.status().is_success() {
-                        let text =
-                            retry.text().await.map_err(|e| LlmError::RequestFailed {
-                                provider: "anthropic_oauth".to_string(),
-                                reason: format!("Failed to read response body: {}", e),
-                            })?;
+                        let text = retry.text().await.map_err(|e| LlmError::RequestFailed {
+                            provider: "anthropic_oauth".to_string(),
+                            reason: format!("Failed to read response body: {}", e),
+                        })?;
                         return serde_json::from_str(&text).map_err(|e| {
-                            let truncated =
-                                crate::agent::truncate_for_preview(&text, 512);
+                            let truncated = crate::agent::truncate_for_preview(&text, 512);
                             LlmError::InvalidResponse {
                                 provider: "anthropic_oauth".to_string(),
                                 reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
