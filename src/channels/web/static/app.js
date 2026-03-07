@@ -1023,7 +1023,7 @@ function showAuthCard(data) {
     oauthBtn.className = 'auth-oauth';
     oauthBtn.textContent = 'Authenticate with ' + data.extension_name;
     oauthBtn.addEventListener('click', () => {
-      window.open(data.auth_url, '_blank', 'width=600,height=700');
+      openOAuthUrl(data.auth_url);
     });
     links.appendChild(oauthBtn);
   }
@@ -2016,7 +2016,7 @@ function renderAvailableExtensionCard(entry) {
         // OAuth popup if auth started during install (builtin creds)
         if (res.auth_url) {
           showToast('Opening authentication for ' + entry.display_name, 'info');
-          window.open(res.auth_url, '_blank', 'width=600,height=700');
+          openOAuthUrl(res.auth_url);
         }
         loadExtensions();
         // Auto-open configure for WASM channels
@@ -2174,7 +2174,7 @@ function renderExtensionCard(ext) {
     card.appendChild(url);
   }
 
-  if (ext.tools.length > 0) {
+  if (ext.tools && ext.tools.length > 0) {
     const tools = document.createElement('div');
     tools.className = 'ext-tools';
     tools.textContent = 'Tools: ' + ext.tools.join(', ');
@@ -2274,7 +2274,7 @@ function activateExtension(name) {
         // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
         if (res.auth_url) {
           showToast('Opening authentication for ' + name, 'info');
-          window.open(res.auth_url, '_blank', 'width=600,height=700');
+          openOAuthUrl(res.auth_url);
         }
         loadExtensions();
         return;
@@ -2282,7 +2282,7 @@ function activateExtension(name) {
 
       if (res.auth_url) {
         showToast('Opening authentication for ' + name, 'info');
-        window.open(res.auth_url, '_blank');
+        openOAuthUrl(res.auth_url);
       } else if (res.awaiting_token) {
         showConfigureModal(name);
       } else {
@@ -2424,20 +2424,21 @@ function submitConfigureModal(name, fields) {
     body: { secrets },
   })
     .then((res) => {
-      closeConfigureModal();
       if (res.success) {
+        closeConfigureModal();
         if (res.auth_url) {
           // OAuth flow started — open consent popup. The auth_completed SSE will
           // not arrive immediately (it fires after OAuth callback), so show a toast now.
           showToast('Opening OAuth authorization for ' + name, 'info');
-          window.open(res.auth_url, '_blank', 'width=600,height=700');
+          openOAuthUrl(res.auth_url);
           loadExtensions();
         }
         // For non-OAuth success: the server always broadcasts auth_completed SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
       } else {
+        // Keep modal open so the user can correct their input and retry.
+        btns.forEach(function(b) { b.disabled = false; });
         showToast(res.message || 'Configuration failed', 'error');
-        loadExtensions();
       }
     })
     .catch((err) => {
@@ -2449,6 +2450,25 @@ function submitConfigureModal(name, fields) {
 function closeConfigureModal() {
   const existing = document.querySelector('.configure-overlay');
   if (existing) existing.remove();
+}
+
+// Validate that a server-supplied OAuth URL is HTTPS before opening a popup.
+// Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
+// Uses the URL constructor to safely parse and validate the scheme, which also
+// handles non-string values (objects, null, etc.) that would throw on .startsWith().
+function openOAuthUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      throw new Error('non-HTTPS protocol: ' + parsed.protocol);
+    }
+  } catch (e) {
+    console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
+    showToast('Invalid OAuth URL returned by server', 'error');
+    return;
+  }
+  window.open(parsed.href, '_blank', 'width=600,height=700');
 }
 
 // --- Pairing ---
@@ -3368,6 +3388,12 @@ function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
     var popover = document.getElementById('gateway-popover');
     var html = '';
+
+    // Version
+    if (data.version) {
+      html += '<div class="gw-section-label">IronClaw v' + escapeHtml(data.version) + '</div>';
+      html += '<div class="gw-divider"></div>';
+    }
 
     // Connection info
     html += '<div class="gw-section-label">Connections</div>';

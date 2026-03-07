@@ -309,6 +309,7 @@ async fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> 
 /// Detect running cloudflared processes or managed services that could conflict
 /// with IronClaw's tunnel management.
 fn detect_existing_cloudflared() -> Option<String> {
+    #[allow(unused_mut)]
     let mut conflicts: Vec<String> = Vec::new();
 
     // Check for running cloudflared processes (all platforms)

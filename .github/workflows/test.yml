@@ -51,6 +51,32 @@ jobs:
       - name: Run Telegram Channel Tests
         run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
 
+  windows-build:
+    name: Windows Build (${{ matrix.name }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all-features
+            flags: "--all-features"
+          - name: default
+            flags: ""
+          - name: libsql-only
+            flags: "--no-default-features --features libsql"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.name }}
+      - name: Check compilation
+        run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
+
   wasm-wit-compat:
     name: WASM WIT Compatibility
     runs-on: ubuntu-latest
@@ -100,10 +126,10 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, telegram-tests, wasm-wit-compat, docker-build, version-check]
+    needs: [tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check]
     steps:
       - run: |
-          if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.telegram-tests.result }}" != "success" || "${{ needs.wasm-wit-compat.result }}" != "success" || "${{ needs.docker-build.result }}" != "success" ]]; then
+          if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.telegram-tests.result }}" != "success" || "${{ needs.wasm-wit-compat.result }}" != "success" || "${{ needs.docker-build.result }}" != "success" || "${{ needs.windows-build.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi

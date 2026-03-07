@@ -2307,6 +2307,7 @@ async fn gateway_status_handler(
         .unwrap_or(false);
 
     Json(GatewayStatusResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
         sse_connections,
         ws_connections,
         total_connections: sse_connections + ws_connections,
@@ -2328,6 +2329,7 @@ struct ModelUsageEntry {
 
 #[derive(serde::Serialize)]
 struct GatewayStatusResponse {
+    version: String,
     sse_connections: u64,
     ws_connections: u64,
     total_connections: u64,

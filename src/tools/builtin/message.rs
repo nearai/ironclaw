@@ -207,26 +207,10 @@ impl Tool for MessageTool {
         }
     }
 
-    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
-        // Require approval when sending to a different channel than the default
-        // (cross-channel messages are more sensitive)
-        let param_channel = params.get("channel").and_then(|v| v.as_str());
-        if let Some(channel) = param_channel {
-            // Check if it differs from the default channel
-            let default_channel = self
-                .default_channel
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(default) = default_channel.as_ref()
-                && channel != default
-            {
-                return ApprovalRequirement::Always;
-            }
-            // No default set - require approval for explicit channel selection
-            return ApprovalRequirement::Always;
-        }
-        // No channel specified in params - uses default, less risky
-        ApprovalRequirement::UnlessAutoApproved
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        // Message tool only delivers to channels the user has configured
+        // (TUI, Telegram, Slack, web gateway, etc.) via ChannelManager::broadcast.
+        ApprovalRequirement::Never
     }
 
     fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
@@ -533,53 +517,17 @@ mod tests {
         );
     }
 
-    // ── Multi-thread runtime safety tests ─────────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn requires_approval_no_channel_multi_thread() {
+    #[test]
+    fn requires_approval_always_never() {
+        // Message tool only sends to user-owned channels, so never needs approval.
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        // No channel set, no channel param - should not panic in multi-thread runtime
-        let result = tool.requires_approval(&serde_json::json!({"content": "hello"}));
-        assert_eq!(result, ApprovalRequirement::UnlessAutoApproved);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn requires_approval_with_context_multi_thread() {
-        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
-
-        // No channel param - uses default, less risky
-        let result = tool.requires_approval(&serde_json::json!({"content": "hello"}));
-        assert_eq!(result, ApprovalRequirement::UnlessAutoApproved);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn requires_approval_cross_channel_multi_thread() {
-        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
-
-        // Different channel than default requires approval
-        let result = tool.requires_approval(&serde_json::json!({
-            "content": "hello",
-            "channel": "telegram"
-        }));
-        assert_eq!(result, ApprovalRequirement::Always);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn requires_approval_same_channel_explicit_multi_thread() {
-        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
-
-        // Explicit channel that matches default still returns Always
-        // (existing behavior: any explicit channel param triggers Always)
-        let result = tool.requires_approval(&serde_json::json!({
-            "content": "hello",
-            "channel": "signal"
-        }));
-        assert_eq!(result, ApprovalRequirement::Always);
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"content": "hello"})),
+            ApprovalRequirement::Never,
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"content": "hi", "channel": "telegram"})),
+            ApprovalRequirement::Never,
+        );
     }
 }

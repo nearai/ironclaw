@@ -130,6 +130,9 @@ impl Agent {
         if let Some(ref tx) = deps.sse_tx {
             scheduler.set_sse_sender(tx.clone());
         }
+        if let Some(ref interceptor) = deps.http_interceptor {
+            scheduler.set_http_interceptor(Arc::clone(interceptor));
+        }
         let scheduler = Arc::new(scheduler);
 
         Self {

@@ -32,7 +32,8 @@ pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTo
 pub use message::MessageTool;
 pub use restart::RestartTool;
 pub use routine::{
-    RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
+    RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool, RoutineListTool,
+    RoutineUpdateTool,
 };
 pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;

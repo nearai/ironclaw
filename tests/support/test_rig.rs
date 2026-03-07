@@ -20,11 +20,14 @@ use ironclaw::config::Config;
 use ironclaw::db::Database;
 use ironclaw::error::ChannelError;
 use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
+use ironclaw::tools::Tool;
 
 use crate::support::instrumented_llm::InstrumentedLlm;
 use crate::support::metrics::{ToolInvocation, TraceMetrics};
 use crate::support::test_channel::TestChannel;
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
+
+use ironclaw::llm::recording::{HttpExchange, ReplayingHttpInterceptor};
 
 // ---------------------------------------------------------------------------
 // TestChannelHandle -- wraps Arc<TestChannel> as Box<dyn Channel>
@@ -108,6 +111,15 @@ pub struct TestRig {
     max_tool_iterations: usize,
     /// Handle to the background agent task (wrapped in Option so Drop can take it).
     agent_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Database handle for direct queries in tests.
+    #[cfg(feature = "libsql")]
+    db: Arc<dyn Database>,
+    /// Workspace handle for direct memory operations in tests.
+    #[cfg(feature = "libsql")]
+    workspace: Option<Arc<ironclaw::workspace::Workspace>>,
+    /// The underlying TraceLlm for inspecting captured requests.
+    #[cfg(feature = "libsql")]
+    trace_llm: Option<Arc<TraceLlm>>,
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
@@ -352,6 +364,9 @@ pub struct TestRigBuilder {
     llm: Option<Arc<dyn LlmProvider>>,
     max_tool_iterations: usize,
     injection_check: bool,
+    enable_routines: bool,
+    http_exchanges: Vec<HttpExchange>,
+    extra_tools: Vec<Arc<dyn Tool>>,
 }
 
 impl TestRigBuilder {
@@ -362,6 +377,9 @@ impl TestRigBuilder {
             llm: None,
             max_tool_iterations: 10,
             injection_check: false,
+            enable_routines: false,
+            http_exchanges: Vec::new(),
+            extra_tools: Vec::new(),
         }
     }
 
@@ -383,6 +401,12 @@ impl TestRigBuilder {
         self
     }
 
+    /// Register additional custom tools (e.g. stub tools for testing).
+    pub fn with_extra_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
+        self.extra_tools = tools;
+        self
+    }
+
     /// Enable prompt injection detection in the safety layer.
     ///
     /// When enabled, tool outputs are scanned for injection patterns
@@ -390,6 +414,23 @@ impl TestRigBuilder {
     /// and critical patterns are escaped before reaching the LLM.
     pub fn with_injection_check(mut self, enable: bool) -> Self {
         self.injection_check = enable;
+        self
+    }
+
+    /// Enable the routines system so the scheduler is wired with a `RoutineEngine`,
+    /// allowing routine jobs to actually execute. Routine tools are always registered
+    /// but require the engine to dispatch jobs.
+    pub fn with_routines(mut self) -> Self {
+        self.enable_routines = true;
+        self
+    }
+
+    /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
+    ///
+    /// When set, all `http` tool calls will return these responses in order
+    /// instead of making real network requests.
+    pub fn with_http_exchanges(mut self, exchanges: Vec<HttpExchange>) -> Self {
+        self.http_exchanges = exchanges;
         self
     }
 
@@ -403,6 +444,17 @@ impl TestRigBuilder {
     pub async fn build(self) -> TestRig {
         use ironclaw::channels::ChannelManager;
         use ironclaw::db::libsql::LibSqlBackend;
+
+        // Destructure self up front to avoid partial-move issues.
+        let TestRigBuilder {
+            trace,
+            llm,
+            max_tool_iterations,
+            injection_check,
+            enable_routines,
+            http_exchanges: explicit_http_exchanges,
+            extra_tools,
+        } = self;
 
         // 1. Create temp dir + libSQL database + run migrations.
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -422,24 +474,26 @@ impl TestRigBuilder {
         let _ = std::fs::create_dir_all(&skills_dir);
         let _ = std::fs::create_dir_all(&installed_skills_dir);
         let mut config = Config::for_testing(db_path, skills_dir, installed_skills_dir);
-        config.agent.max_tool_iterations = self.max_tool_iterations;
-        config.safety.injection_check_enabled = self.injection_check;
+        config.agent.max_tool_iterations = max_tool_iterations;
+        config.safety.injection_check_enabled = injection_check;
 
         // 3. Create SessionManager + LogBroadcaster.
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
         let log_broadcaster = Arc::new(LogBroadcaster::new());
 
         // 4. Create TraceLlm + InstrumentedLlm, extract HTTP exchanges for replay.
-        let http_exchanges = self
-            .trace
+        let trace_http_exchanges = trace
             .as_ref()
             .map(|t| t.http_exchanges.clone())
             .unwrap_or_default();
 
-        let base_llm: Arc<dyn LlmProvider> = if let Some(llm) = self.llm {
+        let mut trace_llm_ref: Option<Arc<TraceLlm>> = None;
+        let base_llm: Arc<dyn LlmProvider> = if let Some(llm) = llm {
             llm
-        } else if let Some(trace) = self.trace {
-            Arc::new(TraceLlm::from_trace(trace))
+        } else if let Some(trace) = trace {
+            let tlm = Arc::new(TraceLlm::from_trace(trace));
+            trace_llm_ref = Some(Arc::clone(&tlm));
+            tlm
         } else {
             let trace = LlmTrace::single_turn(
                 "test-rig-default",
@@ -454,7 +508,9 @@ impl TestRigBuilder {
                     expected_tool_results: Vec::new(),
                 }],
             );
-            Arc::new(TraceLlm::from_trace(trace))
+            let tlm = Arc::new(TraceLlm::from_trace(trace));
+            trace_llm_ref = Some(Arc::clone(&tlm));
+            tlm
         };
         let instrumented = Arc::new(InstrumentedLlm::new(base_llm));
         let llm: Arc<dyn LlmProvider> = Arc::clone(&instrumented) as Arc<dyn LlmProvider>;
@@ -474,7 +530,55 @@ impl TestRigBuilder {
             .await
             .expect("AppBuilder::build_all() failed in test rig");
 
-        // 6. Construct AgentDeps from AppComponents (mirrors main.rs).
+        // 6. Register job tools, routine tools, and extra tools.
+        {
+            use ironclaw::context::ContextManager;
+
+            let ctx_mgr = Arc::new(ContextManager::new(
+                components.config.agent.max_parallel_jobs,
+            ));
+            components.tools.register_job_tools(
+                ctx_mgr,
+                None,
+                None,
+                components.db.clone(),
+                None,
+                None,
+                None,
+                None,
+            );
+
+            // Routine tools: create a RoutineEngine with the LLM and workspace.
+            if let (Some(db_arc), Some(ws)) = (&components.db, &components.workspace) {
+                use ironclaw::agent::routine_engine::RoutineEngine;
+                use ironclaw::config::RoutineConfig;
+
+                let routine_config = RoutineConfig::default();
+                let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+                let engine = Arc::new(RoutineEngine::new(
+                    routine_config,
+                    Arc::clone(db_arc),
+                    components.llm.clone(),
+                    Arc::clone(ws),
+                    notify_tx,
+                    None,
+                ));
+                components
+                    .tools
+                    .register_routine_tools(Arc::clone(db_arc), engine);
+            }
+
+            // Register any extra test-specific tools.
+            for tool in extra_tools {
+                components.tools.register(tool).await;
+            }
+        }
+
+        // Save references for test accessors.
+        let db_ref = components.db.clone().expect("test rig requires a database");
+        let workspace_ref = components.workspace.clone();
+
+        // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
             store: components.db,
             llm: components.llm,
@@ -489,12 +593,19 @@ impl TestRigBuilder {
             hooks: components.hooks,
             cost_guard: components.cost_guard,
             sse_tx: None,
-            http_interceptor: if http_exchanges.is_empty() {
-                None
-            } else {
-                Some(Arc::new(
-                    ironclaw::llm::recording::ReplayingHttpInterceptor::new(http_exchanges),
-                ))
+            http_interceptor: {
+                // Prefer explicit exchanges from with_http_exchanges(), fall back to trace.
+                let exchanges = if explicit_http_exchanges.is_empty() {
+                    trace_http_exchanges
+                } else {
+                    explicit_http_exchanges
+                };
+                if exchanges.is_empty() {
+                    None
+                } else {
+                    Some(Arc::new(ReplayingHttpInterceptor::new(exchanges))
+                        as Arc<dyn ironclaw::llm::recording::HttpInterceptor>)
+                }
             },
         };
 
@@ -505,14 +616,30 @@ impl TestRigBuilder {
         channel_manager.add(Box::new(handle)).await;
         let channels = Arc::new(channel_manager);
 
+        // 7b. Register message tool so routines can send messages to channels.
+        deps.tools
+            .register_message_tools(Arc::clone(&channels))
+            .await;
+
         // 8. Create Agent.
+        let routine_config = if enable_routines {
+            Some(ironclaw::config::RoutineConfig {
+                enabled: true,
+                cron_check_interval_secs: 60,
+                max_concurrent_routines: 3,
+                default_cooldown_secs: 300,
+                max_lightweight_tokens: 4096,
+            })
+        } else {
+            None
+        };
         let agent = Agent::new(
             components.config.agent.clone(),
             deps,
             channels,
             None, // heartbeat_config
             None, // hygiene_config
-            None, // routine_config
+            routine_config,
             None, // context_manager
             None, // session_manager
         );
@@ -533,8 +660,11 @@ impl TestRigBuilder {
             channel: test_channel,
             instrumented_llm: instrumented,
             start_time: Instant::now(),
-            max_tool_iterations: self.max_tool_iterations,
+            max_tool_iterations,
             agent_handle: Some(agent_handle),
+            db: db_ref,
+            workspace: workspace_ref,
+            trace_llm: trace_llm_ref,
             _temp_dir: temp_dir,
         }
     }
@@ -547,6 +677,24 @@ impl Default for TestRigBuilder {
 }
 
 impl TestRig {
+    /// Get the database handle for direct queries.
+    #[cfg(feature = "libsql")]
+    pub fn database(&self) -> &Arc<dyn Database> {
+        &self.db
+    }
+
+    /// Get the workspace handle for direct memory operations.
+    #[cfg(feature = "libsql")]
+    pub fn workspace(&self) -> Option<&Arc<ironclaw::workspace::Workspace>> {
+        self.workspace.as_ref()
+    }
+
+    /// Get the underlying TraceLlm for inspecting captured requests.
+    #[cfg(feature = "libsql")]
+    pub fn trace_llm(&self) -> Option<&Arc<TraceLlm>> {
+        self.trace_llm.as_ref()
+    }
+
     /// Check if any captured status events contain safety/injection warnings.
     pub fn has_safety_warnings(&self) -> bool {
         self.captured_status_events().iter().any(|s| {

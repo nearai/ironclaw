@@ -368,21 +368,6 @@ impl AppBuilder {
             .embeddings
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
-        // Warn if libSQL backend is used with non-1536 embedding dimension.
-        if self.config.database.backend == crate::config::DatabaseBackend::LibSql
-            && self.config.embeddings.enabled
-            && self.config.embeddings.dimension != 1536
-        {
-            tracing::warn!(
-                configured_dimension = self.config.embeddings.dimension,
-                "Embedding dimension {} is not 1536. The libSQL schema uses \
-                 F32_BLOB(1536) which requires exactly 1536 dimensions. \
-                 Embedding storage will fail. Use PostgreSQL or set \
-                 EMBEDDING_DIMENSION=1536.",
-                self.config.embeddings.dimension
-            );
-        }
-
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
             let mut ws = Workspace::new_with_db("default", db.clone());

@@ -175,6 +175,11 @@ pub enum RoutineAction {
         /// Max reasoning iterations (default: 10).
         #[serde(default = "default_max_iterations")]
         max_iterations: u32,
+        /// Tool names pre-authorized for `Always`-approval tools (e.g. destructive
+        /// shell commands, cross-channel messaging). `UnlessAutoApproved` tools are
+        /// automatically permitted in routine jobs without listing them here.
+        #[serde(default)]
+        tool_permissions: Vec<String>,
     },
 }
 
@@ -184,6 +189,19 @@ fn default_max_tokens() -> u32 {
 
 fn default_max_iterations() -> u32 {
     10
+}
+
+/// Parse a `tool_permissions` JSON array into a `Vec<String>`.
+pub fn parse_tool_permissions(value: &serde_json::Value) -> Vec<String> {
+    value
+        .get("tool_permissions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl RoutineAction {
@@ -248,10 +266,12 @@ impl RoutineAction {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(default_max_iterations() as u64)
                     as u32;
+                let tool_permissions = parse_tool_permissions(&config);
                 Ok(RoutineAction::FullJob {
                     title,
                     description,
                     max_iterations,
+                    tool_permissions,
                 })
             }
             other => Err(RoutineError::UnknownActionType {
@@ -276,10 +296,12 @@ impl RoutineAction {
                 title,
                 description,
                 max_iterations,
+                tool_permissions,
             } => serde_json::json!({
                 "title": title,
                 "description": description,
                 "max_iterations": max_iterations,
+                "tool_permissions": tool_permissions,
             }),
         }
     }
@@ -450,12 +472,13 @@ mod tests {
             title: "Deploy review".to_string(),
             description: "Review and deploy pending changes".to_string(),
             max_iterations: 5,
+            tool_permissions: vec!["shell".to_string()],
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("full_job", json).expect("parse full_job");
         assert!(
-            matches!(parsed, RoutineAction::FullJob { title, max_iterations, .. }
-            if title == "Deploy review" && max_iterations == 5)
+            matches!(parsed, RoutineAction::FullJob { title, max_iterations, tool_permissions, .. }
+            if title == "Deploy review" && max_iterations == 5 && tool_permissions == vec!["shell".to_string()])
         );
     }
 

@@ -14,7 +14,7 @@ use ironclaw::{
     agent::HeartbeatRunner,
     config::Config,
     history::Store,
-    llm::{SessionConfig, create_llm_provider, create_session_manager},
+    llm::{create_llm_provider, create_session_manager},
     safety::SafetyLayer,
     workspace::Workspace,
 };
@@ -84,11 +84,7 @@ async fn test_heartbeat_end_to_end() {
     }
 
     // 5. Create LLM provider
-    let session = create_session_manager(SessionConfig {
-        auth_base_url: config.llm.nearai.auth_base_url.clone(),
-        session_path: config.llm.nearai.session_path.clone(),
-    })
-    .await;
+    let session = create_session_manager(config.llm.session.clone()).await;
     let llm = create_llm_provider(&config.llm, session).expect("Failed to create LLM provider");
     println!("[5/6] LLM provider created (model: {})", llm.model_name());
 
