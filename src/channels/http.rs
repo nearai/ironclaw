@@ -6,12 +6,15 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
 };
+use bytes::Bytes;
+use hmac::{Hmac, Mac};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -20,6 +23,8 @@ use uuid::Uuid;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse};
 use crate::config::HttpConfig;
 use crate::error::ChannelError;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// HTTP webhook channel.
 pub struct HttpChannel {
@@ -110,7 +115,8 @@ struct WebhookRequest {
     content: String,
     /// Optional thread ID for conversation tracking.
     thread_id: Option<String>,
-    /// Optional webhook secret for authentication.
+    /// Deprecated: webhook secret in request body. Use X-IronClaw-Signature header instead.
+    /// This field is accepted for backward compatibility but will be removed in a future release.
     secret: Option<String>,
     /// Whether to wait for a synchronous response.
     #[serde(default)]
@@ -140,10 +146,40 @@ async fn health_handler() -> impl IntoResponse {
     })
 }
 
+/// Verify an HMAC-SHA256 signature against the raw request body.
+///
+/// The expected header format is: `sha256=<hex_digest>`
+/// where the digest is HMAC-SHA256(secret_key, body_bytes) encoded as lowercase hex.
+fn verify_hmac_signature(secret: &str, body: &[u8], signature_header: &str) -> bool {
+    // The header must start with "sha256="
+    let hex_digest = match signature_header.strip_prefix("sha256=") {
+        Some(h) => h,
+        None => return false,
+    };
+
+    // Decode the provided hex digest
+    let provided_mac = match hex::decode(hex_digest) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+
+    // Compute expected HMAC
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+    let expected_mac = mac.finalize().into_bytes();
+
+    // Constant-time comparison to prevent timing attacks
+    bool::from(expected_mac.as_slice().ct_eq(&provided_mac))
+}
+
 async fn webhook_handler(
     State(state): State<Arc<HttpChannelState>>,
-    Json(req): Json<WebhookRequest>,
-) -> (StatusCode, Json<WebhookResponse>) {
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
     // Rate limiting
     {
         let mut limiter = state.rate_limit.lock().await;
@@ -160,44 +196,172 @@ async fn webhook_handler(
                     status: "error".to_string(),
                     response: Some("Rate limit exceeded".to_string()),
                 }),
-            );
+            )
+                .into_response();
         }
     }
 
-    let _ = req.user_id.as_ref().map(|user_id| {
+    // Content-Type validation: reject non-JSON payloads before any processing
+    let content_type_ok = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.starts_with("application/json"))
+        .unwrap_or(false);
+
+    if !content_type_ok {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(WebhookResponse {
+                message_id: Uuid::nil(),
+                status: "error".to_string(),
+                response: Some(
+                    "Content-Type must be application/json".to_string(),
+                ),
+            }),
+        )
+            .into_response();
+    }
+
+    // Authenticate BEFORE parsing JSON to avoid leaking parse-validity to
+    // unauthenticated callers (they would otherwise see 400 vs 401 differences).
+    if let Some(ref expected_secret) = state.webhook_secret {
+        match headers.get("x-ironclaw-signature") {
+            Some(raw) => {
+                // Signature header is present -- verify it
+                match raw.to_str() {
+                    Ok(sig) => {
+                        if !verify_hmac_signature(expected_secret, &body, sig) {
+                            return (
+                                StatusCode::UNAUTHORIZED,
+                                Json(WebhookResponse {
+                                    message_id: Uuid::nil(),
+                                    status: "error".to_string(),
+                                    response: Some(
+                                        "Invalid webhook signature".to_string(),
+                                    ),
+                                }),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Err(_) => {
+                        // Header present but not valid UTF-8 -- reject immediately
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(WebhookResponse {
+                                message_id: Uuid::nil(),
+                                status: "error".to_string(),
+                                response: Some(
+                                    "Invalid signature header encoding".to_string(),
+                                ),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            None => {
+                // No signature header -- fall back to deprecated body secret.
+                // We must parse JSON here to extract the secret field, but this
+                // is acceptable because the absence of the header is itself a
+                // distinguishable state (the caller chose the deprecated path).
+                let req: WebhookRequest = match serde_json::from_slice(&body) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        // Return 401 (not 400) so unauthenticated callers cannot
+                        // distinguish parse failures from auth failures.
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(WebhookResponse {
+                                message_id: Uuid::nil(),
+                                status: "error".to_string(),
+                                response: Some(
+                                    "Webhook authentication required. Provide X-IronClaw-Signature header \
+                                     (preferred) or 'secret' field in body (deprecated)."
+                                        .to_string(),
+                                ),
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+
+                match &req.secret {
+                    Some(provided)
+                        if bool::from(
+                            provided.as_bytes().ct_eq(expected_secret.as_bytes()),
+                        ) =>
+                    {
+                        tracing::warn!(
+                            "Webhook authenticated via deprecated 'secret' field in request body. \
+                             Migrate to X-IronClaw-Signature header (HMAC-SHA256). \
+                             Body secret support will be removed in a future release."
+                        );
+                        // Authenticated via deprecated path -- continue with already-parsed request
+                        return process_authenticated_request(state, req).await;
+                    }
+                    Some(_) => {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(WebhookResponse {
+                                message_id: Uuid::nil(),
+                                status: "error".to_string(),
+                                response: Some(
+                                    "Invalid webhook secret".to_string(),
+                                ),
+                            }),
+                        )
+                            .into_response();
+                    }
+                    None => {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(WebhookResponse {
+                                message_id: Uuid::nil(),
+                                status: "error".to_string(),
+                                response: Some(
+                                    "Webhook authentication required. Provide X-IronClaw-Signature header \
+                                     (preferred) or 'secret' field in body (deprecated)."
+                                        .to_string(),
+                                ),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
+    }
+
+    // Authentication passed (or no secret configured) -- now parse JSON
+    let req: WebhookRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(WebhookResponse {
+                    message_id: Uuid::nil(),
+                    status: "error".to_string(),
+                    response: Some(format!("Invalid JSON: {e}")),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    process_authenticated_request(state, req).await
+}
+
+/// Process a request that has already been authenticated and parsed.
+async fn process_authenticated_request(
+    state: Arc<HttpChannelState>,
+    req: WebhookRequest,
+) -> axum::response::Response {
+    if let Some(ref user_id) = req.user_id {
         tracing::debug!(
             provided_user_id = %user_id,
             "HTTP webhook request provided user_id, ignoring in favor of configured user_id"
         );
-    });
-
-    // Validate secret if configured
-    if let Some(ref expected_secret) = state.webhook_secret {
-        match &req.secret {
-            Some(provided) if bool::from(provided.as_bytes().ct_eq(expected_secret.as_bytes())) => {
-                // Secret matches, continue
-            }
-            Some(_) => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(WebhookResponse {
-                        message_id: Uuid::nil(),
-                        status: "error".to_string(),
-                        response: Some("Invalid webhook secret".to_string()),
-                    }),
-                );
-            }
-            None => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(WebhookResponse {
-                        message_id: Uuid::nil(),
-                        status: "error".to_string(),
-                        response: Some("Webhook secret required".to_string()),
-                    }),
-                );
-            }
-        }
     }
 
     if req.content.len() > MAX_CONTENT_BYTES {
@@ -208,8 +372,11 @@ async fn webhook_handler(
                 status: "error".to_string(),
                 response: Some("Content too large".to_string()),
             }),
-        );
+        )
+            .into_response();
     }
+
+    let wait_for_response = req.wait_for_response;
 
     let msg = IncomingMessage::new("http", &state.user_id, &req.content).with_metadata(
         serde_json::json!({
@@ -219,10 +386,14 @@ async fn webhook_handler(
 
     if let Some(thread_id) = &req.thread_id {
         let msg = msg.with_thread(thread_id);
-        return process_message(state, msg, req.wait_for_response).await;
+        return process_message(state, msg, wait_for_response)
+            .await
+            .into_response();
     }
 
-    process_message(state, msg, req.wait_for_response).await
+    process_message(state, msg, wait_for_response)
+        .await
+        .into_response()
 }
 
 async fn process_message(
@@ -373,6 +544,16 @@ mod tests {
         })
     }
 
+    /// Compute an HMAC-SHA256 signature for a body using the given secret,
+    /// returning the `sha256=<hex>` formatted string suitable for the header.
+    fn compute_signature(secret: &str, body: &[u8]) -> String {
+        let mut mac =
+            HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key creation failed");
+        mac.update(body);
+        let result = mac.finalize().into_bytes();
+        format!("sha256={}", hex::encode(result))
+    }
+
     #[tokio::test]
     async fn test_http_channel_requires_secret() {
         let channel = test_channel(None);
@@ -381,9 +562,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webhook_correct_secret_returns_ok() {
+    async fn webhook_hmac_signature_returns_ok() {
+        let secret = "test-secret-123";
+        let channel = test_channel(Some(secret));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body_json = serde_json::json!({
+            "content": "hello"
+        });
+        let body_bytes = serde_json::to_vec(&body_json).unwrap();
+        let signature = compute_signature(secret, &body_bytes);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-ironclaw-signature", &signature)
+            .body(Body::from(body_bytes))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn webhook_wrong_hmac_signature_returns_unauthorized() {
+        let channel = test_channel(Some("correct-secret"));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body_json = serde_json::json!({
+            "content": "hello"
+        });
+        let body_bytes = serde_json::to_vec(&body_json).unwrap();
+        // Sign with the wrong secret
+        let signature = compute_signature("wrong-secret", &body_bytes);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-ironclaw-signature", &signature)
+            .body(Body::from(body_bytes))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn webhook_malformed_signature_returns_unauthorized() {
+        let channel = test_channel(Some("correct-secret"));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body_json = serde_json::json!({
+            "content": "hello"
+        });
+        let body_bytes = serde_json::to_vec(&body_json).unwrap();
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-ironclaw-signature", "not-a-valid-signature")
+            .body(Body::from(body_bytes))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn webhook_deprecated_body_secret_still_works() {
+        // Backward compatibility: old-style secret in body should still authenticate
         let channel = test_channel(Some("test-secret-123"));
-        // Start the channel so the tx sender is populated (otherwise 503).
         let _stream = channel.start().await.unwrap();
         let app = channel.routes();
 
@@ -403,7 +657,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webhook_wrong_secret_returns_unauthorized() {
+    async fn webhook_wrong_body_secret_returns_unauthorized() {
         let channel = test_channel(Some("correct-secret"));
         let _stream = channel.start().await.unwrap();
         let app = channel.routes();
@@ -424,7 +678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webhook_missing_secret_returns_unauthorized() {
+    async fn webhook_missing_all_auth_returns_unauthorized() {
         let channel = test_channel(Some("correct-secret"));
         let _stream = channel.start().await.unwrap();
         let app = channel.routes();
@@ -441,5 +695,161 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn webhook_hmac_takes_precedence_over_body_secret() {
+        // If both header and body secret are present, HMAC header is used
+        let secret = "test-secret-123";
+        let channel = test_channel(Some(secret));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body_json = serde_json::json!({
+            "content": "hello",
+            "secret": "wrong-secret-in-body"
+        });
+        let body_bytes = serde_json::to_vec(&body_json).unwrap();
+        // Sign with the correct secret via header
+        let signature = compute_signature(secret, &body_bytes);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-ironclaw-signature", &signature)
+            .body(Body::from(body_bytes))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Should succeed because HMAC header is valid, body secret is ignored
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn webhook_invalid_json_returns_bad_request() {
+        let secret = "test-secret";
+        let channel = test_channel(Some(secret));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body_bytes = b"not json";
+        // Compute a VALID HMAC over the invalid body so auth passes,
+        // then the JSON parse fails and we get 400.
+        let signature = compute_signature(secret, body_bytes);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-ironclaw-signature", &signature)
+            .body(Body::from(body_bytes.to_vec()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn webhook_missing_content_type_returns_415() {
+        let secret = "test-secret";
+        let channel = test_channel(Some(secret));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body_json = serde_json::json!({ "content": "hello" });
+        let body_bytes = serde_json::to_vec(&body_json).unwrap();
+        let signature = compute_signature(secret, &body_bytes);
+
+        // No content-type header
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("x-ironclaw-signature", &signature)
+            .body(Body::from(body_bytes))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn webhook_wrong_content_type_returns_415() {
+        let secret = "test-secret";
+        let channel = test_channel(Some(secret));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body_bytes = b"some text data";
+        let signature = compute_signature(secret, body_bytes);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "text/plain")
+            .header("x-ironclaw-signature", &signature)
+            .body(Body::from(body_bytes.to_vec()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn webhook_non_utf8_signature_header_returns_unauthorized() {
+        let channel = test_channel(Some("test-secret"));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body_json = serde_json::json!({ "content": "hello" });
+        let body_bytes = serde_json::to_vec(&body_json).unwrap();
+
+        // Construct a request with a non-UTF-8 header value
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header(
+                "x-ironclaw-signature",
+                axum::http::HeaderValue::from_bytes(b"\xff\xfe").unwrap(),
+            )
+            .body(Body::from(body_bytes))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn verify_hmac_signature_valid() {
+        let secret = "my-secret";
+        let body = b"test body content";
+        let sig = compute_signature(secret, body);
+        assert!(verify_hmac_signature(secret, body, &sig));
+    }
+
+    #[test]
+    fn verify_hmac_signature_invalid_digest() {
+        let secret = "my-secret";
+        let body = b"test body content";
+        assert!(!verify_hmac_signature(
+            secret,
+            body,
+            "sha256=0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+    }
+
+    #[test]
+    fn verify_hmac_signature_missing_prefix() {
+        let secret = "my-secret";
+        let body = b"test body content";
+        assert!(!verify_hmac_signature(secret, body, "deadbeef"));
+    }
+
+    #[test]
+    fn verify_hmac_signature_invalid_hex() {
+        let secret = "my-secret";
+        let body = b"test body content";
+        assert!(!verify_hmac_signature(secret, body, "sha256=not-hex!"));
     }
 }
