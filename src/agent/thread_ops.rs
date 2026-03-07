@@ -257,6 +257,14 @@ impl Agent {
             );
         }
 
+        // Augment content with attachment context (transcripts, metadata, images)
+        let augmented =
+            crate::agent::attachments::augment_with_attachments(content, &message.attachments);
+        let (effective_content, image_parts) = match &augmented {
+            Some(result) => (result.text.as_str(), result.image_parts.clone()),
+            None => (content, Vec::new()),
+        };
+
         // Start the turn and get messages
         let turn_messages = {
             let mut sess = session.lock().await;
@@ -264,12 +272,13 @@ impl Agent {
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thread.start_turn(content);
+            let turn = thread.start_turn(effective_content);
+            turn.image_content_parts = image_parts;
             thread.messages()
         };
 
         // Persist user message to DB immediately so it survives crashes
-        self.persist_user_message(thread_id, &message.user_id, content)
+        self.persist_user_message(thread_id, &message.user_id, effective_content)
             .await;
 
         // Send thinking status

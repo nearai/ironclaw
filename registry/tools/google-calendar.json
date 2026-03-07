@@ -2,8 +2,8 @@
   "name": "google-calendar",
   "display_name": "Google Calendar",
   "kind": "tool",
-  "version": "0.1.0",
-  "wit_version": "0.2.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Create, read, update, and delete Google Calendar events",
   "keywords": [
     "calendar",

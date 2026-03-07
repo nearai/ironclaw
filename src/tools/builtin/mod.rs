@@ -19,7 +19,7 @@ mod time;
 pub use echo::EchoTool;
 pub use extension_tools::{
     ExtensionInfoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
-    ToolRemoveTool, ToolSearchTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;

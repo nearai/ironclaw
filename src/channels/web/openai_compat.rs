@@ -244,6 +244,7 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                 _ => Ok(ChatMessage {
                     role,
                     content: m.content.as_deref().unwrap_or("").to_string(),
+                    content_parts: Vec::new(),
                     tool_call_id: None,
                     name: m.name.clone(),
                     tool_calls: None,

@@ -21,7 +21,7 @@ use crate::tools::builtin::{
     MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
     ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
     ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    WriteFileTool,
+    ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -389,8 +389,9 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolRemoveTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ToolUpgradeTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ExtensionInfoTool::new(manager)));
-        tracing::info!("Registered 7 extension management tools");
+        tracing::info!("Registered 8 extension management tools");
     }
 
     /// Register skill management tools (list, search, install, remove).
