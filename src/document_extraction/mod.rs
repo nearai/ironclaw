@@ -24,24 +24,12 @@ const MAX_EXTRACTED_TEXT_LEN: usize = 100_000;
 /// 1. Download bytes from `source_url` if `data` is empty
 /// 2. Extract text based on MIME type
 /// 3. Set `extracted_text` on the attachment
-pub struct DocumentExtractionMiddleware {
-    http_client: reqwest::Client,
-}
-
-impl Default for DocumentExtractionMiddleware {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[derive(Default)]
+pub struct DocumentExtractionMiddleware;
 
 impl DocumentExtractionMiddleware {
     pub fn new() -> Self {
-        Self {
-            http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_default(),
-        }
+        Self
     }
 
     /// Process an incoming message, extracting text from document attachments.
@@ -75,28 +63,11 @@ impl DocumentExtractionMiddleware {
                 continue;
             }
 
-            // Get document bytes: use inline data or download from source_url
+            // Use inline data only — downloading from source_url is intentionally
+            // not supported to prevent SSRF. Channels must populate attachment.data
+            // via store_attachment_data before emitting the message.
             let data = if !attachment.data.is_empty() {
                 attachment.data.clone()
-            } else if let Some(ref url) = attachment.source_url {
-                match self.download(url).await {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::warn!(
-                            attachment_id = %attachment.id,
-                            error = %e,
-                            "Failed to download document for extraction"
-                        );
-                        extractions.push((
-                            i,
-                            format!(
-                                "[Failed to download document for text extraction: {e}. \
-                                 Please try sending the file again.]"
-                            ),
-                        ));
-                        continue;
-                    }
-                }
             } else {
                 extractions.push((
                     i,
@@ -107,12 +78,33 @@ impl DocumentExtractionMiddleware {
                 continue;
             };
 
+            // Enforce size limit on actual data (size_bytes may be missing or underreported)
+            if data.len() as u64 > MAX_DOCUMENT_SIZE {
+                let mb = data.len() as f64 / (1024.0 * 1024.0);
+                let max_mb = MAX_DOCUMENT_SIZE as f64 / (1024.0 * 1024.0);
+                extractions.push((
+                    i,
+                    format!(
+                        "[Document too large for text extraction: {mb:.1} MB exceeds {max_mb:.0} MB limit. \
+                         Please send a smaller file or copy-paste the relevant text.]"
+                    ),
+                ));
+                continue;
+            }
+
             let mime = &attachment.mime_type;
             let filename = attachment.filename.as_deref();
             match extractors::extract_text(&data, mime, filename) {
                 Ok(text) => {
+                    // Truncate at a char boundary to avoid panicking on multi-byte UTF-8
                     let text = if text.len() > MAX_EXTRACTED_TEXT_LEN {
-                        let mut truncated = text[..MAX_EXTRACTED_TEXT_LEN].to_string();
+                        let boundary = text
+                            .char_indices()
+                            .map(|(i, _)| i)
+                            .take_while(|&i| i <= MAX_EXTRACTED_TEXT_LEN)
+                            .last()
+                            .unwrap_or(0);
+                        let mut truncated = text[..boundary].to_string();
                         truncated.push_str("\n\n[... truncated, document too long ...]");
                         truncated
                     } else {
@@ -150,34 +142,6 @@ impl DocumentExtractionMiddleware {
         }
     }
 
-    async fn download(&self, url: &str) -> Result<Vec<u8>, String> {
-        let resp = self
-            .http_client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("download failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            return Err(format!("download returned {}", resp.status()));
-        }
-
-        // Check content-length before downloading
-        if let Some(len) = resp.content_length().filter(|&l| l > MAX_DOCUMENT_SIZE) {
-            return Err(format!("document too large: {len} bytes"));
-        }
-
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("failed to read body: {e}"))?;
-
-        if bytes.len() as u64 > MAX_DOCUMENT_SIZE {
-            return Err(format!("document too large: {} bytes", bytes.len()));
-        }
-
-        Ok(bytes.to_vec())
-    }
 }
 
 #[cfg(test)]

@@ -1402,8 +1402,12 @@ fn make_inbound_attachment(
 /// Extract attachments from a Telegram message.
 fn extract_attachments(message: &TelegramMessage) -> Vec<InboundAttachment> {
     let mut attachments = Vec::new();
-    let get_file_url =
-        |file_id: &str| format!("https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/getFile?file_id={}", file_id);
+    let get_file_url = |file_id: &str| {
+        format!(
+            "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/getFile?file_id={}",
+            percent_encode(file_id)
+        )
+    };
 
     // Photo: Telegram sends multiple sizes; use the largest (last).
     if let Some(ref photos) = message.photo {

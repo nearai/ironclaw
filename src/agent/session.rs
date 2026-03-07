@@ -442,6 +442,8 @@ impl Turn {
         self.response = Some(response.into());
         self.state = TurnState::Completed;
         self.completed_at = Some(Utc::now());
+        // Free image data — only needed for the initial LLM call, not subsequent turns
+        self.image_content_parts.clear();
     }
 
     /// Fail this turn.
@@ -449,12 +451,14 @@ impl Turn {
         self.error = Some(error.into());
         self.state = TurnState::Failed;
         self.completed_at = Some(Utc::now());
+        self.image_content_parts.clear();
     }
 
     /// Interrupt this turn.
     pub fn interrupt(&mut self) {
         self.state = TurnState::Interrupted;
         self.completed_at = Some(Utc::now());
+        self.image_content_parts.clear();
     }
 
     /// Record a tool call.

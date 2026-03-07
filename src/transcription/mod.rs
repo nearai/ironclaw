@@ -150,8 +150,9 @@ impl TranscriptionMiddleware {
 
         // If message has no text content, use the first successful transcription
         if (msg.content.is_empty() || msg.content == "[Voice note]")
-            && let Some((_, text)) = transcriptions.first()
-            && !text.starts_with("[Transcription failed")
+            && let Some((_, text)) = transcriptions
+                .iter()
+                .find(|(_, t)| !t.starts_with("[Transcription failed"))
         {
             msg.content = text.clone();
         }

@@ -313,7 +313,7 @@ impl Guest for DiscordChannel {
     fn on_status(_update: StatusUpdate) {}
 
     fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
-        Ok(()) // Not yet implemented
+        Err("broadcast not yet implemented for Discord channel".to_string())
     }
 
     fn on_shutdown() {

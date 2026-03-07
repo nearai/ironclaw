@@ -2992,28 +2992,37 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
     let mut attachments = Vec::with_capacity(paths.len());
     let mut total_bytes: u64 = 0;
     let tmp_base = std::path::Path::new("/tmp");
+    let home_base = dirs::home_dir()
+        .map(|h| h.join(".ironclaw"))
+        .unwrap_or_default();
 
     for path in paths {
-        // Validate paths are under /tmp/ to prevent arbitrary file reads
-        if !path.starts_with("/tmp/") {
-            return Err(format!(
-                "Invalid attachment path '{}': must be under /tmp/",
-                path
-            ));
-        }
-        crate::tools::builtin::path_utils::validate_path(path, Some(tmp_base))
-            .map_err(|e| format!("Invalid attachment path '{}': {}", path, e))?;
+        // Validate paths are under /tmp/ or ~/.ironclaw/ to prevent arbitrary file reads
+        let validated =
+            crate::tools::builtin::path_utils::validate_path(path, Some(tmp_base)).or_else(
+                |_| crate::tools::builtin::path_utils::validate_path(path, Some(&home_base)),
+            );
+        validated.map_err(|e| {
+            format!(
+                "Invalid attachment path '{}': must be under /tmp/ or ~/.ironclaw/: {}",
+                path, e
+            )
+        })?;
 
-        let data = std::fs::read(path)
-            .map_err(|e| format!("Failed to read attachment '{}': {}", path, e))?;
-
-        total_bytes += data.len() as u64;
+        // Pre-check file size before reading into memory to avoid OOM
+        let file_size = std::fs::metadata(path)
+            .map_err(|e| format!("Failed to stat attachment '{}': {}", path, e))?
+            .len();
+        total_bytes += file_size;
         if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
             return Err(format!(
                 "Total attachment size exceeds {} MB limit",
                 MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024)
             ));
         }
+
+        let data = std::fs::read(path)
+            .map_err(|e| format!("Failed to read attachment '{}': {}", path, e))?;
 
         let filename = std::path::Path::new(path)
             .file_name()

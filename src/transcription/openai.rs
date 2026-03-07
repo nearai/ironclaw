@@ -20,7 +20,10 @@ impl OpenAiWhisperProvider {
     /// Create a new Whisper provider with the given API key.
     pub fn new(api_key: SecretString) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
             api_key,
             model: "whisper-1".to_string(),
             base_url: "https://api.openai.com".to_string(),
@@ -29,7 +32,12 @@ impl OpenAiWhisperProvider {
 
     /// Override the base URL (for proxied or compatible endpoints).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = base_url.into();
+        let mut url = base_url.into();
+        // Normalize: strip trailing slash to avoid double-slash in URL construction
+        while url.ends_with('/') {
+            url.pop();
+        }
+        self.base_url = url;
         self
     }
 

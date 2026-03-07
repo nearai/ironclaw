@@ -108,7 +108,7 @@ impl HttpTool {
 ///
 /// Uses `path_utils::validate_path` with `/tmp` as the base directory to catch
 /// traversal attacks like `/tmp/../../etc/passwd` and symlink escapes.
-/// Creates parent directories as needed before validation.
+/// Creates parent directories only after validation succeeds.
 fn validate_save_to_path(save_to: &str) -> Result<std::path::PathBuf, ToolError> {
     // Quick prefix check before doing any fs work
     if !save_to.starts_with("/tmp/") {
