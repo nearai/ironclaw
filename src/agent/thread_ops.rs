@@ -758,8 +758,10 @@ impl Agent {
                 )
                 .await;
 
+            // Pass "" as original_user_intent: the user already explicitly approved
+            // this tool call, so LLM judge evaluation is skipped.
             let tool_result = self
-                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
+                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx, "")
                 .await;
 
             let tool_ref = self.tools().get(&pending.tool_name).await;
@@ -918,8 +920,10 @@ impl Agent {
                         )
                         .await;
 
+                    // Pass "" as original_user_intent: these tools were already
+                    // evaluated during the original preflight pass.
                     let result = self
-                        .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                        .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx, "")
                         .await;
 
                     let deferred_tool = self.tools().get(&tc.name).await;
@@ -965,12 +969,15 @@ impl Agent {
                             )
                             .await;
 
+                        // Pass "" as original_user_intent: these tools were
+                        // already evaluated during the original preflight pass.
                         let result = execute_chat_tool_standalone(
                             &tools,
                             &safety,
                             &tc.name,
                             &tc.arguments,
                             &job_ctx,
+                            "",
                         )
                         .await;
 

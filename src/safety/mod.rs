@@ -6,9 +6,11 @@
 //! - Validating inputs before processing
 //! - Enforcing safety policies
 //! - Detecting secret leakage in outputs
+//! - LLM-as-Judge semantic evaluation of tool calls (optional, env-gated)
 
 mod credential_detect;
 mod leak_detector;
+pub mod llm_judge;
 mod policy;
 mod sanitizer;
 mod validator;
@@ -18,19 +20,21 @@ pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,
     LeakSeverity,
 };
+pub use llm_judge::{AmbiguousPolicy, JudgeRecord, JudgeVerdict, LlmJudge, LlmJudgeConfig, ToolCallRequest};
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};
 pub use validator::{ValidationResult, Validator};
 
 use crate::config::SafetyConfig;
 
-/// Unified safety layer combining sanitizer, validator, and policy.
+/// Unified safety layer combining sanitizer, validator, policy, and optional LLM judge.
 pub struct SafetyLayer {
     sanitizer: Sanitizer,
     validator: Validator,
     policy: Policy,
     leak_detector: LeakDetector,
     config: SafetyConfig,
+    judge: LlmJudge,
 }
 
 impl SafetyLayer {
@@ -42,6 +46,81 @@ impl SafetyLayer {
             policy: Policy::default(),
             leak_detector: LeakDetector::new(),
             config: config.clone(),
+            judge: LlmJudge::from_env(),
+        }
+    }
+
+    /// Semantically evaluate a proposed tool call using the LLM judge.
+    ///
+    /// Must be called AFTER heuristic safety checks pass and BEFORE tool
+    /// execution. Returns `Ok(())` if the call is allowed, or
+    /// `Err(SafetyError::LlmJudgeDenied)` if it should be blocked.
+    ///
+    /// When `SAFETY_LLM_JUDGE_ENABLED=false` (default) this is a no-op —
+    /// zero latency, zero network calls.
+    pub async fn llm_judge_tool_call(
+        &self,
+        tool_name: &str,
+        tool_args: &serde_json::Value,
+        original_user_intent: &str,
+    ) -> Result<(), crate::error::SafetyError> {
+        if !self.judge.config.enabled {
+            return Ok(());
+        }
+
+        let req = ToolCallRequest {
+            tool_name: tool_name.to_string(),
+            tool_args: tool_args.clone(),
+            original_user_intent: original_user_intent.to_string(),
+        };
+
+        let (verdict, record) = self.judge.evaluate(&req).await;
+
+        tracing::debug!(
+            tool = %tool_name,
+            verdict = %record.verdict,
+            confidence = record.confidence,
+            latency_ms = record.latency_ms,
+            "LLM judge result"
+        );
+
+        match verdict {
+            JudgeVerdict::Allow => Ok(()),
+            JudgeVerdict::Deny(reason) => {
+                tracing::warn!(
+                    tool = %tool_name,
+                    reason = %reason,
+                    attack_type = ?record.attack_type,
+                    "LLM judge denied tool call"
+                );
+                Err(crate::error::SafetyError::LlmJudgeDenied {
+                    tool: tool_name.to_string(),
+                    reason,
+                })
+            }
+            JudgeVerdict::Ambiguous(reason) => {
+                match self.judge.config.ambiguous_policy {
+                    AmbiguousPolicy::Block => {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            reason = %reason,
+                            "LLM judge: ambiguous verdict blocked by policy"
+                        );
+                        Err(crate::error::SafetyError::LlmJudgeDenied {
+                            tool: tool_name.to_string(),
+                            reason,
+                        })
+                    }
+                    AmbiguousPolicy::Allow => {
+                        tracing::debug!(
+                            tool = %tool_name,
+                            reason = %reason,
+                            "LLM judge: ambiguous verdict allowed by policy"
+                        );
+                        Ok(())
+                    }
+                }
+            }
         }
     }
 

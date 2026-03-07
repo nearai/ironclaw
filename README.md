@@ -204,6 +204,39 @@ External content passes through multiple security layers:
 - Policy rules with severity levels (Block/Warn/Review/Sanitize)
 - Tool output wrapping for safe LLM context injection
 
+### LLM-as-Judge (Semantic Tool Call Evaluation)
+
+An optional second-layer defense that semantically evaluates every tool call for intent alignment before execution. After the heuristic safety checks pass, a fast isolated LLM call checks whether the proposed tool call is consistent with what the user actually asked for — catching prompt injection attacks that evade pattern matching.
+
+```
+User message ──► Heuristic safety ──► LLM Judge ──► Execute tool
+                  (sanitizer/policy)   (intent check)
+```
+
+Key design properties:
+
+- **Fail-open** — Judge outages (network errors, timeouts, parse failures) allow the tool call through so judge downtime never bricks the assistant
+- **Intent isolation** — Only the original user message is sent to the judge (not conversation history), preventing poisoned tool outputs from influencing the verdict
+- **Confidence threshold** — Verdicts below the configured threshold (default 0.70) become `Ambiguous`, subject to the ambiguous policy
+- **Approval bypass** — Tools that have already been explicitly approved by the user skip the judge entirely
+- **Zero overhead when disabled** — Gated behind `SAFETY_LLM_JUDGE_ENABLED=false` (default); no network calls, no latency
+
+**Verdicts:** `Allow` | `Deny(reason)` | `Ambiguous(reason)`
+
+**Configuration:**
+
+```env
+SAFETY_LLM_JUDGE_ENABLED=false                    # opt-in
+SAFETY_LLM_JUDGE_MODEL=claude-haiku-4-5-20251001  # any OpenAI-compatible model
+SAFETY_LLM_JUDGE_BASE_URL=https://api.anthropic.com
+SAFETY_LLM_JUDGE_API_KEY=sk-...
+SAFETY_LLM_JUDGE_TIMEOUT_MS=8000                  # fail-open after this
+SAFETY_LLM_JUDGE_CONFIDENCE_THRESHOLD=0.70        # below → Ambiguous
+SAFETY_LLM_JUDGE_AMBIGUOUS_POLICY=block           # "block" | "allow"
+```
+
+Works with any OpenAI-compatible endpoint (Anthropic, NEAR AI, Ollama, vLLM, OpenRouter, etc.).
+
 ### Data Protection
 
 - All data stored locally in your PostgreSQL database
