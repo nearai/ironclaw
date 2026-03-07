@@ -8,6 +8,7 @@
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
 pub mod circuit_breaker;
+pub mod codex_chatgpt;
 pub mod costs;
 pub mod failover;
 mod nearai_chat;
@@ -100,11 +101,48 @@ pub fn create_llm_provider_with_config(
 fn create_registry_provider(
     config: &RegistryProviderConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    // Codex ChatGPT mode: use the Responses API provider
+    if config.is_codex_chatgpt {
+        return create_codex_chatgpt_from_registry(config);
+    }
+
     match config.protocol {
         ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
     }
+}
+
+fn create_codex_chatgpt_from_registry(
+    config: &RegistryProviderConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let api_key = config
+        .api_key
+        .as_ref()
+        .map(|k| k.expose_secret().to_string())
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "codex_chatgpt".to_string(),
+        })?;
+
+    tracing::info!(
+        configured_model = %config.model,
+        base_url = %config.base_url,
+        "Using Codex ChatGPT provider (Responses API) — auto-detecting model"
+    );
+
+    // Run the async model auto-detection synchronously.
+    // This is safe because build_provider_chain runs on a multi-threaded tokio runtime.
+    let provider = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(
+            codex_chatgpt::CodexChatGptProvider::with_auto_model(
+                &config.base_url,
+                &api_key,
+                &config.model,
+            ),
+        )
+    });
+
+    Ok(Arc::new(provider))
 }
 
 fn create_openai_compat_from_registry(

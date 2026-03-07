@@ -73,6 +73,9 @@ pub struct RegistryProviderConfig {
     pub model: String,
     /// Extra HTTP headers injected into every request.
     pub extra_headers: Vec<(String, String)>,
+    /// When true, use the Codex ChatGPT Responses API provider instead of
+    /// the standard OpenAI-compatible Chat Completions client.
+    pub is_codex_chatgpt: bool,
 }
 
 /// LLM provider configuration.
@@ -346,6 +349,7 @@ impl LlmConfig {
         }
 
         // Resolve base URL: codex override > env var > settings (backward compat) > registry default
+        let is_codex_chatgpt = codex_base_url_override.is_some();
         let base_url = codex_base_url_override
             .or_else(|| {
                 if let Some(env_var) = base_url_env {
@@ -397,6 +401,7 @@ impl LlmConfig {
             base_url,
             model,
             extra_headers,
+            is_codex_chatgpt,
         })
     }
 }
