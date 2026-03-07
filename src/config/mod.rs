@@ -23,7 +23,7 @@ mod tunnel;
 mod wasm;
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{LazyLock, Mutex};
 
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -51,7 +51,12 @@ pub use crate::llm::session::SessionConfig;
 /// Used by `inject_llm_keys_from_secrets()` to make API keys available to
 /// `optional_env()` without unsafe `set_var` calls. `optional_env()` checks
 /// real env vars first, then falls back to this overlay.
-static INJECTED_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
+///
+/// Uses `Mutex<HashMap>` instead of `OnceLock` so that both
+/// `inject_os_credentials()` and `inject_llm_keys_from_secrets()` can merge
+/// their data. Whichever runs first initialises the map; the second merges in.
+static INJECTED_VARS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Main configuration for the agent.
 #[derive(Debug, Clone)]
@@ -334,7 +339,7 @@ pub async fn inject_llm_keys_from_secrets(
 
     inject_os_credential_store_tokens(&mut injected);
 
-    let _ = INJECTED_VARS.set(injected);
+    merge_injected_vars(injected);
 }
 
 /// Load tokens from OS credential stores (no DB required).
@@ -346,7 +351,36 @@ pub async fn inject_llm_keys_from_secrets(
 pub fn inject_os_credentials() {
     let mut injected = HashMap::new();
     inject_os_credential_store_tokens(&mut injected);
-    let _ = INJECTED_VARS.set(injected);
+    merge_injected_vars(injected);
+}
+
+/// Merge new entries into the global injected-vars overlay.
+///
+/// New keys are inserted; existing keys are overwritten (later callers win,
+/// e.g. fresh OS credential store tokens override stale DB copies).
+fn merge_injected_vars(new_entries: HashMap<String, String>) {
+    if new_entries.is_empty() {
+        return;
+    }
+    match INJECTED_VARS.lock() {
+        Ok(mut map) => map.extend(new_entries),
+        Err(poisoned) => poisoned.into_inner().extend(new_entries),
+    }
+}
+
+/// Inject a single key-value pair into the overlay.
+///
+/// Used by the setup wizard to make credentials available to `optional_env()`
+/// without calling `unsafe { std::env::set_var }`.
+pub fn inject_single_var(key: &str, value: &str) {
+    match INJECTED_VARS.lock() {
+        Ok(mut map) => {
+            map.insert(key.to_string(), value.to_string());
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().insert(key.to_string(), value.to_string());
+        }
+    }
 }
 
 /// Shared helper: extract tokens from OS credential stores into the overlay map.

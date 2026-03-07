@@ -119,6 +119,46 @@ impl AnthropicOAuthProvider {
                 .unwrap_or_else(|e| format!("(failed to read error body: {e})"));
 
             if status.as_u16() == 401 {
+                // OAuth tokens from `claude login` expire in ~8-12h. Attempt
+                // to re-extract a fresh token from the OS credential store
+                // (macOS Keychain / Linux credentials file) before giving up.
+                if let Some(fresh) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+                    let fresh_token = SecretString::from(fresh);
+                    // Retry once with the refreshed token
+                    let retry = self
+                        .client
+                        .post(&url)
+                        .bearer_auth(fresh_token.expose_secret())
+                        .header("anthropic-version", ANTHROPIC_API_VERSION)
+                        .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+                        .header("Content-Type", "application/json")
+                        .json(body)
+                        .send()
+                        .await
+                        .map_err(|e| LlmError::RequestFailed {
+                            provider: "anthropic_oauth".to_string(),
+                            reason: e.to_string(),
+                        })?;
+                    if retry.status().is_success() {
+                        let text =
+                            retry.text().await.map_err(|e| LlmError::RequestFailed {
+                                provider: "anthropic_oauth".to_string(),
+                                reason: format!("Failed to read response body: {}", e),
+                            })?;
+                        return serde_json::from_str(&text).map_err(|e| {
+                            let truncated =
+                                crate::agent::truncate_for_preview(&text, 512);
+                            LlmError::InvalidResponse {
+                                provider: "anthropic_oauth".to_string(),
+                                reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
+                            }
+                        });
+                    }
+                    tracing::warn!(
+                        "Anthropic OAuth 401 retry with refreshed token also failed ({})",
+                        retry.status()
+                    );
+                }
                 return Err(LlmError::AuthFailed {
                     provider: "anthropic_oauth".to_string(),
                 });

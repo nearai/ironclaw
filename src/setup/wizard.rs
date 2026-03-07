@@ -1091,11 +1091,10 @@ impl SetupWizard {
             print_info("Secrets not available. Set ANTHROPIC_OAUTH_TOKEN in your environment.");
         }
 
-        // Set env var for immediate use (model selection step)
-        // SAFETY: Single-threaded wizard context.
-        unsafe {
-            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", token);
-        }
+        // Make the token visible to `optional_env()` for subsequent config
+        // resolution (model selection step). Uses the thread-safe overlay
+        // instead of `std::env::set_var` to avoid UB on multi-threaded runtimes.
+        crate::config::inject_single_var("ANTHROPIC_OAUTH_TOKEN", token);
 
         // Cache for model fetching
         self.llm_api_key = Some(SecretString::from(token.to_string()));
@@ -1165,11 +1164,10 @@ impl SetupWizard {
             ));
         }
 
-        // Set env var so subsequent wizard steps (model selection) can use it
-        // immediately. This is ephemeral — credentials are NOT written to the
-        // bootstrap .env; they live only in the encrypted secrets DB.
-        // SAFETY: Single-threaded wizard context.
-        unsafe { std::env::set_var(env_var, key_str) };
+        // Make key visible to `optional_env()` for subsequent config resolution.
+        // Uses the thread-safe overlay instead of `std::env::set_var` to avoid
+        // UB on multi-threaded runtimes.
+        crate::config::inject_single_var(env_var, key_str);
 
         // Cache key in memory for model fetching later in the wizard
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
@@ -2127,12 +2125,19 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // Check for Anthropic credentials (API key or OAuth token)
+        // Check for Anthropic credentials (API key or OAuth token).
+        // Uses `optional_env()` which reads both real env vars and the
+        // injected overlay (secrets DB, wizard-set values).
         let has_credentials = || {
-            let has_api_key = std::env::var("ANTHROPIC_API_KEY")
-                .is_ok_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
+            let has_api_key = crate::config::helpers::optional_env("ANTHROPIC_API_KEY")
+                .ok()
+                .flatten()
+                .is_some_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
             let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some()
-                || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok_and(|v| !v.is_empty());
+                || crate::config::helpers::optional_env("ANTHROPIC_OAUTH_TOKEN")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|v| !v.is_empty());
             has_api_key || has_oauth
         };
 
@@ -2697,22 +2702,39 @@ async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String
     let api_key = cached_key
         .map(String::from)
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .filter(|k| !k.is_empty());
+        .filter(|k| !k.is_empty() && k != crate::config::llm::OAUTH_PLACEHOLDER);
 
-    let api_key = match api_key {
-        Some(k) => k,
-        None => return static_defaults,
+    // Fall back to OAuth token if no API key
+    let oauth_token = if api_key.is_none() {
+        crate::config::helpers::optional_env("ANTHROPIC_OAUTH_TOKEN")
+            .ok()
+            .flatten()
+            .filter(|t| !t.is_empty())
+    } else {
+        None
+    };
+
+    let (key_or_token, is_oauth) = match (api_key, oauth_token) {
+        (Some(k), _) => (k, false),
+        (None, Some(t)) => (t, true),
+        (None, None) => return static_defaults,
     };
 
     let client = reqwest::Client::new();
-    let resp = match client
+    let mut request = client
         .get("https://api.anthropic.com/v1/models")
-        .header("x-api-key", &api_key)
         .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
+        .timeout(std::time::Duration::from_secs(5));
+
+    if is_oauth {
+        request = request
+            .bearer_auth(&key_or_token)
+            .header("anthropic-beta", "oauth-2025-04-20");
+    } else {
+        request = request.header("x-api-key", &key_or_token);
+    }
+
+    let resp = match request.send().await {
         Ok(r) if r.status().is_success() => r,
         _ => return static_defaults,
     };

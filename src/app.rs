@@ -245,7 +245,8 @@ impl AppBuilder {
             Some(k) => k,
             None => {
                 // No secrets DB available, but we can still load tokens from
-                // OS credential stores (macOS Keychain, ~/.codex/auth.json).
+                // OS credential stores (e.g., Anthropic OAuth via Claude Code's
+                // macOS Keychain / Linux ~/.claude/.credentials.json).
                 crate::config::inject_os_credentials();
 
                 // Consume unused handles
@@ -680,6 +681,17 @@ impl AppBuilder {
     pub async fn build_all(mut self) -> Result<AppComponents, anyhow::Error> {
         self.init_database().await?;
         self.init_secrets().await?;
+
+        // Post-init validation: if a non-nearai backend was selected but
+        // credentials were never resolved (deferred resolution found no keys),
+        // fail early with a clear error instead of a confusing runtime failure.
+        if self.config.llm.backend != "nearai" && self.config.llm.provider.is_none() {
+            let backend = &self.config.llm.backend;
+            anyhow::bail!(
+                "LLM_BACKEND={backend} is configured but no credentials were found. \
+                 Set the appropriate API key environment variable or run the setup wizard."
+            );
+        }
 
         let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
             (llm, None, None)
