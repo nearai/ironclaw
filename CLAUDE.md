@@ -45,6 +45,16 @@ cargo test test_name
 RUST_LOG=ironclaw=debug cargo run
 ```
 
+### Test Tiers
+
+| Tier | Command | What runs | External deps |
+|------|---------|-----------|---------------|
+| Unit | `cargo test` | All `mod tests` + self-contained integration tests | None |
+| Integration | `cargo test --features integration` | + PostgreSQL-dependent tests | Running PostgreSQL |
+| Live | `cargo test --features integration -- --ignored` | + LLM-dependent tests | PostgreSQL + LLM API keys |
+
+Run `bash scripts/check-boundaries.sh` to verify test tier gating and other architecture rules.
+
 ## Project Structure
 
 ```
