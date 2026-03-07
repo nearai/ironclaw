@@ -355,6 +355,21 @@ pub async fn start_server(
             header::X_FRAME_OPTIONS,
             header::HeaderValue::from_static("DENY"),
         ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("content-security-policy"),
+            header::HeaderValue::from_static(
+                "default-src 'self'; \
+                 script-src 'self' https://cdn.jsdelivr.net; \
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+                 font-src https://fonts.gstatic.com; \
+                 connect-src 'self'; \
+                 img-src 'self' data:; \
+                 object-src 'none'; \
+                 frame-ancestors 'none'; \
+                 base-uri 'self'; \
+                 form-action 'self'",
+            ),
+        ))
         .with_state(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -2772,5 +2787,60 @@ mod tests {
                 .get("test_nonce")
                 .is_none()
         );
+    }
+
+    // --- CSP header regression test ---
+
+    #[tokio::test]
+    async fn test_csp_header_present_on_responses() {
+        use std::net::SocketAddr;
+
+        let state = test_gateway_state(None);
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let bound = start_server(addr, state.clone(), "test-token".to_string())
+            .await
+            .expect("server should start");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/health", bound))
+            .send()
+            .await
+            .expect("health request should succeed");
+
+        assert_eq!(resp.status(), 200);
+
+        let csp = resp
+            .headers()
+            .get("content-security-policy")
+            .expect("CSP header must be present");
+
+        let csp_str = csp.to_str().expect("CSP header should be valid UTF-8");
+        assert!(
+            csp_str.contains("default-src 'self'"),
+            "CSP must contain default-src"
+        );
+        assert!(
+            csp_str.contains("script-src 'self' https://cdn.jsdelivr.net"),
+            "CSP must allow cdn.jsdelivr.net scripts"
+        );
+        assert!(
+            !csp_str.contains("cdnjs.cloudflare.com"),
+            "CSP must not allow cdnjs.cloudflare.com (not used in this codebase)"
+        );
+        assert!(
+            csp_str.contains("object-src 'none'"),
+            "CSP must contain object-src 'none'"
+        );
+        assert!(
+            csp_str.contains("frame-ancestors 'none'"),
+            "CSP must contain frame-ancestors 'none'"
+        );
+
+        // Shut down gracefully.
+        if let Some(tx) = state.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
     }
 }
