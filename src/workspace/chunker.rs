@@ -113,79 +113,6 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
     chunks
 }
 
-/// Split content by paragraphs first, then chunk.
-///
-/// This is better for preserving semantic boundaries.
-#[allow(dead_code)] // Alternative chunking strategy for paragraph-aware indexing
-pub fn chunk_by_paragraphs(content: &str, config: ChunkConfig) -> Vec<String> {
-    if content.is_empty() {
-        return Vec::new();
-    }
-
-    // Split by double newlines (paragraphs)
-    let paragraphs: Vec<&str> = content
-        .split("\n\n")
-        .map(|p| p.trim())
-        .filter(|p| !p.is_empty())
-        .collect();
-
-    if paragraphs.is_empty() {
-        return chunk_document(content, config);
-    }
-
-    let mut chunks = Vec::new();
-    let mut current_chunk = String::new();
-    let mut current_word_count = 0;
-
-    for paragraph in paragraphs {
-        let para_words = paragraph.split_whitespace().count();
-
-        // If this paragraph alone exceeds chunk size, chunk it separately
-        if para_words > config.chunk_size {
-            // Flush current chunk first
-            if !current_chunk.is_empty() {
-                chunks.push(current_chunk.trim().to_string());
-                current_chunk = String::new();
-                current_word_count = 0;
-            }
-            // Chunk the large paragraph
-            let para_chunks = chunk_document(paragraph, config.clone());
-            chunks.extend(para_chunks);
-            continue;
-        }
-
-        // Check if adding this paragraph would exceed chunk size
-        if current_word_count + para_words > config.chunk_size {
-            // Flush current chunk
-            if !current_chunk.is_empty() {
-                chunks.push(current_chunk.trim().to_string());
-            }
-            current_chunk = paragraph.to_string();
-            current_word_count = para_words;
-        } else {
-            // Add paragraph to current chunk
-            if !current_chunk.is_empty() {
-                current_chunk.push_str("\n\n");
-            }
-            current_chunk.push_str(paragraph);
-            current_word_count += para_words;
-        }
-    }
-
-    // Flush remaining content
-    if !current_chunk.is_empty() {
-        // If too small, merge with previous chunk if possible
-        if current_word_count < config.min_chunk_size && !chunks.is_empty() {
-            let last = chunks.pop().unwrap();
-            chunks.push(format!("{}\n\n{}", last, current_chunk.trim()));
-        } else {
-            chunks.push(current_chunk.trim().to_string());
-        }
-    }
-
-    chunks
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,49 +178,6 @@ mod tests {
 
         assert_eq!(config.overlap_size(), 15);
         assert_eq!(config.step_size(), 85);
-    }
-
-    #[test]
-    fn test_paragraph_chunking() {
-        let config = ChunkConfig::default().with_chunk_size(20);
-
-        let content = "First paragraph with some words.\n\nSecond paragraph with different content.\n\nThird paragraph here.";
-        let chunks = chunk_by_paragraphs(content, config);
-
-        // Should preserve paragraph boundaries
-        assert!(!chunks.is_empty());
-        for chunk in &chunks {
-            // No chunk should start or end with \n\n
-            assert!(!chunk.starts_with("\n"));
-            assert!(!chunk.ends_with("\n"));
-        }
-    }
-
-    #[test]
-    fn test_large_paragraph_handling() {
-        let config = ChunkConfig {
-            chunk_size: 10,
-            overlap_percent: 0.15,
-            min_chunk_size: 3, // Low threshold for test
-        };
-
-        // Create a paragraph with 30 words
-        let large_para = (1..=30)
-            .map(|i| format!("word{}", i))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let content = format!("Short intro.\n\n{}\n\nShort outro.", large_para);
-
-        let chunks = chunk_by_paragraphs(&content, config);
-
-        // Should have multiple chunks due to large paragraph
-        // 30 words + 2 intro + 2 outro = 34 words, chunk_size=10
-        // Expect at least 3 chunks
-        assert!(
-            chunks.len() >= 3,
-            "Expected at least 3 chunks for 34 words with chunk_size=10, got {}",
-            chunks.len()
-        );
     }
 
     #[test]
