@@ -274,34 +274,16 @@ impl CodexChatGptProvider {
                             result.text.push_str(delta);
                         }
                     }
-                    "response.function_call_arguments.delta" => {
-                        if let Some(call_id) =
-                            parsed.get("call_id").and_then(|v| v.as_str())
-                        {
-                            let entry = result
-                                .pending_tool_calls
-                                .entry(call_id.to_string())
-                                .or_insert_with(|| PendingToolCall {
-                                    id: call_id.to_string(),
-                                    name: String::new(),
-                                    arguments: String::new(),
-                                });
-                            if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str())
-                            {
-                                entry.arguments.push_str(delta);
-                            }
-                        }
-                    }
                     "response.output_item.added" => {
-                        // Capture function call name when the item is first added
-                        if parsed.get("type").and_then(|t| t.as_str()) == Some("function_call")
-                            || parsed
-                                .get("item")
-                                .and_then(|i| i.get("type"))
-                                .and_then(|t| t.as_str())
-                                == Some("function_call")
-                        {
-                            let item = parsed.get("item").unwrap_or(&parsed);
+                        // Capture function call metadata when the item is first added.
+                        // The item has: id (item_id), call_id, name, type.
+                        let item = parsed.get("item").unwrap_or(&parsed);
+                        if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                            let item_id = item
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             let call_id = item
                                 .get("call_id")
                                 .and_then(|v| v.as_str())
@@ -312,16 +294,28 @@ impl CodexChatGptProvider {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let entry = result
+
+                            result
                                 .pending_tool_calls
-                                .entry(call_id.clone())
+                                .entry(item_id)
                                 .or_insert_with(|| PendingToolCall {
-                                    id: call_id,
-                                    name: String::new(),
+                                    call_id,
+                                    name,
                                     arguments: String::new(),
                                 });
-                            if !name.is_empty() {
-                                entry.name = name;
+                        }
+                    }
+                    "response.function_call_arguments.delta" => {
+                        // Delta events use `item_id` (not `call_id`)
+                        if let Some(item_id) =
+                            parsed.get("item_id").and_then(|v| v.as_str())
+                        {
+                            if let Some(entry) = result.pending_tool_calls.get_mut(item_id) {
+                                if let Some(delta) =
+                                    parsed.get("delta").and_then(|d| d.as_str())
+                                {
+                                    entry.arguments.push_str(delta);
+                                }
                             }
                         }
                     }
@@ -353,6 +347,7 @@ impl CodexChatGptProvider {
 #[derive(Debug, Default)]
 struct ResponsesResult {
     text: String,
+    /// Keyed by item_id (the SSE item identifier, e.g. "fc_...").
     pending_tool_calls: std::collections::HashMap<String, PendingToolCall>,
     input_tokens: u32,
     output_tokens: u32,
@@ -360,7 +355,8 @@ struct ResponsesResult {
 
 #[derive(Debug)]
 struct PendingToolCall {
-    id: String,
+    /// The call_id from the API (e.g. "call_..."), used to match results.
+    call_id: String,
     name: String,
     arguments: String,
 }
@@ -408,7 +404,7 @@ impl LlmProvider for CodexChatGptProvider {
                 let args: Value = serde_json::from_str(&tc.arguments)
                     .unwrap_or_else(|_| json!(tc.arguments));
                 ToolCall {
-                    id: tc.id,
+                    id: tc.call_id,
                     name: tc.name,
                     arguments: args,
                 }
@@ -523,14 +519,16 @@ data: {"response":{"usage":{"input_tokens":10,"output_tokens":5}}}
 
     #[test]
     fn test_parse_sse_tool_call() {
+        // Real API format: output_item.added has item.id (item_id) + item.call_id,
+        // delta events use item_id (not call_id)
         let sse = r#"event: response.output_item.added
-data: {"item":{"type":"function_call","call_id":"call_1","name":"search"}}
+data: {"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"search"}}
 
 event: response.function_call_arguments.delta
-data: {"call_id":"call_1","delta":"{\"query\":"}
+data: {"item_id":"fc_1","delta":"{\"query\":"}
 
 event: response.function_call_arguments.delta
-data: {"call_id":"call_1","delta":"\"rust\"}"}
+data: {"item_id":"fc_1","delta":"\"rust\"}"}
 
 event: response.completed
 data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
@@ -539,7 +537,8 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
         let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
         assert!(result.text.is_empty());
         assert_eq!(result.pending_tool_calls.len(), 1);
-        let tc = result.pending_tool_calls.get("call_1").unwrap();
+        let tc = result.pending_tool_calls.get("fc_1").unwrap();
+        assert_eq!(tc.call_id, "call_1");
         assert_eq!(tc.name, "search");
         assert_eq!(tc.arguments, "{\"query\":\"rust\"}");
     }
