@@ -48,6 +48,10 @@ pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
 pub use crate::llm::session::SessionConfig;
 
+// Thread-safe env var override helpers (replaces unsafe `std::env::set_var`
+// for mid-process env mutations in multi-threaded contexts).
+pub use self::helpers::{env_or_override, set_runtime_env};
+
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///
 /// Used by `inject_llm_keys_from_secrets()` to make API keys available to

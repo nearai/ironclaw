@@ -110,7 +110,7 @@ async fn check_nearai_session() -> CheckResult {
     let session_path = crate::llm::session::default_session_path();
     if !session_path.exists() {
         // Check for API key mode
-        if std::env::var("NEARAI_API_KEY").is_ok() {
+        if crate::config::helpers::env_or_override("NEARAI_API_KEY").is_some() {
             return CheckResult::Pass("API key configured".into());
         }
         return CheckResult::Fail(format!(

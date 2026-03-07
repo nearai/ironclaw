@@ -1107,7 +1107,7 @@ fn check_onboard_needed() -> Option<&'static str> {
         return None;
     }
 
-    if std::env::var("NEARAI_API_KEY").is_err() {
+    if ironclaw::config::env_or_override("NEARAI_API_KEY").is_none() {
         let session_path = ironclaw::llm::session::default_session_path();
         if !session_path.exists() {
             return Some("First run");
