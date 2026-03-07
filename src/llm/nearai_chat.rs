@@ -1491,4 +1491,34 @@ mod tests {
             std::env::remove_var("NEARAI_API_KEY");
         }
     }
+
+    #[tokio::test]
+    async fn test_resolve_bearer_token_config_beats_session_and_env() {
+        // Config API key should win even when session token AND env var are set.
+        let cfg = test_nearai_config("http://localhost:8318");
+        let session = test_session();
+        session
+            .set_token(secrecy::SecretString::from("session-tok".to_string()))
+            .await;
+
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("NEARAI_API_KEY", "env-key");
+        }
+
+        let provider = NearAiChatProvider::new(cfg, session).expect("provider");
+        let token = provider
+            .resolve_bearer_token()
+            .await
+            .expect("should resolve");
+        assert_eq!(
+            token, "test-key",
+            "config api_key must win over session token and env var"
+        );
+
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+    }
 }
