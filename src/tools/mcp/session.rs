@@ -285,4 +285,108 @@ mod tests {
         assert!(servers.contains(&"notion".to_string()));
         assert!(servers.contains(&"github".to_string()));
     }
+
+    #[test]
+    fn test_update_session_id_none_leaves_id_unchanged() {
+        let mut session = McpSession::new("https://mcp.example.com");
+        session.session_id = Some("existing-id".to_string());
+
+        session.update_session_id(None);
+
+        assert_eq!(session.session_id, Some("existing-id".to_string()));
+    }
+
+    #[test]
+    fn test_touch_updates_last_activity() {
+        let mut session = McpSession::new("https://mcp.example.com");
+        // Push last_activity into the past so we can observe the change.
+        session.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        let before = session.last_activity;
+
+        session.touch();
+
+        assert!(session.last_activity > before);
+    }
+
+    #[test]
+    fn test_with_idle_timeout() {
+        let manager = McpSessionManager::with_idle_timeout(42);
+        assert_eq!(manager.max_idle_secs, 42);
+    }
+
+    #[tokio::test]
+    async fn test_get_session_id_nonexistent_returns_none() {
+        let manager = McpSessionManager::new();
+        assert!(manager.get_session_id("ghost").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_session_id_nonexistent_is_noop() {
+        let manager = McpSessionManager::new();
+        // Should not panic or create a session.
+        manager
+            .update_session_id("ghost", Some("id".to_string()))
+            .await;
+        assert!(manager.active_servers().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mark_initialized_nonexistent_is_noop() {
+        let manager = McpSessionManager::new();
+        manager.mark_initialized("ghost").await;
+        assert!(manager.active_servers().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_touch_nonexistent_is_noop() {
+        let manager = McpSessionManager::new();
+        manager.touch("ghost").await;
+        assert!(manager.active_servers().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_stale_removes_only_stale() {
+        // Use a 5-second idle timeout so we can fake staleness easily.
+        let manager = McpSessionManager::with_idle_timeout(5);
+
+        manager
+            .get_or_create("fresh", "https://fresh.example.com")
+            .await;
+        manager
+            .get_or_create("stale1", "https://stale1.example.com")
+            .await;
+        manager
+            .get_or_create("stale2", "https://stale2.example.com")
+            .await;
+
+        // Push the two stale sessions into the past.
+        {
+            let mut sessions = manager.sessions.write().await;
+            let past = std::time::Instant::now() - std::time::Duration::from_secs(60);
+            sessions.get_mut("stale1").unwrap().last_activity = past;
+            sessions.get_mut("stale2").unwrap().last_activity = past;
+        }
+
+        let removed = manager.cleanup_stale().await;
+        assert_eq!(removed, 2);
+
+        let remaining = manager.active_servers().await;
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.contains(&"fresh".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_terminate_nonexistent_is_noop() {
+        let manager = McpSessionManager::new();
+        // Should not panic.
+        manager.terminate("ghost").await;
+        assert!(manager.active_servers().await.is_empty());
+    }
+
+    #[test]
+    fn test_default_trait_impl() {
+        let manager = McpSessionManager::default();
+        // Default should match new(), which uses 1800s idle timeout.
+        assert_eq!(manager.max_idle_secs, 1800);
+    }
 }

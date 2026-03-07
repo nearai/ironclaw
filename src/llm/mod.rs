@@ -177,6 +177,8 @@ fn create_openai_compat_from_registry(
 fn create_anthropic_from_registry(
     config: &RegistryProviderConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    use crate::config::CacheRetention;
+    use crate::config::helpers::optional_env;
     use rig::providers::anthropic;
 
     let api_key = config
@@ -200,7 +202,31 @@ fn create_anthropic_from_registry(
         reason: format!("Failed to create Anthropic client: {e}"),
     })?;
 
+    // Resolve prompt cache retention from env (default: Short).
+    // Injects top-level cache_control via additional_params for Anthropic
+    // automatic caching (the API auto-places the breakpoint at the last
+    // cacheable block).
+    let cache_retention: CacheRetention = optional_env("ANTHROPIC_CACHE_RETENTION")
+        .ok()
+        .flatten()
+        .and_then(|val| match val.parse::<CacheRetention>() {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!("Invalid ANTHROPIC_CACHE_RETENTION: {e}; defaulting to short");
+                None
+            }
+        })
+        .unwrap_or_default();
+
     let model = client.completion_model(&config.model);
+
+    if cache_retention != CacheRetention::None {
+        tracing::info!(
+            model = %config.model,
+            retention = %cache_retention,
+            "Anthropic automatic prompt caching enabled"
+        );
+    }
 
     tracing::info!(
         provider = %config.provider_id,
@@ -209,7 +235,9 @@ fn create_anthropic_from_registry(
         "Using Anthropic provider"
     );
 
-    Ok(Arc::new(RigAdapter::new(model, &config.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &config.model).with_cache_retention(cache_retention),
+    ))
 }
 
 fn create_ollama_from_registry(

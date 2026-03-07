@@ -14,7 +14,7 @@ jobs:
       matrix:
         include:
           - name: all-features
-            flags: "--all-features"
+            flags: "--features postgres,libsql,html-to-markdown"
           - name: default
             flags: ""
           - name: libsql-only

@@ -24,6 +24,13 @@ pub mod types;
 pub(crate) mod util;
 pub mod ws;
 
+/// Test helpers for gateway integration tests.
+///
+/// Always compiled (not behind `#[cfg(test)]`) so that integration tests in
+/// `tests/` -- which import this crate as a regular dependency -- can use
+/// [`TestGatewayBuilder`](test_helpers::TestGatewayBuilder).
+pub mod test_helpers;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
