@@ -1,16 +1,17 @@
-//! Docker container lifecycle management.
+//! Docker/Podman container lifecycle management.
 //!
 //! Handles creating, running, and cleaning up containers for sandboxed execution.
+//! Supports both Docker (rootful and rootless) and Podman (rootless).
 //!
 //! # Container Setup
 //!
 //! ```text
 //! ┌────────────────────────────────────────────────────────────────────────┐
-//! │                          Docker Container                               │
+//! │                       Container (Docker / Podman)                       │
 //! │                                                                         │
 //! │  Environment:                                                           │
-//! │    http_proxy=http://host.docker.internal:PORT                          │
-//! │    https_proxy=http://host.docker.internal:PORT                         │
+//! │    http_proxy=http://<host-gateway>:PORT                                │
+//! │    https_proxy=http://<host-gateway>:PORT                               │
 //! │    (No secrets or credentials)                                          │
 //! │                                                                         │
 //! │  Mounts:                                                                │
@@ -21,7 +22,8 @@
 //! │    Memory: 2GB (default)                                                │
 //! │    CPU: 1024 shares                                                     │
 //! │    No privileged mode                                                   │
-//! │    Non-root user (UID 1000)                                             │
+//! │    Non-root user (UID 1000) — Docker only                               │
+//! │    Rootless Podman: default user (UID 0 maps to host user via UID map)  │
 //! └────────────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -43,6 +45,49 @@ use futures::StreamExt;
 use crate::sandbox::config::{ResourceLimits, SandboxPolicy};
 use crate::sandbox::error::{Result, SandboxError};
 
+/// Which container runtime is backing the Docker-compatible API socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerRuntime {
+    /// Docker Engine or Docker Desktop.
+    Docker,
+    /// Podman (typically rootless on Linux).
+    Podman,
+}
+
+impl ContainerRuntime {
+    /// Detect the runtime by inspecting the server version string.
+    pub async fn detect(docker: &Docker) -> Self {
+        if let Ok(info) = docker.info().await
+            && let Some(version) = info.server_version
+            && version.to_lowercase().contains("podman")
+        {
+            return ContainerRuntime::Podman;
+        }
+        ContainerRuntime::Docker
+    }
+
+    /// Hostname containers use to reach the host's network.
+    ///
+    /// - **Podman**: `host.containers.internal` — Podman automatically adds this
+    ///   to every container's `/etc/hosts`, pointing at the host's slirp4netns
+    ///   gateway (rootless) or bridge gateway (rootful).
+    /// - **Docker on Linux**: `172.17.0.1` — default Docker bridge gateway.
+    /// - **Docker on macOS/Windows**: `host.docker.internal` — routed through
+    ///   the VM hypervisor by Docker Desktop.
+    pub fn host_gateway_hostname(self) -> &'static str {
+        match self {
+            ContainerRuntime::Podman => "host.containers.internal",
+            ContainerRuntime::Docker => {
+                if cfg!(target_os = "linux") {
+                    "172.17.0.1"
+                } else {
+                    "host.docker.internal"
+                }
+            }
+        }
+    }
+}
+
 /// Output from container execution.
 #[derive(Debug, Clone)]
 pub struct ContainerOutput {
@@ -58,11 +103,12 @@ pub struct ContainerOutput {
     pub truncated: bool,
 }
 
-/// Manages Docker container lifecycle.
+/// Manages Docker/Podman container lifecycle.
 pub struct ContainerRunner {
     docker: Docker,
     image: String,
     proxy_port: u16,
+    runtime: ContainerRuntime,
 }
 
 /// Append `text` into `buffer` up to `limit` bytes without breaking UTF-8.
@@ -89,12 +135,28 @@ fn append_with_limit(buffer: &mut String, text: &str, limit: usize) -> bool {
 }
 
 impl ContainerRunner {
-    /// Create a new container runner.
+    /// Create a new container runner (assumes Docker; use `new_with_runtime` when known).
     pub fn new(docker: Docker, image: String, proxy_port: u16) -> Self {
         Self {
             docker,
             image,
             proxy_port,
+            runtime: ContainerRuntime::Docker,
+        }
+    }
+
+    /// Create a new container runner with an explicitly detected runtime.
+    pub fn new_with_runtime(
+        docker: Docker,
+        image: String,
+        proxy_port: u16,
+        runtime: ContainerRuntime,
+    ) -> Self {
+        Self {
+            docker,
+            image,
+            proxy_port,
+            runtime,
         }
     }
 
@@ -253,12 +315,10 @@ impl ContainerRunner {
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
 
-        // Add proxy environment (uses host.docker.internal for Mac/Windows, 172.17.0.1 for Linux)
-        let proxy_host = if cfg!(target_os = "linux") {
-            "172.17.0.1"
-        } else {
-            "host.docker.internal"
-        };
+        // Proxy host reachable from inside the container.
+        // Podman injects host.containers.internal automatically.
+        // Docker on Linux uses the bridge gateway; Desktop uses host.docker.internal.
+        let proxy_host = self.runtime.host_gateway_hostname();
 
         if self.proxy_port > 0 && policy.is_sandboxed() {
             env_vec.push(format!(
@@ -294,6 +354,16 @@ impl ContainerRunner {
                     "/tmp:/tmp:rw".to_string(),
                 ]
             }
+        };
+
+        // In rootless Podman the container's UID 0 maps to the host user via the
+        // UID namespace, so workspace files (owned by the host user) are accessible
+        // as root inside the container. Setting an explicit non-root UID would map
+        // to a sub-UID on the host that does not own the workspace mount.
+        // For Docker we keep the traditional non-root UID 1000.
+        let user: Option<String> = match self.runtime {
+            ContainerRuntime::Podman => None,
+            ContainerRuntime::Docker => Some("1000:1000".to_string()),
         };
 
         let host_config = HostConfig {
@@ -334,7 +404,7 @@ impl ContainerRunner {
             working_dir: Some("/workspace".to_string()),
             env: Some(env_vec),
             host_config: Some(host_config),
-            user: Some("1000:1000".to_string()), // Non-root user
+            user,
             ..Default::default()
         };
 
@@ -487,7 +557,7 @@ impl ContainerRunner {
     }
 }
 
-/// Connect to the Docker daemon.
+/// Connect to the Docker-compatible daemon (Docker or Podman).
 ///
 /// Tries these locations in order:
 /// 1. `DOCKER_HOST` env var (bollard default)
@@ -495,8 +565,10 @@ impl ContainerRunner {
 /// 3. `~/.docker/run/docker.sock` (Docker Desktop 4.13+ on macOS — primary user-owned socket)
 /// 4. `~/.colima/default/docker.sock` (Colima — popular lightweight Docker Desktop alternative)
 /// 5. `~/.rd/docker.sock` (Rancher Desktop on macOS)
-/// 6. `$XDG_RUNTIME_DIR/docker.sock` (common rootless Docker socket on Linux)
-/// 7. `/run/user/$UID/docker.sock` (rootless Docker fallback on Linux)
+/// 6. `$XDG_RUNTIME_DIR/podman/podman.sock` (rootless Podman — standard location)
+/// 7. `$XDG_RUNTIME_DIR/docker.sock` (rootless Docker on Linux)
+/// 8. `/run/user/$UID/podman/podman.sock` (rootless Podman fallback)
+/// 9. `/run/user/$UID/docker.sock` (rootless Docker fallback on Linux)
 pub async fn connect_docker() -> Result<Docker> {
     // First try bollard defaults (checks DOCKER_HOST env var, then /var/run/docker.sock).
     // This covers Linux, OrbStack (updates the /var/run symlink), and any user with
@@ -527,10 +599,11 @@ pub async fn connect_docker() -> Result<Docker> {
     }
 
     Err(SandboxError::DockerNotAvailable {
-        reason: "Could not connect to Docker daemon. Tried: $DOCKER_HOST, \
+        reason: "Could not connect to Docker or Podman daemon. Tried: $DOCKER_HOST, \
             /var/run/docker.sock, ~/.docker/run/docker.sock, \
             ~/.colima/default/docker.sock, ~/.rd/docker.sock, \
-            $XDG_RUNTIME_DIR/docker.sock, /run/user/$UID/docker.sock"
+            $XDG_RUNTIME_DIR/podman/podman.sock, $XDG_RUNTIME_DIR/docker.sock, \
+            /run/user/$UID/podman/podman.sock, /run/user/$UID/docker.sock"
             .to_string(),
     })
 }
@@ -563,12 +636,14 @@ fn unix_socket_candidates_from_env(
         push_unique(home.join(".rd/docker.sock")); // Rancher Desktop
     }
 
-    if let Some(xdg_runtime_dir) = xdg_runtime_dir {
-        push_unique(xdg_runtime_dir.join("docker.sock"));
+    if let Some(ref xdg_runtime_dir) = xdg_runtime_dir {
+        push_unique(xdg_runtime_dir.join("podman/podman.sock")); // Rootless Podman (standard)
+        push_unique(xdg_runtime_dir.join("docker.sock")); // Rootless Docker
     }
 
     if let Some(uid) = uid.filter(|value| !value.is_empty()) {
-        push_unique(PathBuf::from(format!("/run/user/{uid}/docker.sock")));
+        push_unique(PathBuf::from(format!("/run/user/{uid}/podman/podman.sock"))); // Rootless Podman fallback
+        push_unique(PathBuf::from(format!("/run/user/{uid}/docker.sock"))); // Rootless Docker fallback
     }
 
     candidates
@@ -614,7 +689,26 @@ mod tests {
         assert!(candidates.contains(&PathBuf::from("/home/tester/.docker/run/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.colima/default/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.rd/docker.sock")));
+        // Rootless Podman sockets
+        assert!(candidates.contains(&PathBuf::from("/run/user/1000/podman/podman.sock")));
         assert!(candidates.contains(&PathBuf::from("/run/user/1000/docker.sock")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unix_socket_candidates_podman_xdg() {
+        let candidates = unix_socket_candidates_from_env(
+            None,
+            Some(PathBuf::from("/run/user/1001")),
+            Some("1001".to_string()),
+        );
+        // XDG_RUNTIME_DIR/podman/podman.sock should come before the fallback
+        let podman_xdg = PathBuf::from("/run/user/1001/podman/podman.sock");
+        let podman_fallback = PathBuf::from("/run/user/1001/podman/podman.sock");
+        assert!(candidates.contains(&podman_xdg));
+        assert!(candidates.contains(&podman_fallback));
+        // XDG path appears only once (dedup)
+        assert_eq!(candidates.iter().filter(|p| **p == podman_xdg).count(), 1);
     }
 
     #[tokio::test]

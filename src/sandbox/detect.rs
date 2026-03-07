@@ -82,13 +82,16 @@ impl Platform {
         }
     }
 
-    /// Instructions to start the Docker daemon on this platform.
+    /// Instructions to start the container runtime daemon on this platform.
     pub fn start_hint(&self) -> &'static str {
         match self {
             Platform::MacOS => {
                 "Start Docker Desktop from Applications, or run: open -a Docker\n\n  To auto-start at login: System Settings > General > Login Items > add Docker.app"
             }
-            Platform::Linux => "Start the Docker daemon: sudo systemctl start docker",
+            Platform::Linux => {
+                "Start Docker: sudo systemctl start docker  \
+                 — or for rootless Podman: systemctl --user start podman.socket"
+            }
             Platform::Windows => "Start Docker Desktop from the Start menu",
         }
     }
@@ -100,10 +103,10 @@ pub struct DockerDetection {
     pub platform: Platform,
 }
 
-/// Check whether Docker is installed and running.
+/// Check whether a Docker-compatible runtime (Docker or Podman) is installed and running.
 ///
-/// 1. Checks if `docker` binary exists on PATH
-/// 2. If found, tries to connect and ping the Docker daemon via `connect_docker()`
+/// 1. Checks if `docker` or `podman` binary exists on PATH
+/// 2. If found, tries to connect and ping the daemon via `connect_docker()`
 /// 3. Returns `Available`, `NotInstalled`, or `NotRunning`
 pub async fn check_docker() -> DockerDetection {
     let platform = Platform::current();
@@ -140,25 +143,40 @@ pub async fn check_docker() -> DockerDetection {
     }
 }
 
-/// Check if the `docker` binary exists on PATH.
+/// Check if a container runtime binary (`docker` or `podman`) exists on PATH.
+///
+/// Podman provides a Docker-compatible API, so either binary suffices.
 fn docker_binary_exists() -> bool {
     #[cfg(unix)]
     {
-        std::process::Command::new("which")
-            .arg("docker")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        for binary in ["docker", "podman"] {
+            let found = std::process::Command::new("which")
+                .arg(binary)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if found {
+                return true;
+            }
+        }
+        false
     }
     #[cfg(windows)]
     {
-        std::process::Command::new("where")
-            .arg("docker")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        // Podman on Windows is less common; check docker first, then podman.
+        for binary in ["docker", "podman"] {
+            let found = std::process::Command::new("where")
+                .arg(binary)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if found {
+                return true;
+            }
+        }
+        false
     }
 }
 

@@ -38,7 +38,9 @@ use tokio::sync::RwLock;
 use bollard::Docker;
 
 use crate::sandbox::config::{ResourceLimits, SandboxConfig, SandboxPolicy};
-use crate::sandbox::container::{ContainerOutput, ContainerRunner, connect_docker};
+use crate::sandbox::container::{
+    ContainerOutput, ContainerRunner, ContainerRuntime, connect_docker,
+};
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::proxy::{HttpProxy, NetworkProxyBuilder};
 
@@ -85,6 +87,7 @@ pub struct SandboxManager {
     config: SandboxConfig,
     proxy: Arc<RwLock<Option<HttpProxy>>>,
     docker: Arc<RwLock<Option<Docker>>>,
+    runtime: Arc<RwLock<ContainerRuntime>>,
     initialized: std::sync::atomic::AtomicBool,
 }
 
@@ -95,6 +98,7 @@ impl SandboxManager {
             config,
             proxy: Arc::new(RwLock::new(None)),
             docker: Arc::new(RwLock::new(None)),
+            runtime: Arc::new(RwLock::new(ContainerRuntime::Docker)),
             initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -128,10 +132,10 @@ impl SandboxManager {
             });
         }
 
-        // Connect to Docker
+        // Connect to Docker/Podman
         let docker = connect_docker().await?;
 
-        // Check if Docker is responsive
+        // Check if daemon is responsive
         docker
             .ping()
             .await
@@ -139,11 +143,17 @@ impl SandboxManager {
                 reason: e.to_string(),
             })?;
 
+        // Detect whether we're talking to Docker or Podman
+        let runtime = ContainerRuntime::detect(&docker).await;
+        tracing::info!("Container runtime: {:?}", runtime);
+        *self.runtime.write().await = runtime;
+
         // Check for / pull image using a temporary runner
-        let checker = ContainerRunner::new(
+        let checker = ContainerRunner::new_with_runtime(
             docker.clone(),
             self.config.image.clone(),
             self.config.proxy_port,
+            runtime,
         );
         if !checker.image_exists().await {
             if self.config.auto_pull_image {
@@ -233,7 +243,13 @@ impl SandboxManager {
                 .ok_or_else(|| SandboxError::DockerNotAvailable {
                     reason: "Docker connection not initialized".to_string(),
                 })?;
-        let runner = ContainerRunner::new(docker, self.config.image.clone(), proxy_port);
+        let runtime = *self.runtime.read().await;
+        let runner = ContainerRunner::new_with_runtime(
+            docker,
+            self.config.image.clone(),
+            proxy_port,
+            runtime,
+        );
 
         let limits = ResourceLimits {
             memory_bytes: self.config.memory_limit_mb * 1024 * 1024,

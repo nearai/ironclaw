@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
-use crate::sandbox::connect_docker;
+use crate::sandbox::{ContainerRuntime, connect_docker};
 
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,13 +206,15 @@ fn validate_bind_mount_path(
     Ok(canonical)
 }
 
-/// Manages the lifecycle of Docker containers for sandboxed job execution.
+/// Manages the lifecycle of Docker/Podman containers for sandboxed job execution.
 pub struct ContainerJobManager {
     config: ContainerJobConfig,
     token_store: TokenStore,
     pub(crate) containers: Arc<RwLock<HashMap<Uuid, ContainerHandle>>>,
     /// Cached Docker connection (created on first use).
     docker: Arc<RwLock<Option<bollard::Docker>>>,
+    /// Detected container runtime (Docker or Podman), set on first connection.
+    runtime: Arc<RwLock<ContainerRuntime>>,
 }
 
 impl ContainerJobManager {
@@ -222,10 +224,11 @@ impl ContainerJobManager {
             token_store,
             containers: Arc::new(RwLock::new(HashMap::new())),
             docker: Arc::new(RwLock::new(None)),
+            runtime: Arc::new(RwLock::new(ContainerRuntime::Docker)),
         }
     }
 
-    /// Get or create a Docker connection.
+    /// Get or create a Docker/Podman connection, detecting the runtime on first use.
     async fn docker(&self) -> Result<bollard::Docker, OrchestratorError> {
         {
             let guard = self.docker.read().await;
@@ -238,6 +241,9 @@ impl ContainerJobManager {
             .map_err(|e| OrchestratorError::Docker {
                 reason: e.to_string(),
             })?;
+        let runtime = ContainerRuntime::detect(&docker).await;
+        tracing::info!("Container runtime: {:?}", runtime);
+        *self.runtime.write().await = runtime;
         *self.docker.write().await = Some(docker.clone());
         Ok(docker)
     }
@@ -306,11 +312,11 @@ impl ContainerJobManager {
         let docker = self.docker().await?;
 
         // Build container configuration
-        let orchestrator_host = if cfg!(target_os = "linux") {
-            "172.17.0.1"
-        } else {
-            "host.docker.internal"
-        };
+        let runtime = *self.runtime.read().await;
+        // Use the runtime-appropriate hostname for the container to reach the host.
+        // Podman auto-injects host.containers.internal; Docker uses the bridge
+        // gateway on Linux or host.docker.internal on Desktop (macOS/Windows).
+        let orchestrator_host = runtime.host_gateway_hostname();
 
         let orchestrator_url = format!(
             "http://{}:{}",
@@ -361,12 +367,22 @@ impl ContainerJobManager {
         use bollard::container::{Config, CreateContainerOptions};
         use bollard::models::HostConfig;
 
+        // On Docker/Linux we add host.docker.internal via extra_hosts so workers
+        // can reach the orchestrator. Podman auto-injects host.containers.internal
+        // into every container's /etc/hosts, so no extra_hosts entry is needed —
+        // and Podman does not recognise the "host-gateway" special value, which
+        // would cause container creation to fail.
+        let extra_hosts: Option<Vec<String>> = match runtime {
+            ContainerRuntime::Docker => Some(vec!["host.docker.internal:host-gateway".to_string()]),
+            ContainerRuntime::Podman => None,
+        };
+
         let host_config = HostConfig {
             binds: if binds.is_empty() { None } else { Some(binds) },
             memory: Some((memory_mb * 1024 * 1024) as i64),
             cpu_shares: Some(self.config.cpu_shares as i64),
             network_mode: Some("bridge".to_string()),
-            extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
+            extra_hosts,
             cap_drop: Some(vec!["ALL".to_string()]),
             cap_add: Some(vec!["CHOWN".to_string()]),
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
@@ -400,12 +416,20 @@ impl ContainerJobManager {
             ],
         };
 
+        // In rootless Podman the container's UID 0 maps to the host user via the
+        // UID namespace. Setting UID 1000 would map to a sub-UID that does not
+        // own the workspace mount, causing permission errors.
+        let user: Option<String> = match runtime {
+            ContainerRuntime::Podman => None,
+            ContainerRuntime::Docker => Some("1000:1000".to_string()),
+        };
+
         let container_config = Config {
             image: Some(self.config.image.clone()),
             cmd: Some(cmd),
             env: Some(env_vec),
             host_config: Some(host_config),
-            user: Some("1000:1000".to_string()),
+            user,
             working_dir: Some("/workspace".to_string()),
             ..Default::default()
         };
