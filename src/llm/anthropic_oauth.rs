@@ -188,6 +188,8 @@ impl LlmProvider for AnthropicOAuthProvider {
             finish_reason,
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
+            cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: response.usage.cache_read_input_tokens,
         })
     }
 
@@ -260,6 +262,8 @@ impl LlmProvider for AnthropicOAuthProvider {
             finish_reason,
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
+            cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: response.usage.cache_read_input_tokens,
         })
     }
 
@@ -383,6 +387,10 @@ struct AnthropicUsage {
     input_tokens: u32,
     #[serde(default)]
     output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
 }
 
 /// Convert ChatMessage list to Anthropic format.
@@ -557,6 +565,8 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             },
         };
         let (content, tool_calls) = extract_response_content(&response);
@@ -581,6 +591,8 @@ mod tests {
             usage: AnthropicUsage {
                 input_tokens: 20,
                 output_tokens: 15,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             },
         };
         let (content, tool_calls) = extract_response_content(&response);
