@@ -147,10 +147,18 @@ pub(crate) fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
     }
     // Naive with fractional seconds (legacy or SQLite datetime() output)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        tracing::warn!(
+            timestamp = %s,
+            "parsed naive timestamp without timezone, assuming UTC — consider migrating to RFC 3339"
+        );
         return Ok(ndt.and_utc());
     }
     // Naive without fractional seconds (legacy format)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        tracing::warn!(
+            timestamp = %s,
+            "parsed naive timestamp without timezone, assuming UTC — consider migrating to RFC 3339"
+        );
         return Ok(ndt.and_utc());
     }
     Err(format!("unparseable timestamp: {:?}", s))
