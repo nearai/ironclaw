@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Skills, Extensions & Hooks
 
-> Updated: 2026-03-05 | Version: v0.15.0
+> Updated: 2026-03-06 | Version: v0.16.1
 
 ## 1. Overview
 
@@ -691,6 +691,41 @@ Each WASM channel declares its permissions in a sidecar JSON file (e.g., `slack.
   }
 }
 ```
+
+> **v0.16.0 change:** The `channel.webhook` section in the Slack capabilities file now uses `"hmac_secret_name"` (not `"secret_name"`). The host router reads this field and calls `register_hmac_secret()` to enable HMAC-SHA256 verification on the Slack webhook path. The actual Slack capabilities JSON ships as:
+> ```json
+> "webhook": { "hmac_secret_name": "slack_signing_secret" }
+> ```
+
+### 6.1a WIT Interface Version Tracking (v0.16.0, PR #592)
+
+Both `ChannelCapabilitiesFile` and the tool `CapabilitiesFile` now include a `wit_version` field:
+
+```json
+{
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
+  "type": "channel",
+  ...
+}
+```
+
+The host reads `wit_version` at load time and exposes it via `extension_info` tool output:
+
+```json
+{
+  "name": "my-channel",
+  "kind": "wasm_channel",
+  "installed": true,
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
+  "host_wit_version": "0.2.0"
+}
+```
+
+**`extension_info` tool** (added in v0.16.0, `builtin/extension_tools.rs`): Call `extension_info { "name": "my-channel" }` to get this output for any installed extension. Works for both WASM tools and WASM channels.
+
+A mismatch between `wit_version` and `host_wit_version` indicates a stale binary that may fail at runtime. Operators should recompile and reinstall the WASM extension. The `scripts/build-wasm-extensions.sh` script rebuilds all bundled extensions with the current WIT interface.
 
 ### 6.2 Channel Capabilities (`capabilities.rs`)
 

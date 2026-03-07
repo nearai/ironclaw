@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Configuration System
 
-> Updated: 2026-03-05 | Version: v0.15.0
+> Updated: 2026-03-06 | Version: v0.16.1
 
 ## 1. Overview
 
@@ -95,7 +95,7 @@ default is possible.
 | `RESPONSE_CACHE_MAX_ENTRIES` | usize | `1000` | No | Max cached responses before LRU eviction |
 | `LLM_FAILOVER_COOLDOWN_SECS` | u64 | `300` | No | Seconds a failed provider stays in cooldown |
 | `LLM_FAILOVER_THRESHOLD` | u32 | `3` | No | Consecutive retryable failures before provider enters cooldown |
-| `SMART_ROUTING_CASCADE` | bool | `true` | No | When enabled, uncertain responses from the cheap model trigger escalation to the primary model. Added v0.10.0. |
+| `SMART_ROUTING_CASCADE` | bool | `true` | No | When enabled, uncertain responses from the cheap (Pro-tier) model trigger escalation to the primary model. Redesigned in v0.16.0 — now uses 13-dimension scorer with four tiers (Flash/Standard/Pro/Frontier). |
 | **Embeddings** | | | | |
 | `EMBEDDING_ENABLED` | bool | `false` | No | Enable vector embeddings for semantic memory search |
 | `EMBEDDING_PROVIDER` | string | `nearai` | No | Provider: `openai`, `nearai`, or `ollama` |
@@ -200,7 +200,7 @@ The runtime handles token exchange, scope merging for shared providers (e.g., tw
 | **Memory Hygiene** | | | | |
 | `MEMORY_HYGIENE_ENABLED` | bool | `true` | No | Enable automatic cleanup of stale workspace documents |
 | `MEMORY_HYGIENE_RETENTION_DAYS` | u32 | `30` | No | Days before `daily/` documents are deleted |
-| `MEMORY_HYGIENE_CADENCE_HOURS` | u32 | `12` | No | Minimum hours between hygiene passes |
+| `MEMORY_HYGIENE_CADENCE_HOURS` | u32 | `12` | No | Minimum hours between hygiene passes. A global `AtomicBool` guard (added v0.16.0, PR #535) prevents concurrent passes — if a pass is already running when the next heartbeat fires, the new pass is skipped. |
 | **Routines** | | | | |
 | `ROUTINES_ENABLED` | bool | `true` | No | Enable the scheduled/reactive routines system |
 | `ROUTINES_CRON_INTERVAL` | u64 | `15` | No | How often (seconds) to poll for cron routines needing execution |
@@ -216,6 +216,13 @@ The runtime handles token exchange, scope merging for shared providers (e.g., tw
 | **Safety** | | | | |
 | `SAFETY_MAX_OUTPUT_LENGTH` | usize | `100000` | No | Maximum bytes allowed in tool output before truncation |
 | `SAFETY_INJECTION_CHECK_ENABLED` | bool | `true` | No | Enable prompt injection detection on tool output and LLM responses |
+| **Restart** (Docker only) | | | | |
+| `IRONCLAW_IN_DOCKER` | bool | `false` | No | Set `true` in the container entrypoint to enable the `/restart` command and `restart` tool. When `false`, restart is rejected. |
+| `IRONCLAW_RESTART_DELAY` | u64 | `5` | No | Seconds the Docker entrypoint waits before restarting `ironclaw run` after a clean exit (exit code 0). |
+| `IRONCLAW_MAX_FAILURES` | u32 | `10` | No | Maximum consecutive non-zero exits before the container entrypoint gives up and exits. |
+| `IRONCLAW_DISABLE_RESTART` | bool | `false` | No | Set `1` or `true` to prevent `std::process::exit(0)` from firing. Used in tests to validate restart logic without terminating. |
+| **Trace Recording** (v0.16.0) | | | | |
+| `IRONCLAW_RECORD_TRACE` | path | — | No | Set to a `.json` file path to enable live trace recording. Every LLM interaction (memory snapshot, HTTP exchanges, steps) is written to this file for later deterministic replay via `TraceLlm`. Unset = recording disabled. |
 | **Secrets** | | | | |
 | `SECRETS_MASTER_KEY` | secret | — | No | AES-256-GCM master key for encrypting stored secrets. Minimum 32 bytes. Falls back to OS keychain if unset |
 | **Builder** | | | | |
@@ -1022,6 +1029,11 @@ GATEWAY_AUTH_TOKEN="replace-with-random-hex-token"
 # Observability
 ##############################################
 # OBSERVABILITY_BACKEND="none"
+
+##############################################
+# Trace Recording (v0.16.0 — dev/testing only)
+##############################################
+# IRONCLAW_RECORD_TRACE=/tmp/my-session.json   # Set to capture a live session trace
 
 ##############################################
 # Logging

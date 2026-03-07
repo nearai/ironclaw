@@ -1,6 +1,6 @@
 # IronClaw Installation & Deployment Guide
 
-> Version: v0.15.0 | Tested on: macOS 15 (Apple Silicon), macOS 14 (Intel), Linux
+> Version: v0.16.1 | Tested on: macOS 15 (Apple Silicon), macOS 14 (Intel), Linux
 
 Complete guide for installing, configuring, and deploying IronClaw as a personal AI assistant.
 
@@ -72,7 +72,7 @@ Access the web UI at `http://localhost:3000`
 
 | Requirement | When Needed |
 |-------------|-------------|
-| Rust 1.92+ | Building from source |
+| Rust 1.92+ | Building from source (`rust-version = "1.92"` in `Cargo.toml`; uses Rust 2024 edition features) |
 | PostgreSQL 15+ with pgvector | PostgreSQL backend (default) |
 | Docker / Podman | Docker sandbox for shell tools |
 
@@ -254,6 +254,16 @@ SANDBOX_ENABLED=true
 SANDBOX_POLICY=readonly            # readonly, workspace_write, full_access
 SANDBOX_TIMEOUT_SECS=120
 SANDBOX_MEMORY_LIMIT_MB=2048
+
+##############################################
+# Restart Feature (Docker containers only, v0.16.0)
+# The Docker entrypoint monitors exit code:
+#   exit 0 = clean restart (waits IRONCLAW_RESTART_DELAY, then restarts)
+#   exit ≠ 0 = failure (increments counter, exits after IRONCLAW_MAX_FAILURES)
+##############################################
+IRONCLAW_IN_DOCKER=true            # Enables /restart command and restart tool
+IRONCLAW_RESTART_DELAY=5          # Seconds before restarting after clean exit
+IRONCLAW_MAX_FAILURES=10          # Max consecutive failures before giving up
 
 ##############################################
 # Claude Code Mode (optional)
@@ -742,4 +752,4 @@ If you need Okta integration, build a custom WASM tool using [BUILDING_CHANNELS.
 
 ---
 
-*Source: IronClaw v0.15.0 · See also: [ARCHITECTURE.md](ARCHITECTURE.md), [AGENT_README.md](AGENT_README.md)*
+*Source: IronClaw v0.16.1 · See also: [ARCHITECTURE.md](ARCHITECTURE.md), [AGENT_README.md](AGENT_README.md)*

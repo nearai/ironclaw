@@ -1,4 +1,4 @@
-# IronClaw v0.15.0 — LLM Backend System Deep Dive
+# IronClaw v0.16.1 — LLM Backend System Deep Dive
 
 > **Scope:** `src/llm/`, `src/config/llm.rs`, `src/agent/cost_guard.rs`,
 > `src/agent/context_monitor.rs`, `src/agent/compaction.rs`,
@@ -174,6 +174,62 @@ The four reliability wrappers in `src/llm/` all implement `LlmProvider` and
 accept `Arc<dyn LlmProvider>` as their inner provider. They compose cleanly:
 
 ```
+SmartRoutingProvider(
+  RecordingLlm(          ← trace capture layer (when IRONCLAW_RECORD_TRACE=1)
+    RetryProvider(
+      CircuitBreakerProvider(
+        CachedProvider(
+          FailoverProvider([primary, fallback])
+        )
+      )
+    )
+  )
+)
+```
+
+The `RecordingLlm` wrapper is **only** present when `IRONCLAW_RECORD_TRACE` is set; otherwise the chain collapses back to the four-layer form.
+
+### 4.0 Trace Recording — `recording.rs` (v0.16.0)
+
+`RecordingLlm` wraps any `LlmProvider` and captures every interaction into the JSON
+trace fixture format used by `TraceLlm` for deterministic E2E testing. Enable at
+runtime by setting `IRONCLAW_RECORD_TRACE=<output-path>`.
+
+**What is recorded:**
+
+| Component | Detail |
+|-----------|--------|
+| `memory_snapshot` | Workspace documents captured before the first LLM call |
+| `http_exchanges` | All outgoing HTTP request/response pairs from tools (via `HttpInterceptor`) |
+| `steps` | User inputs, LLM responses (text + tool_calls), expected tool results |
+
+**Trace file format** (`TraceFile`):
+
+```json
+{
+  "model_name": "gpt-4o",
+  "memory_snapshot": [
+    { "path": "identity/MEMORY.md", "content": "..." }
+  ],
+  "http_exchanges": [
+    {
+      "request":  { "method": "GET", "url": "...", "headers": [], "body": null },
+      "response": { "status": 200, "headers": [], "body": "..." }
+    }
+  ],
+  "steps": [
+    { "input": "What is the weather?", "expected": { "type": "tool_calls", "calls": [...] } }
+  ]
+}
+```
+
+Recorded traces are written to the path specified in `IRONCLAW_RECORD_TRACE` (must end with `.json`). They can be replayed via `TraceLlm` in tests without network access — `HttpInterceptor` returns pre-recorded responses instead of making real HTTP requests.
+
+**HTTP interception** is wired into `JobContext.http_interceptor`. The `http` built-in tool checks this interceptor before sending real requests; during replay it returns the pre-recorded response.
+
+```env
+IRONCLAW_RECORD_TRACE=/tmp/my-trace.json  # Set to any .json path to enable recording
+```
 RetryProvider(
   CircuitBreakerProvider(
     CachedProvider(
@@ -245,6 +301,15 @@ stop_sequences)`. Any change to any field produces a different key.
 entries (TTL exceeded) are pruned first, then the oldest entry is evicted if
 at capacity.
 
+**v0.16.0 changes (PR #290):**
+
+| Change | Detail |
+|--------|--------|
+| `tokio::sync::Mutex` → `std::sync::Mutex` | Cache lock is never held across `.await` points, so a blocking mutex is safe and keeps `set_model()` synchronous (no `async` needed) |
+| `set_model()` now invalidates cache | Calling `set_model()` clears all cached entries — prevents stale responses after a model switch |
+| Periodic stats logging | Every 100 requests, a `tracing::info!` line reports hit count, request count, and hit-rate percentage |
+| `len()` / `is_empty()` are now sync | Previously `async`; now sync because the mutex is `std::sync::Mutex` |
+
 **Default parameters:**
 
 - `response_cache_enabled`: false (opt-in)
@@ -277,9 +342,9 @@ the same logical request stay on the same provider.
 
 ## 5. Smart Routing Provider
 
-**`src/llm/smart_routing.rs`** (452 lines) — Added in v0.10.0
+**`src/llm/smart_routing.rs`** (1 745 lines) — Redesigned in v0.16.0 (#529)
 
-`SmartRoutingProvider` implements cost-optimized model selection by routing requests to cheap or primary models based on task complexity analysis.
+`SmartRoutingProvider` implements cost-optimized model selection by analyzing prompt complexity across 13 dimensions and routing to the appropriate model tier.
 
 The provider wraps two `LlmProvider` instances and implements the trait itself, fitting into the standard provider chain:
 
@@ -291,63 +356,102 @@ SmartRoutingProvider → RetryProvider → CircuitBreakerProvider → ResponseCa
 Cheap Model  Primary Model
 ```
 
-### 5.1 Task Complexity Classification
+### 5.1 Complexity Tiers
 
-Every incoming request is classified by `classify_message()` into one of three tiers:
+The scorer produces a 0–100 score mapped to four tiers via `Tier::from_score()`:
 
-| Complexity | Criteria |
-|------------|----------|
-| `Simple` | Short queries ≤200 chars; single words; keywords: `list`, `show`, `what is`, `status`, `help`, `yes`, `no`, `ping` |
-| `Moderate` | Medium length, ambiguous (falls between Simple and Complex) |
-| `Complex` | Contains code blocks (` ``` `); keywords: `implement`, `refactor`, `analyze`, `debug`, `design`, `architecture`, `optimize`; or ≥1000 chars |
+| Score | Tier | Typical Use Cases |
+|-------|------|------------------|
+| 0–15 | `Flash` | Greetings, quick lookups (time, date, weather) |
+| 16–40 | `Standard` | Writing, comparisons, defined tasks |
+| 41–65 | `Pro` | Multi-step analysis, code review |
+| 66+ | `Frontier` | Security audits, critical decisions |
 
-Additional rules:
-- Very short messages (≤10 chars) → always `Simple`, regardless of content
-- Tool use requests → always routed to primary model (reliable structured output required)
+These four tiers are mapped to the three `TaskComplexity` variants used by the router:
 
-### 5.2 Routing
+| Tier(s) | `TaskComplexity` | Destination |
+|---------|-----------------|-------------|
+| `Flash`, `Standard` | `Simple` | Cheap model |
+| `Pro` | `Moderate` | Cheap model with cascade escalation |
+| `Frontier` | `Complex` | Primary model always |
 
-| Classification | Destination |
-|---------------|-------------|
-| `Simple` | Cheap model (`NEARAI_CHEAP_MODEL`, e.g., Claude Haiku) |
-| `Complex` | Primary model (`NEARAI_MODEL`, e.g., Claude Sonnet/Opus) |
-| `Moderate` | Cheap model, with cascade escalation if enabled |
+> **Tool use always routes to the primary model** regardless of tier, since structured JSON output requires reliable generation.
 
-### 5.3 Cascade Mode
+### 5.2 Fast-Path Pattern Overrides
+
+Before scoring, `classify()` checks a set of compiled `PatternOverride` regexes that short-circuit the scorer for obvious cases:
+
+| Pattern | Tier |
+|---------|------|
+| `^(hi|hello|hey|thanks|ok|sure|yes|no|yep|nope|cool|nice|great|got it)$` | Flash |
+| `^what(?:'s|\s+is)?\s+(?:the\s+)?(time\|date\|day\|weather)\b…` | Flash |
+| `security.*(audit\|review\|scan)` | Frontier |
+| `vulnerabilit(y\|ies).*(review\|scan\|check\|audit)` | Frontier |
+| `deploy.*(mainnet\|production)` | Pro |
+| `production.*(deploy\|release\|push)` | Pro |
+
+### 5.3 13-Dimension Scorer
+
+`score_complexity()` / `score_complexity_with_config()` — computes a weighted sum across 13 independently scored dimensions:
+
+| Dimension | Default Weight | Key Signals |
+|-----------|--------------|-------------|
+| `reasoning_words` | 14% | "why", "explain", "compare", "trade-offs" |
+| `token_estimate` | 12% | Prompt length in tokens |
+| `code_indicators` | 10% | Backticks, `implement`, `PR`, `refactor` |
+| `multi_step` | 10% | "first", "then", "after", numbered steps |
+| `domain_specific` | 10% | Technical terms (configurable via `domain_keywords`) |
+| `creativity` | 7% | "write", "summarize", "tweet", "blog" |
+| `question_complexity` | 7% | Multiple questions, open-ended starters |
+| `precision` | 6% | Numbers, "exactly", "calculate" |
+| `ambiguity` | 5% | Vague references |
+| `context_dependency` | 5% | "previous", "you said" |
+| `sentence_complexity` | 5% | Commas, conjunctions, clause depth |
+| `tool_likelihood` | 5% | "read", "deploy", "install" |
+| `safety_sensitivity` | 4% | "password", "auth", "vulnerability" |
+
+**Multi-dimensional boost:** if 3 or more dimensions score above their threshold, the total receives a +30% additive boost.
+
+**Explicit tier hints:** prompts containing `[tier:flash]`, `[tier:standard]`, `[tier:pro]`, or `[tier:frontier]` (case-insensitive) bypass scoring entirely.
+
+### 5.4 Cascade Mode
 
 Controlled by `SMART_ROUTING_CASCADE` (default: `true`).
 
-When enabled, `Moderate` requests go to the cheap model first. If the cheap model returns an uncertain response, the request is automatically escalated to the primary model.
+When enabled, `Moderate` (`Pro`-tier) requests go to the cheap model first. If the cheap model returns an uncertain response, the request is automatically escalated to the primary model.
 
-Uncertainty is detected by scanning the response for any of these phrases:
-- `"I'm not sure"`
-- `"I don't know"`
-- `"I'm unable to"`
-- `"I cannot"`
-- `"I can't"`
-- `"beyond my capabilities"`
-- `"I need more context"`
+Uncertainty is detected by scanning the response content for any of these phrases:
+- `"i'm not sure"` / `"i am not sure"`
+- `"i don't know"` / `"i do not know"`
+- `"i'm unable to"` / `"i am unable to"`
+- `"i cannot"` / `"i can't"`
+- `"beyond my capabilities"` / `"beyond my ability"`
+- `"i need more context"` / `"i need more information"`
+- `"could you clarify"` / `"could you provide more"`
+- `"i'm not confident"` / `"i am not confident"`
 - Empty response (zero-length content)
 
-### 5.4 Configuration
+### 5.5 Configuration
 
 ```
-SMART_ROUTING_CASCADE=true         # Enable cascade escalation (default)
-NEARAI_CHEAP_MODEL=...             # Cheap model name for simple tasks
+SMART_ROUTING_CASCADE=true         # Enable cascade escalation for Pro-tier tasks (default: true)
+NEARAI_CHEAP_MODEL=...             # Cheap model name; smart routing disabled if unset
 ```
 
 If `NEARAI_CHEAP_MODEL` is not set, smart routing is disabled and all requests go to the primary model.
 
-### 5.5 Observable Statistics
+Custom domain keywords can be injected via `ScorerConfig::domain_keywords` (programmatic API — no env var).
 
-Internal atomic counters expose routing decisions for observability:
+### 5.6 Observable Statistics
+
+`SmartRoutingProvider::stats()` returns a `SmartRoutingSnapshot` with these atomic counters:
 
 | Counter | Description |
 |---------|-------------|
 | `total_requests` | All requests processed by the provider |
 | `cheap_requests` | Requests routed to the cheap model |
 | `primary_requests` | Requests routed to the primary model |
-| `cascade_escalations` | Cheap-model responses escalated to primary due to uncertainty |
+| `cascade_escalations` | Pro-tier responses escalated to primary due to uncertainty |
 
 ---
 
@@ -394,6 +498,23 @@ Note: retries on other errors are handled by the outer `RetryProvider` wrapper, 
 ### 6.5 Usage Parsing Resilience
 
 Some providers omit `completion_tokens` from the usage block. The `parse_usage()` function handles this by computing `completion_tokens = total_tokens - prompt_tokens` when `completion_tokens` is missing.
+
+### 6.6 Reasoning Content Handling (v0.16.0, PR #580)
+
+Some reasoning models (e.g. GLM-5) return their answer in `reasoning_content` rather than `content` — with `content: null`. The provider handles this with a guarded fallback:
+
+- For **text responses** (no tool calls): use `content`, fall back to `reasoning_content` if `content` is null.
+- For **tool-call responses**: always use `content`; **never** fall back to `reasoning_content`.
+
+This prevents chain-of-thought reasoning tokens from leaking into conversation history during tool calls, which would inflate the context window and confuse subsequent turns.
+
+```rust
+let content = if tool_calls.is_empty() {
+    choice.message.content.or(choice.message.reasoning_content)
+} else {
+    choice.message.content  // reasoning_content intentionally ignored
+};
+```
 
 ---
 
@@ -797,7 +918,7 @@ async fn evaluate(
 
 ---
 
-*Generated from IronClaw v0.15.0 source — `src/llm/`, `src/config/llm.rs`,
+*Generated from IronClaw v0.16.1 source — `src/llm/`, `src/config/llm.rs`,
 `src/agent/cost_guard.rs`, `src/agent/context_monitor.rs`,
 `src/agent/compaction.rs`, `src/estimation/`, `src/evaluation/`,
 `src/observability/`.*
