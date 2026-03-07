@@ -287,15 +287,14 @@ capture-screenshots.sh
 | Failure Point | Behavior |
 |---------------|----------|
 | Binary build fails | Script exits with cargo error |
-| Health check timeout | Script exits with timeout error after 60s |
+| Health check fails | Script exits with a health-check error and does not run tests |
 | Seed API call fails | Playwright test fails, seed cleanup still runs |
 | Screenshot assertion fails | Test fails, no screenshot written, cleanup runs |
 | Cleanup API call fails | Warning logged, script continues |
 
 ### State Lifecycle Risks
-
-- **Seed data leak**: Cleanup runs in `test.afterAll` and via `trap` in shell script
-- **Process leak**: Script tracks PIDs and kills on exit via `trap`
+- **Seed data leak**: Cleanup runs in Playwright `test.afterAll` hooks to remove created seed data
+- **Process leak**: Script is responsible for terminating all spawned processes on exit (including failure paths)
 - **Port conflict**: Uses high ephemeral ports (18199, 18201) to avoid conflicts
 
 ---

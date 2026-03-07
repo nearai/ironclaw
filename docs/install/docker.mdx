@@ -27,10 +27,12 @@ mkdir -p ~/.ironclaw
 docker run -d \
   --name ironclaw \
   -v ~/.ironclaw:/home/ironclaw/.ironclaw \
-  -v /var/run/docker.sock:/var/run/docker.sock \
+  # enabling this mount will allow the container to control the docker daemon, use at own risk
+  # -v /var/run/docker.sock:/var/run/docker.sock \
   -p 3000:3000 \
   -p 8080:8080 \
-  nearai/ironclaw:latest
+  # Pin to a specific IronClaw version for reproducible, rollback-friendly deployments.
+  nearai/ironclaw:latest 
 ```
 
 ## Docker Compose
@@ -42,6 +44,7 @@ version: '3.8'
 
 services:
   ironclaw:
+    # Pin to a specific IronClaw version for reproducible, rollback-friendly deployments.
     image: nearai/ironclaw:latest
     container_name: ironclaw
     restart: unless-stopped

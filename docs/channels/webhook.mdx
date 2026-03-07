@@ -86,7 +86,7 @@ curl -X POST http://localhost:8080/webhook \
 ## Checking Status
 
 ```bash
-curl http://localhost:8080/jobs/{job_id}
+curl http://localhost:8080/jobs/{job_id} -H "X-Webhook-Secret: your-secret"
 ```
 
 Response:

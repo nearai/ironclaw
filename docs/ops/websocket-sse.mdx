@@ -107,7 +107,7 @@ ws.onmessage = (event) => {
       break;
 
     case 'stream_chunk':
-      process.stdout.write(msg.delta); // stream the response
+      console.log(msg.delta); // stream the response
       break;
 
     case 'job_complete':
