@@ -91,7 +91,7 @@ impl LlmConfig {
             backend: "nearai".to_string(),
             session: SessionConfig {
                 auth_base_url: "http://localhost:0".to_string(),
-                session_path: PathBuf::from("/tmp/ironclaw-test-session.json"),
+                session_path: std::env::temp_dir().join("ironclaw-test-session.json"),
             },
             nearai: NearAiConfig {
                 model: "test-model".to_string(),

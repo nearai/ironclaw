@@ -149,6 +149,8 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
         let mut iteration = 0;
+        const MAX_TOOL_INTENT_NUDGES: u32 = 2;
+        let mut consecutive_tool_intent_nudges: u32 = 0;
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -312,6 +314,24 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
+                    // Nudge the LLM if it expressed tool intent without calling tools.
+                    // This is common with non-Anthropic models (e.g. GLM-5 via NEAR AI)
+                    // that output "Let me search…" but don't issue tool_calls.
+                    if !force_text
+                        && !context.available_tools.is_empty()
+                        && consecutive_tool_intent_nudges < MAX_TOOL_INTENT_NUDGES
+                        && crate::llm::llm_signals_tool_intent(&text)
+                    {
+                        consecutive_tool_intent_nudges += 1;
+                        tracing::info!(
+                            iteration,
+                            "LLM expressed tool intent without calling a tool, nudging"
+                        );
+                        context_messages.push(ChatMessage::assistant(&text));
+                        context_messages.push(ChatMessage::user(crate::llm::TOOL_INTENT_NUDGE));
+                        continue;
+                    }
+
                     // Strip internal "[Called tool ...]" text that can leak when
                     // provider flattening (e.g. NEAR AI) converts tool_calls to
                     // plain text and the LLM echoes it back.
@@ -322,6 +342,7 @@ impl Agent {
                     tool_calls,
                     content,
                 } => {
+                    consecutive_tool_intent_nudges = 0;
                     // Add the assistant message with tool_calls to context.
                     // OpenAI protocol requires this before tool-result messages.
                     context_messages.push(ChatMessage::assistant_with_tool_calls(

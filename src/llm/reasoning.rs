@@ -16,6 +16,129 @@ use crate::safety::SafetyLayer;
 /// The dispatcher should check for this and suppress the message.
 pub const SILENT_REPLY_TOKEN: &str = "NO_REPLY";
 
+/// Nudge message injected when the LLM expresses intent to use a tool but
+/// doesn't include any `tool_calls` in its response.
+pub const TOOL_INTENT_NUDGE: &str = "\
+You said you would perform an action, but you did not include any tool calls.\n\
+Do NOT describe what you intend to do — actually call the tool now.\n\
+Use the tool_calls mechanism to invoke the appropriate tool.";
+
+/// Detect when an LLM response expresses intent to call a tool without
+/// actually issuing tool calls. Returns `true` if the text contains phrases
+/// like "Let me search …" or "I'll fetch …" outside of fenced/indented code blocks.
+///
+/// Exclusion phrases (e.g. "let me explain") are checked first to avoid
+/// false positives on conversational language.
+pub fn llm_signals_tool_intent(response: &str) -> bool {
+    // Extract only non-code lines with quoted strings removed
+    let text = strip_code_blocks(response);
+    let lower = text.to_lowercase();
+
+    // Exclusion phrases — if any appear, bail out immediately
+    const EXCLUSIONS: &[&str] = &[
+        "let me explain",
+        "let me know",
+        "let me think",
+        "let me summarize",
+        "let me clarify",
+        "let me describe",
+        "let me help",
+        "let me understand",
+        "let me break",
+        "let me outline",
+        "let me walk you",
+        "let me provide",
+        "let me suggest",
+        "let me elaborate",
+        "let me start by",
+    ];
+    if EXCLUSIONS.iter().any(|e| lower.contains(e)) {
+        return false;
+    }
+
+    const PREFIXES: &[&str] = &["let me ", "i'll ", "i will ", "i'm going to "];
+    const ACTION_VERBS: &[&str] = &[
+        "search",
+        "look up",
+        "check",
+        "fetch",
+        "find",
+        "read the",
+        "write the",
+        "create",
+        "run the",
+        "execute",
+        "query",
+        "retrieve",
+        "add it",
+        "add the",
+        "add this",
+        "add that",
+        "update the",
+        "delete",
+        "remove the",
+        "look into",
+    ];
+
+    for prefix in PREFIXES {
+        for (i, _) in lower.match_indices(prefix) {
+            let after = &lower[i + prefix.len()..];
+            for verb in ACTION_VERBS {
+                if after.starts_with(verb) || after.contains(&format!(" {verb}")) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Strip fenced code blocks (``` ... ```), indented code lines (4+ spaces / tab),
+/// and double-quoted strings so that tool-intent detection only fires on prose.
+fn strip_code_blocks(text: &str) -> String {
+    let mut result = String::new();
+    let mut in_fence = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        // Skip indented code lines (4+ spaces or tab)
+        if line.starts_with("    ") || line.starts_with('\t') {
+            continue;
+        }
+        // Strip double-quoted strings to avoid matching intent phrases inside quotes
+        let stripped = strip_quoted_strings(line);
+        result.push_str(&stripped);
+        result.push('\n');
+    }
+    result
+}
+
+/// Remove double-quoted string literals from a line.
+fn strip_quoted_strings(line: &str) -> String {
+    let mut result = String::with_capacity(line.len());
+    let mut in_quote = false;
+    let mut prev = '\0';
+    for ch in line.chars() {
+        if ch == '"' && prev != '\\' {
+            in_quote = !in_quote;
+            continue;
+        }
+        if !in_quote {
+            result.push(ch);
+        }
+        prev = ch;
+    }
+    result
+}
+
 /// Check if a response is a silent reply (the agent has nothing to say).
 ///
 /// Returns true if the trimmed text is exactly the silent reply token or
@@ -2124,5 +2247,88 @@ That's my plan."#;
         // should use it instead of building from Reasoning state.
         let ctx = ReasoningContext::new().with_system_prompt("custom prompt".to_string());
         assert_eq!(ctx.system_prompt.as_deref(), Some("custom prompt"));
+    }
+
+    // ---- Tool intent detection tests ----
+
+    #[test]
+    fn test_llm_signals_tool_intent_true_positives() {
+        assert!(llm_signals_tool_intent("Let me search for that file."));
+        assert!(llm_signals_tool_intent("I'll fetch the data now."));
+        assert!(llm_signals_tool_intent("I'm going to check the logs."));
+        assert!(llm_signals_tool_intent("Let me add it now."));
+        assert!(llm_signals_tool_intent("I will run the tests to verify."));
+        assert!(llm_signals_tool_intent("I'll look up the documentation."));
+        assert!(llm_signals_tool_intent("Let me read the file contents."));
+        assert!(llm_signals_tool_intent("I'm going to execute the command."));
+    }
+
+    #[test]
+    fn test_llm_signals_tool_intent_true_negatives_conversational() {
+        assert!(!llm_signals_tool_intent("Let me explain how this works."));
+        assert!(!llm_signals_tool_intent(
+            "Let me know if you need anything."
+        ));
+        assert!(!llm_signals_tool_intent("Let me think about this."));
+        assert!(!llm_signals_tool_intent("Let me summarize the findings."));
+        assert!(!llm_signals_tool_intent("Let me clarify what I mean."));
+    }
+
+    #[test]
+    fn test_llm_signals_tool_intent_exclusion_takes_precedence() {
+        // Exclusion phrase present alongside intent → false
+        assert!(!llm_signals_tool_intent(
+            "Let me explain the approach, then I'll search for the file."
+        ));
+    }
+
+    #[test]
+    fn test_llm_signals_tool_intent_ignores_code_blocks() {
+        let with_code = "Here's the updated code:\n\n```\nfn main() {\n    println!(\"Let me search the database\");\n}\n```";
+        assert!(!llm_signals_tool_intent(with_code));
+    }
+
+    #[test]
+    fn test_llm_signals_tool_intent_ignores_indented_code() {
+        let with_indent =
+            "Here's the code:\n\n    println!(\"I'll fetch the data\");\n\nThat's it.";
+        assert!(!llm_signals_tool_intent(with_indent));
+    }
+
+    #[test]
+    fn test_llm_signals_tool_intent_ignores_plain_text() {
+        assert!(!llm_signals_tool_intent("The task is complete."));
+        assert!(!llm_signals_tool_intent(
+            "Here are the results you asked for."
+        ));
+        assert!(!llm_signals_tool_intent("I found 3 matching files."));
+    }
+
+    #[test]
+    fn test_llm_signals_tool_intent_quoted_string_in_code_block() {
+        let text = "The button text should say:\n```\n\"I will create your account\"\n```";
+        assert!(!llm_signals_tool_intent(text));
+    }
+
+    #[test]
+    fn test_llm_signals_tool_intent_quoted_string_outside_code_block() {
+        // Quoted intent phrase in prose should not trigger.
+        let text = "The button says \"Let me search the database\" to the user.";
+        assert!(!llm_signals_tool_intent(text));
+        // But unquoted intent in the same line should still trigger.
+        let text = "I'll fetch the results for you.";
+        assert!(llm_signals_tool_intent(text));
+    }
+
+    #[test]
+    fn test_llm_signals_tool_intent_shadowed_prefix() {
+        // An earlier non-intent "let me" should not shadow a later real intent.
+        let text = "Sure, let me think about it. Actually, let me search for the file.";
+        // "let me think" is an exclusion, so this returns false despite the second "let me search".
+        assert!(!llm_signals_tool_intent(text));
+
+        // But without an exclusion phrase, multiple prefixes should be checked.
+        let text = "I said let me be clear, then let me fetch the data.";
+        assert!(llm_signals_tool_intent(text));
     }
 }

@@ -919,4 +919,162 @@ mod tests {
         assert!(!config.client_id.is_empty());
         assert!(config.client_secret.is_some());
     }
+
+    // ---------------------------------------------------------------
+    // Security regression tests
+    // ---------------------------------------------------------------
+
+    use std::sync::Arc;
+
+    use crate::tools::registry::ToolRegistry;
+    use crate::tools::wasm::{WasmRuntimeConfig, WasmToolRuntime};
+
+    /// Helper: create a WasmToolLoader backed by a real runtime + registry.
+    fn make_loader() -> super::WasmToolLoader {
+        let runtime = Arc::new(
+            WasmToolRuntime::new(WasmRuntimeConfig::for_testing())
+                .expect("failed to create WASM runtime for test"),
+        );
+        let registry = Arc::new(ToolRegistry::new());
+        super::WasmToolLoader::new(runtime, registry)
+    }
+
+    #[tokio::test]
+    async fn test_tool_name_rejects_path_separators() {
+        let dir = TempDir::new().unwrap();
+        // Create a valid wasm file so the name check is the only failure path
+        let wasm_path = dir.path().join("dummy.wasm");
+        std::fs::File::create(&wasm_path).unwrap();
+
+        let loader = make_loader();
+
+        for bad_name in &["../evil", "foo/bar", "foo\\bar"] {
+            let result = loader.load_from_files(bad_name, &wasm_path, None).await;
+            assert!(
+                result.is_err(),
+                "Expected error for name {:?}, got Ok",
+                bad_name
+            );
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, WasmLoadError::InvalidName(_)),
+                "Expected InvalidName for {:?}, got: {}",
+                bad_name,
+                err
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_name_rejects_empty() {
+        let dir = TempDir::new().unwrap();
+        let wasm_path = dir.path().join("dummy.wasm");
+        std::fs::File::create(&wasm_path).unwrap();
+
+        let loader = make_loader();
+        let result = loader.load_from_files("", &wasm_path, None).await;
+
+        assert!(result.is_err(), "Expected error for empty name, got Ok");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, WasmLoadError::InvalidName(_)),
+            "Expected InvalidName for empty string, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_nonexistent_wasm_file() {
+        let loader = make_loader();
+        let bogus_path = std::path::PathBuf::from("/tmp/nonexistent_tool_12345.wasm");
+
+        let result = loader.load_from_files("bogus", &bogus_path, None).await;
+        assert!(
+            result.is_err(),
+            "Expected error for nonexistent file, got Ok"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, WasmLoadError::WasmNotFound(_)),
+            "Expected WasmNotFound, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_invalid_wasm_bytes() {
+        let dir = TempDir::new().unwrap();
+        let wasm_path = dir.path().join("invalid.wasm");
+
+        // Write random invalid bytes (not a valid WASM module)
+        let mut f = std::fs::File::create(&wasm_path).unwrap();
+        f.write_all(b"this is not a valid wasm module at all")
+            .unwrap();
+
+        let loader = make_loader();
+        let result = loader.load_from_files("invalid", &wasm_path, None).await;
+
+        assert!(
+            result.is_err(),
+            "Expected error for invalid WASM bytes, got Ok"
+        );
+        // The error should come from WASM compilation or registration, not name validation
+        let err = result.unwrap_err();
+        assert!(
+            !matches!(err, WasmLoadError::InvalidName(_)),
+            "Got InvalidName instead of a compilation/registration error: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discover_skips_dotfiles() {
+        let dir = TempDir::new().unwrap();
+
+        // Create a dotfile .wasm and a normal .wasm
+        std::fs::File::create(dir.path().join(".hidden.wasm")).unwrap();
+        std::fs::File::create(dir.path().join("visible.wasm")).unwrap();
+
+        let tools = discover_tools(dir.path()).await.unwrap();
+
+        // The current implementation discovers ALL .wasm files including dotfiles.
+        // This test documents the current behavior: .hidden.wasm IS discovered
+        // with the stem ".hidden". A future hardening pass could add dotfile
+        // filtering, at which point this assertion should be updated.
+        assert!(
+            tools.contains_key("visible"),
+            "visible.wasm should be discovered"
+        );
+        assert!(
+            tools.contains_key(".hidden"),
+            "dotfile .hidden.wasm is currently discovered (no dotfile filter yet)"
+        );
+        assert_eq!(tools.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_discover_tools_ignores_subdirectories() {
+        let dir = TempDir::new().unwrap();
+
+        // Create a top-level wasm file
+        std::fs::File::create(dir.path().join("top_level.wasm")).unwrap();
+
+        // Create a subdirectory with a wasm file inside
+        let sub_dir = dir.path().join("subdir");
+        std::fs::create_dir(&sub_dir).unwrap();
+        std::fs::File::create(sub_dir.join("nested.wasm")).unwrap();
+
+        let tools = discover_tools(dir.path()).await.unwrap();
+
+        // Only top-level files should be discovered (read_dir is not recursive)
+        assert_eq!(tools.len(), 1, "Only top-level .wasm files should be found");
+        assert!(
+            tools.contains_key("top_level"),
+            "top_level.wasm should be discovered"
+        );
+        assert!(
+            !tools.contains_key("nested"),
+            "nested.wasm inside subdir should NOT be discovered"
+        );
+    }
 }
