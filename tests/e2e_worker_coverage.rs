@@ -215,6 +215,14 @@ mod tests {
     // -----------------------------------------------------------------------
     // Test 5: rate_limit_cascade
     // -----------------------------------------------------------------------
+    //
+    // Exercises the stuck-detection path by making 11 consecutive
+    // `stub_rate_limit` tool calls (all of which return
+    // `ToolError::RateLimited`), exceeding the 10-call threshold.
+    // The fixture ends with a text response forced by the iteration
+    // limit so the agent can still produce a final message.
+    //
+    // References: Issue #605, PR #593 review comments.
 
     #[tokio::test]
     async fn rate_limit_cascade() {
@@ -227,27 +235,37 @@ mod tests {
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
             .with_extra_tools(vec![Arc::new(StubRateLimitTool) as Arc<dyn Tool>])
+            // Raise iteration limit so the agent can attempt all 11 tool
+            // calls before being forced to produce a text response.
+            .with_max_tool_iterations(14)
             .build()
             .await;
 
         rig.send_message("Call the rate limited tool").await;
-        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(30)).await;
 
         rig.verify_trace_expects(&trace, &responses);
 
-        // Both calls should have failed due to rate limiting.
+        // All 11 stub_rate_limit calls should have been attempted and failed.
         let completed = rig.tool_calls_completed();
         let rl_calls: Vec<_> = completed
             .iter()
             .filter(|(name, _)| name == "stub_rate_limit")
             .collect();
         assert!(
-            !rl_calls.is_empty(),
-            "Expected stub_rate_limit calls: {completed:?}"
+            rl_calls.len() >= 10,
+            "Expected >= 10 stub_rate_limit calls to hit the cascade threshold, got {}: {completed:?}",
+            rl_calls.len()
         );
         assert!(
             rl_calls.iter().all(|(_, ok)| !ok),
             "All stub_rate_limit calls should fail: {rl_calls:?}"
+        );
+
+        // Verify the agent still produced a final response despite the cascade.
+        assert!(
+            !responses.is_empty(),
+            "Agent should produce a response even after rate-limit cascade"
         );
 
         rig.shutdown();
