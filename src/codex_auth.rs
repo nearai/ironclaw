@@ -106,6 +106,10 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
                 is_chatgpt_mode: false,
             });
         }
+        // If auth_mode was explicitly `apiKey`, do not fall back to checking for a token.
+        if auth.auth_mode.is_some() {
+            return None;
+        }
     }
 
     // ChatGPT mode: use access_token as bearer token.
@@ -192,6 +196,19 @@ mod tests {
     fn returns_none_for_empty_key() {
         let mut f = NamedTempFile::new().unwrap();
         writeln!(f, r#"{{"auth_mode":"apiKey","OPENAI_API_KEY":""}}"#).unwrap();
+        assert!(load_codex_credentials(f.path()).is_none());
+    }
+
+    #[test]
+    fn api_key_mode_missing_key_does_not_fallback_to_chatgpt() {
+        // Bug: if auth_mode is "apiKey" but key is missing, the old code would
+        // fall through to check for a ChatGPT token, returning is_chatgpt_mode: true.
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(
+            f,
+            r#"{{"auth_mode":"apiKey","OPENAI_API_KEY":"","tokens":{{"id_token":{{}},"access_token":"eyJ-bad","refresh_token":"rt-x"}}}}"#
+        )
+        .unwrap();
         assert!(load_codex_credentials(f.path()).is_none());
     }
 }
