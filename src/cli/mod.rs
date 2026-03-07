@@ -258,5 +258,4 @@ mod tests {
         let help = cmd.render_long_help().to_string();
         assert_snapshot!(help);
     }
-
 }
