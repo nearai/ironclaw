@@ -27,7 +27,7 @@
           "host_patterns": ["api.telegram.org"]
         }
       },
-      "max_response_bytes": 20971520,
+      "max_response_bytes": 52428800,
       "rate_limit": {
         "requests_per_minute": 30,
         "requests_per_hour": 1000

@@ -1556,8 +1556,10 @@ fn is_downloadable_document(att: &InboundAttachment) -> bool {
 ///
 /// Downloads any attachment that isn't voice or image so the host-side
 /// `DocumentExtractionMiddleware` can extract text from PDFs, Office docs, etc.
-fn download_and_store_documents(attachments: &[InboundAttachment]) {
-    for att in attachments {
+///
+/// On failure, sets `extracted_text` to an error message so the user gets feedback.
+fn download_and_store_documents(attachments: &mut [InboundAttachment]) {
+    for att in attachments.iter_mut() {
         if !is_downloadable_document(att) {
             continue;
         }
@@ -1584,6 +1586,11 @@ fn download_and_store_documents(attachments: &[InboundAttachment]) {
                     channel_host::LogLevel::Error,
                     &format!("Failed to download document file: {}", e),
                 );
+                let name = att.filename.as_deref().unwrap_or("document");
+                att.extracted_text = Some(format!(
+                    "[Failed to download '{name}': {e}. \
+                     The file may be too large or unavailable. Please try a smaller file.]"
+                ));
             }
         }
     }
@@ -1592,13 +1599,13 @@ fn download_and_store_documents(attachments: &[InboundAttachment]) {
 /// Process a single message.
 fn handle_message(message: TelegramMessage) {
     // Extract attachments from media fields (pure data mapping, no host calls)
-    let attachments = extract_attachments(&message);
+    let mut attachments = extract_attachments(&message);
 
     // Download and store voice attachments for host-side transcription
     download_and_store_voice(&attachments);
 
     // Download and store document attachments for host-side text extraction
-    download_and_store_documents(&attachments);
+    download_and_store_documents(&mut attachments);
 
     // Use text or caption (for media messages)
     let has_voice = message.voice.is_some();

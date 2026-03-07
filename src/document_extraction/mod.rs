@@ -56,13 +56,22 @@ impl DocumentExtractionMiddleware {
                 continue;
             }
 
-            // Skip if too large
+            // Check if too large
             if let Some(size) = attachment.size_bytes.filter(|&s| s > MAX_DOCUMENT_SIZE) {
                 tracing::warn!(
                     attachment_id = %attachment.id,
                     size,
                     "Document too large for extraction, skipping"
                 );
+                let mb = size as f64 / (1024.0 * 1024.0);
+                let max_mb = MAX_DOCUMENT_SIZE as f64 / (1024.0 * 1024.0);
+                extractions.push((
+                    i,
+                    format!(
+                        "[Document too large for text extraction: {mb:.1} MB exceeds {max_mb:.0} MB limit. \
+                         Please send a smaller file or copy-paste the relevant text.]"
+                    ),
+                ));
                 continue;
             }
 
@@ -78,10 +87,23 @@ impl DocumentExtractionMiddleware {
                             error = %e,
                             "Failed to download document for extraction"
                         );
+                        extractions.push((
+                            i,
+                            format!(
+                                "[Failed to download document for text extraction: {e}. \
+                                 Please try sending the file again.]"
+                            ),
+                        ));
                         continue;
                     }
                 }
             } else {
+                extractions.push((
+                    i,
+                    "[Document has no data and no download URL. \
+                     Please try sending the file again.]"
+                        .to_string(),
+                ));
                 continue;
             };
 
@@ -111,6 +133,14 @@ impl DocumentExtractionMiddleware {
                         error = %e,
                         "Failed to extract text from document"
                     );
+                    let name = filename.unwrap_or("document");
+                    extractions.push((
+                        i,
+                        format!(
+                            "[Failed to extract text from '{name}' ({mime}): {e}. \
+                             The file format may not be supported.]"
+                        ),
+                    ));
                 }
             }
         }
@@ -240,7 +270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_oversized_documents() {
+    async fn reports_oversized_documents() {
         let middleware = DocumentExtractionMiddleware::new();
         let mut att = doc_attachment("text/plain", "huge.txt", vec![]);
         att.size_bytes = Some(MAX_DOCUMENT_SIZE + 1);
@@ -248,7 +278,11 @@ mod tests {
             IncomingMessage::new("test", "user1", "").with_attachments(vec![att]);
 
         middleware.process(&mut msg).await;
-        assert!(msg.attachments[0].extracted_text.is_none());
+        let text = msg.attachments[0].extracted_text.as_deref().unwrap();
+        assert!(
+            text.contains("too large"),
+            "Expected 'too large' error, got: {text}"
+        );
     }
 
     #[tokio::test]
