@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::context::JobContext;
 use crate::safety::SafetyLayer;
+use crate::tools::tool::ToolDomain;
 use crate::tools::registry::ToolRegistry;
 
 /// Maximum allowed nesting depth for tool-invokes-tool chains.
@@ -51,6 +52,9 @@ pub enum PtcError {
 
     #[error("Nesting depth exceeded (max {max})")]
     NestingDepthExceeded { max: u32 },
+
+    #[error("Tool {name} has domain Container and cannot be executed on the orchestrator")]
+    DomainBlocked { name: String },
 }
 
 /// Standalone tool execution engine for programmatic tool calling.
@@ -105,6 +109,15 @@ impl ToolExecutor {
             .ok_or_else(|| PtcError::NotFound {
                 name: tool_name.to_string(),
             })?;
+
+        // Reject Container-domain tools — they must run inside a sandbox,
+        // not on the orchestrator host. Without this check a compromised
+        // worker could invoke shell/file tools on the host (sandbox escape).
+        if tool.domain() == ToolDomain::Container {
+            return Err(PtcError::DomainBlocked {
+                name: tool_name.to_string(),
+            });
+        }
 
         // Determine timeout: caller override -> tool's own timeout -> default,
         // capped at MAX_TIMEOUT_SECS.
@@ -180,7 +193,7 @@ impl std::fmt::Debug for ToolExecutor {
 mod tests {
     use super::*;
     use crate::safety::SafetyLayer;
-    use crate::tools::tool::{Tool, ToolError, ToolOutput};
+    use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput};
 
     fn test_safety_config() -> crate::config::SafetyConfig {
         crate::config::SafetyConfig {
@@ -399,6 +412,54 @@ mod tests {
             }
             other => panic!("Expected InvalidParameters, got {:?}", other),
         }
+    }
+
+    /// A tool that declares Container domain — must be blocked by the executor.
+    struct ContainerDomainTool;
+
+    #[async_trait::async_trait]
+    impl Tool for ContainerDomainTool {
+        fn name(&self) -> &str {
+            "container_tool"
+        }
+        fn description(&self) -> &str {
+            "Simulates a container-domain tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("should not reach here", Duration::from_millis(1)))
+        }
+        fn domain(&self) -> ToolDomain {
+            ToolDomain::Container
+        }
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn test_container_domain_blocked() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(ContainerDomainTool)).await;
+        let safety = Arc::new(SafetyLayer::new(&test_safety_config()));
+        let executor = ToolExecutor::new(tools, safety, Duration::from_secs(60));
+
+        let ctx = JobContext::new("test", "test");
+        let result = executor
+            .execute("container_tool", serde_json::json!({}), &ctx, None)
+            .await;
+
+        assert!(
+            matches!(result, Err(PtcError::DomainBlocked { .. })),
+            "Container-domain tools must be rejected: {:?}",
+            result
+        );
     }
 
     #[tokio::test]

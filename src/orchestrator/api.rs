@@ -469,17 +469,24 @@ async fn tool_call_handler(
         format!("PTC call: {}", req.tool_name),
         format!("Programmatic tool call from job {}", job_id),
     );
-    // Propagate nesting depth so the executor enforces the global limit
-    ctx.tool_nesting_depth = req.nesting_depth;
+    // Do not trust client-provided nesting_depth — a malicious worker
+    // could always send 0 to bypass the limit. PTC calls from workers
+    // are inherently at depth >= 1 (container -> orchestrator). Use the
+    // client value but floor it at 1.
+    ctx.tool_nesting_depth = req.nesting_depth.max(1);
 
-    // Emit tool_use SSE event
+    // Emit tool_use SSE event with redacted parameters to avoid leaking
+    // sensitive data (API keys, passwords, PII) to the web UI.
     if let Some(ref tx) = state.job_event_tx {
+        let redacted_params = serde_json::json!({
+            "_note": "parameters redacted for security"
+        });
         let _ = tx.send((
             job_id,
             SseEvent::JobToolUse {
                 job_id: job_id.to_string(),
                 tool_name: req.tool_name.clone(),
-                input: req.parameters.clone(),
+                input: redacted_params,
             },
         ));
     }

@@ -50,13 +50,13 @@ def _token():
     return _env("IRONCLAW_WORKER_TOKEN")
 
 
-def call_tool(name, params=None, timeout_secs=None):
+def call_tool(name, params=None, timeout_secs=60):
     """Call a tool on the orchestrator by name.
 
     Args:
         name: Tool name (e.g., "echo", "shell", "read_file").
         params: Dictionary of parameters to pass to the tool.
-        timeout_secs: Optional timeout in seconds (max 300).
+        timeout_secs: Timeout in seconds (default 60, max 300).
 
     Returns:
         Tool output as a string.
@@ -65,12 +65,12 @@ def call_tool(name, params=None, timeout_secs=None):
         RuntimeError: If the tool call fails.
     """
     url = f"{_base_url()}/tools/call"
+    server_timeout = min(int(timeout_secs), 300)
     body = {
         "tool_name": name,
         "parameters": params or {},
+        "timeout_secs": server_timeout,
     }
-    if timeout_secs is not None:
-        body["timeout_secs"] = min(int(timeout_secs), 300)
 
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
@@ -84,7 +84,10 @@ def call_tool(name, params=None, timeout_secs=None):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=(timeout_secs if timeout_secs is not None else 60) + 5) as resp:
+        # Client-side timeout slightly longer than server-side to account
+        # for network latency, preventing premature client timeouts.
+        client_timeout = server_timeout + 5
+        with urllib.request.urlopen(req, timeout=client_timeout) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="replace") if e.fp else ""
