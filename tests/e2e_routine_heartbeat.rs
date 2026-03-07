@@ -20,9 +20,8 @@ mod tests {
     use ironclaw::agent::routine_engine::RoutineEngine;
     use ironclaw::agent::{HeartbeatConfig, HeartbeatRunner};
     use ironclaw::channels::IncomingMessage;
-    use ironclaw::config::{RoutineConfig, SafetyConfig};
+    use ironclaw::config::RoutineConfig;
     use ironclaw::db::Database;
-    use ironclaw::safety::SafetyLayer;
     use ironclaw::workspace::Workspace;
     use ironclaw::workspace::hygiene::HygieneConfig;
 
@@ -342,10 +341,6 @@ mod tests {
             }],
         );
         let llm = Arc::new(TraceLlm::from_trace(trace));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
@@ -358,7 +353,7 @@ mod tests {
         };
 
         let runner =
-            HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm, safety)
+            HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm)
                 .with_response_channel(tx);
 
         let result = runner.check_heartbeat().await;
@@ -396,10 +391,6 @@ mod tests {
         // LLM should NOT be called, so provide a trace that would panic if called.
         let trace = LlmTrace::single_turn("test-heartbeat-skip", "skip", vec![]);
         let llm = Arc::new(TraceLlm::from_trace(trace));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
 
         let hygiene_config = HygieneConfig {
             enabled: false,
@@ -410,7 +401,7 @@ mod tests {
         };
 
         let runner =
-            HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm, safety);
+            HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm);
 
         let result = runner.check_heartbeat().await;
         assert!(

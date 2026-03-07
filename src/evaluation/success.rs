@@ -65,41 +65,12 @@ pub trait SuccessEvaluator: Send + Sync {
 }
 
 /// Rule-based success evaluator.
+#[allow(dead_code)] // Trait implementation exists; only instantiated in tests
 pub struct RuleBasedEvaluator {
     /// Minimum success rate for actions.
     min_action_success_rate: f64,
     /// Maximum allowed failures.
     max_failures: u32,
-}
-
-impl RuleBasedEvaluator {
-    /// Create a new rule-based evaluator.
-    pub fn new() -> Self {
-        Self {
-            min_action_success_rate: 0.8,
-            max_failures: 3,
-        }
-    }
-
-    /// Set minimum action success rate.
-    #[allow(dead_code)] // Public API for configuring evaluation threshold
-    pub fn with_min_success_rate(mut self, rate: f64) -> Self {
-        self.min_action_success_rate = rate;
-        self
-    }
-
-    /// Set maximum failures.
-    #[allow(dead_code)] // Public API for configuring failure tolerance
-    pub fn with_max_failures(mut self, max: u32) -> Self {
-        self.max_failures = max;
-        self
-    }
-}
-
-impl Default for RuleBasedEvaluator {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[async_trait]
@@ -199,16 +170,9 @@ impl SuccessEvaluator for RuleBasedEvaluator {
 }
 
 /// LLM-based success evaluator for more nuanced evaluation.
+#[allow(dead_code)] // Trait implementation exists; no production callers yet
 pub struct LlmEvaluator {
     llm: Arc<dyn LlmProvider>,
-}
-
-impl LlmEvaluator {
-    /// Create a new LLM-based evaluator.
-    #[allow(dead_code)] // Public API for LLM-based evaluation
-    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
-        Self { llm }
-    }
 }
 
 #[async_trait]
@@ -292,9 +256,17 @@ mod tests {
     use super::*;
     use crate::context::JobContext;
 
+    /// Default evaluator with standard thresholds.
+    fn default_evaluator() -> RuleBasedEvaluator {
+        RuleBasedEvaluator {
+            min_action_success_rate: 0.8,
+            max_failures: 3,
+        }
+    }
+
     #[tokio::test]
     async fn test_rule_based_evaluator_success() {
-        let evaluator = RuleBasedEvaluator::new();
+        let evaluator = default_evaluator();
 
         let mut job = JobContext::new("Test", "Test job");
         job.transition_to(crate::context::JobState::InProgress, None)
@@ -315,7 +287,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_rule_based_evaluator_failure() {
-        let evaluator = RuleBasedEvaluator::new().with_max_failures(1);
+        let evaluator = RuleBasedEvaluator {
+            max_failures: 1,
+            ..default_evaluator()
+        };
 
         let job = JobContext::new("Test", "Test job");
 
@@ -405,25 +380,16 @@ mod tests {
 
     #[test]
     fn test_rule_based_evaluator_default() {
-        let eval = RuleBasedEvaluator::default();
+        let eval = default_evaluator();
         assert_eq!(eval.min_action_success_rate, 0.8);
         assert_eq!(eval.max_failures, 3);
-    }
-
-    #[test]
-    fn test_rule_based_evaluator_builder_methods() {
-        let eval = RuleBasedEvaluator::new()
-            .with_min_success_rate(0.5)
-            .with_max_failures(10);
-        assert_eq!(eval.min_action_success_rate, 0.5);
-        assert_eq!(eval.max_failures, 10);
     }
 
     // --- RuleBasedEvaluator::evaluate edge cases ---
 
     #[tokio::test]
     async fn test_empty_actions_fails() {
-        let eval = RuleBasedEvaluator::new();
+        let eval = default_evaluator();
         let job = completed_job("empty");
         let result = eval.evaluate(&job, &[], None).await.unwrap();
         assert!(!result.success);
@@ -432,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_actions_succeed_completed_job_gets_100() {
-        let eval = RuleBasedEvaluator::new();
+        let eval = default_evaluator();
         let job = completed_job("perfect");
         let actions = vec![
             create_action(true),
@@ -450,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn test_quality_score_no_completion_bonus_for_pending_job() {
         // Even if all actions succeed, a non-completed job gets flagged
-        let eval = RuleBasedEvaluator::new();
+        let eval = default_evaluator();
         let job = JobContext::new("pending", "still pending");
         let actions = vec![create_action(true)];
         let result = eval.evaluate(&job, &actions, None).await.unwrap();
@@ -466,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submitted_state_counts_as_completed() {
-        let eval = RuleBasedEvaluator::new();
+        let eval = default_evaluator();
         let mut job = JobContext::new("submitted", "test");
         job.transition_to(crate::context::JobState::InProgress, None)
             .unwrap();
@@ -483,7 +449,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_success_rate_below_threshold_fails() {
-        let eval = RuleBasedEvaluator::new().with_min_success_rate(0.9);
+        let eval = RuleBasedEvaluator {
+            min_action_success_rate: 0.9,
+            ..default_evaluator()
+        };
         let job = completed_job("threshold");
         // 4 out of 5 = 80%, below 90% threshold
         let actions = vec![
@@ -505,7 +474,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_too_many_failures_flagged() {
-        let eval = RuleBasedEvaluator::new().with_max_failures(1);
+        let eval = RuleBasedEvaluator {
+            max_failures: 1,
+            ..default_evaluator()
+        };
         let job = completed_job("failures");
         // 8 successes, 2 failures: rate is 80% (passes default 0.8) but failures > max 1
         let actions = vec![
@@ -532,7 +504,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_critical_error_detected() {
-        let eval = RuleBasedEvaluator::new().with_max_failures(10);
+        let eval = RuleBasedEvaluator {
+            max_failures: 10,
+            ..default_evaluator()
+        };
         let job = completed_job("critical");
         let actions = vec![
             create_action(true),
@@ -548,7 +523,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_fatal_error_detected() {
-        let eval = RuleBasedEvaluator::new().with_max_failures(10);
+        let eval = RuleBasedEvaluator {
+            max_failures: 10,
+            ..default_evaluator()
+        };
         let job = completed_job("fatal");
         let actions = vec![
             create_action(true),
@@ -563,9 +541,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_quality_score_capped_at_50_with_issues() {
-        let eval = RuleBasedEvaluator::new()
-            .with_min_success_rate(0.0)
-            .with_max_failures(100);
+        let eval = RuleBasedEvaluator {
+            min_action_success_rate: 0.0,
+            max_failures: 100,
+        };
         // Job not completed => issues present, quality capped
         let job = JobContext::new("capped", "test");
         let actions = vec![create_action(true)];
@@ -576,7 +555,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_failed_result_includes_suggestions() {
-        let eval = RuleBasedEvaluator::new().with_max_failures(0);
+        let eval = RuleBasedEvaluator {
+            max_failures: 0,
+            ..default_evaluator()
+        };
         let job = completed_job("suggestions");
         let actions = vec![create_action(false)];
         let result = eval.evaluate(&job, &actions, None).await.unwrap();
@@ -587,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_successful_action_completed_job() {
-        let eval = RuleBasedEvaluator::new();
+        let eval = default_evaluator();
         let job = completed_job("single");
         let actions = vec![create_action(true)];
         let result = eval.evaluate(&job, &actions, None).await.unwrap();

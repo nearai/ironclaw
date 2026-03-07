@@ -405,7 +405,6 @@ impl AppBuilder {
             tools
                 .register_builder_tool(
                     llm.clone(),
-                    safety.clone(),
                     Some(self.config.builder.to_builder_config()),
                 )
                 .await;

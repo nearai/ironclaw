@@ -31,7 +31,6 @@ use tokio::sync::mpsc;
 use crate::channels::OutgoingResponse;
 use crate::db::Database;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
-use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
 
@@ -102,7 +101,6 @@ pub struct HeartbeatRunner {
     hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     store: Option<Arc<dyn Database>>,
     consecutive_failures: u32,
@@ -115,14 +113,12 @@ impl HeartbeatRunner {
         hygiene_config: HygieneConfig,
         workspace: Arc<Workspace>,
         llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
     ) -> Self {
         Self {
             config,
             hygiene_config,
             workspace,
             llm,
-            safety,
             response_tx: None,
             store: None,
             consecutive_failures: 0,
@@ -272,7 +268,7 @@ impl HeartbeatRunner {
             .with_max_tokens(max_tokens)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let reasoning = Reasoning::new(self.llm.clone());
         let (content, _usage) = match reasoning.complete(request).await {
             Ok(r) => r,
             Err(e) => return HeartbeatResult::Failed(format!("LLM call failed: {}", e)),
@@ -386,11 +382,10 @@ pub fn spawn_heartbeat(
     hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     store: Option<Arc<dyn Database>>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety);
+    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
     }

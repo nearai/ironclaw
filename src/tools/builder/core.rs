@@ -43,7 +43,6 @@ use crate::error::ToolError as AgentToolError;
 use crate::llm::{
     ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolDefinition,
 };
-use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
@@ -251,7 +250,6 @@ pub trait SoftwareBuilder: Send + Sync {
 pub struct LlmSoftwareBuilder {
     config: BuilderConfig,
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
 }
 
@@ -260,7 +258,6 @@ impl LlmSoftwareBuilder {
     pub fn new(
         config: BuilderConfig,
         llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
         tools: Arc<ToolRegistry>,
     ) -> Self {
         // Ensure build directory exists
@@ -271,7 +268,6 @@ impl LlmSoftwareBuilder {
         Self {
             config,
             llm,
-            safety,
             tools,
         }
     }
@@ -521,7 +517,7 @@ Create alongside the .wasm file to grant capabilities:
         let mut iteration = 0;
 
         // Create reasoning engine
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let reasoning = Reasoning::new(self.llm.clone());
 
         // Build initial context
         let tool_defs = self.get_build_tools().await;
@@ -822,7 +818,7 @@ Create alongside the .wasm file to grant capabilities:
 impl SoftwareBuilder for LlmSoftwareBuilder {
     async fn analyze(&self, description: &str) -> Result<BuildRequirement, AgentToolError> {
         // Use LLM to parse the description
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let reasoning = Reasoning::new(self.llm.clone());
 
         let prompt = format!(
             r#"Analyze this software requirement and extract structured information.
