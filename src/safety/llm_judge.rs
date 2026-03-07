@@ -11,7 +11,7 @@
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Policy for ambiguous verdicts.
 #[derive(Debug, Clone, PartialEq)]
@@ -182,15 +182,20 @@ impl LlmJudge {
             .unwrap_or_else(|_| req.tool_args.to_string());
 
         // Escape user-controlled values before embedding in the prompt.
-        // Replacing "</" prevents tag-boundary injection (e.g. a crafted intent
-        // containing "</user_intent> IGNORE ABOVE" breaking out of the XML block).
+        // Replacing "</" prevents XML closing-tag injection — a crafted intent
+        // like "</user_intent> IGNORE ABOVE" would otherwise break the structural
+        // boundary and inject instructions into the judge prompt.
         let safe_intent = escape_judge_input(&req.original_user_intent);
         let safe_tool = escape_judge_input(&req.tool_name);
         let safe_args = escape_judge_input(&args_str);
 
         let user_prompt = format!(
-            "<user_intent>{safe_intent}</user_intent>\n\n\
-             <tool_call>\nTool: {safe_tool}\nArguments:\n{safe_args}\n</tool_call>\n\n\
+            "Evaluate whether the proposed tool call is consistent with the user's original intent.\n\n\
+             <user_intent>\n{safe_intent}\n</user_intent>\n\n\
+             <tool_call>\n\
+             Tool: {safe_tool}\n\
+             Arguments:\n{safe_args}\n\
+             </tool_call>\n\n\
              Respond ONLY with valid JSON (no markdown fences, no extra text):\n\
              {{\"verdict\":\"Allow\"|\"Deny\"|\"Ambiguous\",\
              \"attack_type\":\"<brief attack type or null>\",\
@@ -226,17 +231,17 @@ impl LlmJudge {
             builder = builder.bearer_auth(key);
         }
 
-        let latency_ms = start.elapsed().as_millis() as u64;
-
         let response_text = match builder.send().await {
             Ok(resp) => match resp.text().await {
                 Ok(text) => text,
                 Err(e) => {
+                    let latency_ms = start.elapsed().as_millis() as u64;
                     warn!(tool = %req.tool_name, error = %e, "LLM judge: failed to read response body, failing open");
                     return fail_open(&req.tool_name, latency_ms);
                 }
             },
             Err(e) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
                 warn!(tool = %req.tool_name, error = %e, "LLM judge: HTTP request failed, failing open");
                 return fail_open(&req.tool_name, latency_ms);
             }
@@ -248,8 +253,8 @@ impl LlmJudge {
         let completion: CompletionResponse = match serde_json::from_str(&response_text) {
             Ok(c) => c,
             Err(e) => {
-                warn!(tool = %req.tool_name, error = %e, raw = %response_text, "LLM judge: failed to parse completion envelope, failing open");
-                return fail_open(&req.tool_name, latency_ms);
+                warn!(tool = %req.tool_name, error = %e, "LLM judge: failed to parse completion envelope, treating as Ambiguous");
+                return fail_ambiguous(&req.tool_name, latency_ms, "Judge returned malformed completion response");
             }
         };
 
@@ -266,14 +271,14 @@ impl LlmJudge {
             }
         };
 
-        // Strip markdown fences if present
-        let json_str = strip_markdown_fences(&content);
+        // Extract JSON object — tolerates markdown fences and leading/trailing prose
+        let json_str = extract_json_object(&content);
 
         let raw: RawVerdict = match serde_json::from_str(json_str) {
             Ok(r) => r,
             Err(e) => {
-                warn!(tool = %req.tool_name, error = %e, raw = %content, "LLM judge: failed to parse verdict JSON, failing open");
-                return fail_open(&req.tool_name, latency_ms);
+                warn!(tool = %req.tool_name, error = %e, "LLM judge: failed to parse verdict JSON, treating as Ambiguous");
+                return fail_ambiguous(&req.tool_name, latency_ms, "Judge returned unparseable response");
             }
         };
 
@@ -309,14 +314,6 @@ impl LlmJudge {
             latency_ms,
         };
 
-        debug!(
-            tool = %req.tool_name,
-            verdict = %record.verdict,
-            confidence,
-            latency_ms,
-            "LLM judge evaluated tool call"
-        );
-
         (verdict, record)
     }
 }
@@ -335,7 +332,11 @@ fn escape_judge_input(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Return a fail-open Allow verdict for use on error paths.
+/// Return a fail-open Allow verdict for network/availability error paths.
+///
+/// Only used when the judge service is unreachable — availability outages must
+/// not brick the assistant. Parse/format errors use `fail_ambiguous` instead
+/// so the policy can decide.
 fn fail_open(tool_name: &str, latency_ms: u64) -> (JudgeVerdict, JudgeRecord) {
     (
         JudgeVerdict::Allow,
@@ -351,10 +352,46 @@ fn fail_open(tool_name: &str, latency_ms: u64) -> (JudgeVerdict, JudgeRecord) {
     )
 }
 
+/// Return an Ambiguous verdict when the judge response cannot be parsed.
+///
+/// Delegates the allow/deny decision to the configured `ambiguous_policy`
+/// rather than silently allowing — prevents a "chatty response" bypass where
+/// an attacker triggers a parse failure to turn Deny into Allow.
+fn fail_ambiguous(tool_name: &str, latency_ms: u64, reason: &str) -> (JudgeVerdict, JudgeRecord) {
+    (
+        JudgeVerdict::Ambiguous(reason.to_string()),
+        JudgeRecord {
+            tool_name: tool_name.to_string(),
+            verdict: "Ambiguous".to_string(),
+            attack_type: None,
+            confidence: 0.0,
+            reasoning: reason.to_string(),
+            layer: "llm_judge".to_string(),
+            latency_ms,
+        },
+    )
+}
+
+/// Extract the first JSON object (`{...}`) from a string.
+///
+/// Tolerates markdown fences, leading prose, and trailing text that some
+/// LLMs add despite instructions. Falls back to the trimmed input if no
+/// `{...}` pair is found, so `serde_json` produces a clear error message.
+fn extract_json_object(s: &str) -> &str {
+    // First strip any markdown fences
+    let candidate = strip_markdown_fences(s);
+    // Then find outermost { ... }
+    if let (Some(start), Some(end)) = (candidate.find('{'), candidate.rfind('}'))
+        && end >= start
+    {
+        return &candidate[start..=end];
+    }
+    candidate
+}
+
 /// Strip ```json ... ``` or ``` ... ``` markdown fences from a string.
 fn strip_markdown_fences(s: &str) -> &str {
     let s = s.trim();
-    // Try ```json\n...\n``` or ```\n...\n```
     if let Some(inner) = s
         .strip_prefix("```json")
         .or_else(|| s.strip_prefix("```"))
@@ -435,16 +472,33 @@ mod tests {
     }
 
     #[test]
-    fn test_malformed_json_fails_open() {
+    fn test_malformed_json_becomes_ambiguous() {
         let result: Result<RawVerdict, _> = serde_json::from_str("not json at all");
         assert!(result.is_err());
-        // In production, this triggers fail_open → Allow
+        // In production this triggers fail_ambiguous → Ambiguous (not Allow),
+        // so the ambiguous_policy decides rather than silently allowing.
+        let (verdict, _) = fail_ambiguous("tool", 0, "Judge returned unparseable response");
+        assert!(matches!(verdict, JudgeVerdict::Ambiguous(_)));
     }
 
     #[test]
-    fn test_empty_response_fails_open() {
+    fn test_empty_response_becomes_ambiguous() {
         let result: Result<RawVerdict, _> = serde_json::from_str("");
         assert!(result.is_err());
+        let (verdict, _) = fail_ambiguous("tool", 0, "Judge returned unparseable response");
+        assert!(matches!(verdict, JudgeVerdict::Ambiguous(_)));
+    }
+
+    #[test]
+    fn test_extract_json_object_strips_prose() {
+        let chatty = "Sure! Here is the verdict:\n{\"verdict\":\"Allow\"}\nHope that helps!";
+        assert_eq!(extract_json_object(chatty), "{\"verdict\":\"Allow\"}");
+    }
+
+    #[test]
+    fn test_extract_json_object_fenced() {
+        let fenced = "```json\n{\"verdict\":\"Deny\"}\n```";
+        assert_eq!(extract_json_object(fenced), "{\"verdict\":\"Deny\"}");
     }
 
     #[test]
