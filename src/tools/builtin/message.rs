@@ -208,9 +208,8 @@ impl Tool for MessageTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        // Message tool only sends to user-owned channels (TUI, Telegram, Slack, web
-        // gateway, etc.) via ChannelManager::broadcast. It cannot reach arbitrary
-        // external services, so no approval is needed.
+        // Message tool only delivers to channels the user has configured
+        // (TUI, Telegram, Slack, web gateway, etc.) via ChannelManager::broadcast.
         ApprovalRequirement::Never
     }
 

@@ -98,7 +98,7 @@ impl Tool for RoutineCreateTool {
                 "tool_permissions": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Tool names pre-authorized for Always-approval tools in full_job mode (e.g. ['shell', 'message']). UnlessAutoApproved tools are automatically permitted in routines."
+                    "description": "Tool names pre-authorized for Always-approval tools in full_job mode (e.g. ['shell']). UnlessAutoApproved tools are automatically permitted in routines."
                 },
                 "notify_channel": {
                     "type": "string",

@@ -417,8 +417,9 @@ impl TestRigBuilder {
         self
     }
 
-    /// Enable the routines system so `routine_create` and other routine tools
-    /// are registered and functional.
+    /// Enable the routines system so the scheduler is wired with a `RoutineEngine`,
+    /// allowing routine jobs to actually execute. Routine tools are always registered
+    /// but require the engine to dispatch jobs.
     pub fn with_routines(mut self) -> Self {
         self.enable_routines = true;
         self
