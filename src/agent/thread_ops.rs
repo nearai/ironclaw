@@ -1295,100 +1295,56 @@ impl Agent {
             None => return Ok(Some("Extension manager not available.".to_string())),
         };
 
-        match ext_mgr.auth(&pending.extension_name, Some(token)).await {
-            Ok(result) if result.is_authenticated() => {
-                tracing::info!(
-                    "Extension '{}' authenticated via auth mode",
-                    pending.extension_name
-                );
-
-                // Auto-activate so tools are available immediately after auth
-                match ext_mgr.activate(&pending.extension_name).await {
-                    Ok(activate_result) => {
-                        let tool_count = activate_result.tools_loaded.len();
-                        let tool_list = if activate_result.tools_loaded.is_empty() {
-                            String::new()
-                        } else {
-                            format!("\n\nTools: {}", activate_result.tools_loaded.join(", "))
-                        };
-                        let msg = format!(
-                            "{} authenticated and activated ({} tools loaded).{}",
-                            pending.extension_name, tool_count, tool_list
-                        );
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::AuthCompleted {
-                                    extension_name: pending.extension_name.clone(),
-                                    success: true,
-                                    message: msg.clone(),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
-                        Ok(Some(msg))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Extension '{}' authenticated but activation failed: {}",
-                            pending.extension_name,
-                            e
-                        );
-                        let msg = format!(
-                            "{} authenticated successfully, but activation failed: {}. \
-                             Try activating manually.",
-                            pending.extension_name, e
-                        );
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::AuthCompleted {
-                                    extension_name: pending.extension_name.clone(),
-                                    success: true,
-                                    message: msg.clone(),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
-                        Ok(Some(msg))
-                    }
-                }
-            }
+        match ext_mgr
+            .configure_token(&pending.extension_name, token)
+            .await
+        {
             Ok(result) => {
-                // Invalid token, re-enter auth mode
-                {
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(pending.extension_name.clone());
-                    }
-                }
-                let msg = result
-                    .instructions()
-                    .map(String::from)
-                    .unwrap_or_else(|| "Invalid token. Please try again.".to_string());
-                // Re-emit AuthRequired so web UI re-shows the card
+                tracing::info!(
+                    "Extension '{}' configured via auth mode: {}",
+                    pending.extension_name,
+                    result.message
+                );
                 let _ = self
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::AuthRequired {
+                        StatusUpdate::AuthCompleted {
                             extension_name: pending.extension_name.clone(),
-                            instructions: Some(msg.clone()),
-                            auth_url: result.auth_url().map(String::from),
-                            setup_url: result.setup_url().map(String::from),
+                            success: true,
+                            message: result.message.clone(),
                         },
                         &message.metadata,
                     )
                     .await;
-                Ok(Some(msg))
+                Ok(Some(result.message))
             }
             Err(e) => {
-                let msg = format!(
-                    "Authentication failed for {}: {}",
-                    pending.extension_name, e
-                );
+                let msg = e.to_string();
+                // Token validation errors: re-enter auth mode and re-prompt
+                if msg.contains("Invalid token") || msg.contains("API returned") {
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.enter_auth_mode(pending.extension_name.clone());
+                        }
+                    }
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::AuthRequired {
+                                extension_name: pending.extension_name.clone(),
+                                instructions: Some(msg.clone()),
+                                auth_url: None,
+                                setup_url: None,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                    return Ok(Some(msg));
+                }
+                // Infrastructure errors
                 let _ = self
                     .channels
                     .send_status(

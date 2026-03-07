@@ -419,6 +419,33 @@ pub struct ActivateResult {
     pub message: String,
 }
 
+/// Result of configuring secrets for an extension.
+///
+/// Returned by `ExtensionManager::configure()`, the single entrypoint
+/// for providing secrets to any extension (chat auth, gateway setup, etc.).
+#[derive(Debug, Clone)]
+pub struct ConfigureResult {
+    /// Human-readable status message.
+    pub message: String,
+    /// Whether the extension was successfully activated after configuration.
+    pub activated: bool,
+    /// OAuth authorization URL (if OAuth flow was started).
+    pub auth_url: Option<String>,
+    /// Secrets that are still missing after this configuration step.
+    pub missing_secrets: Vec<MissingSecret>,
+}
+
+/// A secret that still needs to be provided.
+#[derive(Debug, Clone)]
+pub struct MissingSecret {
+    /// Secret name in the secrets store.
+    pub name: String,
+    /// User-facing prompt text.
+    pub prompt: String,
+    /// URL where the user can obtain the credential.
+    pub setup_url: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }

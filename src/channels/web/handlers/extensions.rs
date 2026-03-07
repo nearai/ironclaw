@@ -140,7 +140,7 @@ pub async fn extensions_activate_handler(
             }
 
             // Activation failed due to auth; try authenticating first.
-            match ext_mgr.auth(&name, None).await {
+            match ext_mgr.auth(&name).await {
                 Ok(auth_result) if auth_result.is_authenticated() => {
                     // Auth succeeded, retry activation.
                     match ext_mgr.activate(&name).await {

@@ -10,7 +10,8 @@
         "optional": false
       }
     ],
-    "setup_url": "https://t.me/BotFather"
+    "setup_url": "https://t.me/BotFather",
+    "validation_endpoint": "https://api.telegram.org/bot{telegram_bot_token}/getMe"
   },
   "capabilities": {
     "http": {
