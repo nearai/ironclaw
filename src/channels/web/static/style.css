@@ -159,7 +159,7 @@ body {
   flex-shrink: 0;
 }
 
-.tab-bar button:not(.status-logs-btn) {
+.tab-bar button:not(.status-logs-btn):not(.restart-btn) {
   padding: 10px 20px;
   background: none;
   border: none;
@@ -171,11 +171,11 @@ body {
   transition: color 0.2s, border-color 0.2s;
 }
 
-.tab-bar button:not(.status-logs-btn):hover {
+.tab-bar button:not(.status-logs-btn):not(.restart-btn):hover {
   color: var(--text);
 }
 
-.tab-bar button:not(.status-logs-btn).active {
+.tab-bar button:not(.status-logs-btn):not(.restart-btn).active {
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
@@ -260,42 +260,42 @@ body {
 }
 
 /* Restart Button */
-.restart-btn {
+.tab-bar .restart-btn {
   display: flex;
   align-items: center;
   gap: 0.375rem;
+  margin: 0.375rem;
   padding: 0.25rem 0.75rem;
   border-radius: 0.5rem;
   font-size: 0.8rem;
-  border: 1px solid;
-  border-color: #00d894;
+  border: 1px solid #00d894;
   color: #00d894;
   background-color: transparent;
   cursor: pointer;
   transition: color 150ms, background-color 150ms, border-color 150ms;
 }
 
-.restart-btn:hover:not(:disabled) {
+.tab-bar .restart-btn:hover:not(:disabled) {
   background-color: rgba(0, 216, 148, 0.1);
 }
 
-.restart-btn:disabled {
+.tab-bar .restart-btn:disabled {
   border-color: #333;
   color: #666;
   cursor: not-allowed;
 }
 
-.restart-btn:disabled:hover {
+.tab-bar .restart-btn:disabled:hover {
   background-color: transparent;
 }
 
-.restart-btn svg {
+.tab-bar .restart-btn svg {
   flex-shrink: 0;
   width: 13px;
   height: 13px;
 }
 
-.restart-btn svg.spinning {
+.tab-bar .restart-btn svg.spinning {
   animation: spin-icon 1s linear infinite;
 }
 
