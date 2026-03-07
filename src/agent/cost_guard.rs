@@ -131,10 +131,14 @@ impl CostGuard {
         // Check hourly rate
         if let Some(limit) = self.config.max_actions_per_hour {
             let mut window = self.action_window.lock().await;
-            let cutoff = Instant::now() - std::time::Duration::from_secs(3600);
-            // Drain expired entries
-            while window.front().is_some_and(|t| *t < cutoff) {
-                window.pop_front();
+            // Use checked_sub to avoid panic on Windows when system uptime < 1 hour
+            // (Instant starts at zero on boot; subtracting a larger duration overflows).
+            // If checked_sub returns None, all entries are within the window — skip draining.
+            if let Some(cutoff) = Instant::now().checked_sub(std::time::Duration::from_secs(3600))
+            {
+                while window.front().is_some_and(|t| *t < cutoff) {
+                    window.pop_front();
+                }
             }
             let count = window.len() as u64;
             if count >= limit {
@@ -260,9 +264,10 @@ impl CostGuard {
     /// Number of actions in the current hourly window.
     pub async fn actions_this_hour(&self) -> u64 {
         let mut window = self.action_window.lock().await;
-        let cutoff = Instant::now() - std::time::Duration::from_secs(3600);
-        while window.front().is_some_and(|t| *t < cutoff) {
-            window.pop_front();
+        if let Some(cutoff) = Instant::now().checked_sub(std::time::Duration::from_secs(3600)) {
+            while window.front().is_some_and(|t| *t < cutoff) {
+                window.pop_front();
+            }
         }
         window.len() as u64
     }
@@ -397,6 +402,28 @@ mod tests {
             .await;
 
         assert_eq!(guard.actions_this_hour().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_checked_sub_does_not_panic() {
+        // Regression test for #657: Instant::now() - Duration panics on Windows
+        // when system uptime is less than the subtracted duration.
+        // This test verifies that check_allowed and actions_this_hour use
+        // checked_sub internally and never panic.
+        let guard = CostGuard::new(CostGuardConfig {
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: Some(100),
+        });
+
+        // These must not panic even if system uptime < 1 hour
+        assert!(guard.check_allowed().await.is_ok());
+        assert_eq!(guard.actions_this_hour().await, 0);
+
+        // Record an action and verify it's counted
+        guard
+            .record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, Decimal::ONE, None)
+            .await;
+        assert_eq!(guard.actions_this_hour().await, 1);
     }
 
     #[test]

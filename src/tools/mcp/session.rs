@@ -204,7 +204,9 @@ mod tests {
         assert!(!session.is_stale(1800));
 
         // Manually set last_activity to the past to simulate staleness
-        session.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        session.last_activity = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(10))
+                .unwrap_or_else(std::time::Instant::now);
         assert!(session.is_stale(5));
         assert!(!session.is_stale(15));
     }
@@ -298,7 +300,9 @@ mod tests {
     fn test_touch_updates_last_activity() {
         let mut session = McpSession::new("https://mcp.example.com");
         // Push last_activity into the past so we can observe the change.
-        session.last_activity = std::time::Instant::now() - std::time::Duration::from_secs(60);
+        session.last_activity = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(60))
+                .unwrap_or_else(std::time::Instant::now);
         let before = session.last_activity;
 
         session.touch();
@@ -360,7 +364,9 @@ mod tests {
         // Push the two stale sessions into the past.
         {
             let mut sessions = manager.sessions.write().await;
-            let past = std::time::Instant::now() - std::time::Duration::from_secs(60);
+            let past = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(60))
+                .unwrap_or_else(std::time::Instant::now);
             sessions.get_mut("stale1").unwrap().last_activity = past;
             sessions.get_mut("stale2").unwrap().last_activity = past;
         }

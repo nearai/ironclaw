@@ -2620,7 +2620,9 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
-            created_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
+            created_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(600))
+                .unwrap_or_else(std::time::Instant::now),
         };
 
         ext_mgr
@@ -2727,7 +2729,9 @@ mod tests {
             sse_sender: None,
             gateway_token: None,
             // Expired — handler will reject after lookup (no network I/O)
-            created_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
+            created_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(600))
+                .unwrap_or_else(std::time::Instant::now),
         };
 
         ext_mgr
