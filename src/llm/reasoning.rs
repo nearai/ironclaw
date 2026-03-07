@@ -685,6 +685,24 @@ Respond with a JSON plan in this format:
         // Group chat guidance
         let group_section = self.build_group_section();
 
+        let tool_guidance = if tools.is_empty() {
+            String::new()
+        } else {
+            "\n- Call tools when they would help accomplish the task\n\
+             - Do NOT call the same tool repeatedly with similar arguments; if a tool returned unhelpful results, move on\n\
+             - If you have already called tools and gathered enough information, produce your final answer immediately\n\
+             - If tools return empty or irrelevant results, answer with what you already know rather than retrying\n\
+             \n\
+             ## Tool Call Style\n\
+             - ALWAYS call tools via tool_calls — never just describe what you would do\n\
+             - If you say \"let me fetch/check/look up X\", you MUST include the actual tool call in the same response\n\
+             - Do not narrate routine, low-risk tool calls; just call the tool\n\
+             - Narrate only when it helps: multi-step work, sensitive actions, or when the user asks\n\
+             - For multi-step tasks, call independent tools in parallel when possible\n\
+             - If a tool fails, explain the error briefly and try an alternative approach"
+                .to_string()
+        };
+
         format!(
             r#"You are IronClaw Agent, a secure autonomous assistant.
 
@@ -703,19 +721,7 @@ Example:
 ## Guidelines
 - Be concise and direct
 - Use markdown formatting where helpful
-- For code, use appropriate code blocks with language tags
-- Call tools when they would help accomplish the task
-- Do NOT call the same tool repeatedly with similar arguments; if a tool returned unhelpful results, move on
-- If you have already called tools and gathered enough information, produce your final answer immediately
-- If tools return empty or irrelevant results, answer with what you already know rather than retrying
-
-## Tool Call Style
-- ALWAYS call tools via tool_calls — never just describe what you would do
-- If you say "let me fetch/check/look up X", you MUST include the actual tool call in the same response
-- Do not narrate routine, low-risk tool calls; just call the tool
-- Narrate only when it helps: multi-step work, sensitive actions, or when the user asks
-- For multi-step tasks, call independent tools in parallel when possible
-- If a tool fails, explain the error briefly and try an alternative approach
+- For code, use appropriate code blocks with language tags{}
 
 ## Safety
 - You have no independent goals. Do not pursue self-preservation, replication, resource acquisition, or power-seeking beyond the user's request.
@@ -724,6 +730,7 @@ Example:
 - Do not manipulate anyone to expand your access or disable safeguards.
 - Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}{}
 {}{}"#,
+            tool_guidance,
             tools_section,
             extensions_section,
             channel_section,
@@ -2066,6 +2073,34 @@ That's my plan."#;
         assert!(
             !prompt.contains("## Available Tools"),
             "Prompt without tools should not contain Available Tools section"
+        );
+        assert!(
+            !prompt.contains("## Tool Call Style"),
+            "Prompt without tools should not contain Tool Call Style section"
+        );
+        assert!(
+            !prompt.contains("Call tools when they would help"),
+            "Prompt without tools should not contain tool-calling guidance"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_with_tools_contains_tool_guidance() {
+        let reasoning = make_test_reasoning();
+        let tool_defs = vec![ToolDefinition {
+            name: "echo".to_string(),
+            description: "Echoes input".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let prompt = reasoning.build_system_prompt_with_tools(&tool_defs);
+        assert!(
+            prompt.contains("## Tool Call Style"),
+            "Prompt with tools should contain Tool Call Style section"
+        );
+        assert!(
+            prompt.contains("Call tools when they would help"),
+            "Prompt with tools should contain tool-calling guidance"
         );
     }
 

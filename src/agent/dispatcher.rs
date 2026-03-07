@@ -139,8 +139,8 @@ impl Agent {
         } else {
             initial_tool_defs
         };
-        let system_prompt = reasoning.build_system_prompt_with_tools(&initial_tool_defs);
-        let system_prompt_no_tools = reasoning.build_system_prompt_with_tools(&[]);
+        let cached_prompt = reasoning.build_system_prompt_with_tools(&initial_tool_defs);
+        let cached_prompt_no_tools = reasoning.build_system_prompt_with_tools(&[]);
 
         let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination
@@ -223,9 +223,9 @@ impl Agent {
                 .with_messages(context_messages.clone())
                 .with_tools(tool_defs)
                 .with_system_prompt(if force_text {
-                    system_prompt_no_tools.clone()
+                    cached_prompt_no_tools.clone()
                 } else {
-                    system_prompt.clone()
+                    cached_prompt.clone()
                 })
                 .with_metadata({
                     let mut m = std::collections::HashMap::new();
