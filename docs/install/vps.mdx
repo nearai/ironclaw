@@ -96,12 +96,7 @@ ironclaw onboard
 ## Step 4: Firewall Configuration
 
 <Warning>
-**Important:** IronClaw's orchestrator binds to `0.0.0.0:50051` on Linux for container communication. This port should **not** be exposed externally.
-
-```bash
-# After installing and enabling UFW, block orchestrator port from external access
-sudo ufw deny 50051
-```
+**Important:** IronClaw's orchestrator binds to `0.0.0.0:50051` on Linux for container communication. This port should **not** be exposed externally. The firewall configuration below includes rules to block external access to this port—do not add any UFW allow rules for `50051`.
 </Warning>
 
 ```bash
