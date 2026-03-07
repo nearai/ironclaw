@@ -9,7 +9,6 @@ mod support;
 mod advanced {
     use std::time::Duration;
 
-    use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -52,10 +51,12 @@ mod advanced {
 
     #[tokio::test]
     async fn user_steering() {
-        let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_steer_test.txt");
-        let _ = std::fs::remove_file("/tmp/ironclaw_steer_test.txt");
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let test_file = tmp.path().join("ironclaw_steer_test.txt");
 
-        let trace = LlmTrace::from_file(format!("{FIXTURES}/steering.json")).unwrap();
+        let mut trace = LlmTrace::from_file(format!("{FIXTURES}/steering.json")).unwrap();
+        trace.replace_paths("/tmp/ironclaw_steer_test.txt", test_file.to_str().unwrap());
+
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
             .build()
@@ -67,8 +68,7 @@ mod advanced {
         assert!(!all_responses[1].is_empty(), "Turn 2: no response");
 
         // Extra: verify file on disk after steering.
-        let content = std::fs::read_to_string("/tmp/ironclaw_steer_test.txt")
-            .expect("steer test file should exist");
+        let content = std::fs::read_to_string(&test_file).expect("steer test file should exist");
         assert_eq!(
             content, "goodbye",
             "File should contain 'goodbye' after steering"
@@ -91,10 +91,16 @@ mod advanced {
 
     #[tokio::test]
     async fn tool_error_recovery() {
-        let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_recovery_test.txt");
-        let _ = std::fs::remove_file("/tmp/ironclaw_recovery_test.txt");
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let test_file = tmp.path().join("ironclaw_recovery_test.txt");
 
-        let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_error_recovery.json")).unwrap();
+        let mut trace =
+            LlmTrace::from_file(format!("{FIXTURES}/tool_error_recovery.json")).unwrap();
+        trace.replace_paths(
+            "/tmp/ironclaw_recovery_test.txt",
+            test_file.to_str().unwrap(),
+        );
+
         let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         rig.send_message("Write 'recovered successfully' to a file for me.")
@@ -112,8 +118,7 @@ mod advanced {
         );
 
         // The second write should have succeeded on disk.
-        let content = std::fs::read_to_string("/tmp/ironclaw_recovery_test.txt")
-            .expect("recovery file should exist");
+        let content = std::fs::read_to_string(&test_file).expect("recovery file should exist");
         assert_eq!(content, "recovered successfully");
 
         // At least one write should have completed with success=true.
@@ -132,18 +137,18 @@ mod advanced {
 
     #[tokio::test]
     async fn long_tool_chain() {
-        let test_dir = "/tmp/ironclaw_chain_test";
-        let _cleanup = CleanupGuard::new().dir(test_dir);
-        let _ = std::fs::remove_dir_all(test_dir);
-        std::fs::create_dir_all(test_dir).unwrap();
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let test_dir = tmp.path().join("ironclaw_chain_test");
+        std::fs::create_dir_all(&test_dir).unwrap();
 
-        let trace = LlmTrace::from_file(format!("{FIXTURES}/long_tool_chain.json")).unwrap();
+        let mut trace = LlmTrace::from_file(format!("{FIXTURES}/long_tool_chain.json")).unwrap();
+        trace.replace_paths("/tmp/ironclaw_chain_test", test_dir.to_str().unwrap());
+
         let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         rig.send_message(
-            "Create a daily log at /tmp/ironclaw_chain_test/log.md, \
-             update it with afternoon activities, write an end-of-day summary, \
-             then read both files and give me a report.",
+            "Create a daily log, update it with afternoon activities, \
+             write an end-of-day summary, then read both files and give me a report.",
         )
         .await;
         let responses = rig.wait_for_responses(1, TIMEOUT).await;
@@ -159,16 +164,15 @@ mod advanced {
         );
 
         // Verify files on disk.
-        let log =
-            std::fs::read_to_string(format!("{test_dir}/log.md")).expect("log.md should exist");
+        let log = std::fs::read_to_string(test_dir.join("log.md")).expect("log.md should exist");
         assert!(
             log.contains("Afternoon"),
             "log.md missing Afternoon section"
         );
         assert!(log.contains("PR #42"), "log.md missing PR #42");
 
-        let summary = std::fs::read_to_string(format!("{test_dir}/summary.md"))
-            .expect("summary.md should exist");
+        let summary =
+            std::fs::read_to_string(test_dir.join("summary.md")).expect("summary.md should exist");
         assert!(
             summary.contains("accomplishments"),
             "summary.md missing accomplishments"

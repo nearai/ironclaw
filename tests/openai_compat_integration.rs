@@ -9,9 +9,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
-use ironclaw::channels::web::server::{GatewayState, start_server};
-use ironclaw::channels::web::sse::SseManager;
-use ironclaw::channels::web::ws::WsConnectionTracker;
+use ironclaw::channels::web::server::GatewayState;
+use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
 use ironclaw::error::LlmError;
 use ironclaw::llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
@@ -179,38 +178,11 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>, Arc<MockLlmState
 async fn start_test_server_with_provider(
     llm_provider: Arc<dyn LlmProvider>,
 ) -> (SocketAddr, Arc<GatewayState>) {
-    let state = Arc::new(GatewayState {
-        msg_tx: tokio::sync::RwLock::new(None),
-        sse: SseManager::new(),
-        workspace: None,
-        session_manager: None,
-        log_broadcaster: None,
-        log_level_handle: None,
-        extension_manager: None,
-        tool_registry: None,
-        store: None,
-        job_manager: None,
-        prompt_queue: None,
-        scheduler: None,
-        user_id: "test-user".to_string(),
-        shutdown_tx: tokio::sync::RwLock::new(None),
-        ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
-        llm_provider: Some(llm_provider),
-        skill_registry: None,
-        skill_catalog: None,
-        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
-        registry_entries: Vec::new(),
-        cost_guard: None,
-        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-        startup_time: std::time::Instant::now(),
-    });
-
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string())
+    TestGatewayBuilder::new()
+        .llm_provider(llm_provider)
+        .start(AUTH_TOKEN)
         .await
-        .expect("Failed to start test server");
-
-    (bound_addr, state)
+        .expect("Failed to start test server")
 }
 
 fn client() -> reqwest::Client {
@@ -669,36 +641,10 @@ async fn test_models_no_auth() {
 #[tokio::test]
 async fn test_no_llm_provider_returns_503() {
     // Create state WITHOUT llm_provider
-    let state = Arc::new(GatewayState {
-        msg_tx: tokio::sync::RwLock::new(None),
-        sse: SseManager::new(),
-        workspace: None,
-        session_manager: None,
-        log_broadcaster: None,
-        log_level_handle: None,
-        extension_manager: None,
-        tool_registry: None,
-        store: None,
-        job_manager: None,
-        prompt_queue: None,
-        scheduler: None,
-        user_id: "test-user".to_string(),
-        shutdown_tx: tokio::sync::RwLock::new(None),
-        ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
-        llm_provider: None, // No LLM!
-        skill_registry: None,
-        skill_catalog: None,
-        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
-        registry_entries: Vec::new(),
-        cost_guard: None,
-        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-        startup_time: std::time::Instant::now(),
-    });
-
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state, AUTH_TOKEN.to_string())
+    let (bound_addr, _state) = TestGatewayBuilder::new()
+        .start(AUTH_TOKEN)
         .await
-        .unwrap();
+        .expect("Failed to start test server");
 
     let url = format!("http://{}/v1/chat/completions", bound_addr);
     let resp = client()
