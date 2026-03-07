@@ -308,33 +308,30 @@ impl LlmConfig {
             )
         };
 
-        // Resolve API key from env
-        let api_key = if let Some(env_var) = api_key_env {
-            optional_env(env_var)?.map(SecretString::from)
+        // Codex auth.json override: when LLM_USE_CODEX_AUTH=true,
+        // credentials from the Codex CLI's auth.json take highest priority
+        // (over env vars AND secrets store). In ChatGPT mode, the base URL
+        // is also overridden to the private ChatGPT backend endpoint.
+        let mut codex_base_url_override: Option<String> = None;
+        let codex_creds = if parse_optional_env("LLM_USE_CODEX_AUTH", false)? {
+            let path = optional_env("CODEX_AUTH_PATH")?
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(crate::codex_auth::default_codex_auth_path);
+            crate::codex_auth::load_codex_credentials(&path)
         } else {
             None
         };
 
-        // Codex auth.json fallback: when no API key is found from env vars,
-        // try loading credentials from the Codex CLI's auth.json file.
-        // In ChatGPT mode, the base URL is also overridden to the private
-        // ChatGPT backend endpoint.
-        let mut codex_base_url_override: Option<String> = None;
-        let api_key = if api_key.is_none() && parse_optional_env("LLM_USE_CODEX_AUTH", false)? {
-            let path = optional_env("CODEX_AUTH_PATH")?
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(crate::codex_auth::default_codex_auth_path);
-            match crate::codex_auth::load_codex_credentials(&path) {
-                Some(creds) => {
-                    if creds.is_chatgpt_mode {
-                        codex_base_url_override = Some(creds.base_url().to_string());
-                    }
-                    Some(SecretString::from(creds.token))
-                }
-                None => None,
+        let api_key = if let Some(creds) = codex_creds {
+            if creds.is_chatgpt_mode {
+                codex_base_url_override = Some(creds.base_url().to_string());
             }
+            Some(SecretString::from(creds.token))
+        } else if let Some(env_var) = api_key_env {
+            // Resolve API key from env (including secrets store overlay)
+            optional_env(env_var)?.map(SecretString::from)
         } else {
-            api_key
+            None
         };
 
         if api_key_required && api_key.is_none() {
