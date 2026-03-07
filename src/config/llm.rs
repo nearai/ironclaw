@@ -327,12 +327,23 @@ impl LlmConfig {
         };
 
         // Codex auth.json fallback: when no API key is found from env vars,
-        // try loading one from the Codex CLI's auth.json file.
+        // try loading credentials from the Codex CLI's auth.json file.
+        // In ChatGPT mode, the base URL is also overridden to the private
+        // ChatGPT backend endpoint.
+        let mut codex_base_url_override: Option<String> = None;
         let api_key = if api_key.is_none() && parse_optional_env("LLM_USE_CODEX_AUTH", false)? {
             let path = optional_env("CODEX_AUTH_PATH")?
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(crate::codex_auth::default_codex_auth_path);
-            crate::codex_auth::load_codex_api_key(&path).map(SecretString::from)
+            match crate::codex_auth::load_codex_credentials(&path) {
+                Some(creds) => {
+                    if creds.is_chatgpt_mode {
+                        codex_base_url_override = Some(creds.base_url().to_string());
+                    }
+                    Some(SecretString::from(creds.token))
+                }
+                None => None,
+            }
         } else {
             api_key
         };
@@ -348,22 +359,27 @@ impl LlmConfig {
             }
         }
 
-        // Resolve base URL: env var > settings (backward compat) > registry default
-        let base_url = if let Some(env_var) = base_url_env {
-            optional_env(env_var)?
-        } else {
-            None
-        }
-        .or_else(|| {
-            // Backward compat: check legacy settings fields
-            match backend {
-                "ollama" => settings.ollama_base_url.clone(),
-                "openai_compatible" | "openrouter" => settings.openai_compatible_base_url.clone(),
-                _ => None,
-            }
-        })
-        .or_else(|| default_base_url.map(String::from))
-        .unwrap_or_default();
+        // Resolve base URL: codex override > env var > settings (backward compat) > registry default
+        let base_url = codex_base_url_override
+            .or_else(|| {
+                if let Some(env_var) = base_url_env {
+                    optional_env(env_var).ok().flatten()
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // Backward compat: check legacy settings fields
+                match backend {
+                    "ollama" => settings.ollama_base_url.clone(),
+                    "openai_compatible" | "openrouter" => {
+                        settings.openai_compatible_base_url.clone()
+                    }
+                    _ => None,
+                }
+            })
+            .or_else(|| default_base_url.map(String::from))
+            .unwrap_or_default();
 
         if base_url_required
             && base_url.is_empty()
