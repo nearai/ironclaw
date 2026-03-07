@@ -37,7 +37,9 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsq
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
-pub use self::llm::{CacheRetention, LlmConfig, NearAiConfig, RegistryProviderConfig};
+pub use self::llm::{
+    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, RegistryProviderConfig,
+};
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
@@ -303,6 +305,7 @@ pub async fn inject_llm_keys_from_secrets(
     let mut mappings: Vec<(&str, &str)> = vec![
         ("llm_nearai_api_key", "NEARAI_API_KEY"),
         ("llm_anthropic_oauth_token", "ANTHROPIC_OAUTH_TOKEN"),
+        ("bedrock_api_key", "AWS_BEARER_TOKEN_BEDROCK"),
     ];
 
     // Dynamically discover secret->env mappings from the provider registry.
