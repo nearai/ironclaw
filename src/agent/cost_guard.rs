@@ -292,7 +292,16 @@ mod tests {
 
         // Record a big call, still allowed
         guard
-            .record_llm_call("gpt-4o", 100_000, 100_000, 0, 0, Decimal::ONE, Decimal::ONE, None)
+            .record_llm_call(
+                "gpt-4o",
+                100_000,
+                100_000,
+                0,
+                0,
+                Decimal::ONE,
+                Decimal::ONE,
+                None,
+            )
             .await;
         assert!(guard.check_allowed().await.is_ok());
     }
@@ -311,7 +320,16 @@ mod tests {
         // gpt-4o: input=$0.0000025/tok, output=$0.00001/tok
         // 10000 input + 10000 output = $0.025 + $0.10 = $0.125
         guard
-            .record_llm_call("gpt-4o", 10_000, 10_000, 0, 0, Decimal::ONE, Decimal::ONE, None)
+            .record_llm_call(
+                "gpt-4o",
+                10_000,
+                10_000,
+                0,
+                0,
+                Decimal::ONE,
+                Decimal::ONE,
+                None,
+            )
             .await;
 
         // Now should be blocked
@@ -457,14 +475,32 @@ mod tests {
 
         // Full price: 1000 input + 500 output, no cache
         let full_cost = guard
-            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 0, Decimal::ONE, Decimal::ONE, None)
+            .record_llm_call(
+                "claude-opus-4-6",
+                1000,
+                500,
+                0,
+                0,
+                Decimal::ONE,
+                Decimal::ONE,
+                None,
+            )
             .await;
 
         let guard2 = CostGuard::new(CostGuardConfig::default());
 
         // Same tokens but all input cached (90% discount on input)
         let cached_cost = guard2
-            .record_llm_call("claude-opus-4-6", 1000, 500, 1000, 0, dec!(10), Decimal::ONE, None)
+            .record_llm_call(
+                "claude-opus-4-6",
+                1000,
+                500,
+                1000,
+                0,
+                dec!(10),
+                Decimal::ONE,
+                None,
+            )
             .await;
 
         // Cached cost must be strictly less than full cost
@@ -491,7 +527,16 @@ mod tests {
 
         // Full price: 1000 input + 500 output, no cache activity
         let full_cost = guard
-            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 0, Decimal::ONE, Decimal::ONE, None)
+            .record_llm_call(
+                "claude-opus-4-6",
+                1000,
+                500,
+                0,
+                0,
+                Decimal::ONE,
+                Decimal::ONE,
+                None,
+            )
             .await;
 
         let guard2 = CostGuard::new(CostGuardConfig::default());
@@ -535,7 +580,16 @@ mod tests {
 
         // Full price: 1000 input + 500 output
         let full_cost = guard
-            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 0, Decimal::ONE, Decimal::ONE, None)
+            .record_llm_call(
+                "claude-opus-4-6",
+                1000,
+                500,
+                0,
+                0,
+                Decimal::ONE,
+                Decimal::ONE,
+                None,
+            )
             .await;
 
         let guard2 = CostGuard::new(CostGuardConfig::default());
@@ -543,7 +597,16 @@ mod tests {
         // All input tokens are cache writes with 2.0x multiplier (1h TTL)
         let long_multiplier = Decimal::TWO;
         let write_cost = guard2
-            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 1000, Decimal::ONE, long_multiplier, None)
+            .record_llm_call(
+                "claude-opus-4-6",
+                1000,
+                500,
+                0,
+                1000,
+                Decimal::ONE,
+                long_multiplier,
+                None,
+            )
             .await;
 
         // Write cost > full cost
