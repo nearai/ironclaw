@@ -2,8 +2,8 @@
   "name": "slack-tool",
   "display_name": "Slack Tool",
   "kind": "tool",
-  "version": "0.1.0",
-  "wit_version": "0.2.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Your agent uses Slack to post and read messages in your workspace",
   "keywords": [
     "messaging",

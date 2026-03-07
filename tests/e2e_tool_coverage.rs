@@ -10,8 +10,18 @@ mod support;
 mod tests {
     use std::time::Duration;
 
+    use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
+
+    const TEST_DIR_BASE: &str = "/tmp/ironclaw_coverage_test";
+
+    fn setup_test_dir(suffix: &str) -> String {
+        let dir = format!("{TEST_DIR_BASE}_{suffix}");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("failed to create test directory");
+        dir
+    }
 
     // -----------------------------------------------------------------------
     // json tool
@@ -84,21 +94,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_dir() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let test_dir = tmp.path().join("test_dir");
-        std::fs::create_dir_all(&test_dir).unwrap();
-        std::fs::write(test_dir.join("file_a.txt"), "content a").unwrap();
-        std::fs::write(test_dir.join("file_b.txt"), "content b").unwrap();
+        let test_dir = setup_test_dir("list_dir");
+        let _cleanup = CleanupGuard::new().dir(&test_dir);
+        std::fs::write(format!("{test_dir}/file_a.txt"), "content a").unwrap();
+        std::fs::write(format!("{test_dir}/file_b.txt"), "content b").unwrap();
 
-        let mut trace = LlmTrace::from_file(concat!(
+        let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/coverage/list_dir.json"
         ))
         .expect("failed to load list_dir.json");
-        trace.replace_paths(
-            "/tmp/ironclaw_coverage_test_list_dir",
-            test_dir.to_str().unwrap(),
-        );
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
@@ -118,19 +123,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_apply_patch_chain() {
-        let tmp = tempfile::tempdir().expect("failed to create tempdir");
-        let test_dir = tmp.path().join("test_dir");
-        std::fs::create_dir_all(&test_dir).unwrap();
+        let test_dir = setup_test_dir("apply_patch");
+        let _cleanup = CleanupGuard::new().dir(&test_dir);
 
-        let mut trace = LlmTrace::from_file(concat!(
+        let trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/coverage/apply_patch_chain.json"
         ))
         .expect("failed to load apply_patch_chain.json");
-        trace.replace_paths(
-            "/tmp/ironclaw_coverage_test_apply_patch",
-            test_dir.to_str().unwrap(),
-        );
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
@@ -143,7 +143,7 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Extra: verify the patch was applied on disk.
-        let content = std::fs::read_to_string(test_dir.join("patch_target.txt"))
+        let content = std::fs::read_to_string(format!("{test_dir}/patch_target.txt"))
             .expect("patch_target.txt should exist");
         assert!(
             content.contains("PATCHED"),

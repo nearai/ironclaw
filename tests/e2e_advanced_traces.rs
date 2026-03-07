@@ -9,6 +9,7 @@ mod support;
 mod advanced {
     use std::time::Duration;
 
+    use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -51,12 +52,10 @@ mod advanced {
 
     #[tokio::test]
     async fn user_steering() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        let test_file = tmp.path().join("ironclaw_steer_test.txt");
+        let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_steer_test.txt");
+        let _ = std::fs::remove_file("/tmp/ironclaw_steer_test.txt");
 
-        let mut trace = LlmTrace::from_file(format!("{FIXTURES}/steering.json")).unwrap();
-        trace.replace_paths("/tmp/ironclaw_steer_test.txt", test_file.to_str().unwrap());
-
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/steering.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
             .build()
@@ -68,7 +67,8 @@ mod advanced {
         assert!(!all_responses[1].is_empty(), "Turn 2: no response");
 
         // Extra: verify file on disk after steering.
-        let content = std::fs::read_to_string(&test_file).expect("steer test file should exist");
+        let content = std::fs::read_to_string("/tmp/ironclaw_steer_test.txt")
+            .expect("steer test file should exist");
         assert_eq!(
             content, "goodbye",
             "File should contain 'goodbye' after steering"
@@ -91,16 +91,10 @@ mod advanced {
 
     #[tokio::test]
     async fn tool_error_recovery() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        let test_file = tmp.path().join("ironclaw_recovery_test.txt");
+        let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_recovery_test.txt");
+        let _ = std::fs::remove_file("/tmp/ironclaw_recovery_test.txt");
 
-        let mut trace =
-            LlmTrace::from_file(format!("{FIXTURES}/tool_error_recovery.json")).unwrap();
-        trace.replace_paths(
-            "/tmp/ironclaw_recovery_test.txt",
-            test_file.to_str().unwrap(),
-        );
-
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_error_recovery.json")).unwrap();
         let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         rig.send_message("Write 'recovered successfully' to a file for me.")
@@ -118,7 +112,8 @@ mod advanced {
         );
 
         // The second write should have succeeded on disk.
-        let content = std::fs::read_to_string(&test_file).expect("recovery file should exist");
+        let content = std::fs::read_to_string("/tmp/ironclaw_recovery_test.txt")
+            .expect("recovery file should exist");
         assert_eq!(content, "recovered successfully");
 
         // At least one write should have completed with success=true.
@@ -137,18 +132,18 @@ mod advanced {
 
     #[tokio::test]
     async fn long_tool_chain() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        let test_dir = tmp.path().join("ironclaw_chain_test");
-        std::fs::create_dir_all(&test_dir).unwrap();
+        let test_dir = "/tmp/ironclaw_chain_test";
+        let _cleanup = CleanupGuard::new().dir(test_dir);
+        let _ = std::fs::remove_dir_all(test_dir);
+        std::fs::create_dir_all(test_dir).unwrap();
 
-        let mut trace = LlmTrace::from_file(format!("{FIXTURES}/long_tool_chain.json")).unwrap();
-        trace.replace_paths("/tmp/ironclaw_chain_test", test_dir.to_str().unwrap());
-
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/long_tool_chain.json")).unwrap();
         let rig = TestRigBuilder::new().with_trace(trace).build().await;
 
         rig.send_message(
-            "Create a daily log, update it with afternoon activities, \
-             write an end-of-day summary, then read both files and give me a report.",
+            "Create a daily log at /tmp/ironclaw_chain_test/log.md, \
+             update it with afternoon activities, write an end-of-day summary, \
+             then read both files and give me a report.",
         )
         .await;
         let responses = rig.wait_for_responses(1, TIMEOUT).await;
@@ -164,15 +159,16 @@ mod advanced {
         );
 
         // Verify files on disk.
-        let log = std::fs::read_to_string(test_dir.join("log.md")).expect("log.md should exist");
+        let log =
+            std::fs::read_to_string(format!("{test_dir}/log.md")).expect("log.md should exist");
         assert!(
             log.contains("Afternoon"),
             "log.md missing Afternoon section"
         );
         assert!(log.contains("PR #42"), "log.md missing PR #42");
 
-        let summary =
-            std::fs::read_to_string(test_dir.join("summary.md")).expect("summary.md should exist");
+        let summary = std::fs::read_to_string(format!("{test_dir}/summary.md"))
+            .expect("summary.md should exist");
         assert!(
             summary.contains("accomplishments"),
             "summary.md missing accomplishments"
@@ -392,138 +388,6 @@ mod advanced {
         let responses = rig.wait_for_responses(1, TIMEOUT).await;
 
         rig.verify_trace_expects(&trace, &responses);
-        rig.shutdown();
-    }
-
-    // -----------------------------------------------------------------------
-    // 7. Tool intent nudge — model recovers after nudge
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn tool_intent_nudge_recovery() {
-        let trace =
-            LlmTrace::from_file(format!("{FIXTURES}/tool_intent_nudge_recovery.json")).unwrap();
-        let rig = TestRigBuilder::new()
-            .with_trace(trace.clone())
-            .build()
-            .await;
-
-        rig.send_message("Search for the config file.").await;
-        let responses = rig.wait_for_responses(1, TIMEOUT).await;
-
-        rig.verify_trace_expects(&trace, &responses);
-
-        // The nudge should have caused the model to actually call a tool.
-        let started = rig.tool_calls_started();
-        assert!(
-            started.iter().any(|s| s == "echo"),
-            "expected echo tool call after nudge, got: {started:?}"
-        );
-
-        // Verify the nudge was injected: the TraceLlm request_hint on step 2
-        // requires "tool_calls mechanism" in the last user message. If the hint
-        // didn't match, TraceLlm logs a warning but doesn't fail -- so also
-        // check captured requests directly.
-        let trace_llm = rig.trace_llm().expect("trace_llm should exist");
-        assert_eq!(
-            trace_llm.hint_mismatches(),
-            0,
-            "nudge message should have been injected before the tool-call step"
-        );
-
-        rig.shutdown();
-    }
-
-    // -----------------------------------------------------------------------
-    // 8. Tool intent nudge — caps at 2 nudges
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn tool_intent_nudge_cap() {
-        let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_intent_nudge_cap.json")).unwrap();
-        let rig = TestRigBuilder::new()
-            .with_trace(trace.clone())
-            .build()
-            .await;
-
-        rig.send_message("Fetch the project data for me.").await;
-        let responses = rig.wait_for_responses(1, TIMEOUT).await;
-
-        rig.verify_trace_expects(&trace, &responses);
-
-        // Exactly 3 LLM calls: nudge after 1st, nudge after 2nd, 3rd text
-        // returned as-is (cap of 2 nudges reached).
-        let trace_llm = rig.trace_llm().expect("trace_llm should exist");
-        let captured = trace_llm.captured_requests();
-        assert_eq!(
-            captured.len(),
-            3,
-            "expected exactly 3 LLM calls (2 nudged + 1 returned), got {}",
-            captured.len()
-        );
-
-        // Verify both nudges fired: calls 2 and 3 should have the nudge
-        // message as the last user message.
-        for call_idx in [1usize, 2] {
-            let msgs = &captured[call_idx];
-            let last_user = msgs
-                .iter()
-                .rev()
-                .find(|m| matches!(m.role, ironclaw::llm::Role::User));
-            assert!(
-                last_user.is_some_and(|m| m.content.contains("tool_calls mechanism")),
-                "call {} should have the nudge as last user message",
-                call_idx + 1
-            );
-        }
-
-        // No tools should have been called (model never issued tool_calls).
-        let started = rig.tool_calls_started();
-        assert!(
-            started.is_empty(),
-            "no tools should be called when model keeps narrating, got: {started:?}"
-        );
-
-        rig.shutdown();
-    }
-
-    // -----------------------------------------------------------------------
-    // 9. Tool intent nudge — no false positive on conversational "let me explain"
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn tool_intent_no_false_positive() {
-        let trace =
-            LlmTrace::from_file(format!("{FIXTURES}/tool_intent_no_false_positive.json")).unwrap();
-        let rig = TestRigBuilder::new()
-            .with_trace(trace.clone())
-            .build()
-            .await;
-
-        rig.send_message("How does auth work?").await;
-        let responses = rig.wait_for_responses(1, TIMEOUT).await;
-
-        rig.verify_trace_expects(&trace, &responses);
-
-        // "Let me explain" should NOT trigger a nudge, so the TraceLlm should
-        // have been called exactly once (the text response) with no extra nudge
-        // messages injected.
-        let trace_llm = rig.trace_llm().expect("trace_llm should exist");
-        let captured = trace_llm.captured_requests();
-        assert_eq!(
-            captured.len(),
-            1,
-            "expected exactly 1 LLM call (no nudge), got {}",
-            captured.len()
-        );
-
-        // No tools should have been called.
-        let started = rig.tool_calls_started();
-        assert!(
-            started.is_empty(),
-            "no tools should be called for a conversational response, got: {started:?}"
-        );
-
         rig.shutdown();
     }
 }

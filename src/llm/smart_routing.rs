@@ -857,6 +857,14 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.cost_per_token()
     }
 
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.primary.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.primary.cache_read_discount()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
@@ -1471,6 +1479,8 @@ mod tests {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: crate::llm::FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -1482,6 +1492,8 @@ mod tests {
             input_tokens: 10,
             output_tokens: 0,
             finish_reason: crate::llm::FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -1493,6 +1505,8 @@ mod tests {
             input_tokens: 10,
             output_tokens: 1,
             finish_reason: crate::llm::FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         };
         assert!(!SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -1505,6 +1519,8 @@ mod tests {
             input_tokens: 10,
             output_tokens: 20,
             finish_reason: crate::llm::FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         };
         assert!(!SmartRoutingProvider::response_is_uncertain(&response));
     }

@@ -91,6 +91,11 @@ impl TestChannel {
         self.tx.send(msg).await.expect("TestChannel tx closed");
     }
 
+    /// Inject a raw `IncomingMessage` (for tests that need attachments, etc.).
+    pub async fn send_incoming(&self, msg: IncomingMessage) {
+        self.tx.send(msg).await.expect("TestChannel tx closed");
+    }
+
     /// Inject a user message with a specific thread ID.
     pub async fn send_message_in_thread(&self, content: &str, thread_id: &str) {
         let msg = IncomingMessage::new("test", &self.user_id, content).with_thread(thread_id);

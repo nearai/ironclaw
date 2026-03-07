@@ -11,6 +11,7 @@ mod support;
 mod spot_tests {
     use std::time::Duration;
 
+    use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -97,12 +98,10 @@ mod spot_tests {
 
     #[tokio::test]
     async fn spot_chain_write_read() {
-        let tmp = tempfile::tempdir().unwrap();
-        let test_file = tmp.path().join("ironclaw_spot_test.txt");
+        let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_spot_test.txt");
+        let _ = std::fs::remove_file("/tmp/ironclaw_spot_test.txt");
 
-        let mut trace = LlmTrace::from_file(format!("{FIXTURES}/chain_write_read.json")).unwrap();
-        trace.replace_paths("/tmp/ironclaw_spot_test.txt", test_file.to_str().unwrap());
-
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/chain_write_read.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
             .build()
@@ -118,7 +117,8 @@ mod spot_tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Extra: verify file on disk (can't express in expects).
-        let content = std::fs::read_to_string(&test_file).expect("file should exist");
+        let content =
+            std::fs::read_to_string("/tmp/ironclaw_spot_test.txt").expect("file should exist");
         assert_eq!(content, "ironclaw spot check");
 
         rig.shutdown();
@@ -166,12 +166,10 @@ mod spot_tests {
 
     #[tokio::test]
     async fn spot_memory_save_recall() {
-        let tmp = tempfile::tempdir().unwrap();
-        let test_file = tmp.path().join("bench-meeting.md");
+        let _cleanup = CleanupGuard::new().file("/tmp/bench-meeting.md");
+        let _ = std::fs::remove_file("/tmp/bench-meeting.md");
 
-        let mut trace = LlmTrace::from_file(format!("{FIXTURES}/memory_save_recall.json")).unwrap();
-        trace.replace_paths("/tmp/bench-meeting.md", test_file.to_str().unwrap());
-
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/memory_save_recall.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
             .build()

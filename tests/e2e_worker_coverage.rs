@@ -91,17 +91,22 @@ mod tests {
 
     #[tokio::test]
     async fn tool_error_feedback() {
+        // Use a tempdir for the recovery file. The fixture's recovery path
+        // is updated to write here via the test_dir variable.
         let tmp = tempfile::tempdir().expect("create temp dir");
+        let test_dir = tmp.path().to_str().expect("tempdir path");
 
-        let mut trace = LlmTrace::from_file(concat!(
+        // Patch the fixture's recovery path to use our tempdir.
+        let fixture_str = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/worker/tool_error_feedback.json"
         ))
-        .expect("failed to load tool_error_feedback.json");
-        trace.replace_paths(
-            "/tmp/ironclaw_error_feedback_test",
-            tmp.path().to_str().unwrap(),
+        .expect("read fixture");
+        let fixture_str = fixture_str.replace(
+            "/tmp/ironclaw_error_feedback_test/recovered.txt",
+            &format!("{test_dir}/recovered.txt"),
         );
+        let trace: LlmTrace = serde_json::from_str(&fixture_str).expect("parse patched fixture");
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
@@ -115,7 +120,7 @@ mod tests {
         rig.verify_trace_expects(&trace, &responses);
 
         // Verify the recovery file exists in the tempdir.
-        let content = std::fs::read_to_string(tmp.path().join("recovered.txt"))
+        let content = std::fs::read_to_string(format!("{test_dir}/recovered.txt"))
             .expect("recovered.txt should exist");
         assert!(
             content.contains("recovered"),

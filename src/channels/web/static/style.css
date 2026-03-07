@@ -2438,6 +2438,12 @@ body {
   color: var(--warning);
 }
 
+.ext-version {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
 .ext-auth-dot {
   width: 8px;
   height: 8px;

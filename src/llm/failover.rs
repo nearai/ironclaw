@@ -296,6 +296,14 @@ impl LlmProvider for FailoverProvider {
         self.providers[self.last_used.load(Ordering::Relaxed)].cost_per_token()
     }
 
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.providers[self.last_used.load(Ordering::Relaxed)].cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.providers[self.last_used.load(Ordering::Relaxed)].cache_read_discount()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let (provider_idx, response) = self
             .try_providers(|provider| {
@@ -404,6 +412,8 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 }))),
                 tool_complete_result: Mutex::new(Some(Ok(ToolCompletionResponse {
                     content: Some(content.to_string()),
@@ -411,6 +421,8 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 }))),
             }
         }
@@ -792,6 +804,8 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -817,6 +831,8 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 

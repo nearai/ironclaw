@@ -1890,6 +1890,13 @@ function renderAvailableExtensionCard(entry) {
   kind.textContent = kindLabels[entry.kind] || entry.kind;
   header.appendChild(kind);
 
+  if (entry.version) {
+    const ver = document.createElement('span');
+    ver.className = 'ext-version';
+    ver.textContent = 'v' + entry.version;
+    header.appendChild(ver);
+  }
+
   card.appendChild(header);
 
   const desc = document.createElement('div');
@@ -2049,6 +2056,13 @@ function renderExtensionCard(ext) {
   kind.className = 'ext-kind kind-' + ext.kind;
   kind.textContent = kindLabels[ext.kind] || ext.kind;
   header.appendChild(kind);
+
+  if (ext.version) {
+    const ver = document.createElement('span');
+    ver.className = 'ext-version';
+    ver.textContent = 'v' + ext.version;
+    header.appendChild(ver);
+  }
 
   // Auth dot only for non-WASM-channel extensions (channels use the stepper instead)
   if (ext.kind !== 'wasm_channel') {

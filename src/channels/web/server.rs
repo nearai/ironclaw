@@ -1441,6 +1441,7 @@ async fn extensions_list_handler(
                 has_auth: ext.has_auth,
                 activation_status,
                 activation_error: ext.activation_error,
+                version: ext.version,
             }
         })
         .collect();
@@ -1734,6 +1735,7 @@ async fn extensions_registry_handler(
                 kind: kind_str,
                 description: e.description.clone(),
                 keywords: e.keywords.clone(),
+                version: e.version.clone(),
             }
         })
         .collect();

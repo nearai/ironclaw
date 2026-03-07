@@ -236,38 +236,6 @@ impl LlmTrace {
         Ok(trace)
     }
 
-    /// Replace all occurrences of `old` with `new` in tool call arguments,
-    /// text content, and user input throughout the trace.
-    ///
-    /// Used to substitute hardcoded fixture paths (e.g. `/tmp/ironclaw_test`)
-    /// with dynamic `tempfile::tempdir()` paths so tests don't collide.
-    pub fn replace_paths(&mut self, old: &str, new: &str) {
-        for turn in &mut self.turns {
-            if turn.user_input.contains(old) {
-                turn.user_input = turn.user_input.replace(old, new);
-            }
-            for step in &mut turn.steps {
-                match &mut step.response {
-                    TraceResponse::ToolCalls { tool_calls, .. } => {
-                        for tc in tool_calls {
-                            replace_in_json_value(&mut tc.arguments, old, new);
-                        }
-                    }
-                    TraceResponse::Text { content, .. } => {
-                        if content.contains(old) {
-                            *content = content.replace(old, new);
-                        }
-                    }
-                    TraceResponse::UserInput { content } => {
-                        if content.contains(old) {
-                            *content = content.replace(old, new);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Return only the playable steps from the raw steps (text + tool_calls),
     /// skipping `user_input` markers. Only meaningful for recorded traces that
     /// were deserialized from a flat `steps` array.
@@ -277,28 +245,6 @@ impl LlmTrace {
             .iter()
             .filter(|s| !matches!(s.response, TraceResponse::UserInput { .. }))
             .collect()
-    }
-}
-
-/// Recursively replace `old` with `new` in all string values within a JSON tree.
-fn replace_in_json_value(value: &mut serde_json::Value, old: &str, new: &str) {
-    match value {
-        serde_json::Value::String(s) => {
-            if s.contains(old) {
-                *s = s.replace(old, new);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for v in map.values_mut() {
-                replace_in_json_value(v, old, new);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                replace_in_json_value(v, old, new);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -578,6 +524,8 @@ impl LlmProvider for TraceLlm {
                 input_tokens,
                 output_tokens,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }),
             TraceResponse::ToolCalls { .. } => Err(LlmError::RequestFailed {
                 provider: self.model_name.clone(),
@@ -610,6 +558,8 @@ impl LlmProvider for TraceLlm {
                 input_tokens,
                 output_tokens,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -630,6 +580,8 @@ impl LlmProvider for TraceLlm {
                     input_tokens,
                     output_tokens,
                     finish_reason: FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 })
             }
             TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {

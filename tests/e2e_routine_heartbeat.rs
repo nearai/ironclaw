@@ -205,6 +205,7 @@ mod tests {
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
             timezone: None,
+            attachments: Vec::new(),
         };
         let fired = engine.check_event_triggers(&matching_msg).await;
         assert!(
@@ -226,6 +227,7 @@ mod tests {
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
             timezone: None,
+            attachments: Vec::new(),
         };
         let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
@@ -290,6 +292,7 @@ mod tests {
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
             timezone: None,
+            attachments: Vec::new(),
         };
         let fired1 = engine.check_event_triggers(&msg).await;
         assert!(fired1 >= 1, "First fire should work");

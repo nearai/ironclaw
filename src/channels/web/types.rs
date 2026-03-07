@@ -402,6 +402,9 @@ pub struct ExtensionInfo {
     /// Human-readable error when activation_status is "failed".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
+    /// Extension version (semver).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -504,6 +507,8 @@ pub struct RegistryEntryInfo {
     pub description: String,
     pub keywords: Vec<String>,
     pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

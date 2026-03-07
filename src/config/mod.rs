@@ -19,6 +19,7 @@ mod safety;
 mod sandbox;
 mod secrets;
 mod skills;
+mod transcription;
 mod tunnel;
 mod wasm;
 
@@ -36,12 +37,13 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsq
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
-pub use self::llm::{LlmConfig, NearAiConfig, RegistryProviderConfig};
+pub use self::llm::{CacheRetention, LlmConfig, NearAiConfig, RegistryProviderConfig};
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
+pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
 pub use crate::llm::session::SessionConfig;
@@ -72,6 +74,7 @@ pub struct Config {
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
     pub skills: SkillsConfig,
+    pub transcription: TranscriptionConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
 
@@ -143,6 +146,7 @@ impl Config {
                 installed_dir: installed_skills_dir,
                 ..SkillsConfig::default()
             },
+            transcription: TranscriptionConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
         }
     }
@@ -267,6 +271,7 @@ impl Config {
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
+            transcription: TranscriptionConfig::resolve(settings)?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },

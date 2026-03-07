@@ -142,6 +142,17 @@ impl Agent {
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
 
+        // Build system prompts once for this turn. Two variants: with tools
+        // (normal iterations) and without (force_text final iteration).
+        let initial_tool_defs = self.tools().tool_definitions().await;
+        let initial_tool_defs = if !active_skills.is_empty() {
+            crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
+        } else {
+            initial_tool_defs
+        };
+        let cached_prompt = reasoning.build_system_prompt_with_tools(&initial_tool_defs);
+        let cached_prompt_no_tools = reasoning.build_system_prompt_with_tools(&[]);
+
         let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination
         // instead of hard-erroring. The penultimate iteration also gets a nudge
@@ -219,10 +230,16 @@ impl Agent {
             };
 
             // Call LLM with current context; force_text drops tools to guarantee a
-            // text response on the final iteration.
+            // text response on the final iteration. The pre-built system prompt
+            // avoids rebuilding the same ~1,500-token string each iteration.
             let mut context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
                 .with_tools(tool_defs)
+                .with_system_prompt(if force_text {
+                    cached_prompt_no_tools.clone()
+                } else {
+                    cached_prompt.clone()
+                })
                 .with_metadata({
                     let mut m = std::collections::HashMap::new();
                     m.insert("thread_id".to_string(), thread_id.to_string());
@@ -259,7 +276,7 @@ impl Agent {
                     // Compact: keep system messages + last user message + current turn
                     context_messages = compact_messages_for_retry(&context_messages);
 
-                    // Rebuild context with compacted messages
+                    // Rebuild context with compacted messages, reusing cached prompt
                     let mut retry_context = ReasoningContext::new()
                         .with_messages(context_messages.clone())
                         .with_tools(if force_text {
@@ -269,6 +286,7 @@ impl Agent {
                         })
                         .with_metadata(context.metadata.clone());
                     retry_context.force_text = force_text;
+                    retry_context.system_prompt = context.system_prompt.clone();
 
                     reasoning
                         .respond_with_tools(&retry_context)
@@ -289,12 +307,18 @@ impl Agent {
 
             // Record cost and track token usage
             let model_name = self.llm().active_model_name();
+            let read_discount = self.llm().cache_read_discount();
+            let write_multiplier = self.llm().cache_write_multiplier();
             let call_cost = self
                 .cost_guard()
                 .record_llm_call(
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
+                    output.usage.cache_read_input_tokens,
+                    output.usage.cache_creation_input_tokens,
+                    read_discount,
+                    write_multiplier,
                     Some(self.llm().cost_per_token()),
                 )
                 .await;
@@ -1073,6 +1097,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1086,6 +1112,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1110,6 +1138,8 @@ mod tests {
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
         };
 
         Agent::new(
@@ -1647,6 +1677,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1662,6 +1694,8 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 });
             }
             // Tools available: always call one.
@@ -1675,6 +1709,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1799,6 +1835,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 2,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1813,6 +1851,8 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 2,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 });
             }
             // Always call a tool that does not exist in the registry.
@@ -1826,6 +1866,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1851,6 +1893,8 @@ mod tests {
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
         };
 
         Agent::new(
@@ -1965,6 +2009,8 @@ mod tests {
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
                 sse_tx: None,
                 http_interceptor: None,
+                transcription: None,
+                document_extraction: None,
             };
 
             Agent::new(

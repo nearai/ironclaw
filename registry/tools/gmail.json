@@ -2,8 +2,8 @@
   "name": "gmail",
   "display_name": "Gmail",
   "kind": "tool",
-  "version": "0.1.0",
-  "wit_version": "0.2.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Read, send, and manage Gmail messages and threads",
   "keywords": [
     "email",
