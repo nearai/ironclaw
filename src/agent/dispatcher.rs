@@ -50,8 +50,18 @@ impl Agent {
 
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         // In group chats, MEMORY.md is excluded to prevent leaking personal context.
+        // Resolve the user's timezone
+        let user_tz = crate::timezone::resolve_timezone(
+            message.timezone.as_deref(),
+            None, // user setting lookup can be added later
+            &self.config.default_timezone,
+        );
+
         let system_prompt = if let Some(ws) = self.workspace() {
-            match ws.system_prompt_for_context(is_group_chat).await {
+            match ws
+                .system_prompt_for_context_tz(is_group_chat, user_tz)
+                .await
+            {
                 Ok(prompt) if !prompt.is_empty() => Some(prompt),
                 Ok(_) => None,
                 Err(e) => {
@@ -130,6 +140,7 @@ impl Agent {
         let mut job_ctx =
             JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
+        job_ctx.user_timezone = user_tz.name().to_string();
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -785,6 +796,7 @@ impl Agent {
                             tool_call_id: tc.id.clone(),
                             context_messages: context_messages.clone(),
                             deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
+                            user_timezone: Some(user_tz.name().to_string()),
                         };
 
                         return Ok(AgenticLoopResult::NeedApproval { pending });
@@ -1146,6 +1158,7 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations: 50,
                 auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -1248,6 +1261,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "done"}),
                 },
             ],
+            user_timezone: None,
         };
 
         let json = serde_json::to_string(&pending).expect("serialize");
@@ -1900,6 +1914,7 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations,
                 auto_approve_tools: true,
+                default_timezone: "UTC".to_string(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2015,6 +2030,7 @@ mod tests {
                     max_actions_per_hour: None,
                     max_tool_iterations: max_iter,
                     auto_approve_tools: true,
+                    default_timezone: "UTC".to_string(),
                 },
                 deps,
                 Arc::new(ChannelManager::new()),

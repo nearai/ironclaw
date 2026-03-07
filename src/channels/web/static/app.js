@@ -181,6 +181,7 @@ function confirmRestart() {
     body: {
       content: '/restart',
       thread_id: currentThreadId,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     },
   })
     .then((response) => {
@@ -454,7 +455,7 @@ function sendMessage() {
 
   apiFetch('/api/chat/send', {
     method: 'POST',
-    body: { content, thread_id: currentThreadId || undefined },
+    body: { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
   }).catch((err) => {
     addMessage('system', 'Failed to send: ' + err.message);
   });

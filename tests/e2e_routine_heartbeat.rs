@@ -118,6 +118,7 @@ mod tests {
             "cron-test",
             Trigger::Cron {
                 schedule: "* * * * *".to_string(),
+                timezone: None,
             },
             "Check system status.",
         );
@@ -203,6 +204,7 @@ mod tests {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
+            timezone: None,
             attachments: Vec::new(),
         };
         let fired = engine.check_event_triggers(&matching_msg).await;
@@ -224,6 +226,7 @@ mod tests {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
+            timezone: None,
             attachments: Vec::new(),
         };
         let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
@@ -288,6 +291,7 @@ mod tests {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
+            timezone: None,
             attachments: Vec::new(),
         };
         let fired1 = engine.check_event_triggers(&msg).await;

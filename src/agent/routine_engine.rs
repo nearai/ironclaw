@@ -170,7 +170,7 @@ impl RoutineEngine {
                 continue;
             }
 
-            let detail = if let Trigger::Cron { ref schedule } = routine.trigger {
+            let detail = if let Trigger::Cron { ref schedule, .. } = routine.trigger {
                 Some(schedule.clone())
             } else {
                 None
@@ -380,8 +380,12 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
 
     // Update routine runtime state
     let now = Utc::now();
-    let next_fire = if let Trigger::Cron { ref schedule } = routine.trigger {
-        next_cron_fire(schedule).unwrap_or(None)
+    let next_fire = if let Trigger::Cron {
+        ref schedule,
+        ref timezone,
+    } = routine.trigger
+    {
+        next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None)
     } else {
         None
     };
