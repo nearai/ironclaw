@@ -350,8 +350,13 @@ impl Agent {
         let heartbeat_handle = if let Some(ref hb_config) = self.heartbeat_config {
             if hb_config.enabled {
                 if let Some(workspace) = self.workspace() {
-                    let config = AgentHeartbeatConfig::default()
+                    let mut config = AgentHeartbeatConfig::default()
                         .with_interval(std::time::Duration::from_secs(hb_config.interval_secs));
+                    if let (Some(user), Some(channel)) =
+                        (&hb_config.notify_user, &hb_config.notify_channel)
+                    {
+                        config = config.with_notify(user, channel);
+                    }
 
                     // Set up notification channel
                     let (notify_tx, mut notify_rx) =

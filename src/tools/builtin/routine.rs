@@ -620,9 +620,13 @@ impl Tool for RoutineFireTool {
             .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
             .ok_or_else(|| ToolError::ExecutionFailed(format!("routine '{}' not found", name)))?;
 
-        let run_id = self.engine.fire_manual(routine.id).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("failed to fire routine '{}': {e}", name))
-        })?;
+        let run_id = self
+            .engine
+            .fire_manual(routine.id, None)
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to fire routine '{}': {e}", name))
+            })?;
 
         let result = serde_json::json!({
             "name": name,

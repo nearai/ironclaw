@@ -132,17 +132,20 @@ pub async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let engine_guard = state.routine_engine.read().await;
-    let engine = engine_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Routine engine not available".to_string(),
-    ))?;
+    // Clone the Arc out of the lock to avoid holding the RwLock across .await.
+    let engine = {
+        let guard = state.routine_engine.read().await;
+        guard.as_ref().cloned().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Routine engine not available".to_string(),
+        ))?
+    };
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
     let run_id = engine
-        .fire_manual(routine_id)
+        .fire_manual(routine_id, Some(&state.user_id))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

@@ -184,7 +184,11 @@ impl RoutineEngine {
     ///
     /// Bypasses cooldown checks (those only apply to cron/event triggers).
     /// Still enforces enabled check and concurrent run limit.
-    pub async fn fire_manual(&self, routine_id: Uuid) -> Result<Uuid, RoutineError> {
+    pub async fn fire_manual(
+        &self,
+        routine_id: Uuid,
+        user_id: Option<&str>,
+    ) -> Result<Uuid, RoutineError> {
         let routine = self
             .store
             .get_routine(routine_id)
@@ -193,6 +197,13 @@ impl RoutineEngine {
                 reason: e.to_string(),
             })?
             .ok_or(RoutineError::NotFound { id: routine_id })?;
+
+        // Enforce ownership when a user_id is provided (gateway calls).
+        if let Some(uid) = user_id
+            && routine.user_id != uid
+        {
+            return Err(RoutineError::NotAuthorized { id: routine_id });
+        }
 
         if !routine.enabled {
             return Err(RoutineError::Disabled {
