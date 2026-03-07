@@ -19,7 +19,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/google-calendar-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "fc42277b65881d6e9bcc5403dc54c7f5b3ddeaaaf04617fce2c5da05d76325f0"
     }
   },
   "auth_summary": {

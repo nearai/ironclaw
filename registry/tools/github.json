@@ -20,7 +20,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/github-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "6fcd32719a4ff15641a4b50fff8984686550f0c491dce60518f4126857d0c544"
     }
   },
   "auth_summary": {
