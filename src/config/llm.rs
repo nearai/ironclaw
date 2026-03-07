@@ -9,6 +9,57 @@ use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
 
+/// Prompt cache retention policy for Anthropic.
+///
+/// Controls whether rig-core's native prompt caching is enabled and the
+/// cost multiplier applied to cache-creation tokens.
+/// - `None` — caching disabled.
+/// - `Short` — 5-minute TTL (default), 1.25× write surcharge.
+/// - `Long` — 1-hour TTL, 2× write surcharge.
+///
+/// Note: rig-core 0.30's `CacheControl` enum only supports `Ephemeral`
+/// (5-minute TTL). `Long` is treated identically to `Short` for cache
+/// injection but applies the higher write surcharge for cost tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheRetention {
+    /// No prompt caching.
+    None,
+    /// 5-minute TTL (default). Write cost: 1.25× base input.
+    #[default]
+    Short,
+    /// 1-hour TTL. Write cost: 2× base input.
+    /// Note: rig-core 0.30 does not support the `ttl` field on `CacheControl`,
+    /// so this currently behaves like `Short` for cache injection. The higher
+    /// write surcharge is still applied for accurate cost tracking.
+    Long,
+}
+
+impl std::str::FromStr for CacheRetention {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" | "off" | "disabled" => Ok(Self::None),
+            "short" | "5m" | "ephemeral" => Ok(Self::Short),
+            "long" | "1h" => Ok(Self::Long),
+            _ => Err(format!(
+                "invalid cache retention '{}', expected one of: none, short, long",
+                s
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for CacheRetention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Short => write!(f, "short"),
+            Self::Long => write!(f, "long"),
+        }
+    }
+}
+
 /// Resolved configuration for a registry-based provider.
 ///
 /// This single struct replaces what used to be five separate config types
