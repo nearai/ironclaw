@@ -194,7 +194,11 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
-        .route("/oauth/callback", get(oauth_callback_handler));
+        .route("/oauth/callback", get(oauth_callback_handler))
+        .route(
+            "/api/webhooks/routines/{identifier}",
+            post(crate::channels::web::handlers::routines::webhook_trigger_handler),
+        );
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
