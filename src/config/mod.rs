@@ -36,10 +36,7 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsq
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
-pub use self::llm::{
-    AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
-    OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
-};
+pub use self::llm::{CacheRetention, LlmConfig, NearAiConfig, RegistryProviderConfig};
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
@@ -47,6 +44,7 @@ pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
+pub use crate::llm::session::SessionConfig;
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///
@@ -78,6 +76,77 @@ pub struct Config {
 }
 
 impl Config {
+    /// Create a full Config for integration tests without reading env vars.
+    ///
+    /// Requires the `libsql` feature. Sets up:
+    /// - libSQL database at the given path
+    /// - WASM and embeddings disabled
+    /// - Skills enabled with the given directories
+    /// - Heartbeat, routines, sandbox, builder all disabled
+    /// - Safety with injection check off, 100k output limit
+    #[cfg(feature = "libsql")]
+    pub fn for_testing(
+        libsql_path: std::path::PathBuf,
+        skills_dir: std::path::PathBuf,
+        installed_skills_dir: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            database: DatabaseConfig {
+                backend: DatabaseBackend::LibSql,
+                url: secrecy::SecretString::from("unused://test".to_string()),
+                pool_size: 1,
+                ssl_mode: SslMode::Disable,
+                libsql_path: Some(libsql_path),
+                libsql_url: None,
+                libsql_auth_token: None,
+            },
+            llm: LlmConfig::for_testing(),
+            embeddings: EmbeddingsConfig::default(),
+            tunnel: TunnelConfig::default(),
+            channels: ChannelsConfig {
+                cli: CliConfig { enabled: false },
+                http: None,
+                gateway: None,
+                signal: None,
+                wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
+                wasm_channels_enabled: false,
+                wasm_channel_owner_ids: HashMap::new(),
+            },
+            agent: AgentConfig::for_testing(),
+            safety: SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            },
+            wasm: WasmConfig {
+                enabled: false,
+                ..WasmConfig::default()
+            },
+            secrets: SecretsConfig::default(),
+            builder: BuilderModeConfig {
+                enabled: false,
+                ..BuilderModeConfig::default()
+            },
+            heartbeat: HeartbeatConfig::default(),
+            hygiene: HygieneConfig::default(),
+            routines: RoutineConfig {
+                enabled: false,
+                ..RoutineConfig::default()
+            },
+            sandbox: SandboxModeConfig {
+                enabled: false,
+                ..SandboxModeConfig::default()
+            },
+            claude_code: ClaudeCodeConfig::default(),
+            skills: SkillsConfig {
+                enabled: true,
+                local_dir: skills_dir,
+                installed_dir: installed_skills_dir,
+                ..SkillsConfig::default()
+            },
+            observability: crate::observability::ObservabilityConfig::default(),
+        }
+    }
+
     /// Load configuration from environment variables and the database.
     ///
     /// Priority: env var > TOML config file > DB settings > default.
@@ -215,12 +284,29 @@ pub async fn inject_llm_keys_from_secrets(
     secrets: &dyn crate::secrets::SecretsStore,
     user_id: &str,
 ) {
-    let mappings = [
-        ("llm_openai_api_key", "OPENAI_API_KEY"),
-        ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
-        ("llm_compatible_api_key", "LLM_API_KEY"),
-        ("llm_nearai_api_key", "NEARAI_API_KEY"),
-    ];
+    // Static mappings for well-known providers.
+    // The registry's setup hints define secret_name -> env_var mappings,
+    // so new providers added to providers.json get injection automatically.
+    let mut mappings: Vec<(&str, &str)> = vec![("llm_nearai_api_key", "NEARAI_API_KEY")];
+
+    // Dynamically discover secret->env mappings from the provider registry.
+    // Uses selectable() which deduplicates user overrides correctly.
+    let registry = crate::llm::ProviderRegistry::load();
+    let dynamic_mappings: Vec<(String, String)> = registry
+        .selectable()
+        .iter()
+        .filter_map(|def| {
+            def.api_key_env.as_ref().and_then(|env_var| {
+                def.setup
+                    .as_ref()
+                    .and_then(|s| s.secret_name())
+                    .map(|secret_name| (secret_name.to_string(), env_var.clone()))
+            })
+        })
+        .collect();
+    for (secret, env_var) in &dynamic_mappings {
+        mappings.push((secret, env_var));
+    }
 
     let mut injected = HashMap::new();
 

@@ -9,7 +9,7 @@
 // - Secrets are NEVER exposed to WASM; credentials are injected at host boundary
 // - All outputs are scanned for secret leakage before returning to WASM
 
-package near:agent;
+package near:agent@0.2.0;
 
 /// Host-provided capabilities for sandboxed tools.
 ///

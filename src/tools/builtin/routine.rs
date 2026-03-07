@@ -1,10 +1,11 @@
 //! LLM-facing tools for managing routines.
 //!
-//! Five tools let the agent manage routines conversationally:
+//! Six tools let the agent manage routines conversationally:
 //! - `routine_create` - Create a new routine
 //! - `routine_list` - List all routines with status
 //! - `routine_update` - Modify or toggle a routine
 //! - `routine_delete` - Remove a routine
+//! - `routine_fire` - Manually trigger a routine
 //! - `routine_history` - View past runs
 
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use crate::agent::routine::{
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
 use crate::db::Database;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
 // ==================== routine_create ====================
 
@@ -93,6 +94,19 @@ impl Tool for RoutineCreateTool {
                 "cooldown_secs": {
                     "type": "integer",
                     "description": "Minimum seconds between fires (default: 300)"
+                },
+                "tool_permissions": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Tool names pre-authorized for Always-approval tools in full_job mode (e.g. ['shell']). UnlessAutoApproved tools are automatically permitted in routines."
+                },
+                "notify_channel": {
+                    "type": "string",
+                    "description": "Channel to send results to (e.g. 'telegram', 'slack', 'tui'). Sets the default channel for message tool calls in routine jobs."
+                },
+                "notify_user": {
+                    "type": "string",
+                    "description": "User/target to notify (e.g. username, chat ID). Defaults to 'default'."
                 }
             },
             "required": ["name", "trigger_type", "prompt"]
@@ -192,11 +206,15 @@ impl Tool for RoutineCreateTool {
                 context_paths,
                 max_tokens: 4096,
             },
-            "full_job" => RoutineAction::FullJob {
-                title: name.to_string(),
-                description: prompt.to_string(),
-                max_iterations: 10,
-            },
+            "full_job" => {
+                let tool_permissions = crate::agent::routine::parse_tool_permissions(&params);
+                RoutineAction::FullJob {
+                    title: name.to_string(),
+                    description: prompt.to_string(),
+                    max_iterations: 10,
+                    tool_permissions,
+                }
+            }
             other => {
                 return Err(ToolError::InvalidParameters(format!(
                     "unknown action_type: {other}"
@@ -229,7 +247,18 @@ impl Tool for RoutineCreateTool {
                 max_concurrent: 1,
                 dedup_window: None,
             },
-            notify: NotifyConfig::default(),
+            notify: NotifyConfig {
+                channel: params
+                    .get("notify_channel")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                user: params
+                    .get("notify_user")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default")
+                    .to_string(),
+                ..NotifyConfig::default()
+            },
             last_run_at: None,
             next_fire_at: next_fire,
             run_count: 0,
@@ -523,6 +552,82 @@ impl Tool for RoutineDeleteTool {
         let result = serde_json::json!({
             "name": name,
             "deleted": deleted,
+        });
+
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
+// ==================== routine_fire ====================
+
+pub struct RoutineFireTool {
+    store: Arc<dyn Database>,
+    engine: Arc<RoutineEngine>,
+}
+
+impl RoutineFireTool {
+    pub fn new(store: Arc<dyn Database>, engine: Arc<RoutineEngine>) -> Self {
+        Self { store, engine }
+    }
+}
+
+#[async_trait]
+impl Tool for RoutineFireTool {
+    fn name(&self) -> &str {
+        "routine_fire"
+    }
+
+    fn description(&self) -> &str {
+        "Manually trigger a routine to run immediately, bypassing schedule, trigger type, and cooldown."
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        // Firing a routine can dispatch a full_job with pre-authorized Always-gated tools,
+        // so this is a meaningful escalation that warrants auto-approval gating.
+        ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the routine to fire"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let name = require_str(&params, "name")?;
+
+        let routine = self
+            .store
+            .get_routine_by_name(&ctx.user_id, name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("DB error: {e}")))?
+            .ok_or_else(|| ToolError::ExecutionFailed(format!("routine '{}' not found", name)))?;
+
+        let run_id = self.engine.fire_manual(routine.id).await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("failed to fire routine '{}': {e}", name))
+        })?;
+
+        let result = serde_json::json!({
+            "name": name,
+            "run_id": run_id.to_string(),
+            "status": "fired",
         });
 
         Ok(ToolOutput::success(result, start.elapsed()))

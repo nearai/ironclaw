@@ -127,7 +127,20 @@ impl Agent {
         let mut context_messages = initial_messages;
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        let mut job_ctx =
+            JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        job_ctx.http_interceptor = self.deps.http_interceptor.clone();
+
+        // Build system prompts once for this turn. Two variants: with tools
+        // (normal iterations) and without (force_text final iteration).
+        let initial_tool_defs = self.tools().tool_definitions().await;
+        let initial_tool_defs = if !active_skills.is_empty() {
+            crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
+        } else {
+            initial_tool_defs
+        };
+        let cached_prompt = reasoning.build_system_prompt_with_tools(&initial_tool_defs);
+        let cached_prompt_no_tools = reasoning.build_system_prompt_with_tools(&[]);
 
         let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination
@@ -136,6 +149,8 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
         let mut iteration = 0;
+        const MAX_TOOL_INTENT_NUDGES: u32 = 2;
+        let mut consecutive_tool_intent_nudges: u32 = 0;
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -204,10 +219,16 @@ impl Agent {
             };
 
             // Call LLM with current context; force_text drops tools to guarantee a
-            // text response on the final iteration.
+            // text response on the final iteration. The pre-built system prompt
+            // avoids rebuilding the same ~1,500-token string each iteration.
             let mut context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
                 .with_tools(tool_defs)
+                .with_system_prompt(if force_text {
+                    cached_prompt_no_tools.clone()
+                } else {
+                    cached_prompt.clone()
+                })
                 .with_metadata({
                     let mut m = std::collections::HashMap::new();
                     m.insert("thread_id".to_string(), thread_id.to_string());
@@ -244,7 +265,7 @@ impl Agent {
                     // Compact: keep system messages + last user message + current turn
                     context_messages = compact_messages_for_retry(&context_messages);
 
-                    // Rebuild context with compacted messages
+                    // Rebuild context with compacted messages, reusing cached prompt
                     let mut retry_context = ReasoningContext::new()
                         .with_messages(context_messages.clone())
                         .with_tools(if force_text {
@@ -254,6 +275,7 @@ impl Agent {
                         })
                         .with_metadata(context.metadata.clone());
                     retry_context.force_text = force_text;
+                    retry_context.system_prompt = context.system_prompt.clone();
 
                     reasoning
                         .respond_with_tools(&retry_context)
@@ -274,12 +296,18 @@ impl Agent {
 
             // Record cost and track token usage
             let model_name = self.llm().active_model_name();
+            let read_discount = self.llm().cache_read_discount();
+            let write_multiplier = self.llm().cache_write_multiplier();
             let call_cost = self
                 .cost_guard()
                 .record_llm_call(
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
+                    output.usage.cache_read_input_tokens,
+                    output.usage.cache_creation_input_tokens,
+                    read_discount,
+                    write_multiplier,
                     Some(self.llm().cost_per_token()),
                 )
                 .await;
@@ -292,6 +320,24 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
+                    // Nudge the LLM if it expressed tool intent without calling tools.
+                    // This is common with non-Anthropic models (e.g. GLM-5 via NEAR AI)
+                    // that output "Let me search…" but don't issue tool_calls.
+                    if !force_text
+                        && !context.available_tools.is_empty()
+                        && consecutive_tool_intent_nudges < MAX_TOOL_INTENT_NUDGES
+                        && crate::llm::llm_signals_tool_intent(&text)
+                    {
+                        consecutive_tool_intent_nudges += 1;
+                        tracing::info!(
+                            iteration,
+                            "LLM expressed tool intent without calling a tool, nudging"
+                        );
+                        context_messages.push(ChatMessage::assistant(&text));
+                        context_messages.push(ChatMessage::user(crate::llm::TOOL_INTENT_NUDGE));
+                        continue;
+                    }
+
                     // Strip internal "[Called tool ...]" text that can leak when
                     // provider flattening (e.g. NEAR AI) converts tool_calls to
                     // plain text and the LLM echoes it back.
@@ -302,6 +348,7 @@ impl Agent {
                     tool_calls,
                     content,
                 } => {
+                    consecutive_tool_intent_nudges = 0;
                     // Add the assistant message with tool_calls to context.
                     // OpenAI protocol requires this before tool-result messages.
                     context_messages.push(ChatMessage::assistant_with_tool_calls(
@@ -686,6 +733,15 @@ impl Agent {
                                     deferred_auth = Some(instructions);
                                 }
 
+                                // Stash full output so subsequent tools can reference it
+                                if let Ok(ref output) = tool_result {
+                                    job_ctx
+                                        .tool_output_stash
+                                        .write()
+                                        .await
+                                        .insert(tc.id.clone(), output.clone());
+                                }
+
                                 // Sanitize and add tool result to context
                                 let result_content = match tool_result {
                                     Ok(output) => {
@@ -697,7 +753,7 @@ impl Agent {
                                             sanitized.was_modified,
                                         )
                                     }
-                                    Err(e) => format!("Error: {}", e),
+                                    Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                                 };
 
                                 context_messages.push(ChatMessage::tool_result(
@@ -1030,6 +1086,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1043,6 +1101,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1066,6 +1126,7 @@ mod tests {
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
+            http_interceptor: None,
         };
 
         Agent::new(
@@ -1602,6 +1663,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1617,6 +1680,8 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 });
             }
             // Tools available: always call one.
@@ -1630,6 +1695,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1754,6 +1821,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 2,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1768,6 +1837,8 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 2,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 });
             }
             // Always call a tool that does not exist in the registry.
@@ -1781,6 +1852,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1805,6 +1878,7 @@ mod tests {
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
+            http_interceptor: None,
         };
 
         Agent::new(
@@ -1917,6 +1991,7 @@ mod tests {
                 hooks: Arc::new(HookRegistry::new()),
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
                 sse_tx: None,
+                http_interceptor: None,
             };
 
             Agent::new(
@@ -2013,5 +2088,26 @@ mod tests {
         let input = "This is a normal response with [brackets] inside.";
         let result = super::strip_internal_tool_call_text(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_tool_error_format_includes_tool_name() {
+        // Regression test for issue #487: tool errors sent to the LLM should
+        // include the tool name so the model can reason about which tool failed
+        // and try alternatives.
+        let tool_name = "http";
+        let err = crate::error::ToolError::ExecutionFailed {
+            name: tool_name.to_string(),
+            reason: "connection refused".to_string(),
+        };
+        let formatted = format!("Tool '{}' failed: {}", tool_name, err);
+        assert!(
+            formatted.contains("Tool 'http' failed:"),
+            "Error should identify the tool by name, got: {formatted}"
+        );
+        assert!(
+            formatted.contains("connection refused"),
+            "Error should include the underlying reason, got: {formatted}"
+        );
     }
 }

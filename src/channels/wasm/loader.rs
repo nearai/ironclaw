@@ -90,6 +90,14 @@ impl WasmChannelLoader {
                         "Parsed capabilities file"
                     );
 
+                    // Check WIT version compatibility
+                    crate::tools::wasm::loader::check_wit_version_compat(
+                        name,
+                        cap_file.wit_version.as_deref(),
+                        crate::tools::wasm::WIT_CHANNEL_VERSION,
+                    )
+                    .map_err(|e| WasmChannelError::IncompatibleWitVersion(e.to_string()))?;
+
                     let caps = cap_file.to_capabilities();
 
                     // Debug: log resulting capabilities
@@ -275,6 +283,13 @@ impl LoadedChannel {
         self.capabilities_file
             .as_ref()
             .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()))
+    }
+
+    /// Get the HMAC-SHA256 signing secret name from capabilities.
+    pub fn hmac_secret_name(&self) -> Option<String> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()))
     }
 
     /// Get the webhook secret name from capabilities.

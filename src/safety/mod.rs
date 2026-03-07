@@ -47,14 +47,22 @@ impl SafetyLayer {
 
     /// Sanitize tool output before it reaches the LLM.
     pub fn sanitize_tool_output(&self, tool_name: &str, output: &str) -> SanitizedOutput {
-        // Check length limits first
+        // Check length limits — keep the beginning so the LLM has partial data
         if output.len() > self.config.max_output_length {
+            // Find a safe truncation point on a char boundary
+            let mut cut = self.config.max_output_length;
+            while cut > 0 && !output.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let truncated = &output[..cut];
+            let notice = format!(
+                "\n\n[... truncated: showing {}/{} bytes. Use the json tool with \
+                 source_tool_call_id to query the full output.]",
+                cut,
+                output.len()
+            );
             return SanitizedOutput {
-                content: format!(
-                    "[Output truncated: {} bytes exceeded maximum of {} bytes]",
-                    output.len(),
-                    self.config.max_output_length
-                ),
+                content: format!("{}{}", truncated, notice),
                 warnings: vec![InjectionWarning {
                     pattern: "output_too_large".to_string(),
                     severity: Severity::Low,

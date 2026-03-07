@@ -1,0 +1,21 @@
+{
+  "model_name": "spot-robust-no-tool",
+  "expects": {
+    "response_contains": ["Paris"],
+    "max_tool_calls": 0,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "capital of France"
+      },
+      "response": {
+        "type": "text",
+        "content": "The capital of France is Paris.",
+        "input_tokens": 40,
+        "output_tokens": 10
+      }
+    }
+  ]
+}

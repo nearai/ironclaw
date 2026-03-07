@@ -80,6 +80,9 @@ pub enum WasmChannelError {
 
     #[error("HTTP request error: {0}")]
     HttpRequest(String),
+
+    #[error("WIT version mismatch: {0}")]
+    IncompatibleWitVersion(String),
 }
 
 impl From<crate::tools::wasm::WasmError> for WasmChannelError {

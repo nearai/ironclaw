@@ -245,6 +245,14 @@ impl LlmProvider for CircuitBreakerProvider {
         self.inner.cost_per_token()
     }
 
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.check_allowed().await?;
         match self.inner.complete(request).await {

@@ -73,6 +73,15 @@
 //! let output = tool.execute(serde_json::json!({"input": "test"}), &ctx).await?;
 //! ```
 
+/// Host WIT version for tool extensions.
+///
+/// Extensions declaring a `wit_version` in their capabilities file are checked
+/// against this at load time: same major, not greater than host.
+pub const WIT_TOOL_VERSION: &str = "0.2.0";
+
+/// Host WIT version for channel extensions.
+pub const WIT_CHANNEL_VERSION: &str = "0.2.0";
+
 mod allowlist;
 mod capabilities;
 mod capabilities_schema;
@@ -80,10 +89,10 @@ pub(crate) mod credential_injector;
 mod error;
 mod host;
 mod limits;
-mod loader;
+pub(crate) mod loader;
 mod rate_limiter;
 mod runtime;
-mod storage;
+pub(crate) mod storage;
 mod wrapper;
 
 // Core types
@@ -93,7 +102,7 @@ pub use limits::{
     DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT, FuelConfig, ResourceLimits,
     WasmResourceLimiter,
 };
-pub use runtime::{PreparedModule, WasmRuntimeConfig, WasmToolRuntime};
+pub use runtime::{PreparedModule, WasmRuntimeConfig, WasmToolRuntime, enable_compilation_cache};
 pub use wrapper::{OAuthRefreshConfig, WasmToolWrapper};
 
 // Capabilities (V2)

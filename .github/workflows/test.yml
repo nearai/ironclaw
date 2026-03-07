@@ -14,7 +14,7 @@ jobs:
       matrix:
         include:
           - name: all-features
-            flags: "--all-features"
+            flags: "--features postgres,libsql,html-to-markdown"
           - name: default
             flags: ""
           - name: libsql-only
@@ -26,9 +26,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           profile: minimal
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM channels (for integration tests)
+        run: ./scripts/build-wasm-extensions.sh --channels
       - name: Run Tests
         run: cargo test ${{ matrix.flags }} -- --nocapture
 
@@ -46,6 +51,53 @@ jobs:
       - name: Run Telegram Channel Tests
         run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
 
+  windows-build:
+    name: Windows Build (${{ matrix.name }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all-features
+            flags: "--all-features"
+          - name: default
+            flags: ""
+          - name: libsql-only
+            flags: "--no-default-features --features libsql"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.name }}
+      - name: Check compilation
+        run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
+
+  wasm-wit-compat:
+    name: WASM WIT Compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm-extensions
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build all WASM extensions against current WIT
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Instantiation test (host linker compatibility)
+        run: cargo test --all-features wit_compat -- --nocapture
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
@@ -55,15 +107,34 @@ jobs:
       - name: Build Docker image
         run: docker build -t ironclaw-test:ci .
 
+  version-check:
+    name: Version Bump Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check version bumps for changed extensions
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: ./scripts/check-version-bumps.sh
+
   # Roll-up job for branch protection
   run-tests:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, telegram-tests, docker-build]
+    needs: [tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check]
     steps:
       - run: |
-          if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.telegram-tests.result }}" != "success" || "${{ needs.docker-build.result }}" != "success" ]]; then
+          if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.telegram-tests.result }}" != "success" || "${{ needs.wasm-wit-compat.result }}" != "success" || "${{ needs.docker-build.result }}" != "success" || "${{ needs.windows-build.result }}" != "success" ]]; then
             echo "One or more jobs failed"
+            exit 1
+          fi
+          # version-check only runs on PRs, so skip/success are both acceptable
+          if [[ "${{ needs.version-check.result }}" == "failure" ]]; then
+            echo "Version bump check failed"
             exit 1
           fi
