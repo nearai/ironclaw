@@ -1542,6 +1542,31 @@ impl Store {
         Ok(row.is_some())
     }
 
+    /// Find the most recent conversation for a user on a channel.
+    ///
+    /// Used for channels like WhatsApp that don't have explicit thread IDs.
+    /// Returns the most recently active conversation UUID, or None if no
+    /// conversation exists.
+    pub async fn find_conversation_by_user_channel(
+        &self,
+        user_id: &str,
+        channel: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND channel = $2
+                ORDER BY last_activity DESC
+                LIMIT 1
+                "#,
+                &[&user_id, &channel],
+            )
+            .await?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
     /// Load messages for a conversation with cursor-based pagination.
     ///
     /// Returns `(messages_oldest_first, has_more)`.

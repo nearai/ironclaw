@@ -23,6 +23,35 @@ use crate::error::Error;
 use crate::llm::ChatMessage;
 use crate::tools::redact_params;
 
+/// Errors that can occur during thread hydration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HydrationError {
+    /// User attempted to access a conversation they don't own.
+    AccessDenied {
+        conversation_id: Uuid,
+        user_id: String,
+    },
+}
+
+impl std::fmt::Display for HydrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AccessDenied {
+                conversation_id,
+                user_id,
+            } => {
+                write!(
+                    f,
+                    "User {} does not have access to conversation {}",
+                    user_id, conversation_id
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for HydrationError {}
+
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
@@ -33,15 +62,98 @@ impl Agent {
     /// even when the conversation has zero messages (e.g. a brand-new
     /// assistant thread). Without this, `resolve_thread` would mint a
     /// fresh UUID and all messages would land in the wrong conversation.
+    ///
+    /// For non-UUID thread IDs (WhatsApp, CLI, etc.), looks up the most recent
+    /// conversation for the user on the channel and loads its history.
+    ///
+    /// Returns `Err(HydrationError::AccessDenied)` if the user attempts to access
+    /// a conversation they don't own. Returns `Ok(())` otherwise (including when
+    /// no hydration is needed or possible).
     pub(super) async fn maybe_hydrate_thread(
         &self,
         message: &IncomingMessage,
         external_thread_id: &str,
-    ) {
-        // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
+    ) -> Result<(), HydrationError> {
+        // Try UUID parsing first (web gateway uses UUIDs)
         let thread_uuid = match Uuid::parse_str(external_thread_id) {
-            Ok(id) => id,
-            Err(_) => return,
+            Ok(id) => {
+                // Security: Verify the conversation belongs to this user before loading
+                if let Some(store) = self.store() {
+                    match store
+                        .conversation_belongs_to_user(id, &message.user_id)
+                        .await
+                    {
+                        Ok(true) => Some(id),
+                        Ok(false) => {
+                            tracing::warn!(
+                                user_id = %message.user_id,
+                                conversation_id = %id,
+                                "User attempted to access conversation they don't own"
+                            );
+                            return Err(HydrationError::AccessDenied {
+                                conversation_id: id,
+                                user_id: message.user_id.clone(),
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                conversation_id = %id,
+                                "Failed to verify conversation ownership"
+                            );
+                            return Err(HydrationError::AccessDenied {
+                                conversation_id: id,
+                                user_id: message.user_id.clone(),
+                            });
+                        }
+                    }
+                } else {
+                    Some(id)
+                }
+            }
+            Err(_) => {
+                // For non-UUID thread IDs (WhatsApp, CLI, etc.), look up by user+channel.
+                // Security: find_conversation_by_user_channel queries by user_id,
+                // so only conversations owned by this user can be returned.
+                if let Some(store) = self.store() {
+                    match store
+                        .find_conversation_by_user_channel(&message.user_id, &message.channel)
+                        .await
+                    {
+                        Ok(Some(conv_id)) => {
+                            tracing::debug!(
+                                user_id = %message.user_id,
+                                channel = %message.channel,
+                                conversation_id = %conv_id,
+                                "Found existing conversation for non-UUID thread"
+                            );
+                            Some(conv_id)
+                        }
+                        Ok(None) => {
+                            tracing::debug!(
+                                user_id = %message.user_id,
+                                channel = %message.channel,
+                                "No existing conversation found for non-UUID thread"
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to look up conversation by user+channel"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+
+        let thread_uuid = match thread_uuid {
+            Some(id) => id,
+            None => return Ok(()),
         };
 
         // Check if already in memory
@@ -52,7 +164,7 @@ impl Agent {
         {
             let sess = session.lock().await;
             if sess.threads.contains_key(&thread_uuid) {
-                return;
+                return Ok(());
             }
         }
 
@@ -113,6 +225,8 @@ impl Agent {
             thread_uuid,
             msg_count
         );
+
+        Ok(())
     }
 
     pub(super) async fn process_user_input(
@@ -1467,5 +1581,40 @@ impl Agent {
         } else {
             Ok(SubmissionResult::error("Checkpoint not found."))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn test_hydration_error_display() {
+        let conv_id = uuid::Uuid::new_v4();
+        let user_id = "alice".to_string();
+
+        let error = HydrationError::AccessDenied {
+            conversation_id: conv_id,
+            user_id: user_id.clone(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "User alice does not have access to conversation {}",
+                conv_id
+            )
+        );
+    }
+
+    #[test]
+    fn test_hydration_error_is_error() {
+        let error = HydrationError::AccessDenied {
+            conversation_id: uuid::Uuid::nil(),
+            user_id: "test".to_string(),
+        };
+
+        assert!(error.source().is_none());
     }
 }

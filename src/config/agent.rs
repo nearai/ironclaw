@@ -27,6 +27,12 @@ pub struct AgentConfig {
     pub max_tool_iterations: usize,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
+    /// Whether message batching is enabled (default: true).
+    pub batching_enabled: bool,
+    /// Time window for batching in milliseconds (default: 5000).
+    pub batching_window_ms: u64,
+    /// Maximum messages per batch (default: 5).
+    pub batching_max_messages: usize,
 }
 
 impl AgentConfig {
@@ -47,6 +53,9 @@ impl AgentConfig {
             max_actions_per_hour: None,
             max_tool_iterations: 10,
             auto_approve_tools: true,
+            batching_enabled: false,
+            batching_window_ms: 5000,
+            batching_max_messages: 5,
         }
     }
 
@@ -89,6 +98,9 @@ impl AgentConfig {
                 "AGENT_AUTO_APPROVE_TOOLS",
                 settings.agent.auto_approve_tools,
             )?,
+            batching_enabled: parse_bool_env("BATCHING_ENABLED", true)?,
+            batching_window_ms: parse_optional_env("BATCHING_WINDOW_MS", 5000)?,
+            batching_max_messages: parse_optional_env("BATCHING_MAX_MESSAGES", 5)?,
         })
     }
 }
