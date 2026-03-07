@@ -10,6 +10,12 @@ use rust_decimal_macros::dec;
 ///
 /// Returns `Some((input_cost, output_cost))` for known models, `None` otherwise.
 pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
+    // OpenRouter free-tier models: `:free` suffix or the `openrouter/free` router
+    // should always report zero cost (see #463).
+    if model_id.ends_with(":free") || model_id == "openrouter/free" || model_id == "free" {
+        return Some((Decimal::ZERO, Decimal::ZERO));
+    }
+
     // Normalize: strip provider prefixes (e.g., "openai/gpt-4o" -> "gpt-4o")
     let id = model_id
         .rsplit_once('/')
@@ -146,5 +152,45 @@ mod tests {
     fn test_provider_prefix_stripped() {
         // "openai/gpt-4o" should resolve to same as "gpt-4o"
         assert_eq!(model_cost("openai/gpt-4o"), model_cost("gpt-4o"));
+    }
+
+    #[test]
+    fn test_openrouter_free_suffix_zero_cost() {
+        // Models with `:free` suffix should report zero cost (#463)
+        let (input, output) = model_cost("stepfun/step-3.5-flash:free").unwrap();
+        assert_eq!(input, Decimal::ZERO);
+        assert_eq!(output, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_openrouter_free_router_zero_cost() {
+        // The "openrouter/free" router model should report zero cost (#463)
+        let (input, output) = model_cost("openrouter/free").unwrap();
+        assert_eq!(input, Decimal::ZERO);
+        assert_eq!(output, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_bare_free_zero_cost() {
+        // Edge case: bare "free" after prefix stripping
+        let (input, output) = model_cost("free").unwrap();
+        assert_eq!(input, Decimal::ZERO);
+        assert_eq!(output, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_free_suffix_various_providers() {
+        // Various provider-prefixed free models
+        for model in &[
+            "google/gemma-3-27b-it:free",
+            "meta-llama/llama-4-maverick:free",
+            "microsoft/phi-4:free",
+            "nousresearch/deephermes-3-llama-3-8b-preview:free",
+        ] {
+            let (input, output) =
+                model_cost(model).unwrap_or_else(|| panic!("{model} should return Some"));
+            assert_eq!(input, Decimal::ZERO, "{model} input cost should be zero");
+            assert_eq!(output, Decimal::ZERO, "{model} output cost should be zero");
+        }
     }
 }

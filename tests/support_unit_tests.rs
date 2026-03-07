@@ -96,42 +96,46 @@ mod cleanup_tests {
 
     #[test]
     fn cleanup_guard_removes_file() {
-        let path = "/tmp/ironclaw_cleanup_guard_test.txt";
-        std::fs::write(path, "test").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cleanup_guard_test.txt");
+        std::fs::write(&path, "test").unwrap();
+        let path_str = path.to_str().unwrap().to_string();
         {
-            let _guard = CleanupGuard::new().file(path);
-            assert!(std::path::Path::new(path).exists());
+            let _guard = CleanupGuard::new().file(path_str);
+            assert!(path.exists());
         }
-        assert!(!std::path::Path::new(path).exists());
+        assert!(!path.exists());
     }
 
     #[test]
     fn cleanup_guard_removes_dir() {
-        let dir = "/tmp/ironclaw_cleanup_guard_test_dir";
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(format!("{dir}/file.txt"), "test").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("cleanup_guard_test_dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("file.txt"), "test").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
         {
-            let _guard = CleanupGuard::new().dir(dir);
-            assert!(std::path::Path::new(dir).exists());
+            let _guard = CleanupGuard::new().dir(dir_str);
+            assert!(dir.exists());
         }
-        assert!(!std::path::Path::new(dir).exists());
+        assert!(!dir.exists());
     }
 
     #[test]
     fn cleanup_guard_file_does_not_remove_dir() {
-        let dir = "/tmp/ironclaw_cleanup_guard_file_not_dir";
-        std::fs::create_dir_all(dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("cleanup_guard_file_not_dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
         {
             // Registering a directory path as .file() should not remove it
             // (remove_file fails on directories).
-            let _guard = CleanupGuard::new().file(dir);
+            let _guard = CleanupGuard::new().file(dir_str);
         }
         assert!(
-            std::path::Path::new(dir).exists(),
+            dir.exists(),
             "dir should still exist when registered as file"
         );
-        // Clean up manually.
-        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

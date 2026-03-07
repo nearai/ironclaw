@@ -11,17 +11,9 @@ mod tests {
     use std::time::Duration;
 
     use crate::support::assertions::assert_all_tools_succeeded;
-    use crate::support::cleanup::CleanupGuard;
     use crate::support::metrics::{RunResult, ScenarioResult, compare_runs};
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
-
-    const TEST_DIR: &str = "/tmp/ironclaw_metrics_test";
-
-    fn setup_test_dir() {
-        let _ = std::fs::remove_dir_all(TEST_DIR);
-        std::fs::create_dir_all(TEST_DIR).expect("failed to create test directory");
-    }
 
     /// Verify that metrics are collected from a simple text-only trace.
     #[tokio::test]
@@ -86,14 +78,14 @@ mod tests {
     /// Verify that metrics capture tool calls from a file write/read flow.
     #[tokio::test]
     async fn test_metrics_collected_from_tool_trace() {
-        setup_test_dir();
-        let _cleanup = CleanupGuard::new().dir(TEST_DIR);
+        let tmp = tempfile::tempdir().expect("create temp dir");
 
-        let trace = LlmTrace::from_file(concat!(
+        let mut trace = LlmTrace::from_file(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/llm_traces/file_write_read.json"
         ))
         .expect("failed to load file_write_read.json");
+        trace.replace_paths("/tmp/ironclaw_e2e_test", tmp.path().to_str().unwrap());
 
         let rig = TestRigBuilder::new().with_trace(trace).build().await;
 

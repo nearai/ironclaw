@@ -1,4 +1,4 @@
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "integration"))]
 //! Integration tests for the workspace module.
 //!
 //! Requires a running PostgreSQL with pgvector extension.
@@ -21,18 +21,6 @@ fn get_pool() -> deadpool_postgres::Pool {
         .expect("Failed to create pool")
 }
 
-/// Try to get a connection, returning None if Postgres is unreachable.
-/// Tests call this to skip gracefully in CI where no database is available.
-async fn try_connect(pool: &deadpool_postgres::Pool) -> Option<()> {
-    match pool.get().await {
-        Ok(_) => Some(()),
-        Err(e) => {
-            eprintln!("skipping: database unavailable ({e})");
-            None
-        }
-    }
-}
-
 async fn cleanup_user(pool: &deadpool_postgres::Pool, user_id: &str) {
     let conn = pool.get().await.expect("Failed to get connection");
     conn.execute(
@@ -46,9 +34,6 @@ async fn cleanup_user(pool: &deadpool_postgres::Pool, user_id: &str) {
 #[tokio::test]
 async fn test_workspace_write_and_read() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_write_read";
     cleanup_user(&pool, user_id).await;
 
@@ -74,9 +59,6 @@ async fn test_workspace_write_and_read() {
 #[tokio::test]
 async fn test_workspace_append() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_append";
     cleanup_user(&pool, user_id).await;
 
@@ -104,9 +86,6 @@ async fn test_workspace_append() {
 #[tokio::test]
 async fn test_workspace_nested_paths() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_nested";
     cleanup_user(&pool, user_id).await;
 
@@ -152,9 +131,6 @@ async fn test_workspace_nested_paths() {
 #[tokio::test]
 async fn test_workspace_delete() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_delete";
     cleanup_user(&pool, user_id).await;
 
@@ -179,9 +155,6 @@ async fn test_workspace_delete() {
 #[tokio::test]
 async fn test_workspace_memory_operations() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_memory_ops";
     cleanup_user(&pool, user_id).await;
 
@@ -210,9 +183,6 @@ async fn test_workspace_memory_operations() {
 #[tokio::test]
 async fn test_workspace_daily_log() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_daily_log";
     cleanup_user(&pool, user_id).await;
 
@@ -239,9 +209,6 @@ async fn test_workspace_daily_log() {
 #[tokio::test]
 async fn test_workspace_fts_search() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_fts_search";
     cleanup_user(&pool, user_id).await;
 
@@ -300,9 +267,6 @@ async fn test_workspace_fts_search() {
 #[tokio::test]
 async fn test_workspace_hybrid_search_with_mock_embeddings() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_hybrid_search";
     cleanup_user(&pool, user_id).await;
 
@@ -342,9 +306,6 @@ async fn test_workspace_hybrid_search_with_mock_embeddings() {
 #[tokio::test]
 async fn test_workspace_list_all() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_list_all";
     cleanup_user(&pool, user_id).await;
 
@@ -370,9 +331,6 @@ async fn test_workspace_list_all() {
 #[tokio::test]
 async fn test_workspace_system_prompt() {
     let pool = get_pool();
-    if try_connect(&pool).await.is_none() {
-        return;
-    }
     let user_id = "test_system_prompt";
     cleanup_user(&pool, user_id).await;
 

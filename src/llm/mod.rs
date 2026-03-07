@@ -31,7 +31,7 @@ pub use provider::{
 };
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
-    TokenUsage, ToolSelection, is_silent_reply,
+    TOOL_INTENT_NUDGE, TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
 };
 pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
