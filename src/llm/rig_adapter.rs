@@ -449,14 +449,28 @@ where
             request.max_tokens,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+        let response = match self.model.completion(rig_req).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("no message or tool call") || msg.contains("(empty)") {
+                    tracing::warn!(
+                        provider = %self.model_name,
+                        "LLM returned empty response in complete(); returning fallback"
+                    );
+                    return Ok(CompletionResponse {
+                        content: "I was unable to produce a response. Let me try a different approach.".to_string(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        finish_reason: FinishReason::Stop,
+                    });
+                }
+                return Err(LlmError::RequestFailed {
                     provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+                    reason: msg,
+                });
+            }
+        };
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
@@ -500,14 +514,37 @@ where
             request.max_tokens,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+        let response = match self.model.completion(rig_req).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let msg = e.to_string();
+                // rig-core throws "Response contained no message or tool call (empty)"
+                // when the Anthropic API returns an empty content array. Instead of
+                // crashing the job (and wasting retries on the same deterministic
+                // failure), return a no-op text response so the worker can continue
+                // its conversation loop.
+                if msg.contains("no message or tool call") || msg.contains("(empty)") {
+                    tracing::warn!(
+                        provider = %self.model_name,
+                        "LLM returned empty response; converting to no-op text to avoid job crash"
+                    );
+                    return Ok(ToolCompletionResponse {
+                        content: Some(
+                            "I was unable to produce a response. Let me try a different approach."
+                                .to_string(),
+                        ),
+                        tool_calls: vec![],
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        finish_reason: FinishReason::Stop,
+                    });
+                }
+                return Err(LlmError::RequestFailed {
                     provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+                    reason: msg,
+                });
+            }
+        };
 
         let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
 

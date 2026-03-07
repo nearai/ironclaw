@@ -363,7 +363,7 @@ impl Reasoning {
 
         let mut request =
             ToolCompletionRequest::new(context.messages.clone(), context.available_tools.clone())
-                .with_max_tokens(1024)
+                .with_max_tokens(2048)
                 .with_tool_choice("auto");
         request.metadata = context.metadata.clone();
 
