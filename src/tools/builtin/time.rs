@@ -134,7 +134,10 @@ mod tests {
             .execute(serde_json::json!({"operation": "now"}), &ctx)
             .await
             .expect("execute");
-        assert!(output.result.get("local_iso").is_some(), "should have local_iso");
+        assert!(
+            output.result.get("local_iso").is_some(),
+            "should have local_iso"
+        );
         assert_eq!(
             output.result["timezone"].as_str(),
             Some("America/New_York"),
