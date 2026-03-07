@@ -244,9 +244,7 @@ impl Tool for MemoryWriteTool {
                 self.workspace
                     .append_daily_log_tz(content, tz)
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                let today = crate::timezone::today_in_tz(tz);
-                format!("daily/{}.md", today.format("%Y-%m-%d"))
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?
             }
             "heartbeat" => {
                 if append {

@@ -746,8 +746,10 @@ impl Agent {
             let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
-            if let Some(ref tz) = message.timezone {
-                job_ctx.user_timezone = tz.clone();
+            // Prefer timezone from the approval message, fall back to the
+            // timezone stored when the approval was originally requested.
+            if let Some(ref tz) = message.timezone.as_ref().or(pending.user_timezone.as_ref()) {
+                job_ctx.user_timezone = tz.to_string();
             }
 
             let _ = self
@@ -1114,6 +1116,7 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
+                    user_timezone: message.timezone.clone(),
                 };
 
                 let request_id = new_pending.request_id;

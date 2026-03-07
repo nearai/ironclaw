@@ -107,6 +107,10 @@ impl Tool for RoutineCreateTool {
                 "notify_user": {
                     "type": "string",
                     "description": "User/target to notify (e.g. username, chat ID). Defaults to 'default'."
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone for cron schedule evaluation (e.g. 'America/New_York'). Defaults to UTC."
                 }
             },
             "required": ["name", "trigger_type", "prompt"]
@@ -146,7 +150,16 @@ impl Tool for RoutineCreateTool {
                 let timezone = params
                     .get("timezone")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
+                    .map(|tz| {
+                        crate::timezone::parse_timezone(tz)
+                            .map(|_| tz.to_string())
+                            .ok_or_else(|| {
+                                ToolError::InvalidParameters(format!(
+                                    "invalid IANA timezone: '{tz}'"
+                                ))
+                            })
+                    })
+                    .transpose()?;
                 // Validate cron expression
                 next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
                     ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
@@ -462,28 +475,54 @@ impl Tool for RoutineUpdateTool {
             }
         }
 
-        if let Some(schedule) = params.get("schedule").and_then(|v| v.as_str()) {
-            let timezone = params
-                .get("timezone")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .or_else(|| {
-                    // Preserve existing timezone if only schedule is changing
-                    if let Trigger::Cron { ref timezone, .. } = routine.trigger {
-                        timezone.clone()
-                    } else {
-                        None
-                    }
-                });
-            // Validate
-            next_cron_fire(schedule, timezone.as_deref())
-                .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
+        // Validate timezone param if provided
+        let new_timezone = params
+            .get("timezone")
+            .and_then(|v| v.as_str())
+            .map(|tz| {
+                crate::timezone::parse_timezone(tz)
+                    .map(|_| tz.to_string())
+                    .ok_or_else(|| {
+                        ToolError::InvalidParameters(format!("invalid IANA timezone: '{tz}'"))
+                    })
+            })
+            .transpose()?;
 
-            routine.trigger = Trigger::Cron {
-                schedule: schedule.to_string(),
-                timezone: timezone.clone(),
+        let new_schedule = params.get("schedule").and_then(|v| v.as_str());
+
+        if new_schedule.is_some() || new_timezone.is_some() {
+            // Extract existing cron fields (cloned to avoid borrow conflict)
+            let existing_cron = match &routine.trigger {
+                Trigger::Cron { schedule, timezone } => {
+                    Some((schedule.clone(), timezone.clone()))
+                }
+                _ => None,
             };
-            routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None);
+
+            if let Some((old_schedule, old_tz)) = existing_cron {
+                let effective_schedule = new_schedule.unwrap_or(&old_schedule);
+                let effective_tz = new_timezone.or(old_tz);
+                // Validate
+                next_cron_fire(effective_schedule, effective_tz.as_deref())
+                    .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
+
+                routine.trigger = Trigger::Cron {
+                    schedule: effective_schedule.to_string(),
+                    timezone: effective_tz.clone(),
+                };
+                routine.next_fire_at =
+                    next_cron_fire(effective_schedule, effective_tz.as_deref()).unwrap_or(None);
+            } else if let Some(schedule) = new_schedule {
+                let tz = new_timezone;
+                next_cron_fire(schedule, tz.as_deref())
+                    .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
+                routine.trigger = Trigger::Cron {
+                    schedule: schedule.to_string(),
+                    timezone: tz.clone(),
+                };
+                routine.next_fire_at =
+                    next_cron_fire(schedule, tz.as_deref()).unwrap_or(None);
+            }
         }
 
         self.store

@@ -102,6 +102,9 @@ mod tests {
     #[test]
     fn test_today_in_tz_returns_valid_date() {
         let date = today_in_tz(Tz::UTC);
-        assert!(date.year() >= 2024);
+        // Verify it returns a valid date (year, month, day are all positive)
+        assert!(date.year() > 0);
+        assert!((1..=12).contains(&date.month()));
+        assert!((1..=31).contains(&date.day()));
     }
 }

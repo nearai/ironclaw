@@ -565,25 +565,26 @@ impl Workspace {
     ///
     /// Daily logs are raw, append-only notes for the current day.
     pub async fn append_daily_log(&self, entry: &str) -> Result<(), WorkspaceError> {
-        let today = Utc::now().date_naive();
-        let path = format!("daily/{}.md", today.format("%Y-%m-%d"));
-        let timestamp = Utc::now().format("%H:%M:%S");
-        let timestamped_entry = format!("[{}] {}", timestamp, entry);
-        self.append(&path, &timestamped_entry).await
+        self.append_daily_log_tz(entry, chrono_tz::Tz::UTC)
+            .await
+            .map(|_| ())
     }
 
     /// Append an entry to today's daily log using the given timezone.
+    ///
+    /// Returns the path that was written to (e.g. `daily/2024-01-15.md`).
     pub async fn append_daily_log_tz(
         &self,
         entry: &str,
         tz: chrono_tz::Tz,
-    ) -> Result<(), WorkspaceError> {
+    ) -> Result<String, WorkspaceError> {
         let now = crate::timezone::now_in_tz(tz);
         let today = now.date_naive();
         let path = format!("daily/{}.md", today.format("%Y-%m-%d"));
         let timestamp = now.format("%H:%M:%S");
         let timestamped_entry = format!("[{}] {}", timestamp, entry);
-        self.append(&path, &timestamped_entry).await
+        self.append(&path, &timestamped_entry).await?;
+        Ok(path)
     }
 
     // ==================== System Prompt ====================
