@@ -541,6 +541,13 @@ function sendApprovalAction(requestId, action) {
 
 function renderMarkdown(text) {
   if (typeof marked !== 'undefined') {
+    // Escape raw HTML error pages instead of rendering them as markup.
+    // Only triggers when the text *starts with* a doctype or <html> tag
+    // (after optional whitespace), so normal messages that mention HTML
+    // tags in prose or code fences are not affected.  See #263.
+    if (/^\s*<!doctype\s/i.test(text) || /^\s*<html[\s>]/i.test(text)) {
+      return escapeHtml(text);
+    }
     let html = marked.parse(text);
     // Sanitize HTML output to prevent XSS from tool output or LLM responses.
     html = sanitizeRenderedHtml(html);
