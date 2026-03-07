@@ -145,16 +145,10 @@ pub(crate) fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Ok(dt.with_timezone(&Utc));
     }
-    // Naive with fractional seconds (legacy or SQLite datetime() output)
-    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
-        tracing::warn!(
-            timestamp = %s,
-            "parsed naive timestamp without timezone, assuming UTC — consider migrating to RFC 3339"
-        );
-        return Ok(ndt.and_utc());
-    }
-    // Naive without fractional seconds (legacy format)
-    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+    // Naive format fallback (legacy or SQLite datetime() output), with or without fractional seconds
+    if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+    {
         tracing::warn!(
             timestamp = %s,
             "parsed naive timestamp without timezone, assuming UTC — consider migrating to RFC 3339"
