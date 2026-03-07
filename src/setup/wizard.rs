@@ -883,7 +883,7 @@ impl SetupWizard {
                 "Provider '{}' has no setup wizard. Configure via environment variables.",
                 provider_id
             ));
-            self.settings.llm_backend = Some(provider_id.to_string());
+            self.set_llm_backend_preserving_model(provider_id);
             return Ok(());
         };
 
@@ -938,9 +938,19 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Update the selected LLM backend while preserving the current model when
+    /// the backend did not actually change.
+    fn set_llm_backend_preserving_model(&mut self, backend: &str) {
+        let backend_changed = self.settings.llm_backend.as_deref() != Some(backend);
+        self.settings.llm_backend = Some(backend.to_string());
+        if backend_changed {
+            self.settings.selected_model = None;
+        }
+    }
+
     /// NEAR AI provider setup (extracted from the old step_authentication).
     async fn setup_nearai(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("nearai".to_string());
+        self.set_llm_backend_preserving_model("nearai");
 
         // Check if we already have a session
         if let Some(ref session) = self.session_manager
@@ -1119,10 +1129,7 @@ impl SetupWizard {
             other => other,
         });
 
-        self.settings.llm_backend = Some(backend.to_string());
-        if self.settings.selected_model.is_some() {
-            self.settings.selected_model = None;
-        }
+        self.set_llm_backend_preserving_model(backend);
 
         // Check env var first
         if let Ok(existing) = std::env::var(env_var) {
@@ -1181,10 +1188,7 @@ impl SetupWizard {
         &mut self,
         def: &crate::llm::ProviderDefinition,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(def.id.clone());
-        if self.settings.selected_model.is_some() {
-            self.settings.selected_model = None;
-        }
+        self.set_llm_backend_preserving_model(&def.id);
 
         let default_url = self
             .settings
@@ -1219,10 +1223,7 @@ impl SetupWizard {
         secret_name: &str,
         display_name: &str,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(backend_id.to_string());
-        if self.settings.selected_model.is_some() {
-            self.settings.selected_model = None;
-        }
+        self.set_llm_backend_preserving_model(backend_id);
 
         let existing_url = self
             .settings
@@ -3535,5 +3536,29 @@ mod tests {
             Some("custom_no_setup"),
             "backend should be set even without setup hint"
         );
+    }
+
+    #[test]
+    fn test_set_llm_backend_preserves_model_when_backend_unchanged() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("openai".to_string());
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("openai");
+
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("openai"));
+        assert_eq!(wizard.settings.selected_model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_set_llm_backend_clears_model_when_backend_changes() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("openai".to_string());
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("anthropic");
+
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(wizard.settings.selected_model, None);
     }
 }
