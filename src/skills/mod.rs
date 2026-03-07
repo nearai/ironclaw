@@ -122,6 +122,9 @@ impl ActivationCriteria {
     pub fn enforce_limits(&mut self) {
         self.keywords.retain(|k| k.len() >= MIN_KEYWORD_TAG_LENGTH);
         self.keywords.truncate(MAX_KEYWORDS_PER_SKILL);
+        self.exclude_keywords
+            .retain(|k| k.len() >= MIN_KEYWORD_TAG_LENGTH);
+        self.exclude_keywords.truncate(MAX_KEYWORDS_PER_SKILL);
         self.patterns.truncate(MAX_PATTERNS_PER_SKILL);
         self.tags.retain(|t| t.len() >= MIN_KEYWORD_TAG_LENGTH);
         self.tags.truncate(MAX_TAGS_PER_SKILL);

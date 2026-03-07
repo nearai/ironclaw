@@ -24,6 +24,10 @@ use crate::skills::{
 /// Prevents resource exhaustion from a directory with thousands of entries.
 const MAX_DISCOVERED_SKILLS: usize = 100;
 
+fn to_lowercase_vec(items: &[String]) -> Vec<String> {
+    items.iter().map(|s| s.to_lowercase()).collect()
+}
+
 /// Error type for skill registry operations.
 #[derive(Debug, thiserror::Error)]
 pub enum SkillRegistryError {
@@ -582,24 +586,9 @@ async fn load_and_validate_skill(
     let compiled_patterns = LoadedSkill::compile_patterns(&manifest.activation.patterns);
 
     // Pre-compute lowercased keywords and tags for efficient scoring
-    let lowercased_keywords = manifest
-        .activation
-        .keywords
-        .iter()
-        .map(|k| k.to_lowercase())
-        .collect();
-    let lowercased_exclude_keywords = manifest
-        .activation
-        .exclude_keywords
-        .iter()
-        .map(|k| k.to_lowercase())
-        .collect();
-    let lowercased_tags = manifest
-        .activation
-        .tags
-        .iter()
-        .map(|t| t.to_lowercase())
-        .collect();
+    let lowercased_keywords = to_lowercase_vec(&manifest.activation.keywords);
+    let lowercased_exclude_keywords = to_lowercase_vec(&manifest.activation.exclude_keywords);
+    let lowercased_tags = to_lowercase_vec(&manifest.activation.tags);
 
     let name = manifest.name.clone();
     let skill = LoadedSkill {

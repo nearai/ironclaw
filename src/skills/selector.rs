@@ -100,10 +100,12 @@ pub fn prefilter_skills<'a>(
 /// Score a skill against a user message.
 fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str) -> u32 {
     // Exclusion veto: if any exclude_keyword is present in the message, score 0
-    for excl in &skill.lowercased_exclude_keywords {
-        if message_lower.contains(excl.as_str()) {
-            return 0;
-        }
+    if skill
+        .lowercased_exclude_keywords
+        .iter()
+        .any(|excl| message_lower.contains(excl.as_str()))
+    {
+        return 0;
     }
 
     let mut score: u32 = 0;
