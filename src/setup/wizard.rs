@@ -3297,6 +3297,14 @@ mod tests {
             }
             Self { key, original }
         }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
     }
 
     impl Drop for EnvGuard {
@@ -3385,6 +3393,9 @@ mod tests {
     fn test_write_bootstrap_env_includes_secrets_master_key() {
         use std::io::Read;
 
+        let dir = tempdir().unwrap();
+        let _guard = EnvGuard::set("IRONCLAW_BASE_DIR", dir.path().to_str().unwrap());
+
         let mut wizard = SetupWizard::new();
 
         // Set a test key
@@ -3395,8 +3406,8 @@ mod tests {
         // Write bootstrap env
         wizard.write_bootstrap_env().unwrap();
 
-        // Read and check the .env file
-        let env_path = crate::bootstrap::ironclaw_base_dir().join(".env");
+        // Read and check the .env file from the ironclaw base directory
+        let env_path = crate::bootstrap::ironclaw_env_path();
         let mut content = String::new();
         std::fs::File::open(&env_path)
             .unwrap()
