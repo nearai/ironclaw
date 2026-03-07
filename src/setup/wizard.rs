@@ -768,13 +768,28 @@ impl SetupWizard {
                 print_success("Master key generated and stored in OS keychain");
             }
             1 => {
-                // Env var mode
-                print_info("Generate a key and add it to your environment:");
+                // Env var mode — generate key, initialize crypto, and save to .env
                 let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+                // Initialize crypto so subsequent wizard steps (API key save) work
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                        .map_err(|e| SetupError::Config(e.to_string()))?,
+                ));
+
+                // Auto-save to ~/.ironclaw/.env so the key persists across restarts
+                crate::bootstrap::save_bootstrap_env(&[("SECRETS_MASTER_KEY", &key_hex)])
+                    .map_err(|e| {
+                        SetupError::Io(std::io::Error::other(format!(
+                            "Failed to save SECRETS_MASTER_KEY to .env: {}",
+                            e
+                        )))
+                    })?;
+
+                print_info("Master key saved to ~/.ironclaw/.env");
                 println!();
-                println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                println!("  SECRETS_MASTER_KEY={}", key_hex);
                 println!();
-                print_info("Add this to your shell profile or .env file.");
 
                 self.settings.secrets_master_key_source = KeySource::Env;
                 print_success("Configured for environment variable");
