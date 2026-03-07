@@ -6,20 +6,50 @@
 #
 # Checks staged .rs files for:
 #   1. Unsafe UTF-8 byte slicing (panics on multi-byte chars)
-#   2. Case-sensitive file extension / media type comparisons
+#   2. Case-sensitive file extension comparisons
 #   3. Hardcoded /tmp paths in tests (flaky in parallel runs)
 #   4. Tool parameters logged without redaction (secret leaks)
+#   5. Multi-step DB operations without transaction wrapping
 #
 # Suppress individual lines with an inline "// safety: <reason>" comment.
 
 set -euo pipefail
 
-# Support both pre-commit hook (staged files) and standalone (all changed vs main)
+# Determine a suitable base ref for standalone diffs.
+resolve_base_ref() {
+    local candidates=(
+        "@{upstream}"
+        "origin/HEAD"
+        "origin/main"
+        "origin/master"
+        "main"
+        "master"
+    )
+
+    for ref in "${candidates[@]}"; do
+        if git rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
+            echo "$ref"
+            return 0
+        fi
+    done
+
+    echo "pre-commit-safety: could not determine a base Git ref for diff (tried: ${candidates[*]})." >&2
+    echo "pre-commit-safety: ensure your repository has an upstream or a local main/master branch." >&2
+    exit 1
+}
+
+# Support both pre-commit hook (staged files) and standalone (all changed vs base)
 if git diff --cached --quiet 2>/dev/null; then
-    # No staged changes -- compare working tree against main
-    DIFF_CMD="git diff origin/main -- "
+    # No staged changes -- compare working tree against a resolved base ref
+    BASE_REF="$(resolve_base_ref)"
+    DIFF_OUTPUT=$(git diff "$BASE_REF" -- '*.rs' 2>/dev/null || true)
 else
-    DIFF_CMD="git diff --cached -U0 -- "
+    DIFF_OUTPUT=$(git diff --cached -U0 -- '*.rs' 2>/dev/null || true)
+fi
+
+# Early exit if there are no relevant .rs changes
+if [ -z "$DIFF_OUTPUT" ]; then
+    exit 0
 fi
 
 WARNINGS=0
@@ -36,43 +66,65 @@ warn() {
 
 # 1. Unsafe UTF-8 byte slicing: &s[..N] or &s[..some_var] on strings
 #    Safe patterns: is_char_boundary, char_indices, // safety:
-if $DIFF_CMD '*.rs' 2>/dev/null | grep -nE '^\+' | grep -E '\[\.\..*\]' | grep -vE 'is_char_boundary|char_indices|// safety:|as_bytes|Vec<|&\[u8\]|\[u8\]|bytes\(\)|&bytes' | head -3 | grep -q .; then
+if echo "$DIFF_OUTPUT" | grep -nE '^\+' | grep -E '\[\.\..*\]' | grep -vE 'is_char_boundary|char_indices|// safety:|as_bytes|Vec<|&\[u8\]|\[u8\]|bytes\(\)|&bytes' | head -3 | grep -q .; then
     warn "UTF8" "Possible unsafe byte-index string slicing. Use is_char_boundary() or char_indices()."
-    $DIFF_CMD '*.rs' 2>/dev/null | grep -nE '^\+' | grep -E '\[\.\..*\]' | grep -vE 'is_char_boundary|char_indices|// safety:|as_bytes|Vec<|&\[u8\]|\[u8\]|bytes\(\)|&bytes' | head -3 | sed 's/^/    /'
+    echo "$DIFF_OUTPUT" | grep -nE '^\+' | grep -E '\[\.\..*\]' | grep -vE 'is_char_boundary|char_indices|// safety:|as_bytes|Vec<|&\[u8\]|\[u8\]|bytes\(\)|&bytes' | head -3 | sed 's/^/    /'
 fi
 
-# 2. Case-sensitive file extension or media type checks
-#    Match: .ends_with(".png") or == "image/jpeg" without prior to_lowercase
-if $DIFF_CMD '*.rs' 2>/dev/null | grep -nE '^\+.*ends_with\("\.([pP][nN][gG]|[jJ][pP][eE]?[gG]|[gG][iI][fF]|[wW][eE][bB][pP]|[mM][dD])"\)' | grep -vE 'to_lowercase|to_ascii_lowercase|// safety:' | head -3 | grep -q .; then
+# 2. Case-sensitive file extension checks
+#    Match: .ends_with(".png") without prior to_lowercase
+if echo "$DIFF_OUTPUT" | grep -nE '^\+.*ends_with\("\.([pP][nN][gG]|[jJ][pP][eE]?[gG]|[gG][iI][fF]|[wW][eE][bB][pP]|[mM][dD])"\)' | grep -vE 'to_lowercase|to_ascii_lowercase|// safety:' | head -3 | grep -q .; then
     warn "CASE" "Case-sensitive file extension comparison. Normalize to lowercase first."
-    $DIFF_CMD '*.rs' 2>/dev/null | grep -nE '^\+.*ends_with\("\.([pP][nN][gG]|[jJ][pP][eE]?[gG]|[gG][iI][fF]|[wW][eE][bB][pP]|[mM][dD])"\)' | grep -vE 'to_lowercase|to_ascii_lowercase|// safety:' | head -3 | sed 's/^/    /'
+    echo "$DIFF_OUTPUT" | grep -nE '^\+.*ends_with\("\.([pP][nN][gG]|[jJ][pP][eE]?[gG]|[gG][iI][fF]|[wW][eE][bB][pP]|[mM][dD])"\)' | grep -vE 'to_lowercase|to_ascii_lowercase|// safety:' | head -3 | sed 's/^/    /'
 fi
 
 # 3. Hardcoded /tmp paths in test files
-if $DIFF_CMD '*.rs' 2>/dev/null | grep -nE '^\+.*"/tmp/' | grep -vE 'tempfile|tempdir|// safety:' | head -3 | grep -q .; then
+if echo "$DIFF_OUTPUT" | grep -nE '^\+.*"/tmp/' | grep -vE 'tempfile|tempdir|// safety:' | head -3 | grep -q .; then
     warn "TMPDIR" "Hardcoded /tmp path. Use tempfile::tempdir() for parallel-safe tests."
-    $DIFF_CMD '*.rs' 2>/dev/null | grep -nE '^\+.*"/tmp/' | grep -vE 'tempfile|tempdir|// safety:' | head -3 | sed 's/^/    /'
+    echo "$DIFF_OUTPUT" | grep -nE '^\+.*"/tmp/' | grep -vE 'tempfile|tempdir|// safety:' | head -3 | sed 's/^/    /'
 fi
 
 # 4. Logging tool parameters without redaction
-if $DIFF_CMD '*.rs' 2>/dev/null | grep -nE '^\+.*tracing::(info|debug|warn|error).*param' | grep -vE 'redact|// safety:' | head -3 | grep -q .; then
+if echo "$DIFF_OUTPUT" | grep -nE '^\+.*tracing::(info|debug|warn|error).*param' | grep -vE 'redact|// safety:' | head -3 | grep -q .; then
     warn "REDACT" "Logging tool parameters without redaction. Use redact_params() first."
-    $DIFF_CMD '*.rs' 2>/dev/null | grep -nE '^\+.*tracing::(info|debug|warn|error).*param' | grep -vE 'redact|// safety:' | head -3 | sed 's/^/    /'
+    echo "$DIFF_OUTPUT" | grep -nE '^\+.*tracing::(info|debug|warn|error).*param' | grep -vE 'redact|// safety:' | head -3 | sed 's/^/    /'
 fi
 
 # 5. Multi-step DB operations without transaction
-if $DIFF_CMD '*.rs' 2>/dev/null | grep -nE '^\+.*(\.execute\(|\.query\()' | head -1 | grep -q .; then
-    # Check if there are multiple execute/query calls in the same hunk without transaction/tx
-    HUNK_COUNT=$($DIFF_CMD '*.rs' 2>/dev/null | awk '
-        /^@@/ { count=0; has_tx=0 }
+#    Uses -W (function context) to reduce false positives from existing transactions.
+#    Suppressible with "// safety:" in the hunk.
+DIFF_W_OUTPUT=$(git diff --cached -W -- '*.rs' 2>/dev/null || git diff "$(resolve_base_ref)" -W -- '*.rs' 2>/dev/null || true)
+if [ -n "$DIFF_W_OUTPUT" ]; then
+    HUNK_COUNT=$(echo "$DIFF_W_OUTPUT" | awk '
+        /^@@/ {
+            if (count >= 2 && !has_tx && !has_safety) found++
+            count=0; has_tx=0; has_safety=0
+        }
         /^\+.*\.(execute|query)\(/ { count++ }
-        /^\+.*(transaction|\.tx\.|begin)/ { has_tx=1 }
-        /^@@/ { if (prev_count >= 2 && !prev_tx) found++ }
-        { prev_count=count; prev_tx=has_tx }
-        END { if (count >= 2 && !has_tx) found++; print found+0 }
+        /^\+.*(transaction|\.tx\.|\.begin\()/ { has_tx=1 }
+        / .*(transaction|\.tx\.|\.begin\()/ { has_tx=1 }
+        /\/\/ safety:/ { has_safety=1 }
+        END {
+            if (count >= 2 && !has_tx && !has_safety) found++
+            print found+0
+        }
     ')
     if [ "$HUNK_COUNT" -gt 0 ]; then
-        warn "TX" "Multiple DB operations in same hunk without transaction. Wrap in a transaction for atomicity."
+        warn "TX" "Multiple DB operations in same function without transaction. Wrap in a transaction for atomicity."
+        echo "$DIFF_W_OUTPUT" | awk '
+            /^@@/ {
+                if (count >= 2 && !has_tx && !has_safety) { print buf }
+                buf=""; count=0; has_tx=0; has_safety=0
+            }
+            /^\+.*\.(execute|query)\(/ { count++ }
+            /^\+.*(transaction|\.tx\.|\.begin\()/ { has_tx=1 }
+            / .*(transaction|\.tx\.|\.begin\()/ { has_tx=1 }
+            /\/\/ safety:/ { has_safety=1 }
+            { buf = buf "\n" $0 }
+            END {
+                if (count >= 2 && !has_tx && !has_safety) { print buf }
+            }
+        ' | grep -E '^\+.*\.(execute|query)\(' | head -4 | sed 's/^/    /'
     fi
 fi
 
