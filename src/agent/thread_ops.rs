@@ -1535,7 +1535,7 @@ impl Agent {
             Err(e) => {
                 let msg = e.to_string();
                 // Token validation errors: re-enter auth mode and re-prompt
-                if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
+                if msg.contains("Invalid token") || msg.contains("API returned") {
                     {
                         let mut sess = session.lock().await;
                         if let Some(thread) = sess.threads.get_mut(&thread_id) {

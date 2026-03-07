@@ -509,9 +509,8 @@ impl ExtensionManager {
         Err(err)
     }
 
-    /// Check auth status for an installed extension.
+    /// Check auth status for an installed extension (read-only, no side effects).
     ///
-    /// Read-only for WASM extensions; may initiate OAuth for MCP servers.
     /// To provide secrets, use [`configure()`] instead.
     pub async fn auth(&self, name: &str) -> Result<AuthResult, ExtensionError> {
         // Clean up expired pending auths
@@ -3736,39 +3735,43 @@ impl ExtensionManager {
         // Validate secrets against the validation_endpoint if declared in capabilities.
         // The endpoint URL template uses {secret_name} placeholders that are
         // substituted with the provided secret value before making the request.
-        if let Some(ref cap_file) = channel_cap_file
-            && let Some(ref endpoint_template) = cap_file.setup.validation_endpoint
-            && let Some(secret_def) = cap_file
-                .setup
-                .required_secrets
-                .iter()
-                .find(|s| !s.optional && secrets.contains_key(&s.name))
-            && let Some(token_value) = secrets.get(&secret_def.name)
-        {
-            let token = token_value.trim();
-            if !token.is_empty() {
-                let encoded =
-                    url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
-                let url = endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
-                // SSRF defense: block private IPs, localhost, cloud metadata endpoints
-                crate::tools::builtin::skill_tools::validate_fetch_url(&url)
-                    .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
-                let resp = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .map_err(|e| ExtensionError::Other(e.to_string()))?
-                    .get(&url)
-                    .send()
-                    .await
-                    // Transport errors are infrastructure failures, not token issues
-                    .map_err(|e| {
-                        ExtensionError::Other(format!("Token validation request failed: {}", e))
-                    })?;
-                if !resp.status().is_success() {
-                    return Err(ExtensionError::ValidationFailed(format!(
-                        "Invalid token (API returned {})",
-                        resp.status()
-                    )));
+        if kind == ExtensionKind::WasmChannel {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            if let Ok(cap_bytes) = tokio::fs::read(&cap_path).await
+                && let Ok(cap_file) =
+                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+                && let Some(ref endpoint_template) = cap_file.setup.validation_endpoint
+                && let Some(secret_def) = cap_file
+                    .setup
+                    .required_secrets
+                    .iter()
+                    .find(|s| !s.optional && secrets.contains_key(&s.name))
+                && let Some(token_value) = secrets.get(&secret_def.name)
+            {
+                let token = token_value.trim();
+                if !token.is_empty() {
+                    let encoded =
+                        url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+                    let url =
+                        endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
+                    let resp = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()
+                        .map_err(|e| ExtensionError::Other(e.to_string()))?
+                        .get(&url)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            ExtensionError::Other(format!("Failed to validate token: {}", e))
+                        })?;
+                    if !resp.status().is_success() {
+                        return Err(ExtensionError::Other(format!(
+                            "Invalid token (API returned {})",
+                            resp.status()
+                        )));
+                    }
                 }
             }
         }
@@ -3877,6 +3880,7 @@ impl ExtensionManager {
                         message,
                         activated: true,
                         auth_url,
+                        missing_secrets: vec![],
                     });
                 }
                 Err(e) => {
@@ -3889,6 +3893,7 @@ impl ExtensionManager {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
                         auth_url: None,
+                        missing_secrets: vec![],
                     });
                 }
             }
@@ -3921,6 +3926,7 @@ impl ExtensionManager {
                     ),
                     activated: true,
                     auth_url: None,
+                    missing_secrets: vec![],
                 })
             }
             Err(e) => {
@@ -3943,6 +3949,7 @@ impl ExtensionManager {
                     ),
                     activated: false,
                     auth_url: None,
+                    missing_secrets: vec![],
                 })
             }
         }
@@ -3970,33 +3977,12 @@ impl ExtensionManager {
                 let cap_file =
                     crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
                         .map_err(|e| ExtensionError::Other(e.to_string()))?;
-                // Pick the first *missing* non-optional secret so re-configure
-                // of a second secret works for multi-secret channels.
-                let mut target = None;
-                for s in &cap_file.setup.required_secrets {
-                    if s.optional {
-                        continue;
-                    }
-                    if !self
-                        .secrets
-                        .exists(&self.user_id, &s.name)
-                        .await
-                        .unwrap_or(false)
-                    {
-                        target = Some(s.name.clone());
-                        break;
-                    }
-                }
-                // Fall back to first non-optional if all exist (overwrite)
-                target
-                    .or_else(|| {
-                        cap_file
-                            .setup
-                            .required_secrets
-                            .iter()
-                            .find(|s| !s.optional)
-                            .map(|s| s.name.clone())
-                    })
+                cap_file
+                    .setup
+                    .required_secrets
+                    .iter()
+                    .find(|s| !s.optional)
+                    .map(|s| s.name.clone())
                     .ok_or_else(|| {
                         ExtensionError::Other(format!("Channel '{}' has no required secrets", name))
                     })?
@@ -4005,45 +3991,21 @@ impl ExtensionManager {
                 let cap = self.load_tool_capabilities(name).await.ok_or_else(|| {
                     ExtensionError::Other(format!("Capabilities not found for '{}'", name))
                 })?;
-                // Prefer auth secret, then first missing setup secret
-                if let Some(ref auth) = cap.auth {
-                    if !self
-                        .secrets
-                        .exists(&self.user_id, &auth.secret_name)
-                        .await
-                        .unwrap_or(false)
-                    {
-                        auth.secret_name.clone()
-                    } else if let Some(ref setup) = cap.setup {
-                        // Auth secret exists, find first missing setup secret
-                        let mut found = None;
-                        for s in &setup.required_secrets {
-                            if !self
-                                .secrets
-                                .exists(&self.user_id, &s.name)
-                                .await
-                                .unwrap_or(false)
-                            {
-                                found = Some(s.name.clone());
-                                break;
-                            }
-                        }
-                        found.unwrap_or_else(|| auth.secret_name.clone())
-                    } else {
-                        auth.secret_name.clone()
-                    }
-                } else {
-                    cap.setup
-                        .as_ref()
-                        .and_then(|s| s.required_secrets.first())
-                        .map(|s| s.name.clone())
-                        .ok_or_else(|| {
-                            ExtensionError::Other(format!(
-                                "Tool '{}' has no auth or setup secrets",
-                                name
-                            ))
-                        })?
-                }
+                cap.auth
+                    .as_ref()
+                    .map(|a| a.secret_name.clone())
+                    .or_else(|| {
+                        cap.setup
+                            .as_ref()
+                            .and_then(|s| s.required_secrets.first())
+                            .map(|s| s.name.clone())
+                    })
+                    .ok_or_else(|| {
+                        ExtensionError::Other(format!(
+                            "Tool '{}' has no auth or setup secrets",
+                            name
+                        ))
+                    })?
             }
             ExtensionKind::McpServer => {
                 let server = self

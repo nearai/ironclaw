@@ -461,6 +461,19 @@ pub struct ConfigureResult {
     pub activated: bool,
     /// OAuth authorization URL (if OAuth flow was started).
     pub auth_url: Option<String>,
+    /// Secrets that are still missing after this configuration step.
+    pub missing_secrets: Vec<MissingSecret>,
+}
+
+/// A secret that still needs to be provided.
+#[derive(Debug, Clone)]
+pub struct MissingSecret {
+    /// Secret name in the secrets store.
+    pub name: String,
+    /// User-facing prompt text.
+    pub prompt: String,
+    /// URL where the user can obtain the credential.
+    pub setup_url: Option<String>,
 }
 
 fn default_true() -> bool {
