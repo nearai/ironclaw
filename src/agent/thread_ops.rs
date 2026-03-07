@@ -737,6 +737,9 @@ impl Agent {
             let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
+            if let Some(ref tz) = message.timezone {
+                job_ctx.user_timezone = tz.clone();
+            }
 
             let _ = self
                 .channels

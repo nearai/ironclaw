@@ -1,4 +1,4 @@
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_option_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -13,6 +13,10 @@ pub struct HeartbeatConfig {
     pub notify_channel: Option<String>,
     /// User ID to notify on heartbeat findings.
     pub notify_user: Option<String>,
+    /// Hour (0-23) when quiet hours start.
+    pub quiet_hours_start: Option<u32>,
+    /// Hour (0-23) when quiet hours end.
+    pub quiet_hours_end: Option<u32>,
 }
 
 impl Default for HeartbeatConfig {
@@ -22,6 +26,8 @@ impl Default for HeartbeatConfig {
             interval_secs: 1800, // 30 minutes
             notify_channel: None,
             notify_user: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
         }
     }
 }
@@ -38,6 +44,8 @@ impl HeartbeatConfig {
                 .or_else(|| settings.heartbeat.notify_channel.clone()),
             notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?
                 .or_else(|| settings.heartbeat.notify_user.clone()),
+            quiet_hours_start: parse_option_env("HEARTBEAT_QUIET_START")?,
+            quiet_hours_end: parse_option_env("HEARTBEAT_QUIET_END")?,
         })
     }
 }

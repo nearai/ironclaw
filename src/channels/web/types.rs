@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub struct SendMessageRequest {
     pub content: String,
     pub thread_id: Option<String>,
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -606,6 +607,7 @@ pub enum WsClientMessage {
     Message {
         content: String,
         thread_id: Option<String>,
+        timezone: Option<String>,
     },
     /// Approve or deny a pending tool execution.
     #[serde(rename = "approval")]
@@ -791,7 +793,9 @@ mod tests {
         let json = r#"{"type":"message","content":"hello","thread_id":"t1"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            WsClientMessage::Message { content, thread_id } => {
+            WsClientMessage::Message {
+                content, thread_id, ..
+            } => {
                 assert_eq!(content, "hello");
                 assert_eq!(thread_id.as_deref(), Some("t1"));
             }
@@ -804,7 +808,9 @@ mod tests {
         let json = r#"{"type":"message","content":"hi"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            WsClientMessage::Message { content, thread_id } => {
+            WsClientMessage::Message {
+                content, thread_id, ..
+            } => {
                 assert_eq!(content, "hi");
                 assert!(thread_id.is_none());
             }

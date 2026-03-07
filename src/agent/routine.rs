@@ -57,7 +57,11 @@ pub struct Routine {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Trigger {
     /// Fire on a cron schedule (e.g. "0 9 * * MON-FRI" or "every 2h").
-    Cron { schedule: String },
+    Cron {
+        schedule: String,
+        #[serde(default)]
+        timezone: Option<String>,
+    },
     /// Fire when a channel message matches a pattern.
     Event {
         /// Optional channel filter (e.g. "telegram", "slack").
@@ -99,7 +103,11 @@ impl Trigger {
                         field: "schedule".into(),
                     })?
                     .to_string();
-                Ok(Trigger::Cron { schedule })
+                let timezone = config
+                    .get("timezone")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Ok(Trigger::Cron { schedule, timezone })
             }
             "event" => {
                 let pattern = config
@@ -137,7 +145,10 @@ impl Trigger {
     /// Serialize trigger-specific config to JSON for DB storage.
     pub fn to_config_json(&self) -> serde_json::Value {
         match self {
-            Trigger::Cron { schedule } => serde_json::json!({ "schedule": schedule }),
+            Trigger::Cron { schedule, timezone } => serde_json::json!({
+                "schedule": schedule,
+                "timezone": timezone,
+            }),
             Trigger::Event { channel, pattern } => serde_json::json!({
                 "pattern": pattern,
                 "channel": channel,
@@ -415,12 +426,25 @@ pub fn content_hash(content: &str) -> u64 {
 }
 
 /// Parse a cron expression and compute the next fire time from now.
-pub fn next_cron_fire(schedule: &str) -> Result<Option<DateTime<Utc>>, RoutineError> {
+///
+/// When `timezone` is provided and valid, the schedule is evaluated in that
+/// timezone and the result is converted back to UTC. Otherwise UTC is used.
+pub fn next_cron_fire(
+    schedule: &str,
+    timezone: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, RoutineError> {
     let cron_schedule =
         cron::Schedule::from_str(schedule).map_err(|e| RoutineError::InvalidCron {
             reason: e.to_string(),
         })?;
-    Ok(cron_schedule.upcoming(Utc).next())
+    if let Some(tz) = timezone.and_then(crate::timezone::parse_timezone) {
+        Ok(cron_schedule
+            .upcoming(tz)
+            .next()
+            .map(|dt| dt.with_timezone(&Utc)))
+    } else {
+        Ok(cron_schedule.upcoming(Utc).next())
+    }
 }
 
 #[cfg(test)]
@@ -433,10 +457,11 @@ mod tests {
     fn test_trigger_roundtrip() {
         let trigger = Trigger::Cron {
             schedule: "0 9 * * MON-FRI".to_string(),
+            timezone: None,
         };
         let json = trigger.to_config_json();
         let parsed = Trigger::from_db("cron", json).expect("parse cron");
-        assert!(matches!(parsed, Trigger::Cron { schedule } if schedule == "0 9 * * MON-FRI"));
+        assert!(matches!(parsed, Trigger::Cron { schedule, .. } if schedule == "0 9 * * MON-FRI"));
     }
 
     #[test]
@@ -509,14 +534,46 @@ mod tests {
     #[test]
     fn test_next_cron_fire_valid() {
         // Every minute should always have a next fire
-        let next = next_cron_fire("* * * * * *").expect("valid cron");
+        let next = next_cron_fire("* * * * * *", None).expect("valid cron");
         assert!(next.is_some());
     }
 
     #[test]
     fn test_next_cron_fire_invalid() {
-        let result = next_cron_fire("not a cron");
+        let result = next_cron_fire("not a cron", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trigger_cron_timezone_roundtrip() {
+        let trigger = Trigger::Cron {
+            schedule: "0 9 * * MON-FRI".to_string(),
+            timezone: Some("America/New_York".to_string()),
+        };
+        let json = trigger.to_config_json();
+        let parsed = Trigger::from_db("cron", json).expect("parse cron");
+        assert!(matches!(parsed, Trigger::Cron { schedule, timezone }
+                if schedule == "0 9 * * MON-FRI"
+                && timezone.as_deref() == Some("America/New_York")));
+    }
+
+    #[test]
+    fn test_trigger_cron_no_timezone_backward_compat() {
+        let json = serde_json::json!({"schedule": "0 9 * * *"});
+        let parsed = Trigger::from_db("cron", json).expect("parse cron");
+        assert!(matches!(parsed, Trigger::Cron { timezone, .. } if timezone.is_none()));
+    }
+
+    #[test]
+    fn test_next_cron_fire_with_timezone() {
+        let next_utc = next_cron_fire("0 0 9 * * * *", None)
+            .expect("valid cron")
+            .expect("has next");
+        let next_est = next_cron_fire("0 0 9 * * * *", Some("America/New_York"))
+            .expect("valid cron")
+            .expect("has next");
+        // EST is UTC-5 (or EDT UTC-4), so the UTC result should differ
+        assert_ne!(next_utc, next_est, "timezone should shift the fire time");
     }
 
     #[test]
@@ -531,7 +588,8 @@ mod tests {
     fn test_trigger_type_tag() {
         assert_eq!(
             Trigger::Cron {
-                schedule: String::new()
+                schedule: String::new(),
+                timezone: None,
             }
             .type_tag(),
             "cron"

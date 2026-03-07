@@ -118,6 +118,7 @@ mod tests {
             "cron-test",
             Trigger::Cron {
                 schedule: "* * * * *".to_string(),
+                timezone: None,
             },
             "Check system status.",
         );
@@ -203,6 +204,7 @@ mod tests {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
+            timezone: None,
         };
         let fired = engine.check_event_triggers(&matching_msg).await;
         assert!(
@@ -223,6 +225,7 @@ mod tests {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
+            timezone: None,
         };
         let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
@@ -286,6 +289,7 @@ mod tests {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
+            timezone: None,
         };
         let fired1 = engine.check_event_triggers(&msg).await;
         assert!(fired1 >= 1, "First fire should work");

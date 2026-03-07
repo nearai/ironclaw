@@ -27,6 +27,8 @@ pub struct AgentConfig {
     pub max_tool_iterations: usize,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
+    /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
+    pub default_timezone: String,
 }
 
 impl AgentConfig {
@@ -47,6 +49,7 @@ impl AgentConfig {
             max_actions_per_hour: None,
             max_tool_iterations: 10,
             auto_approve_tools: true,
+            default_timezone: "UTC".to_string(),
         }
     }
 
@@ -88,6 +91,10 @@ impl AgentConfig {
             auto_approve_tools: parse_bool_env(
                 "AGENT_AUTO_APPROVE_TOOLS",
                 settings.agent.auto_approve_tools,
+            )?,
+            default_timezone: parse_optional_env(
+                "DEFAULT_TIMEZONE",
+                settings.agent.default_timezone.clone(),
             )?,
         })
     }

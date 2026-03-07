@@ -47,6 +47,12 @@ pub struct HeartbeatConfig {
     pub notify_user_id: Option<String>,
     /// Channel to notify on heartbeat findings.
     pub notify_channel: Option<String>,
+    /// Hour (0-23) when quiet hours start.
+    pub quiet_hours_start: Option<u32>,
+    /// Hour (0-23) when quiet hours end.
+    pub quiet_hours_end: Option<u32>,
+    /// Timezone for quiet hours evaluation (IANA name).
+    pub timezone: Option<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -57,6 +63,9 @@ impl Default for HeartbeatConfig {
             max_failures: 3,
             notify_user_id: None,
             notify_channel: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            timezone: None,
         }
     }
 }
@@ -72,6 +81,26 @@ impl HeartbeatConfig {
     pub fn disabled(mut self) -> Self {
         self.enabled = false;
         self
+    }
+
+    /// Check whether the current time falls within configured quiet hours.
+    pub fn is_quiet_hours(&self) -> bool {
+        use chrono::Timelike;
+        let (Some(start), Some(end)) = (self.quiet_hours_start, self.quiet_hours_end) else {
+            return false;
+        };
+        let tz = self
+            .timezone
+            .as_deref()
+            .and_then(crate::timezone::parse_timezone)
+            .unwrap_or(chrono_tz::UTC);
+        let now_hour = crate::timezone::now_in_tz(tz).hour();
+        if start <= end {
+            now_hour >= start && now_hour < end
+        } else {
+            // Wraps midnight, e.g. 22..06
+            now_hour >= start || now_hour < end
+        }
     }
 
     /// Set the notification target.
@@ -152,6 +181,12 @@ impl HeartbeatRunner {
 
         loop {
             interval.tick().await;
+
+            // Skip during quiet hours
+            if self.config.is_quiet_hours() {
+                tracing::debug!("Heartbeat skipped: quiet hours");
+                continue;
+            }
 
             // Run memory hygiene in the background so it never delays the
             // heartbeat checklist. Failures are logged inside run_if_due.
@@ -494,5 +529,37 @@ mod tests {
     fn test_effectively_empty_comment_plus_real_content() {
         let content = "<!-- comment -->\nActual task here";
         assert!(!is_effectively_empty(content));
+    }
+
+    // ==================== quiet hours ====================
+
+    #[test]
+    fn test_quiet_hours_inside() {
+        let config = HeartbeatConfig {
+            quiet_hours_start: Some(22),
+            quiet_hours_end: Some(6),
+            timezone: Some("UTC".to_string()),
+            ..HeartbeatConfig::default()
+        };
+        // We can't control the clock, so just verify the method doesn't panic
+        let _ = config.is_quiet_hours();
+    }
+
+    #[test]
+    fn test_quiet_hours_none_configured() {
+        let config = HeartbeatConfig::default();
+        assert!(!config.is_quiet_hours());
+    }
+
+    #[test]
+    fn test_quiet_hours_same_start_end() {
+        let config = HeartbeatConfig {
+            quiet_hours_start: Some(10),
+            quiet_hours_end: Some(10),
+            timezone: Some("UTC".to_string()),
+            ..HeartbeatConfig::default()
+        };
+        // start == end means zero-width window, should be false
+        assert!(!config.is_quiet_hours());
     }
 }

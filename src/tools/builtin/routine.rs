@@ -143,12 +143,17 @@ impl Tool for RoutineCreateTool {
                                 "cron trigger requires 'schedule'".to_string(),
                             )
                         })?;
+                let timezone = params
+                    .get("timezone")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 // Validate cron expression
-                next_cron_fire(schedule).map_err(|e| {
+                next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
                     ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
                 })?;
                 Trigger::Cron {
                     schedule: schedule.to_string(),
+                    timezone,
                 }
             }
             "event" => {
@@ -228,8 +233,12 @@ impl Tool for RoutineCreateTool {
             .unwrap_or(300);
 
         // Compute next fire time for cron
-        let next_fire = if let Trigger::Cron { ref schedule } = trigger {
-            next_cron_fire(schedule).unwrap_or(None)
+        let next_fire = if let Trigger::Cron {
+            ref schedule,
+            ref timezone,
+        } = trigger
+        {
+            next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None)
         } else {
             None
         };
@@ -454,14 +463,27 @@ impl Tool for RoutineUpdateTool {
         }
 
         if let Some(schedule) = params.get("schedule").and_then(|v| v.as_str()) {
+            let timezone = params
+                .get("timezone")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    // Preserve existing timezone if only schedule is changing
+                    if let Trigger::Cron { ref timezone, .. } = routine.trigger {
+                        timezone.clone()
+                    } else {
+                        None
+                    }
+                });
             // Validate
-            next_cron_fire(schedule)
+            next_cron_fire(schedule, timezone.as_deref())
                 .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
 
             routine.trigger = Trigger::Cron {
                 schedule: schedule.to_string(),
+                timezone: timezone.clone(),
             };
-            routine.next_fire_at = next_cron_fire(schedule).unwrap_or(None);
+            routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None);
         }
 
         self.store
