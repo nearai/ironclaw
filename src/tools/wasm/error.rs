@@ -68,8 +68,15 @@ pub enum WasmError {
     Timeout(std::time::Duration),
 
     /// Component returned an error response.
-    #[error("Tool error: {0}")]
-    ToolReturnedError(String),
+    /// When `hint` is non-empty it carries the tool's description and parameter
+    /// schema so the LLM can retry with correct arguments.
+    #[error("Tool error: {message}{}", if hint.is_empty() { String::new() } else { format!("\n\nTool usage hint:\n{hint}") })]
+    ToolReturnedError {
+        /// The error message from the WASM tool.
+        message: String,
+        /// Optional description + schema hint (empty when unavailable).
+        hint: String,
+    },
 
     /// Invalid JSON in tool response.
     #[error("Invalid response JSON: {0}")]
@@ -194,5 +201,29 @@ mod tests {
             }
             _ => panic!("Expected Sandbox variant"),
         }
+    }
+
+    #[test]
+    fn test_tool_returned_error_without_hint() {
+        let err = WasmError::ToolReturnedError {
+            message: "unknown action: foobar".to_string(),
+            hint: String::new(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("unknown action: foobar"));
+        assert!(!display.contains("Tool usage hint"));
+    }
+
+    #[test]
+    fn test_tool_returned_error_with_hint() {
+        let err = WasmError::ToolReturnedError {
+            message: "unknown action: foobar".to_string(),
+            hint: "Description: Gmail tool\nParameters schema: {\"type\":\"object\"}".to_string(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("unknown action: foobar"));
+        assert!(display.contains("Tool usage hint"));
+        assert!(display.contains("Gmail tool"));
+        assert!(display.contains("Parameters schema"));
     }
 }
