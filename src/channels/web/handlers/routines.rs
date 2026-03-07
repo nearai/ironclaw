@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::error::RoutineError;
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -147,7 +148,7 @@ pub async fn routines_trigger_handler(
     let run_id = engine
         .fire_manual(routine_id, Some(&state.user_id))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (routine_error_status(&e), e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",
@@ -305,5 +306,15 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
         run_count: r.run_count,
         consecutive_failures: r.consecutive_failures,
         status: status.to_string(),
+    }
+}
+
+/// Map `RoutineError` variants to appropriate HTTP status codes.
+fn routine_error_status(err: &RoutineError) -> StatusCode {
+    match err {
+        RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
+        RoutineError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
+        RoutineError::Disabled { .. } | RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

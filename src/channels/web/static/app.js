@@ -5,6 +5,7 @@ let eventSource = null;
 let logEventSource = null;
 let currentTab = 'chat';
 let currentThreadId = null;
+let currentThreadIsReadOnly = false;
 let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
@@ -460,6 +461,7 @@ function sendMessage() {
 }
 
 function enableChatInput() {
+  if (currentThreadIsReadOnly) return;
   const input = document.getElementById('chat-input');
   const btn = document.getElementById('send-btn');
   if (input) {
@@ -1379,7 +1381,8 @@ function loadThreads() {
     if (currentThreadId) {
       const currentThread = threads.find(t => t.id === currentThreadId);
       const ch = currentThread ? currentThread.channel : 'gateway';
-      if (isReadOnlyChannel(ch)) {
+      currentThreadIsReadOnly = isReadOnlyChannel(ch);
+      if (currentThreadIsReadOnly) {
         disableChatInputReadOnly();
       } else {
         enableChatInput();
@@ -1402,6 +1405,7 @@ function switchToAssistant() {
   if (!assistantThreadId) return;
   finalizeActivityGroup();
   currentThreadId = assistantThreadId;
+  currentThreadIsReadOnly = false;
   unreadThreads.delete(assistantThreadId);
   hasMore = false;
   oldestTimestamp = null;
