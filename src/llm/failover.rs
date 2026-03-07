@@ -296,6 +296,14 @@ impl LlmProvider for FailoverProvider {
         self.providers[self.last_used.load(Ordering::Relaxed)].cost_per_token()
     }
 
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.providers[self.last_used.load(Ordering::Relaxed)].cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.providers[self.last_used.load(Ordering::Relaxed)].cache_read_discount()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let (provider_idx, response) = self
             .try_providers(|provider| {

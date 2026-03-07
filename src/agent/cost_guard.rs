@@ -151,8 +151,9 @@ impl CostGuard {
     /// Record a completed LLM action: its token costs and the action timestamp.
     ///
     /// Call this AFTER an LLM call completes so that costs are tracked.
-    /// - `cache_read_input_tokens`: tokens served from cache at 10% input rate.
+    /// - `cache_read_input_tokens`: tokens served from cache.
     /// - `cache_creation_input_tokens`: tokens written to cache.
+    /// - `cache_read_discount`: divisor for cache-read cost (e.g. 10 for Anthropic 90% off, 2 for OpenAI 50% off).
     /// - `cache_write_multiplier`: cost multiplier for cache writes (1.25 for 5m, 2.0 for 1h).
     ///
     /// When `cost_per_token` is `Some`, those rates are used directly (provider-
@@ -166,17 +167,24 @@ impl CostGuard {
         output_tokens: u32,
         cache_read_input_tokens: u32,
         cache_creation_input_tokens: u32,
+        cache_read_discount: Decimal,
         cache_write_multiplier: Decimal,
         cost_per_token: Option<(Decimal, Decimal)>,
     ) -> Decimal {
         let (input_rate, output_rate) = cost_per_token
             .unwrap_or_else(|| costs::model_cost(model).unwrap_or_else(costs::default_cost));
-        // Cached read tokens cost 10% of the input rate (Anthropic's 90% discount).
+        // Cached read tokens cost input_rate / cache_read_discount (provider-specific).
         // Cached write tokens cost write_multiplier × input_rate (e.g. 1.25× for 5m, 2× for 1h).
         // Uncached tokens = total input - cache reads - cache writes.
         let cached_total = cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
         let uncached_input = input_tokens.saturating_sub(cached_total);
-        let cache_read_cost = input_rate * Decimal::from(cache_read_input_tokens) / dec!(10);
+        let effective_discount = if cache_read_discount.is_zero() {
+            Decimal::ONE
+        } else {
+            cache_read_discount
+        };
+        let cache_read_cost =
+            input_rate * Decimal::from(cache_read_input_tokens) / effective_discount;
         let cache_write_cost =
             input_rate * Decimal::from(cache_creation_input_tokens) * cache_write_multiplier;
         let cost = input_rate * Decimal::from(uncached_input)
@@ -284,7 +292,7 @@ mod tests {
 
         // Record a big call, still allowed
         guard
-            .record_llm_call("gpt-4o", 100_000, 100_000, 0, 0, Decimal::ONE, None)
+            .record_llm_call("gpt-4o", 100_000, 100_000, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
         assert!(guard.check_allowed().await.is_ok());
     }
@@ -303,7 +311,7 @@ mod tests {
         // gpt-4o: input=$0.0000025/tok, output=$0.00001/tok
         // 10000 input + 10000 output = $0.025 + $0.10 = $0.125
         guard
-            .record_llm_call("gpt-4o", 10_000, 10_000, 0, 0, Decimal::ONE, None)
+            .record_llm_call("gpt-4o", 10_000, 10_000, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
 
         // Now should be blocked
@@ -328,7 +336,7 @@ mod tests {
         for _ in 0..3 {
             assert!(guard.check_allowed().await.is_ok());
             guard
-                .record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, None)
+                .record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, Decimal::ONE, None)
                 .await;
         }
 
@@ -351,7 +359,7 @@ mod tests {
         assert_eq!(guard.daily_spend().await, Decimal::ZERO);
 
         let cost = guard
-            .record_llm_call("gpt-4o", 1000, 500, 0, 0, Decimal::ONE, None)
+            .record_llm_call("gpt-4o", 1000, 500, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
         assert!(cost > Decimal::ZERO);
         assert_eq!(guard.daily_spend().await, cost);
@@ -364,10 +372,10 @@ mod tests {
         assert_eq!(guard.actions_this_hour().await, 0);
 
         guard
-            .record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, None)
+            .record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
         guard
-            .record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, None)
+            .record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
 
         assert_eq!(guard.actions_this_hour().await, 2);
@@ -406,10 +414,10 @@ mod tests {
 
         // Record calls for two different models
         guard
-            .record_llm_call("gpt-4o", 1000, 500, 0, 0, Decimal::ONE, None)
+            .record_llm_call("gpt-4o", 1000, 500, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
         guard
-            .record_llm_call("gpt-4o", 2000, 1000, 0, 0, Decimal::ONE, None)
+            .record_llm_call("gpt-4o", 2000, 1000, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
         guard
             .record_llm_call(
@@ -418,6 +426,7 @@ mod tests {
                 200,
                 0,
                 0,
+                Decimal::ONE,
                 Decimal::ONE,
                 None,
             )
@@ -448,14 +457,14 @@ mod tests {
 
         // Full price: 1000 input + 500 output, no cache
         let full_cost = guard
-            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 0, Decimal::ONE, None)
+            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
 
         let guard2 = CostGuard::new(CostGuardConfig::default());
 
         // Same tokens but all input cached (90% discount on input)
         let cached_cost = guard2
-            .record_llm_call("claude-opus-4-6", 1000, 500, 1000, 0, Decimal::ONE, None)
+            .record_llm_call("claude-opus-4-6", 1000, 500, 1000, 0, dec!(10), Decimal::ONE, None)
             .await;
 
         // Cached cost must be strictly less than full cost
@@ -482,7 +491,7 @@ mod tests {
 
         // Full price: 1000 input + 500 output, no cache activity
         let full_cost = guard
-            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 0, Decimal::ONE, None)
+            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
 
         let guard2 = CostGuard::new(CostGuardConfig::default());
@@ -496,6 +505,7 @@ mod tests {
                 500,
                 0,
                 1000,
+                Decimal::ONE,
                 short_multiplier,
                 None,
             )
@@ -525,7 +535,7 @@ mod tests {
 
         // Full price: 1000 input + 500 output
         let full_cost = guard
-            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 0, Decimal::ONE, None)
+            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 0, Decimal::ONE, Decimal::ONE, None)
             .await;
 
         let guard2 = CostGuard::new(CostGuardConfig::default());
@@ -533,7 +543,7 @@ mod tests {
         // All input tokens are cache writes with 2.0x multiplier (1h TTL)
         let long_multiplier = Decimal::TWO;
         let write_cost = guard2
-            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 1000, long_multiplier, None)
+            .record_llm_call("claude-opus-4-6", 1000, 500, 0, 1000, Decimal::ONE, long_multiplier, None)
             .await;
 
         // Write cost > full cost

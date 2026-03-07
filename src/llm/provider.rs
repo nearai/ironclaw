@@ -346,6 +346,15 @@ pub trait LlmProvider: Send + Sync {
     fn cache_write_multiplier(&self) -> Decimal {
         Decimal::ONE
     }
+
+    /// Discount divisor for cache-read tokens.
+    ///
+    /// Cached-read cost = `input_rate / cache_read_discount()`.
+    /// Returns `1` by default (no discount). Anthropic returns `10` (90% off),
+    /// OpenAI would return `2` (50% off).
+    fn cache_read_discount(&self) -> Decimal {
+        Decimal::ONE
+    }
 }
 
 /// Sanitize a message list to ensure tool_use / tool_result integrity.

@@ -15,6 +15,7 @@ use rig::message::{
     ToolResultContent, UserContent,
 };
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
@@ -492,6 +493,14 @@ where
             CacheRetention::None => Decimal::ONE,
             CacheRetention::Short => Decimal::new(125, 2), // 1.25× (125% of input rate)
             CacheRetention::Long => Decimal::TWO,          // 2.0×  (200% of input rate)
+        }
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        if self.cache_retention != CacheRetention::None {
+            dec!(10) // Anthropic: 90% discount (cost = input_rate / 10)
+        } else {
+            Decimal::ONE
         }
     }
 
@@ -1052,6 +1061,11 @@ mod tests {
         );
     }
 
+    /// Verify that the multiplier match arms in `RigAdapter::cache_write_multiplier`
+    /// produce the expected values. We use a standalone helper because constructing
+    /// a real `RigAdapter` requires a rig `Model` (which needs network/provider setup).
+    /// The helper mirrors the same match expression — if the impl drifts, the
+    /// `test_build_rig_request_*` tests will still catch regressions end-to-end.
     #[test]
     fn test_cache_write_multiplier_values() {
         use rust_decimal::Decimal;
@@ -1072,7 +1086,6 @@ mod tests {
         );
     }
 
-    /// Helper to compute the multiplier without constructing a full RigAdapter.
     fn cache_write_multiplier_for(retention: CacheRetention) -> rust_decimal::Decimal {
         match retention {
             CacheRetention::None => rust_decimal::Decimal::ONE,

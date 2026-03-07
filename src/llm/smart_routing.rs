@@ -857,6 +857,14 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.cost_per_token()
     }
 
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.primary.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.primary.cache_read_discount()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 

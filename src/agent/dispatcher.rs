@@ -276,6 +276,7 @@ impl Agent {
 
             // Record cost and track token usage
             let model_name = self.llm().active_model_name();
+            let read_discount = self.llm().cache_read_discount();
             let write_multiplier = self.llm().cache_write_multiplier();
             let call_cost = self
                 .cost_guard()
@@ -285,6 +286,7 @@ impl Agent {
                     output.usage.output_tokens,
                     output.usage.cache_read_input_tokens,
                     output.usage.cache_creation_input_tokens,
+                    read_discount,
                     write_multiplier,
                     Some(self.llm().cost_per_token()),
                 )
