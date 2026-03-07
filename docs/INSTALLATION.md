@@ -101,7 +101,7 @@ irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-install
 **Verify:**
 ```bash
 ironclaw --version
-# Expected: ironclaw 0.15.0
+# Prints: ironclaw <version>
 ```
 
 ### 3.2 Build from Source

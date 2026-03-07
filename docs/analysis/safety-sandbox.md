@@ -446,7 +446,7 @@ The worker holds no LLM API keys. The orchestrator holds the real credentials an
 
 Per-job auth tokens enforce job isolation at the orchestrator API layer.
 
-**Token generation**: 32 bytes from `rand::thread_rng()` (a CSPRNG on all supported platforms), hex-encoded to 64 ASCII characters. Tokens are generated fresh for each job and stored only in the in-memory `TokenStore` — never logged, serialized, or written to the database.
+**Token generation**: 32 bytes from the OS-backed CSPRNG (`rand::rngs::OsRng`), hex-encoded to 64 ASCII characters. Tokens are generated fresh for each job and stored only in the in-memory `TokenStore` — never logged, serialized, or written to the database.
 
 **Token validation** uses the `subtle` crate's `ConstantTimeEq` trait:
 

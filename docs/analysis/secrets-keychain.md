@@ -258,9 +258,9 @@ InjectedCredentials { headers, query_params }
 `host_matches_pattern` supports two forms:
 
 - **Exact**: `"api.openai.com"` matches only that hostname
-- **Wildcard**: `"*.openai.com"` matches any single subdomain level (`api.openai.com`, `beta.openai.com`) but not the bare domain (`openai.com`) and not multi-level subdomain paths that skip a level
+- **Wildcard**: `"*.openai.com"` matches any subdomain whose hostname ends with `.openai.com` (`api.openai.com`, `beta.openai.com`, `sub.api.openai.com`), but not the bare domain (`openai.com`).
 
-The wildcard logic checks that the prefix portion (before the matched suffix) ends with a dot or is empty, preventing `notasubdomain-openai.com` from matching `*.openai.com`.
+The wildcard logic checks that the host ends with the suffix from the pattern (e.g., `.openai.com`) and that the character immediately preceding that suffix is a dot. This prevents `notasubdomain-openai.com` from matching `*.openai.com` while still excluding the bare domain.
 
 ### LLM Isolation Guarantee
 
