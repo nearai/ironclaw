@@ -1,6 +1,6 @@
 # Building WASM Channels
 
-> Version baseline: IronClaw v0.15.0 (`v0.15.0` tag snapshot)
+> Version baseline: IronClaw v0.16.1 (`v0.16.1` tag snapshot)
 
 This guide covers how to build WASM channel modules for IronClaw.
 
@@ -282,6 +282,8 @@ Create `my-channel.capabilities.json`:
 
 ```json
 {
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
   "type": "channel",
   "name": "my-channel",
   "description": "My messaging platform channel",
@@ -541,3 +543,66 @@ Ensure `on_respond` uses the ORIGINAL message's metadata, not response metadata:
 // response.metadata_json comes from the ORIGINAL emit_message call
 let metadata: MyMetadata = serde_json::from_str(&response.metadata_json)?;
 ```
+
+---
+
+## WIT Interface Versioning (v0.16.0)
+
+IronClaw v0.16.0 introduced WIT interface versioning. Your `capabilities.json` must declare the WIT version it was compiled against:
+
+```json
+{
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
+  ...
+}
+```
+
+**Current WIT versions:**
+
+| Interface | Version |
+|-----------|---------|
+| `wit/tool.wit` | `0.2.0` |
+| `wit/channel.wit` | `0.2.0` |
+
+If your `wit_version` does not match the host's version, the `extension_info` tool will report a mismatch:
+
+```json
+{
+  "wit_version": "0.1.0",
+  "host_wit_version": "0.2.0"
+}
+```
+
+When this happens, recompile your WASM module against the current WIT files:
+
+```bash
+# Pull the latest WIT files
+cd ~/src/ironclaw
+git pull
+
+# Rebuild
+cargo build --release --target wasm32-wasip2
+cp target/wasm32-wasip2/release/my_channel.wasm ~/.ironclaw/channels/my-channel.wasm
+```
+
+Then update `"wit_version"` in your `capabilities.json` to match.
+
+### HMAC-SHA256 Webhook Security (Slack-style channels, v0.16.0)
+
+For channels receiving webhooks from Slack-compatible services, add `hmac_secret_name` to the `webhook` block in your capabilities:
+
+```json
+"channel": {
+  "allowed_paths": ["/webhook/my-channel"],
+  "webhook": {
+    "hmac_secret_name": "my_channel_signing_secret"
+  }
+}
+```
+
+The host will:
+1. Look up the secret named `my_channel_signing_secret` at activation time.
+2. On every incoming webhook, verify the `X-Slack-Signature` header using HMAC-SHA256.
+3. Reject requests with timestamps older than 5 minutes (replay protection).
+4. Only call `on_http_request` if the signature is valid.

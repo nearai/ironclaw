@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Secrets Management & Keychain
 
-> Updated: 2026-03-05 | Version: v0.15.0
+> Updated: 2026-03-06 | Version: v0.16.1
 
 ## 1. Overview
 
@@ -349,3 +349,21 @@ AES-GCM authentication tag verification in `aes-gcm` is constant-time by constru
 ### Response Leak Detection
 
 After credential injection and HTTP request execution, the response passes through the `LeakDetector` (in `src/safety/leak_detector.rs`) before being returned to the WASM tool or the LLM. The leak detector scans for known secret patterns (API key formats, tokens, etc.). If a secret value is echoed back in the response body — for example because a misconfigured API reflects request headers — it is redacted or blocked before the WASM tool or LLM context ever sees it. This is the final line of defense shown in the module-level security model diagram.
+
+---
+
+## 10. v0.16.0 Security Changes (PR #519)
+
+### OsRng Migration — All Security-Critical Randomness
+
+`rand::thread_rng()` was replaced with `rand::rngs::OsRng` in all security-critical code paths. `thread_rng()` uses a PRNG seeded from the OS — while it is cryptographically strong, it introduces an indirect dependency on thread-local state. `OsRng` samples directly from the OS kernel's CSPRNG (`getrandom` syscall) with no intermediate state.
+
+**Affected sites:**
+
+| File | Change |
+|------|--------|
+| `src/secrets/crypto.rs:generate_salt()` | `rand::RngCore::fill_bytes(&mut rand::thread_rng(), …)` → `rand::RngCore::fill_bytes(&mut OsRng, …)` |
+| `src/pairing/store.rs:random_code()` | `rand::thread_rng()` → `OsRng` |
+| `src/pairing/store.rs:generate_unique_code()` | `rand::thread_rng()` → `OsRng` |
+
+**Impact:** Pairing codes (used in device pairing flows for Telegram, Slack, etc.) and secret encryption salts are now generated exclusively from the OS entropy pool, removing any risk of PRNG state leakage from thread-local contexts in multi-threaded servers.

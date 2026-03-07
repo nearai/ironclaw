@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Workspace, Memory & Storage
 
-> Updated: 2026-03-05 | Version: v0.15.0
+> Updated: 2026-03-06 | Version: v0.16.1
 
 ## 1. Overview
 
@@ -684,6 +684,16 @@ The hygiene system performs automatic cleanup of stale workspace documents. It i
 
 **Cadence**: A state file at `~/.ironclaw/memory_hygiene_state.json` records the last run timestamp. The hygiene pass is skipped if fewer than `cadence_hours` (default: 12) have elapsed since the last run.
 
+**Concurrency guard (v0.16.0, PR #535):** A global `static RUNNING: AtomicBool` prevents concurrent hygiene passes. If a pass is still running when the next heartbeat fires (e.g. on Windows where file locks can be held longer), the second pass is dropped immediately. This eliminates TOCTOU races on the state file and Windows OS error 1224 (file lock violation).
+
+**Pass steps:**
+1. Acquire `RUNNING` guard (set `true`; skip if already `true`)
+2. Check cadence (skip if ran recently)
+3. Save state file (claim the cadence window)
+4. List `daily/` documents
+5. Delete those older than `retention_days`
+6. Log summary
+
 **Configuration** (`HygieneConfig`):
 
 | Field | Default | Description |
@@ -696,7 +706,7 @@ The hygiene system performs automatic cleanup of stale workspace documents. It i
 **`HygieneReport`** is returned from `run_if_due()`:
 
 - `daily_logs_deleted: u32` — count of deleted documents.
-- `skipped: bool` — true if the cadence has not elapsed or hygiene is disabled.
+- `skipped: bool` — true if the cadence has not elapsed, hygiene is disabled, or a concurrent pass is running.
 
 The `run_if_due(workspace, config)` function is called from the agent startup loop. The state directory and file are created automatically if missing.
 

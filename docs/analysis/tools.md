@@ -1,6 +1,6 @@
 # IronClaw Tool System — Developer Reference
 
-Version: v0.15.0
+Version: v0.16.1
 Source: `src/tools/`
 
 ---
@@ -15,7 +15,7 @@ an MCP server — is expressed as a `Tool` implementation registered in the `Too
 
 | Category | Source | Domain | Description |
 |----------|--------|--------|-------------|
-| Core utilities | `builtin/` | Orchestrator | echo, time, json, http, web_fetch |
+| Core utilities | `builtin/` | Orchestrator | echo, time, json, http (unified GET+API), restart |
 | Filesystem | `builtin/file.rs` | Container | read_file, write_file, list_dir, apply_patch |
 | Shell | `builtin/shell.rs` | Container | shell command execution |
 | Memory | `builtin/memory.rs` | Orchestrator | memory_search, memory_write, memory_read, memory_tree |
@@ -233,9 +233,9 @@ The registry assembles built-in tools in these groups during startup:
 |------|------------------------|--------|----------|
 | `echo` | message* | Orchestrator | No |
 | `time` | operation* | Orchestrator | No |
-| `json` | operation*, data* | Orchestrator | No |
-| `http` | method*, url* | Orchestrator | Yes |
-| `web_fetch` | url* | Orchestrator | No |
+| `json` | operation*; data or source_tool_call_id | Orchestrator | No |
+| `http` | method*, url* | Orchestrator | Conditional (see §4.4) |
+| `restart` | delay_secs | Orchestrator | No (gate is at `/restart` command level) |
 | `read_file` | path* | Container | No |
 | `write_file` | path*, content* | Container | No |
 | `list_dir` | — | Container | No |
@@ -262,6 +262,7 @@ The registry assembles built-in tools in these groups during startup:
 | `tool_activate` | name* | Orchestrator | No |
 | `tool_list` | — | Orchestrator | No |
 | `tool_remove` | name* | Orchestrator | Yes |
+| `extension_info` | name* | Orchestrator | No |
 | `skill_list` | — | Orchestrator | No |
 | `skill_search` | query* | Orchestrator | No |
 | `skill_install` | name* | Orchestrator | Yes |
@@ -333,20 +334,45 @@ JSON manipulation. Fixed for OpenAI API compatibility (see Section 8).
       "type": "string",
       "enum": ["parse", "query", "stringify", "validate"]
     },
-    "data":      { "description": "JSON data to process (any value)" },
-    "path":      { "type": "string", "description": "JSONPath query for 'query' operation" }
+    "data": {
+      "description": "JSON input data. Pass a string for parse, or any JSON value otherwise. Not required when source_tool_call_id is provided."
+    },
+    "source_tool_call_id": {
+      "type": "string",
+      "description": "Reference a previous tool call's full output by its ID (e.g., 'call_abc123'). Use this instead of data when the previous tool output was large and may have been truncated."
+    },
+    "path": { "type": "string", "description": "JSONPath query for 'query' operation" }
   },
-  "required": ["operation", "data"]
+  "required": ["operation"]
 }
 ```
 
 Note: `data` has no `"type"` field — this means "accept any JSON value". An OpenAI API
 bug rejects `"type": ["string", "null"]` union arrays; omitting `"type"` is the fix.
 
+**`source_tool_call_id` (v0.16.0, PR #578):** Because the dispatcher may truncate large
+tool outputs before they enter the LLM context window, `json` provides a bypass via
+`source_tool_call_id`. When this parameter is set, the tool reads the *full* untruncated
+output of the referenced tool call from an in-memory stash (`JobContext.tool_output_stash`)
+rather than from the truncated message in the conversation. This avoids partial-parse errors
+on large HTTP or file outputs.
+
+```
+LLM calls: http { url: "https://..." }
+  → dispatcher stashes full output at tool_output_stash["call_http_01"]
+  → LLM context receives truncated summary
+
+LLM calls: json { operation: "query", source_tool_call_id: "call_http_01", path: "body.results[0]" }
+  → json tool reads full output from stash (not the truncated version)
+```
+
+`data` becomes optional when `source_tool_call_id` is provided. If both are given,
+`source_tool_call_id` takes precedence.
+
 Operations:
 
 - `parse` — parses a JSON string into a structured value
-- `query` — runs a JSONPath expression against `data`
+- `query` — runs a JSONPath expression against `data` or the stashed output
 - `stringify` — serializes a value to a JSON string
 - `validate` — checks whether a string is valid JSON
 
@@ -354,7 +380,21 @@ Operations:
 
 ### 4.4 `http` (`builtin/http.rs`)
 
-Outbound HTTP requests. Fixed for OpenAI API compatibility (see Section 8).
+Unified HTTP tool introduced in v0.16.0 (#578). Replaces the former separate `web_fetch` tool (which was a GET-only no-auth tool). The `http` tool now handles both simple fetches and full authenticated API calls under a **conditional approval model**:
+
+| Request type | Approval |
+|---|---|
+| Plain GET, no custom headers, no auth params | `Never` (auto-approved; follows up to 3 redirects) |
+| GET with `Authorization`, `X-Api-Key`, or similar headers | `Always` |
+| Any non-GET method (POST, PUT, DELETE, PATCH) | `UnlessAutoApproved` |
+| Host has credential mappings (auto-inject from secrets) | `Always` |
+
+This eliminates the need for a separate `web_fetch` tool — simple page fetches now run without approval while authenticated API calls still gate on user confirmation.
+
+**User-Agent:** `IronClaw-Agent/<version> (https://github.com/nearai/ironclaw)` — sent on all requests to avoid bot-detection blocks on public APIs.
+
+**Tool description shown to LLM (v0.16.1):**
+> "Make HTTP requests. Simple GET requests (no auth, no custom headers) run without approval and follow redirects — use for fetching weather, public JSON APIs, web pages, and documentation. Requests with authentication, custom headers, or non-GET methods (POST, PUT, DELETE, PATCH) require user approval."
 
 ```json
 {
@@ -401,44 +441,59 @@ Security controls enforced:
 
 ---
 
-### 4.5 `web_fetch` (`builtin/web_fetch.rs`)
+### 4.5 `restart` (`builtin/restart.rs`)
 
-Fetches a web page and converts HTML to Markdown via Readability. Purpose-built for reading articles, documentation, and web pages; use `http` for API calls that require POST, custom headers, or authentication.
+Added in v0.16.0 (#531). Triggers a graceful process restart by calling `std::process::exit(0)` after a short delay so the HTTP response can flush.
 
-- **No approval required** — auto-approved; SSRF and leak protections are unconditional
-- **Chrome-like User-Agent** — avoids bot-detection blocks on most sites
-- **GET-only** — no custom headers or request body
-- **HTML to Markdown conversion** — always attempted for `text/html` responses
-- **Rate-limited** — 30 requests/minute, 500/hour (same as `http`)
-- **Max response size** — 5 MB hard cap
-- **Returns** — structured JSON: `{url, final_url, status, title, content, word_count}`
+**Security model:**
+- The `/restart` command only works via the **web gateway** channel (`channel == "gateway"`). REPL and webhook channels are rejected.
+- `IRONCLAW_IN_DOCKER` must be `"true"` — restart is only available inside the Docker container where the entrypoint loop is running.
+- Approval is handled at the **command level** (web modal confirmation), not at tool execution level. `requires_approval()` returns `Never` so approved commands can execute autonomously.
+
+**How restart works:**
+1. User clicks Restart in the web UI → confirmation modal appears.
+2. On confirm, the web UI sends `/restart` as a chat message.
+3. `agent::commands` validates channel is `"gateway"` and `IRONCLAW_IN_DOCKER=true`.
+4. `RestartTool::execute()` is called directly (no LLM dispatch).
+5. A `tokio::spawn` sleeps `delay_secs` (default: 2, range: 1–30), then calls `std::process::exit(0)`.
+6. The Docker entrypoint detects exit code 0, waits `IRONCLAW_RESTART_DELAY` seconds (default: 5), then restarts `ironclaw run`.
+
+**Parameters:**
 
 ```json
 {
   "type": "object",
   "properties": {
-    "url": {
-      "type": "string",
-      "description": "HTTPS URL to fetch. Must be a public URL (no localhost or private IPs)."
+    "delay_secs": {
+      "type": "integer",
+      "description": "Seconds to wait before exiting (default: 2, min: 1, max: 30)",
+      "minimum": 1,
+      "maximum": 30
     }
-  },
-  "required": ["url"],
-  "additionalProperties": false
+  }
 }
 ```
 
-Security controls enforced:
+**Relevant env vars:**
 
-- HTTPS-only — HTTP URLs are rejected
-- SSRF protection on every redirect hop — each `Location` URL is validated before the next request
-- Max redirects: 3
-- DNS rebinding check — resolved IP addresses are validated against the SSRF blocklist
-- LeakDetector scans the outbound URL and response body for credential exposure
-- `requires_sanitization: true` — response is sanitized before reaching LLM
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `IRONCLAW_IN_DOCKER` | `false` | Set to `true` in the container entrypoint to enable restart |
+| `IRONCLAW_RESTART_DELAY` | `5` | Seconds the entrypoint waits before restarting the process |
+| `IRONCLAW_MAX_FAILURES` | `10` | Max consecutive non-zero exits before the container gives up |
+| `IRONCLAW_DISABLE_RESTART` | — | Set to `1` or `true` to disable `std::process::exit(0)` (test use only) |
+
+> **Note:** `std::process::exit(0)` is a hard exit with no destructor cleanup. In-flight jobs are paused during restart and resumed by the entrypoint loop.
 
 ---
 
-### 4.6 File Tools (`builtin/file.rs`)
+### 4.6 `web_fetch` — removed in v0.16.0
+
+The `web_fetch` built-in tool (`builtin/web_fetch.rs`) that was added in v0.13.0 was **merged into the unified `http` tool** in v0.16.0 (#578). The `http` tool now handles plain GET fetches (no-approval path) as well as authenticated API calls. `web_fetch` no longer exists as a separate tool or source file.
+
+---
+
+### 4.7 File Tools (`builtin/file.rs`)
 
 All four file tools use `domain = Container` and enforce sandbox path restrictions.
 
@@ -513,7 +568,7 @@ separators because normalization is lexical-only and reject is applied before an
 
 ---
 
-### 4.7 `shell` (`builtin/shell.rs`)
+### 4.8 `shell` (`builtin/shell.rs`)
 
 Execute shell commands. Domain: Container.
 
@@ -566,7 +621,7 @@ Security layers applied in order:
 
 ---
 
-### 4.8 Memory Tools (`builtin/memory.rs`)
+### 4.9 Memory Tools (`builtin/memory.rs`)
 
 Persistent workspace memory backed by the database (not the filesystem).
 
@@ -631,7 +686,7 @@ Returns a hierarchical JSON structure of the workspace file tree.
 
 ---
 
-### 4.9 Job Tools (`builtin/job.rs`)
+### 4.10 Job Tools (`builtin/job.rs`)
 
 Manage parallel background jobs.
 
@@ -715,7 +770,7 @@ into a running job's input stream.
 
 ---
 
-### 4.10 Routine Tools (`builtin/routine.rs`)
+### 4.11 Routine Tools (`builtin/routine.rs`)
 
 Manage scheduled and reactive automations.
 
@@ -750,7 +805,7 @@ Manage scheduled and reactive automations.
 
 ---
 
-### 4.11 Extension Tools (`builtin/extension_tools.rs`)
+### 4.12 Extension Tools (`builtin/extension_tools.rs`)
 
 Manage WASM and MCP tool extensions.
 
@@ -762,10 +817,26 @@ Manage WASM and MCP tool extensions.
 | `tool_activate` | `name` | No | Auto-triggers auth if 401 is returned |
 | `tool_list` | — | No | Optional `kind` filter |
 | `tool_remove` | `name` | Yes | Permanently unregisters the tool |
+| `extension_info` | `name` | No | Returns `version`, `wit_version`, `host_wit_version` for a named extension (v0.16.0) |
+
+**`extension_info` (v0.16.0):** Reports version metadata for an installed extension so operators can detect WIT version mismatches before runtime failures occur:
+
+```json
+{
+  "name": "my-channel",
+  "kind": "wasm_channel",
+  "installed": true,
+  "version": "0.1.0",
+  "wit_version": "0.2.0",
+  "host_wit_version": "0.2.0"
+}
+```
+
+If `wit_version` ≠ `host_wit_version`, the extension needs to be recompiled against the current WIT interface.
 
 ---
 
-### 4.12 Skill Tools (`builtin/skill_tools.rs`)
+### 4.13 Skill Tools (`builtin/skill_tools.rs`)
 
 Manage SKILL.md prompt extensions.
 
@@ -778,7 +849,7 @@ Manage SKILL.md prompt extensions.
 
 ---
 
-### 4.13 `message` (`builtin/message.rs`)
+### 4.14 `message` (`builtin/message.rs`)
 
 Send messages across connected channels, including optional attachments.
 
@@ -815,7 +886,7 @@ Behavior:
 
 ---
 
-### 4.14 HTML to Markdown Converter (`builtin/html_converter.rs`)
+### 4.15 HTML to Markdown Converter (`builtin/html_converter.rs`)
 
 Added in v0.10.0. Built-in tool and two-stage pipeline for converting HTML content to clean Markdown. Used internally by the `http` tool when fetching HTML pages, and exposed directly as the `html_to_markdown` built-in tool for web content ingestion and formatting.
 
@@ -841,7 +912,7 @@ let markdown = convert_html_to_markdown(html_content, "https://example.com/artic
 
 ---
 
-### 4.15 Built-in Tool Rate Limiter (`src/tools/rate_limiter.rs`)
+### 4.16 Built-in Tool Rate Limiter (`src/tools/rate_limiter.rs`)
 
 Added in v0.10.0. Shared rate limiter for built-in tool invocations (separate from WASM tool rate limiting). Provides per-tool, per-user sliding window rate limiting checked before every built-in tool execution.
 

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(git:*)",
+      "Bash(launchctl list)",
+      "Bash(tail:*)",
+      "Bash(launchctl unload:*)",
+      "Bash(echo health check pending...:*)"
+    ]
+  }
+}

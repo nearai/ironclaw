@@ -1,6 +1,6 @@
 # IronClaw — Master Architecture Document
 
-> Updated: 2026-03-05 (v0.15.0) | Comprehensive reference for contributors
+> Updated: 2026-03-06 (v0.16.1) | Comprehensive reference for contributors
 
 ---
 
@@ -85,7 +85,7 @@ The channel abstraction is the core extensibility point for message ingestion. A
 │  │                    Arc<dyn LlmProvider> chain                            │  │
 │  │                                                                          │  │
 │  │  ┌────────────────────┐                                                  │  │
-│  │  │SmartRoutingProvider│ (Simple/Moderate/Complex → cheap vs primary,     │  │
+│  │  │SmartRoutingProvider│ (13-dim scorer: Flash/Standard/Pro/Frontier → cheap vs primary,     │  │
 │  │  │                    │  cascade escalation for uncertain responses)      │  │
 │  │  └─────────┬──────────┘                                                  │  │
 │  │            │                                                              │  │
@@ -171,7 +171,7 @@ The following table lists every source module directory and the key top-level fi
 | `extensions` | `src/extensions/` | `ExtensionManager`: coordinates MCP server auth and activation, WASM tool install/remove, registers in-chat discovery tools |
 | `history` | `src/history/` | Persistence for conversation threads and analytics: PostgreSQL repositories, aggregation queries (JobStats, ToolStats) |
 | `hooks` | `src/hooks/` | `HookRegistry` for Inbound/Outbound message interception: hooks can modify, reject, or pass through messages at the agent loop boundary |
-| `llm` | `src/llm/` | LLM provider chain: `LlmProvider` trait, `NearAiChatProvider` (Chat Completions, dual auth: session token + API key), `SmartRoutingProvider` (classifies queries as Simple/Moderate/Complex and routes to cheap vs primary models, with cascade escalation for uncertain responses; sits at top of chain: `SmartRoutingProvider → RetryProvider → CircuitBreakerProvider → CachedProvider → FailoverProvider → backend`), `RigAdapter` (rig-core bridge for OpenAI/Anthropic/Ollama/Tinfoil), `FailoverProvider`, `CircuitBreakerProvider`, `CachedProvider`, `RetryProvider`, session token management |
+| `llm` | `src/llm/` | LLM provider chain: `LlmProvider` trait, `NearAiChatProvider` (Chat Completions, dual auth: session token + API key), `SmartRoutingProvider` (**redesigned v0.16.0**: 13-dimension complexity scorer produces 0–100 score mapped to four tiers Flash/Standard/Pro/Frontier → `Simple`/`Moderate`/`Complex` routing; pattern overrides fast-path greetings and security audits; cascade escalation for uncertain Pro-tier responses; sits at top of chain: `SmartRoutingProvider → RetryProvider → CircuitBreakerProvider → CachedProvider → FailoverProvider → backend`), `RigAdapter` (rig-core bridge for OpenAI/Anthropic/Ollama/Tinfoil), `FailoverProvider`, `CircuitBreakerProvider`, `CachedProvider`, `RetryProvider`, session token management |
 | `observability` | `src/observability/` | Tracing and metrics backend configuration |
 | `orchestrator` | `src/orchestrator/` | Internal HTTP API served to Docker sandbox containers: LLM proxy endpoint, job event streaming, per-job bearer token auth, `ContainerJobManager` (bollard lifecycle) |
 | `pairing` | `src/pairing/` | Device pairing and authentication helpers for remote channel setup |
@@ -181,7 +181,7 @@ The following table lists every source module directory and the key top-level fi
 | `secrets` | `src/secrets/` | Encrypted credential storage: AES-256-GCM encryption, HKDF-SHA256 per-secret key derivation, PostgreSQL or libSQL backend (both support encrypted store), OS keychain integration (macOS: security-framework, Linux: secret-service/KWallet) |
 | `setup` | `src/setup/` | 7-step interactive onboarding wizard: database backend selection, NEAR AI authentication, secrets master key setup, channel configuration |
 | `skills` | `src/skills/` | SKILL.md prompt extension system: `SkillRegistry` (discover, install, remove), deterministic scorer (keywords/tags/regex), `SkillTrust` model (Trusted vs Installed), tool attenuation (trust-based ceiling), gating requirements (bins/env/config), `SkillCatalog` (ClawHub HTTP client) |
-| `tools` | `src/tools/` | Extensible tool system: `Tool` trait, `ToolRegistry` (shadowing protection for built-in names; shared `Arc<RateLimiter>` for per-tool per-user sliding window rate limiting via **RateLimiter** (`tools/rate_limiter.rs`) — per-minute and per-hour windows), built-in tools (echo, time, json, http, web_fetch, shell, file ops, memory, job mgmt, routines, extensions, skills, `HtmlConverter` (**HTML-to-Markdown** built-in conversion — two-stage: readability extraction + markdown conversion; feature-gated `html-to-markdown`)), WASM sandbox (wasmtime component model, fuel metering, memory limits), MCP client (JSON-RPC over HTTP), dynamic software builder |
+| `tools` | `src/tools/` | Extensible tool system: `Tool` trait, `ToolRegistry` (shadowing protection for built-in names; shared `Arc<RateLimiter>` for per-tool per-user sliding window rate limiting via **RateLimiter** (`tools/rate_limiter.rs`) — per-minute and per-hour windows), built-in tools (echo, time, json, **unified `http`** tool (replaces `web_fetch` — conditional approval: GET-no-auth=never, POST/auth=always; v0.16.0), **`restart`** tool (graceful process restart via Docker entrypoint loop; web-only; v0.16.0), shell, file ops, memory, job mgmt, routines, extensions, skills, `HtmlConverter` (**HTML-to-Markdown** built-in conversion — two-stage: readability extraction + markdown conversion; feature-gated `html-to-markdown`)), WASM sandbox (wasmtime component model, fuel metering, memory limits), MCP client (JSON-RPC over HTTP), dynamic software builder |
 | `tunnel` | `src/tunnel/` | Tunnel/ngrok-style public URL provisioning for webhook channels |
 | `worker` | `src/worker/` | Runs inside Docker containers: `Worker` execution loop, tool calls via LLM reasoning, Claude Code bridge (spawns `claude` CLI), orchestrator HTTP client, proxy LLM provider that forwards requests through orchestrator |
 | `workspace` | `src/workspace/` | Persistent memory (OpenClaw-inspired): path-based document store, content chunking (800 tokens, 15% overlap), `EmbeddingProvider` trait (OpenAI, NEAR AI, Ollama), hybrid FTS+vector search via Reciprocal Rank Fusion, identity file injection into system prompt, heartbeat checklist, disk-to-DB migration (via `bootstrap::migrate_disk_to_db()` and `Workspace::import_from_directory()`) |
@@ -232,7 +232,7 @@ src/main.rs
     │        │       └──▶ safety::credential_detect (HTTP param credential detection)
     │        │
     │        ├──▶ tools (ToolRegistry)
-    │        │       ├──▶ tools::builtin     (echo, time, json, http, web_fetch, shell, file, memory, job, html_converter)
+    │        │       ├──▶ tools::builtin     (echo, time, json, http [unified, replaces web_fetch v0.16.0], restart [v0.16.0], shell, file, memory, job, html_converter)
     │        │       ├──▶ tools::wasm        (wasmtime, WasmToolRuntime, WasmToolWrapper)
     │        │       │       ├──▶ secrets    (credential injection at host boundary)
     │        │       │       └──▶ safety     (leak detection on WASM output)
@@ -840,7 +840,7 @@ File counts for each module directory (`.rs` files only, excluding tests in sepa
 | `workspace` | `src/workspace/` | 7 |
 | **Top-level files** | `src/*.rs` | 11 (`main.rs`, `lib.rs`, `app.rs`, `bootstrap.rs`, `service.rs`, `error.rs`, `settings.rs`, `util.rs`, `boot_screen.rs`, `testing.rs`, `tracing_fmt.rs`) |
 
-> **Note**: File counts are pinned to the `v0.15.0` release tag snapshot. They reflect `src/**.rs` at tag `v0.15.0`.
+> **Note**: File counts are pinned to the `v0.16.1` release tag snapshot. They reflect `src/**.rs` at tag `v0.16.1`.
 
 The `tools` module is one of the largest modules, reflecting the breadth of the tool system: built-ins, a full WASM runtime, an MCP client, a software builder, and the registry/trait definitions. The `channels` module includes REPL, web gateway, HTTP, Signal (added v0.12.0), and WASM channel runtime implementations.
 
@@ -867,11 +867,11 @@ The `tools` module is one of the largest modules, reflecting the breadth of the 
 | `termimad` | 0.34 | Markdown rendering in terminal REPL |
 | `pgvector` | 0.4 | PostgreSQL vector type support for semantic search |
 | `regex` | 1.x | Pattern matching for safety layer and skill scoring |
-| `serde_yml` | 0.0.12 | YAML parsing for SKILL.md frontmatter |
+| `serde_yml` | 0.0.12 | YAML parsing for SKILL.md frontmatter (`serde_yml` is intentional — it is a distinct, actively-maintained crate from `serde_yaml`, used for YAML parsing in skill files) |
 | `dotenvy` | 0.15 | `.env` file loading |
 | `hyper` | 1.5 | HTTP/1.1 and HTTP/2 server for network proxy |
 | `subtle` | 2.x | Constant-time comparison for auth token validation |
 
 ---
 
-*Document generated from source code inspection of IronClaw v0.15.0 (`src/` directory). For module-level specifications, see `src/setup/README.md`, `src/workspace/README.md`, and `src/tools/README.md`.*
+*Document generated from source code inspection of IronClaw v0.16.1 (`src/` directory). For module-level specifications, see `src/setup/README.md`, `src/workspace/README.md`, and `src/tools/README.md`.*

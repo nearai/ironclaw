@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — CLI Interface
 
-> Updated: 2026-03-05 | Version: v0.15.0
+> Updated: 2026-03-06 | Version: v0.16.1
 
 ## 1. Overview
 

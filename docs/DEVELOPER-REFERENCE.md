@@ -1,6 +1,6 @@
 # IronClaw Developer Reference
 
-> Version baseline: IronClaw v0.15.0 (`v0.15.0` tag snapshot)
+> Version baseline: IronClaw v0.16.1 (`v0.16.1` tag snapshot)
 
 Reference for developers building tools, channels, or contributing to IronClaw.
 
@@ -212,3 +212,78 @@ of the host Rust toolchain.
 All four jobs (`tests`, `telegram-tests`, `docker-build`, and the roll-up `run-tests`)
 must pass. The `run-tests` roll-up job is used as the branch protection target. A
 pull request cannot be merged if any of the three underlying jobs fail.
+
+---
+
+## 5. Trace Recording and Replay (v0.16.0)
+
+IronClaw v0.16.0 introduced a live trace recording system for creating deterministic E2E test fixtures without a live LLM or network.
+
+### Capturing a trace
+
+Run any real session with `IRONCLAW_RECORD_TRACE` set:
+
+```bash
+IRONCLAW_RECORD_TRACE=/tmp/my-session.json ironclaw run
+```
+
+Every LLM request, tool call, and HTTP exchange is written to the JSON file. The agent runs normally during recording — all real requests go through.
+
+### Trace file format
+
+```json
+{
+  "model_name": "gpt-4o",
+  "memory_snapshot": [
+    { "path": "identity/MEMORY.md", "content": "..." }
+  ],
+  "http_exchanges": [
+    {
+      "request":  { "method": "GET", "url": "https://api.example.com/data", "headers": [], "body": null },
+      "response": { "status": 200, "headers": [], "body": "{\"result\": 42}" }
+    }
+  ],
+  "steps": [
+    {
+      "input": "What is 6×7?",
+      "expected": { "type": "text", "content": "42" }
+    }
+  ]
+}
+```
+
+### Replaying a trace in tests
+
+Use `TraceLlm` in the test rig:
+
+```rust
+let app = AppBuilder::new()
+    .with_llm(TraceLlm::from_file("tests/fixtures/my-session.json"))
+    .build()
+    .await?;
+```
+
+During replay:
+- `TraceLlm` returns pre-recorded LLM responses step by step.
+- `HttpInterceptor` intercepts outgoing HTTP calls and returns the pre-recorded responses — no real network requests.
+- Workspace is pre-seeded from `memory_snapshot`.
+
+### HTTP interception architecture
+
+`JobContext` carries an `http_interceptor: Option<Arc<dyn HttpInterceptor>>`. The built-in `http` tool checks this before sending real requests. Tools call `interceptor.before_request(&req).await` — if `Some(response)` is returned, the real request is skipped.
+
+This makes all HTTP-dependent tests hermetic and reproducible without mocking at the network layer.
+
+### Fixture directory
+
+Pre-recorded traces are stored in `tests/fixtures/llm_traces/`. The directory is organized by scenario type:
+
+| Subdirectory | Purpose |
+|---|---|
+| `spot/` | Smoke tests — greeting, math, echo, tool |
+| `coverage/` | Per-tool coverage scenarios |
+| `advanced/` | Multi-turn, memory, steering, iteration-limit |
+| `recorded/` | Real-world sessions (weather, baseball stats) |
+| `worker/` | Worker/orchestrator scenarios |
+| `workspace/` | Workspace search and document lifecycle |
+| `tools/` | Individual tool traces (http, jobs, routines) |

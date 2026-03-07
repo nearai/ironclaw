@@ -1,6 +1,6 @@
 # LLM Provider Configuration
 
-> Version baseline: IronClaw v0.15.0 (`v0.15.0` tag snapshot)
+> Version baseline: IronClaw v0.16.1 (`v0.16.1` tag snapshot)
 
 IronClaw defaults to NEAR AI for model access, but supports any OpenAI-compatible
 endpoint as well as Anthropic and Ollama directly. This guide covers the most common
@@ -216,13 +216,29 @@ The model name is configured in the following step.
 
 ## Smart Routing (Cost Optimization)
 
-Smart routing uses a configured cheap model (`NEARAI_CHEAP_MODEL`) plus heuristic complexity checks to route simple prompts to cheap-model inference and complex prompts to the primary model.
+Smart routing (**redesigned in v0.16.0**, PR #529) uses a 13-dimension complexity scorer to classify every prompt into one of four tiers, then routes to the appropriate model.
 
 ```env
 LLM_BACKEND=nearai                         # Smart routing applies to NearAI backend
-NEARAI_MODEL=zai-org/GLM-latest           # Primary (capable) model
-NEARAI_CHEAP_MODEL=zai-org/GLM-latest     # Set to a cheaper model when available
-SMART_ROUTING_CASCADE=true                # Retry with primary if cheap model is uncertain
+NEARAI_MODEL=zai-org/GLM-latest           # Primary (capable) model — used for Pro/Frontier tiers
+NEARAI_CHEAP_MODEL=zai-org/GLM-flash      # Cheap model — used for Flash/Standard tiers
+SMART_ROUTING_CASCADE=true                # Retry with primary if cheap model gives uncertain Pro-tier response
 ```
 
-Simple queries (greetings, yes/no questions) are routed to the configured cheap model. Complex queries (code, reasoning, multi-step) use the primary model. With `SMART_ROUTING_CASCADE=true`, uncertain cheap-model responses are escalated to the primary model automatically.
+**Four tiers (score 0–100):**
+
+| Score | Tier | Routed to |
+|-------|------|-----------|
+| 0–15 | Flash | Cheap model |
+| 16–40 | Standard | Cheap model |
+| 41–65 | Pro | Cheap model (escalates to primary if SMART_ROUTING_CASCADE=true and response is uncertain) |
+| 66–100 | Frontier | Primary model always |
+
+**Pattern overrides** (bypass scoring, applied before the scorer):
+- Greetings and short yes/no questions → **Flash** (fast-path)
+- Security audits, CVE analysis, cryptography questions → **Frontier** (always primary)
+
+**13 scoring dimensions** (partial list — see `src/llm/smart_routing.rs`):
+technical depth, code complexity, reasoning chains, context length, ambiguity, domain expertise required, multi-step planning, creativity, factual precision, adversarial robustness, mathematical complexity, structured output requirements, time-sensitivity.
+
+**Cascade mode** (`SMART_ROUTING_CASCADE=true`): applies only to **Pro-tier** prompts routed to the cheap model. If the cheap model's response shows uncertainty signals (hedging phrases, incomplete reasoning), the request is automatically re-sent to the primary model.

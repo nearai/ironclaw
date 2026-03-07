@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Channel System
 
-> Updated: 2026-03-05 | Version: v0.15.0
+> Updated: 2026-03-06 | Version: v0.16.1
 
 ---
 
@@ -778,6 +778,44 @@ Recent fix (`e8eb4ca`, PR #390) prevents duplicate activation at startup:
 - Refresh updates credentials/webhook secrets on the already-running instance, which
   avoids triggering duplicate backend polling loops (for example Telegram `getUpdates`).
 
+### WIT Interface Versioning (v0.16.0, PR #592)
+
+WASM channels now carry a `wit_version` field in their `capabilities.json` that the host verifies at load time. The host's current WIT interface versions are:
+
+| Interface | Version |
+|-----------|---------|
+| Tool WIT (`wit/tool.wit`) | `0.2.0` |
+| Channel WIT (`wit/channel.wit`) | `0.2.0` |
+
+When a WASM channel is loaded, `ExtensionManager` compares the channel's declared `wit_version` against the host's version. A mismatch is reported via the `extension_info` tool (`host_wit_version` vs `wit_version` fields) so operators can identify stale WASM binaries. Build-time WIT compatibility tests (`tests/wit_compat.rs`) ensure the bundled channels remain in sync with the WIT interface.
+
+### Slack HMAC-SHA256 Webhook Signature Validation (v0.16.0, PR #588)
+
+The WASM channel router now validates **Slack webhook signatures** before forwarding requests to WASM. Slack signs every request with HMAC-SHA256:
+
+```
+base_string = "v0:" + X-Slack-Request-Timestamp + ":" + raw_body
+signature   = hex(HMAC-SHA256(signing_secret, base_string))
+header      = "v0=" + signature    (X-Slack-Signature header)
+```
+
+**Security properties:**
+- **Staleness check:** requests with a `X-Slack-Request-Timestamp` older than **5 minutes** from the server clock are rejected, preventing replay attacks.
+- **Constant-time comparison** is used when comparing the HMAC value to prevent timing attacks.
+- The signing secret is retrieved from the secrets store at webhook-route registration time via `register_hmac_secret()` on `WasmChannelRouter`.
+
+**How it's configured:** The `channel.webhook.hmac_secret_name` field in `capabilities.json` names the secret containing the signing secret. For the bundled Slack channel:
+
+```json
+"channel": {
+  "webhook": {
+    "hmac_secret_name": "slack_signing_secret"
+  }
+}
+```
+
+`verify_slack_signature()` is implemented in `src/channels/wasm/signature.rs` (alongside the existing `verify_discord_signature()` for Ed25519).
+
 ### Pairing/Permission System (v0.10.0)
 
 All WASM channels now support device pairing. Pairing enables authentication
@@ -1054,3 +1092,53 @@ For dynamically loaded channels (Telegram, Slack, WhatsApp, custom bots), use
 the WASM channel system: implement the WASM callback exports and declare
 capabilities in `channel.json`. The host runtime handles polling, HTTP, rate
 limiting, and credential injection automatically.
+
+---
+
+## 10. v0.16.0 / v0.16.1 Channel Changes
+
+### Telegram: Group Message Policy Fix (v0.16.0, PR #590)
+
+The bundled Telegram WASM channel now correctly respects `config.respond_to_all_group_messages`. Previously the flag was parsed but not applied — the channel only responded to the `owner_id` even in group chats regardless of the setting. After the fix, when `respond_to_all_group_messages = true` the channel accepts messages from **all participants** in group chats, not just the owner.
+
+The `telegram.capabilities.json` `config` block now exposes:
+
+```json
+{
+  "respond_to_all_group_messages": false,
+  "owner_id": null,
+  "dm_policy": "pairing",
+  "allow_from": []
+}
+```
+
+### Slack: HMAC-SHA256 Signing (v0.16.0, PR #588)
+
+See §7 WIT + Slack HMAC section above for full details.
+
+### WASM Storage: Channel Binaries in Database (v0.16.0)
+
+A new `wasm_channels` database table (migration `V10__wasm_versioning.sql`) stores compiled WASM channel binaries with BLAKE3 integrity hashes — mirroring the existing `wasm_tools` storage pattern:
+
+```sql
+CREATE TABLE IF NOT EXISTS wasm_channels (
+    id UUID PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL DEFAULT '0.1.0',
+    wit_version TEXT NOT NULL DEFAULT '0.1.0',
+    description TEXT NOT NULL DEFAULT '',
+    wasm_binary BYTEA NOT NULL,
+    binary_hash BYTEA NOT NULL,
+    capabilities_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    CONSTRAINT unique_wasm_channel UNIQUE (user_id, name)
+);
+```
+
+The `wit_version` column also tracks the WIT interface version the binary was compiled against. `src/channels/wasm/storage.rs` provides the async CRUD operations for both libSQL and PostgreSQL backends.
+
+### v0.16.1: WASM Artifact SHA256 Revert
+
+v0.16.1 (#627) reverts WASM artifact SHA256 checksums back to `null` in the registry JSON files. The checksums were added prematurely in v0.16.0 before the artifact build pipeline was stable. All registry `.json` files now have `"sha256": null`.
+

@@ -1,9 +1,9 @@
 # IronClaw Documentation
 
-> Comprehensive developer reference for [IronClaw](https://github.com/nearai/ironclaw) v0.15.0
+> Comprehensive developer reference for [IronClaw](https://github.com/nearai/ironclaw) v0.16.1
 > — a secure, self-hosted personal AI assistant written in Rust.
 
-**Documentation set for IronClaw v0.15.0, validated against release tag `v0.15.0` (2026-03-05).**
+**Documentation set for IronClaw v0.16.1, validated against release tag `v0.16.1` (2026-03-06).**
 
 ---
 
@@ -44,21 +44,20 @@ IronClaw is a Rust-based personal AI assistant built by [NEAR AI](https://near.a
 - **Multiple LLM backends**: NEAR AI, Anthropic, OpenAI, Ollama, OpenAI-compatible, Tinfoil
 - **Dual database**: libSQL (embedded, no server required) or PostgreSQL (with pgvector)
 
-### Source Module Statistics (v0.15.0)
+### Source Module Statistics (v0.16.1)
 
 | Module | Files | Description |
 |--------|------:|-------------|
-| `tools/` | 46 | Tool system: built-in, MCP, WASM, dynamic builder, rate limiter, HTML-to-Markdown |
-| `channels/` | 36 | Channels: REPL, web gateway, HTTP, native Signal, WASM plugins (with pairing + hot-activate) |
+| `tools/` | 47 | Tool system: built-in (incl. unified `http` + new `restart`), MCP, WASM, dynamic builder, rate limiter, HTML-to-Markdown |
+| `channels/` | 38 | Channels: REPL, web gateway, HTTP, native Signal, WASM plugins (with HMAC-SHA256 Slack signing, WIT versioning, DB-stored channel binaries) |
 | `agent/` | 21 | Agent runtime: loop, sessions, jobs, routines, heartbeat, context compaction |
 | `config/` | 17 | Configuration: all env vars and structs |
 | `workspace/` | 7 | Memory, embeddings, hybrid FTS+vector search |
-| `llm/` | 12 | LLM backends, smart routing provider, reliability wrappers |
+| `llm/` | 13 | LLM backends, redesigned 13-dim smart routing, reliability wrappers, trace recording |
 | `tunnel/` | 6 | Tunnels: cloudflare, ngrok, tailscale, custom |
-| `secrets/` | 5 | Keychain, AES-256-GCM crypto, credential injection |
+| `secrets/` | 5 | Keychain, AES-256-GCM crypto, credential injection (OsRng throughout) |
 | `worker/` | 5 | Docker worker: runtime, LLM bridge, proxy |
-| **Total (`src/`)** | **258** | Rust source files in `src/` (`v0.15.0` tag snapshot) |
-| **Total (repo-wide)** | **305** | Rust source files repo-wide (excluding `target/`) |
+| **Total (`src/`)** | **265+** | Rust source files in `src/` (`v0.16.1` tag snapshot) |
 
 ---
 
@@ -112,6 +111,39 @@ See [INSTALLATION.md](INSTALLATION.md) for complete setup and deployment, [LLM_P
 ---
 
 ## What's New
+
+### v0.16.1 (2026-03-06)
+
+#### Fixed
+
+- revert WASM artifact SHA256 checksums to null ([#627](https://github.com/nearai/ironclaw/pull/627))
+
+---
+
+### v0.16.0 (2026-03-06)
+
+#### Added
+
+- **Smart routing redesign**: 13-dimension complexity scorer with four tiers (Flash/Standard/Pro/Frontier), pattern overrides, and cascade mode ([#529](https://github.com/nearai/ironclaw/pull/529))
+- **WASM extension versioning** with WIT compatibility checks — `wit_version` field in capabilities files, DB migration `V10__wasm_versioning.sql` ([#592](https://github.com/nearai/ironclaw/pull/592))
+- **HMAC-SHA256 webhook signature validation for Slack** — 5-minute replay window, constant-time comparison ([#588](https://github.com/nearai/ironclaw/pull/588))
+- **Graceful restart** via `/restart` command (web-only, Docker-only) — `RestartTool` triggers `std::process::exit(0)` via entrypoint loop ([#531](https://github.com/nearai/ironclaw/pull/531))
+- **Unified `http` tool** — merges `web_fetch` into `http`; conditional approval (plain GET = never, auth/POST = always); `IRONCLAW_IN_DOCKER` env var ([#578](https://github.com/nearai/ironclaw/pull/578))
+- *(e2e)* extensions tab tests, CI parallelization, and 3 production bug fixes ([#584](https://github.com/nearai/ironclaw/pull/584))
+
+#### Fixed
+
+- *(llm)* fix reasoning model response parsing bugs ([#580](https://github.com/nearai/ironclaw/pull/580))
+- Telegram channel accepts group messages from all users if `respond_to_all_group_messages=true` ([#590](https://github.com/nearai/ironclaw/pull/590))
+- *(security)* use `OsRng` for all security-critical key and token generation ([#519](https://github.com/nearai/ironclaw/pull/519))
+- prevent concurrent memory hygiene passes and Windows file lock errors ([#535](https://github.com/nearai/ironclaw/pull/535))
+- sort `tool_definitions()` for deterministic LLM tool ordering ([#582](https://github.com/nearai/ironclaw/pull/582))
+
+#### Other
+
+- *(llm)* complete response cache — `set_model` invalidation, stats logging, sync mutex ([#290](https://github.com/nearai/ironclaw/pull/290))
+
+---
 
 ### v0.15.0 (2026-03-05)
 
@@ -261,8 +293,8 @@ See [INSTALLATION.md](INSTALLATION.md) for complete setup and deployment, [LLM_P
 
 ## Version
 
-Documented: IronClaw v0.15.0
-Release tag: [v0.15.0](https://github.com/nearai/ironclaw/releases/tag/v0.15.0) (2026-03-05)
+Documented: IronClaw v0.16.1
+Release tag: [v0.16.1](https://github.com/nearai/ironclaw/releases/tag/v0.16.1) (2026-03-06)
 Source: [github.com/nearai/ironclaw](https://github.com/nearai/ironclaw)
 Docs repo: [github.com/mudrii/ironclaw-docs](https://github.com/mudrii/ironclaw-docs)
 Generated: 2026-03-05

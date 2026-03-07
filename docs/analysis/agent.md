@@ -1,6 +1,6 @@
 # IronClaw Agent Runtime System — Deep Dive
 
-**Version:** v0.15.0
+**Version:** v0.16.1
 **Source tree:** `src/agent/` (21 files)
 **Last updated:** 2026-03-05
 
@@ -737,7 +737,7 @@ Command table:
 | `/cancel` | CancelJob |
 | `/list`, `/jobs` | ListJobs |
 | `/help <id>` | HelpJob |
-| `/help`, `/ping`, `/version`, `/tools`, `/debug`, `/model` | Command |
+| `/help`, `/ping`, `/version`, `/tools`, `/debug`, `/model`, `/restart` | Command |
 
 ### 12.2 Submission Parser
 
@@ -934,3 +934,31 @@ All configuration is read from environment variables at startup. Relevant
 ---
 
 *End of agent system analysis. Total source files analyzed: 21.*
+
+---
+
+## 14. v0.16.0 Agent Changes
+
+### `/restart` Command (PR #531)
+
+Added in v0.16.0. The `/restart` system command triggers a graceful process restart when running inside a Docker container.
+
+**Authorization double-gate:**
+1. `handle_command()` / `handle_system_command()` receive the originating `channel` name.
+2. The command is only accepted when `channel == "gateway"` (web UI only). REPL and webhook channels are rejected.
+3. `IRONCLAW_IN_DOCKER` must be `true`; local deployments receive a clear error message.
+
+**Execution path:**
+- `RestartTool::execute()` is called directly (not dispatched to an LLM job).
+- A `tokio::spawn` sleeps `delay_secs` (default: 2 s), then calls `std::process::exit(0)`.
+- The Docker entrypoint loop detects exit code 0, waits `IRONCLAW_RESTART_DELAY` s, then restarts.
+
+**Web UI integration:**
+- A Restart button appears in the web UI header when `restart_enabled = true` (only set when `IRONCLAW_IN_DOCKER=true`).
+- The button shows a confirmation modal before sending `/restart`.
+- A spinning animation and progress overlay are shown while the process restarts.
+- The UI automatically reconnects once the agent comes back online.
+
+### Deterministic Tool Ordering (PR #582)
+
+`tool_definitions()` now sorts all tool definitions alphabetically before sending to the LLM. This ensures deterministic ordering across restarts and is required for reproducible trace-based E2E tests.
