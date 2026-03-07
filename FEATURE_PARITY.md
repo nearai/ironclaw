@@ -215,8 +215,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | NEAR AI | ✅ | ✅ | - | Primary provider |
 | Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy; Opus 4.5, Sonnet 4, Sonnet 4.6 |
 | OpenAI | ✅ | 🚧 | - | Via NEAR AI proxy |
-| AWS Bedrock | ✅ | ❌ | P3 | |
-| Google Gemini | ✅ | ❌ | P3 | |
+| AWS Bedrock | ✅ | ✅ | P3 | Via `openai_compatible` adapter (e.g. LiteLLM) |
+| Google Gemini | ✅ | ✅ | P3 | Via `gemini` adapter |
 | NVIDIA API | ✅ | ❌ | P3 | New provider |
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |

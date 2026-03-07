@@ -11,6 +11,8 @@ configurations.
 | NEAR AI | `nearai` | OAuth (browser) | Default; multi-model |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
+| Google Gemini | `gemini` | `GEMINI_API_KEY` | Gemini models |
+| AWS Bedrock | `bedrock` | `BEDROCK_ACCESS_KEY` | Requires OpenAI proxy (e.g. LiteLLM) |
 | Ollama | `ollama` | No | Local inference |
 | OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
