@@ -493,9 +493,7 @@ impl Tool for RoutineUpdateTool {
         if new_schedule.is_some() || new_timezone.is_some() {
             // Extract existing cron fields (cloned to avoid borrow conflict)
             let existing_cron = match &routine.trigger {
-                Trigger::Cron { schedule, timezone } => {
-                    Some((schedule.clone(), timezone.clone()))
-                }
+                Trigger::Cron { schedule, timezone } => Some((schedule.clone(), timezone.clone())),
                 _ => None,
             };
 
@@ -503,8 +501,9 @@ impl Tool for RoutineUpdateTool {
                 let effective_schedule = new_schedule.unwrap_or(&old_schedule);
                 let effective_tz = new_timezone.or(old_tz);
                 // Validate
-                next_cron_fire(effective_schedule, effective_tz.as_deref())
-                    .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
+                next_cron_fire(effective_schedule, effective_tz.as_deref()).map_err(|e| {
+                    ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
+                })?;
 
                 routine.trigger = Trigger::Cron {
                     schedule: effective_schedule.to_string(),
@@ -514,14 +513,14 @@ impl Tool for RoutineUpdateTool {
                     next_cron_fire(effective_schedule, effective_tz.as_deref()).unwrap_or(None);
             } else if let Some(schedule) = new_schedule {
                 let tz = new_timezone;
-                next_cron_fire(schedule, tz.as_deref())
-                    .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
+                next_cron_fire(schedule, tz.as_deref()).map_err(|e| {
+                    ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
+                })?;
                 routine.trigger = Trigger::Cron {
                     schedule: schedule.to_string(),
                     timezone: tz.clone(),
                 };
-                routine.next_fire_at =
-                    next_cron_fire(schedule, tz.as_deref()).unwrap_or(None);
+                routine.next_fire_at = next_cron_fire(schedule, tz.as_deref()).unwrap_or(None);
             }
         }
 
