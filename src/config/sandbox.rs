@@ -20,6 +20,10 @@ pub struct SandboxModeConfig {
     pub auto_pull_image: bool,
     /// Additional domains to allow through the network proxy.
     pub extra_allowed_domains: Vec<String>,
+    /// How often the reaper scans for orphaned containers (seconds). Default: 300 (5 min).
+    pub reaper_interval_secs: u64,
+    /// Containers older than this with no active job are reaped (seconds). Default: 600 (10 min).
+    pub orphan_threshold_secs: u64,
 }
 
 impl Default for SandboxModeConfig {
@@ -33,6 +37,8 @@ impl Default for SandboxModeConfig {
             image: "ironclaw-worker:latest".to_string(),
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
+            reaper_interval_secs: 300,
+            orphan_threshold_secs: 600,
         }
     }
 }
@@ -52,6 +58,8 @@ impl SandboxModeConfig {
             image: parse_string_env("SANDBOX_IMAGE", "ironclaw-worker:latest")?,
             auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", true)?,
             extra_allowed_domains: extra_domains,
+            reaper_interval_secs: parse_optional_env("SANDBOX_REAPER_INTERVAL_SECS", 300)?,
+            orphan_threshold_secs: parse_optional_env("SANDBOX_ORPHAN_THRESHOLD_SECS", 600)?,
         })
     }
 
