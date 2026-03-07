@@ -2620,7 +2620,7 @@ mod tests {
             gateway_token: None,
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
-                .unwrap_or(std::time::Instant::now()),
+                .expect("System uptime is too low to run expired flow test"),
         };
 
         ext_mgr
@@ -2729,7 +2729,7 @@ mod tests {
             // Expired — handler will reject after lookup (no network I/O)
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
-                .unwrap_or(std::time::Instant::now()),
+                .expect("System uptime is too low to run expired flow test"),
         };
 
         ext_mgr

@@ -206,7 +206,7 @@ mod tests {
         // Manually set last_activity to the past to simulate staleness
         session.last_activity = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(10))
-            .unwrap_or(std::time::Instant::now());
+            .expect("System uptime is too low to run staleness test");
         assert!(session.is_stale(5));
         assert!(!session.is_stale(15));
     }
