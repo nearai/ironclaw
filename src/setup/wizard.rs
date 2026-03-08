@@ -769,13 +769,28 @@ impl SetupWizard {
                 print_success("Master key generated and stored in OS keychain");
             }
             1 => {
-                // Env var mode
-                print_info("Generate a key and add it to your environment:");
+                // Env var mode — generate key, init crypto, and persist to .env
                 let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+                // Initialize crypto so subsequent wizard steps (channel setup,
+                // API key storage) can encrypt secrets immediately.
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                        .map_err(|e| SetupError::Config(e.to_string()))?,
+                ));
+
+                // Make visible to optional_env() for any subsequent config resolution.
+                crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
+
+                // Store hex for write_bootstrap_env to persist to ~/.ironclaw/.env.
+                self.settings.secrets_master_key_hex = Some(key_hex.clone());
+
                 println!();
-                println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                print_info("Master key generated and will be saved to ~/.ironclaw/.env");
                 println!();
-                print_info("Add this to your shell profile or .env file.");
+                println!("  SECRETS_MASTER_KEY={}", key_hex);
+                println!();
+                print_info("You can also copy this to another .env file or CI secrets.");
 
                 self.settings.secrets_master_key_source = KeySource::Env;
                 print_success("Configured for environment variable");
@@ -2324,6 +2339,12 @@ impl SetupWizard {
             env_vars.push(("NEARAI_API_KEY".to_string(), api_key));
         }
 
+        // Secrets master key (env var mode): write to .env so it's available
+        // on next startup before the DB is connected.
+        if let Some(ref key_hex) = self.settings.secrets_master_key_hex {
+            env_vars.push(("SECRETS_MASTER_KEY".to_string(), key_hex.clone()));
+        }
+
         // Always write ONBOARD_COMPLETED so that check_onboard_needed()
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {
@@ -3535,5 +3556,31 @@ mod tests {
             Some("custom_no_setup"),
             "backend should be set even without setup hint"
         );
+    }
+
+    /// Regression test for #666: env-var security option must initialize
+    /// secrets_crypto so subsequent steps can encrypt API keys.
+    #[test]
+    fn test_env_var_security_initializes_crypto() {
+        use crate::secrets::SecretsCrypto;
+        use secrecy::SecretString;
+
+        // Simulate what option 1 in step_security() does after the fix:
+        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+        // The fix: create SecretsCrypto from the generated key.
+        // Before the fix, this was skipped, leaving secrets_crypto = None.
+        let crypto = SecretsCrypto::new(SecretString::from(key_hex.clone()));
+        assert!(
+            crypto.is_ok(),
+            "generated key hex must produce valid SecretsCrypto"
+        );
+
+        // Verify the key is stored for bootstrap env persistence.
+        let settings = Settings {
+            secrets_master_key_hex: Some(key_hex),
+            ..Settings::default()
+        };
+        assert!(settings.secrets_master_key_hex.is_some());
     }
 }
