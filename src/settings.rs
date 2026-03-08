@@ -42,6 +42,10 @@ pub struct Settings {
     #[serde(default)]
     pub secrets_master_key_source: KeySource,
 
+    /// Generated master key hex (env var mode only, written to .env by wizard).
+    #[serde(default, skip_serializing)]
+    pub secrets_master_key_hex: Option<String>,
+
     // === Step 3: Inference Provider ===
     /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible".
     #[serde(default)]
