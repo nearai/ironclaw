@@ -145,14 +145,23 @@ jobs:
             cat /tmp/staging-diff.patch
           } > /tmp/review-prompt.txt
 
+      - name: Load prompt into env
+        id: load-prompt
+        if: steps.diff.outputs.diff_available == 'true'
+        run: |
+          # Use GITHUB_ENV with delimiter to handle multiline content
+          DELIM=$(openssl rand -hex 16)
+          echo "REVIEW_PROMPT<<${DELIM}" >> "$GITHUB_ENV"
+          cat /tmp/review-prompt.txt >> "$GITHUB_ENV"
+          echo "${DELIM}" >> "$GITHUB_ENV"
+
       - name: Run Claude Code review
         id: claude-review
         if: steps.diff.outputs.diff_available == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            $(cat /tmp/review-prompt.txt)
+          prompt: ${{ env.REVIEW_PROMPT }}
           claude_args: "--max-turns 30"
 
       - name: Validate and process results

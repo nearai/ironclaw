@@ -52,30 +52,37 @@ jobs:
           fi
           echo "last_tested=${LAST_TESTED}" >> "$GITHUB_OUTPUT"
 
+          DIFF_RANGE=""
           if [ -n "$LAST_TESTED" ] && [ "$LAST_TESTED" = "$CURRENT_HEAD" ]; then
             echo "No new commits since last tested (${CURRENT_HEAD})"
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            echo "diff_range=" >> "$GITHUB_OUTPUT"
+            HAS_CHANGES=false
           else
+            HAS_CHANGES=true
             if [ -n "$LAST_TESTED" ]; then
               COMMIT_COUNT=$(git rev-list --count "${LAST_TESTED}..HEAD")
               echo "Found ${COMMIT_COUNT} new commit(s) since last tested"
-              echo "diff_range=${LAST_TESTED}..${CURRENT_HEAD}" >> "$GITHUB_OUTPUT"
+              DIFF_RANGE="${LAST_TESTED}..${CURRENT_HEAD}"
             else
               # First run: use merge-base with main to capture all staging changes
               git fetch origin main
               MERGE_BASE=$(git merge-base origin/main HEAD)
               echo "First run -- reviewing from merge-base ${MERGE_BASE}"
-              echo "diff_range=${MERGE_BASE}..${CURRENT_HEAD}" >> "$GITHUB_OUTPUT"
+              DIFF_RANGE="${MERGE_BASE}..${CURRENT_HEAD}"
             fi
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi
 
           # Force override from workflow_dispatch
           if [ "${{ inputs.force }}" = "true" ]; then
             echo "Force run requested"
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            HAS_CHANGES=true
+            # Use a valid empty range if no new commits
+            if [ -z "$DIFF_RANGE" ]; then
+              DIFF_RANGE="${CURRENT_HEAD}..${CURRENT_HEAD}"
+            fi
           fi
+
+          echo "has_changes=${HAS_CHANGES}" >> "$GITHUB_OUTPUT"
+          echo "diff_range=${DIFF_RANGE}" >> "$GITHUB_OUTPUT"
 
   # ── Run full test suite ──────────────────────────────────────────
   tests:
@@ -110,30 +117,22 @@ jobs:
       always() &&
       needs.check-changes.outputs.has_changes == 'true' &&
       needs.tests.result == 'success' &&
-      needs.e2e.result == 'success'
+      needs.e2e.result == 'success' &&
+      needs.claude-review.result == 'success'
     runs-on: ubuntu-latest
     outputs:
       gate_passed: ${{ steps.gate.outputs.passed }}
     steps:
-      - name: Check for skip-claude-gate label
-        id: label-check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          SKIP=$(gh label list --json name -q '.[].name' | grep -c 'skip-claude-gate' || true)
-          echo "skip_label=${SKIP}" >> "$GITHUB_OUTPUT"
-
       - name: Evaluate gate
         id: gate
         run: |
           HAS_BLOCKING="${{ needs.claude-review.outputs.has_blocking }}"
-          SKIP_LABEL="${{ steps.label-check.outputs.skip_label }}"
           SKIP_INPUT="${{ inputs.skip_claude_gate }}"
 
           if [ "$HAS_BLOCKING" = "true" ]; then
             echo "::warning::Claude review found blocking issues (CRITICAL ≥80 confidence)"
-            if [ "$SKIP_LABEL" -gt 0 ] || [ "$SKIP_INPUT" = "true" ]; then
-              echo "::warning::Gate overridden by skip-claude-gate label or input"
+            if [ "$SKIP_INPUT" = "true" ]; then
+              echo "::warning::Gate overridden by skip_claude_gate workflow input"
               echo "passed=true" >> "$GITHUB_OUTPUT"
             else
               echo "::error::Blocking promotion to main due to CRITICAL findings (≥80 confidence)"

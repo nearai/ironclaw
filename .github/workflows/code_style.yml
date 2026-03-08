@@ -69,7 +69,7 @@ jobs:
             echo "One or more jobs failed"
             exit 1
           fi
-          if [[ "${{ needs.version-check.result }}" == "failure" ]]; then
-            echo "Version bump check failed"
+          if [[ "${{ needs.version-check.result }}" != "success" ]]; then
+            echo "Version bump check did not succeed (status: ${{ needs.version-check.result }})"
             exit 1
           fi
