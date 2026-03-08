@@ -18,7 +18,7 @@
 //! - `Esc` - Interrupt current operation
 
 use std::borrow::Cow;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -303,6 +303,9 @@ impl Channel for ReplChannel {
             if let Some(msg) = single_message {
                 let incoming = IncomingMessage::new("repl", "default", &msg).with_timezone(&sys_tz);
                 let _ = tx.blocking_send(incoming);
+                // Ensure the agent exits after handling exactly one turn in -m mode,
+                // even when other channels (gateway/http) are enabled.
+                let _ = tx.blocking_send(IncomingMessage::new("repl", "default", "/quit"));
                 return;
             }
 
@@ -408,10 +411,15 @@ impl Channel for ReplChannel {
                         }
                     }
                     Err(ReadlineError::Eof) => {
-                        // Ctrl+D: send /quit so the agent loop runs graceful shutdown
-                        let msg =
-                            IncomingMessage::new("repl", "default", "/quit").with_timezone(&sys_tz);
-                        let _ = tx.blocking_send(msg);
+                        // Ctrl+D in interactive mode: graceful shutdown.
+                        // In daemon mode (stdin = /dev/null, no TTY), EOF arrives
+                        // immediately — just drop the REPL thread silently so other
+                        // channels (gateway, telegram, …) keep running.
+                        if std::io::stdin().is_terminal() {
+                            let msg = IncomingMessage::new("repl", "default", "/quit")
+                                .with_timezone(&sys_tz);
+                            let _ = tx.blocking_send(msg);
+                        }
                         break;
                     }
                     Err(e) => {
@@ -619,5 +627,31 @@ impl Channel for ReplChannel {
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::StreamExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn single_message_mode_sends_message_then_quit() {
+        let repl = ReplChannel::with_message("hi".to_string());
+        let mut stream = repl.start().await.expect("repl start should succeed");
+
+        let first = stream.next().await.expect("first message missing");
+        assert_eq!(first.channel, "repl");
+        assert_eq!(first.content, "hi");
+
+        let second = stream.next().await.expect("quit message missing");
+        assert_eq!(second.channel, "repl");
+        assert_eq!(second.content, "/quit");
+
+        assert!(
+            stream.next().await.is_none(),
+            "stream should end after /quit"
+        );
     }
 }

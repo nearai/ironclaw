@@ -39,7 +39,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Network modes (loopback/LAN/remote) | ✅ | 🚧 | HTTP only |
 | OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions, per-request `model` override |
 | Canvas hosting | ✅ | ❌ | Agent-driven UI |
-| Gateway lock (PID-based) | ✅ | ❌ | |
+| Gateway lock (PID-based) | ✅ | ✅ | `fs4` flock-based, acquired in `main.rs` before agent startup |
 | launchd/systemd integration | ✅ | ❌ | |
 | Bonjour/mDNS discovery | ✅ | ❌ | |
 | Tailscale integration | ✅ | ❌ | |

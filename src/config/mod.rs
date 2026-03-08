@@ -259,6 +259,32 @@ impl Config {
         Ok(())
     }
 
+    /// Re-resolve only the LLM config after credential injection.
+    ///
+    /// Called by `AppBuilder::init_secrets()` after injecting API keys into
+    /// the env overlay. Only rebuilds `self.llm` — all other config fields
+    /// are unaffected, preserving values from the initial config load (or
+    /// from `Config::for_testing()` in test mode).
+    pub async fn re_resolve_llm(
+        &mut self,
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<(), ConfigError> {
+        let settings = if let Some(store) = store {
+            let mut s = match store.get_all_settings(user_id).await {
+                Ok(map) => Settings::from_db_map(&map),
+                Err(_) => Settings::default(),
+            };
+            Self::apply_toml_overlay(&mut s, toml_path)?;
+            s
+        } else {
+            Settings::default()
+        };
+        self.llm = LlmConfig::resolve(&settings)?;
+        Ok(())
+    }
+
     /// Build config from settings (shared by from_env and from_db).
     async fn build(settings: &Settings) -> Result<Self, ConfigError> {
         Ok(Self {
