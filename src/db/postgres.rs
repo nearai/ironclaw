@@ -494,6 +494,10 @@ impl RoutineStore for PgBackend {
     ) -> Result<(), DatabaseError> {
         self.store.link_routine_run_to_job(run_id, job_id).await
     }
+
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        self.store.list_dispatched_routine_runs().await
+    }
 }
 
 // ==================== ToolFailureStore ====================

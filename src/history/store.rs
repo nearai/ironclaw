@@ -1295,6 +1295,17 @@ impl Store {
         .await?;
         Ok(())
     }
+
+    pub async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM routine_runs WHERE status = 'running' AND job_id IS NOT NULL",
+                &[],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_run).collect()
+    }
 }
 
 #[cfg(feature = "postgres")]
