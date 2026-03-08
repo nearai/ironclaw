@@ -389,10 +389,7 @@ mod tests {
     ) -> LoadedSkill {
         let mut skill = make_skill(name, keywords, tags, patterns);
         let excl_vec: Vec<String> = exclude_keywords.iter().map(|s| s.to_string()).collect();
-        skill.lowercased_exclude_keywords = excl_vec
-            .iter()
-            .map(|k| k.to_lowercase())
-            .collect();
+        skill.lowercased_exclude_keywords = excl_vec.iter().map(|k| k.to_lowercase()).collect();
         skill.manifest.activation.exclude_keywords = excl_vec;
         skill
     }
@@ -403,7 +400,13 @@ mod tests {
     fn test_exclude_keyword_vetos_match() {
         // Skill matches on "write" but exclude_keywords: ["route"] — message contains "route"
         // so the skill should score 0 and be excluded.
-        let skills = vec![make_skill_with_excludes("writer", &["write"], &["route"], &[], &[])];
+        let skills = vec![make_skill_with_excludes(
+            "writer",
+            &["write"],
+            &["route"],
+            &[],
+            &[],
+        )];
         let result = prefilter_skills(
             "route this write request to another agent",
             &skills,
@@ -419,7 +422,13 @@ mod tests {
     #[test]
     fn test_exclude_keyword_absent_does_not_block() {
         // Same skill, message does NOT contain the exclude keyword — should activate normally.
-        let skills = vec![make_skill_with_excludes("writer", &["write"], &["route"], &[], &[])];
+        let skills = vec![make_skill_with_excludes(
+            "writer",
+            &["write"],
+            &["route"],
+            &[],
+            &[],
+        )];
         let result = prefilter_skills(
             "help me write an email",
             &skills,
@@ -459,7 +468,13 @@ mod tests {
     #[test]
     fn test_exclude_keyword_case_insensitive() {
         // exclude_keywords are pre-lowercased; the veto must fire regardless of case in the message.
-        let skills = vec![make_skill_with_excludes("writer", &["write"], &["Route"], &[], &[])];
+        let skills = vec![make_skill_with_excludes(
+            "writer",
+            &["write"],
+            &["Route"],
+            &[],
+            &[],
+        )];
         let result = prefilter_skills(
             "please ROUTE this write request",
             &skills,
