@@ -7,6 +7,7 @@
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
+mod anthropic_oauth;
 pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
@@ -25,8 +26,9 @@ pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai_chat::{ModelInfo, NearAiChatProvider};
 pub use provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
+    LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, ToolResult,
 };
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
@@ -56,8 +58,10 @@ pub fn create_llm_provider(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let timeout = config.request_timeout_secs;
+
     if config.backend == "nearai" || config.backend == "near_ai" || config.backend == "near" {
-        return create_llm_provider_with_config(&config.nearai, session);
+        return create_llm_provider_with_config(&config.nearai, session, timeout);
     }
 
     let reg_config = config
@@ -77,6 +81,7 @@ pub fn create_llm_provider(
 pub fn create_llm_provider_with_config(
     config: &NearAiConfig,
     session: Arc<SessionManager>,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let auth_mode = if config.api_key.is_some() {
         "API key"
@@ -87,9 +92,14 @@ pub fn create_llm_provider_with_config(
         model = %config.model,
         base_url = %config.base_url,
         auth = auth_mode,
+        timeout_secs = request_timeout_secs,
         "Using NEAR AI (Chat Completions API)"
     );
-    Ok(Arc::new(NearAiChatProvider::new(config.clone(), session)?))
+    Ok(Arc::new(NearAiChatProvider::new_with_timeout(
+        config.clone(),
+        session,
+        request_timeout_secs,
+    )?))
 }
 
 /// Create a provider from a registry-resolved config.
@@ -177,6 +187,24 @@ fn create_openai_compat_from_registry(
 fn create_anthropic_from_registry(
     config: &RegistryProviderConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    // Route to OAuth provider when an OAuth token is present and no real API
+    // key was provided. When both are set, the API key takes priority (standard
+    // x-api-key auth via rig-core).
+    let api_key_is_placeholder = config
+        .api_key
+        .as_ref()
+        .is_some_and(|k| k.expose_secret() == crate::config::llm::OAUTH_PLACEHOLDER);
+    if config.oauth_token.is_some() && (config.api_key.is_none() || api_key_is_placeholder) {
+        tracing::info!(
+            provider = %config.provider_id,
+            model = %config.model,
+            base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
+            "Using Anthropic OAuth API"
+        );
+        let provider = anthropic_oauth::AnthropicOAuthProvider::new(config)?;
+        return Ok(Arc::new(provider));
+    }
+
     use crate::config::CacheRetention;
     use crate::config::helpers::optional_env;
     use rig::providers::anthropic;
@@ -345,7 +373,11 @@ pub fn build_provider_chain(
     let llm: Arc<dyn LlmProvider> = if let Some(ref cheap_model) = config.nearai.cheap_model {
         let mut cheap_config = config.nearai.clone();
         cheap_config.model = cheap_model.clone();
-        let cheap = create_llm_provider_with_config(&cheap_config, session.clone())?;
+        let cheap = create_llm_provider_with_config(
+            &cheap_config,
+            session.clone(),
+            config.request_timeout_secs,
+        )?;
         let cheap: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(cheap, retry_config.clone()))
         } else {
@@ -377,7 +409,11 @@ pub fn build_provider_chain(
         }
         let mut fallback_config = config.nearai.clone();
         fallback_config.model = fallback_model.clone();
-        let fallback = create_llm_provider_with_config(&fallback_config, session.clone())?;
+        let fallback = create_llm_provider_with_config(
+            &fallback_config,
+            session.clone(),
+            config.request_timeout_secs,
+        )?;
         tracing::info!(
             primary = %llm.model_name(),
             fallback = %fallback.model_name(),
@@ -483,6 +519,7 @@ mod tests {
             session: SessionConfig::default(),
             nearai: test_nearai_config(),
             provider: None,
+            request_timeout_secs: 120,
         }
     }
 

@@ -131,10 +131,12 @@ impl CostGuard {
         // Check hourly rate
         if let Some(limit) = self.config.max_actions_per_hour {
             let mut window = self.action_window.lock().await;
-            let cutoff = Instant::now() - std::time::Duration::from_secs(3600);
-            // Drain expired entries
-            while window.front().is_some_and(|t| *t < cutoff) {
-                window.pop_front();
+            // checked_sub avoids panic when system uptime < 1 hour (Windows)
+            if let Some(cutoff) = Instant::now().checked_sub(std::time::Duration::from_secs(3600)) {
+                // Drain expired entries
+                while window.front().is_some_and(|t| *t < cutoff) {
+                    window.pop_front();
+                }
             }
             let count = window.len() as u64;
             if count >= limit {
@@ -260,9 +262,11 @@ impl CostGuard {
     /// Number of actions in the current hourly window.
     pub async fn actions_this_hour(&self) -> u64 {
         let mut window = self.action_window.lock().await;
-        let cutoff = Instant::now() - std::time::Duration::from_secs(3600);
-        while window.front().is_some_and(|t| *t < cutoff) {
-            window.pop_front();
+        // checked_sub avoids panic when system uptime < 1 hour (Windows)
+        if let Some(cutoff) = Instant::now().checked_sub(std::time::Duration::from_secs(3600)) {
+            while window.front().is_some_and(|t| *t < cutoff) {
+                window.pop_front();
+            }
         }
         window.len() as u64
     }
@@ -620,5 +624,36 @@ mod tests {
             actual_surcharge, expected_surcharge,
             "surcharge should be 100% of input cost for 1h cache writes"
         );
+    }
+
+    /// Regression test for #657: Instant::now() - Duration panics on Windows
+    /// when system uptime is less than the subtracted duration.
+    #[tokio::test]
+    async fn test_checked_sub_no_panic_on_fresh_guard() {
+        // A fresh CostGuard with rate limits should not panic even if
+        // checked_sub returns None (simulating short uptime).
+        let guard = CostGuard::new(CostGuardConfig {
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: Some(100),
+        });
+
+        // These must not panic regardless of system uptime
+        assert!(guard.check_allowed().await.is_ok());
+        assert_eq!(guard.actions_this_hour().await, 0);
+
+        // Record some actions and verify again
+        guard
+            .record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, Decimal::ONE, None)
+            .await;
+        assert!(guard.check_allowed().await.is_ok());
+        assert_eq!(guard.actions_this_hour().await, 1);
+    }
+
+    /// Verify that checked_sub itself behaves as expected for the pattern we use.
+    #[test]
+    fn test_instant_checked_sub_returns_none_for_overflow() {
+        // Duration::MAX will always exceed uptime, so checked_sub must return None
+        let result = Instant::now().checked_sub(std::time::Duration::MAX);
+        assert!(result.is_none());
     }
 }

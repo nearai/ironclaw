@@ -16,11 +16,38 @@ pub enum Role {
     Tool,
 }
 
+/// A part of multimodal message content (OpenAI Chat Completions format).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// Text content part.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// Image URL content part (supports data: URLs for inline base64 images).
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// Image URL reference for multimodal content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// URL or data: URI (e.g., "data:image/jpeg;base64,...").
+    pub url: String,
+    /// Detail level hint: "auto", "low", or "high".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// A message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
+    /// Multimodal content parts (images, etc.).
+    /// When non-empty, providers serialize content as an array of parts
+    /// (with `content` included as a text part) instead of a plain string.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_parts: Vec<ContentPart>,
     /// Tool call ID if this is a tool result message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -39,6 +66,7 @@ impl ChatMessage {
         Self {
             role: Role::System,
             content: content.into(),
+            content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -50,6 +78,21 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: content.into(),
+            content_parts: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Create a user message with multimodal content parts (e.g., images).
+    ///
+    /// The text `content` is included as the primary text alongside the parts.
+    pub fn user_with_parts(content: impl Into<String>, parts: Vec<ContentPart>) -> Self {
+        Self {
+            role: Role::User,
+            content: content.into(),
+            content_parts: parts,
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -61,6 +104,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: content.into(),
+            content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
             tool_calls: None,
@@ -75,6 +119,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: content.unwrap_or_default(),
+            content_parts: Vec::new(),
             tool_call_id: None,
             name: None,
             tool_calls: if tool_calls.is_empty() {
@@ -94,6 +139,7 @@ impl ChatMessage {
         Self {
             role: Role::Tool,
             content: content.into(),
+            content_parts: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
@@ -475,5 +521,67 @@ mod tests {
         assert_eq!(messages[2].role, Role::Tool); // call_1 is valid
         assert_eq!(messages[3].role, Role::User); // call_2 orphaned
         assert_eq!(messages[4].role, Role::User); // call_3 orphaned
+    }
+
+    /// Regression: worker's select_tools/execute_plan now emit
+    /// assistant_with_tool_calls before tool_result messages.
+    /// Verify sanitize_tool_messages preserves all tool_results when
+    /// each has a matching assistant tool_call.
+    #[test]
+    fn test_sanitize_preserves_tool_results_with_matching_assistant() {
+        let tc1 = ToolCall {
+            id: "call_sel_1".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"q": "test"}),
+        };
+        let tc2 = ToolCall {
+            id: "call_sel_2".to_string(),
+            name: "http".to_string(),
+            arguments: serde_json::json!({"url": "https://example.com"}),
+        };
+        let mut messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]),
+            ChatMessage::tool_result("call_sel_1", "search", "found 3 results"),
+            ChatMessage::tool_result("call_sel_2", "http", "200 OK"),
+        ];
+        sanitize_tool_messages(&mut messages);
+
+        // All tool_results must keep Role::Tool -- none should be rewritten.
+        assert_eq!(messages[2].role, Role::Tool);
+        assert_eq!(messages[2].tool_call_id, Some("call_sel_1".to_string()));
+        assert_eq!(messages[2].content, "found 3 results");
+
+        assert_eq!(messages[3].role, Role::Tool);
+        assert_eq!(messages[3].tool_call_id, Some("call_sel_2".to_string()));
+        assert_eq!(messages[3].content, "200 OK");
+    }
+
+    /// Regression: the OLD buggy worker code pushed tool_result messages
+    /// without a preceding assistant_with_tool_calls, causing
+    /// sanitize_tool_messages to rewrite them as orphaned user messages.
+    /// This test reproduces that buggy sequence and confirms the rewrite.
+    #[test]
+    fn test_sanitize_rewrites_orphaned_tool_results() {
+        let mut messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            // No assistant_with_tool_calls -- mimics the old bug.
+            ChatMessage::tool_result("call_bug_1", "search", "found 3 results"),
+            ChatMessage::tool_result("call_bug_2", "http", "200 OK"),
+        ];
+        sanitize_tool_messages(&mut messages);
+
+        // Both tool_results must be rewritten to Role::User.
+        assert_eq!(messages[1].role, Role::User);
+        assert!(messages[1].content.contains("[Tool `search` returned:"));
+        assert!(messages[1].content.contains("found 3 results"));
+        assert!(messages[1].tool_call_id.is_none());
+        assert!(messages[1].name.is_none());
+
+        assert_eq!(messages[2].role, Role::User);
+        assert!(messages[2].content.contains("[Tool `http` returned:"));
+        assert!(messages[2].content.contains("200 OK"));
+        assert!(messages[2].tool_call_id.is_none());
+        assert!(messages[2].name.is_none());
     }
 }

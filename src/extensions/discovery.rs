@@ -106,6 +106,7 @@ impl OnlineDiscovery {
                             },
                             fallback_source: None,
                             auth_hint: AuthHint::Dcr,
+                            version: None,
                         })
                     } else {
                         None
@@ -181,6 +182,7 @@ impl OnlineDiscovery {
                     source: ExtensionSource::Discovered { url },
                     fallback_source: None,
                     auth_hint: AuthHint::Dcr,
+                    version: None,
                 })
             })
             .collect()

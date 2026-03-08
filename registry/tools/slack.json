@@ -2,8 +2,8 @@
   "name": "slack-tool",
   "display_name": "Slack Tool",
   "kind": "tool",
-  "version": "0.1.0",
-  "wit_version": "0.2.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Your agent uses Slack to post and read messages in your workspace",
   "keywords": [
     "messaging",
@@ -18,7 +18,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/slack-tool-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "6ed36077b67ac70a041f06f760f93ba79b33269885413c3c3f2c8c87ee60807e"
     }
   },
   "auth_summary": {

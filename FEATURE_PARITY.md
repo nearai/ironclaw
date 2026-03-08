@@ -119,7 +119,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Mention-based activation | ✅ | ✅ | bot_username + respond_to_all_group_messages |
 | Per-group tool policies | ✅ | ❌ | Allow/deny specific tools |
 | Thread isolation | ✅ | ✅ | Separate sessions per thread |
-| Per-channel media limits | ✅ | 🚧 | Caption support for media; no size limits |
+| Per-channel media limits | ✅ | ✅ | Attachment type in WIT; max 10 per msg, 20MB total, MIME allowlist |
 | Typing indicators | ✅ | 🚧 | TUI + Telegram typing/actionable status prompts; richer parity pending |
 | Per-channel ackReaction config | ✅ | ❌ | Customizable acknowledgement reactions |
 | Group session priming | ✅ | ❌ | Member roster injected for context |
@@ -215,9 +215,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | NEAR AI | ✅ | ✅ | - | Primary provider |
 | Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy; Opus 4.5, Sonnet 4, Sonnet 4.6 |
 | OpenAI | ✅ | 🚧 | - | Via NEAR AI proxy |
-| AWS Bedrock | ✅ | ❌ | P3 | |
-| Google Gemini | ✅ | ❌ | P3 | |
-| NVIDIA API | ✅ | ❌ | P3 | New provider |
+| AWS Bedrock | ✅ | ✅ | P3 | Via `openai_compatible` adapter (e.g. LiteLLM) |
+| Google Gemini | ✅ | ✅ | P3 | Via `gemini` adapter |
+| io.net | ✅ | ✅ | P3 | Via `ionet` adapter |
+| Mistral | ✅ | ✅ | P3 | Via `mistral` adapter |
+| Yandex AI Studio | ✅ | ✅ | P3 | Via `yandex` adapter |
+| Cloudflare Workers AI | ✅ | ✅ | P3 | Via `cloudflare` adapter |
+| NVIDIA API | ✅ | ✅ | P3 | Via `nvidia` adapter and `providers.json` |
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
 | OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
@@ -248,19 +252,32 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
+| WIT inbound-attachment type | N/A | ✅ | P1 | `inbound-attachment` record in channel-host (id, mime_type, filename, size_bytes, source_url, storage_key, extracted_text) |
+| WIT outbound attachment type | N/A | ✅ | P1 | `attachment` record in channel (filename, mime_type, data) on `agent-response` |
+| WIT on-broadcast export | N/A | ✅ | P1 | Proactive message sending without prior incoming message |
+| IncomingMessage attachments | N/A | ✅ | P1 | `IncomingAttachment` struct on `IncomingMessage`, populated from WASM channels |
+| OutgoingResponse attachments | N/A | ✅ | P1 | File paths on `OutgoingResponse`, read from disk and sent as WIT attachments |
+| Attachment security (size/MIME) | N/A | ✅ | P1 | Inbound: max 10, 20MB total, MIME allowlist. Outbound: 50MB total |
+| Telegram media parsing | ✅ | ✅ | P1 | Photo, document, audio, video, voice, sticker parsed and emitted as attachments |
+| Telegram media sending | ✅ | ✅ | P1 | sendPhoto/sendDocument multipart upload, auto photo→document fallback >10MB |
+| Slack file parsing | ✅ | ✅ | P1 | `files` array from Events API parsed into attachments |
+| WhatsApp media parsing | ✅ | ✅ | P1 | Image, audio, video, document parsed with caption as extracted_text |
+| Discord attachment parsing | ✅ | ❌ | P2 | Discord interaction payloads don't include file attachments (needs message events) |
+| HTTP tool save_to | N/A | ✅ | P1 | Download binary files to /tmp/ for attachment sending (50MB limit, path traversal protection) |
+| Credential env var fallback | N/A | ✅ | P2 | Channels can use env vars (e.g., TELEGRAM_BOT_TOKEN) when secrets store not configured |
 | Image processing (Sharp) | ✅ | ❌ | P2 | Resize, format convert |
 | Configurable image resize dims | ✅ | ❌ | P2 | Per-agent dimension config |
 | Multiple images per tool call | ✅ | ❌ | P2 | Single tool invocation, multiple images |
 | Audio transcription | ✅ | ❌ | P2 | |
 | Video support | ✅ | ❌ | P3 | |
 | PDF parsing | ✅ | ❌ | P2 | pdfjs-dist |
-| MIME detection | ✅ | ❌ | P2 | |
+| MIME detection | ✅ | ✅ | P2 | MIME allowlist in host validates attachment types |
 | Media caching | ✅ | ❌ | P3 | |
 | Vision model integration | ✅ | ❌ | P2 | Image understanding |
 | TTS (Edge TTS) | ✅ | ❌ | P3 | Text-to-speech |
 | TTS (OpenAI) | ✅ | ❌ | P3 | |
 | Incremental TTS playback | ✅ | ❌ | P3 | iOS progressive playback |
-| Sticker-to-image | ✅ | ❌ | P3 | Telegram stickers |
+| Sticker-to-image | ✅ | ✅ | P3 | Telegram stickers emitted as image/webp attachments |
 
 ### Owner: _Unassigned_
 

@@ -426,7 +426,7 @@ pub async fn chat_threads_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-            .list_conversations_with_preview(&state.user_id, "gateway", 50)
+            .list_conversations_all_channels(&state.user_id, 50)
             .await
         {
             let mut assistant_thread = None;
@@ -441,6 +441,7 @@ pub async fn chat_threads_handler(
                     updated_at: s.last_activity.to_rfc3339(),
                     title: s.title.clone(),
                     thread_type: s.thread_type.clone(),
+                    channel: Some(s.channel.clone()),
                 };
 
                 if s.id == assistant_id {
@@ -460,6 +461,7 @@ pub async fn chat_threads_handler(
                     updated_at: chrono::Utc::now().to_rfc3339(),
                     title: None,
                     thread_type: Some("assistant".to_string()),
+                    channel: Some("gateway".to_string()),
                 });
             }
 
@@ -472,9 +474,10 @@ pub async fn chat_threads_handler(
     }
 
     // Fallback: in-memory only (no assistant thread without DB)
-    let threads: Vec<ThreadInfo> = sess
-        .threads
-        .values()
+    let mut sorted_threads: Vec<_> = sess.threads.values().collect();
+    sorted_threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let threads: Vec<ThreadInfo> = sorted_threads
+        .into_iter()
         .map(|t| ThreadInfo {
             id: t.id,
             state: format!("{:?}", t.state),
@@ -483,6 +486,7 @@ pub async fn chat_threads_handler(
             updated_at: t.updated_at.to_rfc3339(),
             title: None,
             thread_type: None,
+            channel: Some("gateway".to_string()),
         })
         .collect();
 
@@ -502,38 +506,39 @@ pub async fn chat_new_thread_handler(
     ))?;
 
     let session = session_manager.get_or_create_session(&state.user_id).await;
-    let mut sess = session.lock().await;
-    let thread = sess.create_thread();
-    let thread_id = thread.id;
-    let info = ThreadInfo {
-        id: thread.id,
-        state: format!("{:?}", thread.state),
-        turn_count: thread.turns.len(),
-        created_at: thread.created_at.to_rfc3339(),
-        updated_at: thread.updated_at.to_rfc3339(),
-        title: None,
-        thread_type: Some("thread".to_string()),
+    let (thread_id, info) = {
+        let mut sess = session.lock().await;
+        let thread = sess.create_thread();
+        let id = thread.id;
+        let info = ThreadInfo {
+            id: thread.id,
+            state: format!("{:?}", thread.state),
+            turn_count: thread.turns.len(),
+            created_at: thread.created_at.to_rfc3339(),
+            updated_at: thread.updated_at.to_rfc3339(),
+            title: None,
+            thread_type: Some("thread".to_string()),
+            channel: Some("gateway".to_string()),
+        };
+        (id, info)
     };
 
-    // Persist the empty conversation row with thread_type metadata
+    // Persist the empty conversation row with thread_type metadata synchronously
+    // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
-        let store = Arc::clone(store);
-        let user_id = state.user_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store
-                .ensure_conversation(thread_id, "gateway", &user_id, None)
-                .await
-            {
-                tracing::warn!("Failed to persist new thread: {}", e);
-            }
-            let metadata_val = serde_json::json!("thread");
-            if let Err(e) = store
-                .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
-                .await
-            {
-                tracing::warn!("Failed to set thread_type metadata: {}", e);
-            }
-        });
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", &state.user_id, None)
+            .await
+        {
+            tracing::warn!("Failed to persist new thread: {}", e);
+        }
+        let metadata_val = serde_json::json!("thread");
+        if let Err(e) = store
+            .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
+            .await
+        {
+            tracing::warn!("Failed to set thread_type metadata: {}", e);
+        }
     }
 
     Ok(Json(info))

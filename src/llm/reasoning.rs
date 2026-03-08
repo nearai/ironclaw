@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::LlmError;
 
 use crate::llm::{
-    ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
+    ChatMessage, CompletionRequest, LlmProvider, Role, ToolCall, ToolCompletionRequest,
+    ToolDefinition,
 };
-use crate::safety::SafetyLayer;
 
 /// Token the agent returns when it has nothing to say (e.g. in group chats).
 /// The dispatcher should check for this and suppress the message.
@@ -342,8 +342,6 @@ pub struct RespondOutput {
 /// Reasoning engine for the agent.
 pub struct Reasoning {
     llm: Arc<dyn LlmProvider>,
-    #[allow(dead_code)] // Will be used for sanitizing tool outputs
-    safety: Arc<SafetyLayer>,
     /// Optional workspace for loading identity/system prompts.
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
@@ -361,10 +359,9 @@ pub struct Reasoning {
 
 impl Reasoning {
     /// Create a new reasoning engine.
-    pub fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
+    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
         Self {
             llm,
-            safety,
             workspace_system_prompt: None,
             skill_context: None,
             channel: None,
@@ -460,8 +457,15 @@ impl Reasoning {
     pub async fn plan(&self, context: &ReasoningContext) -> Result<ActionPlan, LlmError> {
         let system_prompt = self.build_planning_prompt(context);
 
+        let system_prompt = merge_system_messages(system_prompt, &context.messages);
         let mut messages = vec![ChatMessage::system(system_prompt)];
-        messages.extend(context.messages.clone());
+        messages.extend(
+            context
+                .messages
+                .iter()
+                .filter(|m| m.role != Role::System)
+                .cloned(),
+        );
 
         if let Some(ref job) = context.job_description {
             messages.push(ChatMessage::user(format!(
@@ -612,8 +616,15 @@ Respond in JSON format:
             None => self.build_system_prompt_with_tools(&context.available_tools),
         };
 
+        let system_prompt = merge_system_messages(system_prompt, &context.messages);
         let mut messages = vec![ChatMessage::system(system_prompt)];
-        messages.extend(context.messages.clone());
+        messages.extend(
+            context
+                .messages
+                .iter()
+                .filter(|m| m.role != Role::System)
+                .cloned(),
+        );
 
         let effective_tools = if context.force_text {
             Vec::new()
@@ -1024,6 +1035,22 @@ pub struct SuccessEvaluation {
     pub issues: Vec<String>,
     #[serde(default)]
     pub suggestions: Vec<String>,
+}
+
+/// Merge the reasoning method's system prompt with any system messages already
+/// present in the conversation context.  Strict LLM providers (e.g. Qwen)
+/// reject conversations with system messages that are not at the very
+/// beginning, so we concatenate all system content into a single prompt.
+fn merge_system_messages(primary: String, context_messages: &[ChatMessage]) -> String {
+    let extra: Vec<&str> = context_messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .map(|m| m.content.as_str())
+        .collect();
+    if extra.is_empty() {
+        return primary;
+    }
+    format!("{}\n\n---\n\n{}", primary, extra.join("\n\n"))
 }
 
 /// Extract JSON from text that might contain other content.
@@ -2086,15 +2113,9 @@ That's my plan."#;
     // ---- System prompt building tests (issue #565) ----
 
     fn make_test_reasoning() -> Reasoning {
-        use crate::config::SafetyConfig;
-        use crate::safety::SafetyLayer;
         use crate::testing::StubLlm;
         let llm = Arc::new(StubLlm::new("test"));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
-        Reasoning::new(llm, safety)
+        Reasoning::new(llm)
     }
 
     #[test]
@@ -2196,6 +2217,58 @@ That's my plan."#;
         assert!(!cleaned.contains("[Called tool"));
         assert!(cleaned.contains("Let me fetch that."));
         assert!(cleaned.contains("Here are the results."));
+    }
+
+    // ---- merge_system_messages: duplicate system message regression (Bug #597) ----
+
+    #[test]
+    fn test_merge_system_messages_no_system_in_context() {
+        let messages = vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant("Hi there"),
+        ];
+        let result = merge_system_messages("primary prompt".into(), &messages);
+        assert_eq!(result, "primary prompt");
+    }
+
+    #[test]
+    fn test_merge_system_messages_merges_worker_system() {
+        let messages = vec![
+            ChatMessage::system("You are an autonomous agent working on a job.\n\nJob: Test Job"),
+            ChatMessage::user("Do the thing"),
+        ];
+        let result = merge_system_messages("planning prompt".into(), &messages);
+        assert!(
+            result.contains("planning prompt"),
+            "must contain the primary prompt"
+        );
+        assert!(
+            result.contains("autonomous agent"),
+            "must contain worker system text"
+        );
+        assert!(
+            result.contains("Test Job"),
+            "must contain job description from worker system message"
+        );
+    }
+
+    #[test]
+    fn test_merge_system_messages_multiple_system() {
+        let messages = vec![
+            ChatMessage::system("First system instruction"),
+            ChatMessage::system("Second system instruction"),
+            ChatMessage::user("Hello"),
+        ];
+        let result = merge_system_messages("primary".into(), &messages);
+        assert!(result.contains("primary"), "must contain primary prompt");
+        assert!(
+            result.contains("First system instruction"),
+            "must contain first system message"
+        );
+        assert!(
+            result.contains("Second system instruction"),
+            "must contain second system message"
+        );
     }
 
     #[test]

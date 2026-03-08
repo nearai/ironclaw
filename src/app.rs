@@ -244,11 +244,28 @@ impl AppBuilder {
         let master_key = match self.config.secrets.master_key() {
             Some(k) => k,
             None => {
+                // No secrets DB available, but we can still load tokens from
+                // OS credential stores (e.g., Anthropic OAuth via Claude Code's
+                // macOS Keychain / Linux ~/.claude/.credentials.json).
+                crate::config::inject_os_credentials();
+
                 // Consume unused handles
                 #[cfg(feature = "libsql")]
                 {
                     self.libsql_db.take();
                 }
+
+                // Re-resolve config with OS credentials
+                if let Some(ref db) = self.db {
+                    let toml_path = self.toml_path.as_deref();
+                    if let Ok(refreshed) =
+                        Config::from_db_with_toml(db.as_ref(), "default", toml_path).await
+                    {
+                        self.config = refreshed;
+                        tracing::debug!("LlmConfig re-resolved after OS credential injection");
+                    }
+                }
+
                 return Ok(());
             }
         };
@@ -386,11 +403,7 @@ impl AppBuilder {
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
             tools
-                .register_builder_tool(
-                    llm.clone(),
-                    safety.clone(),
-                    Some(self.config.builder.to_builder_config()),
-                )
+                .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
             tracing::info!("Builder mode enabled");
         }
@@ -664,6 +677,17 @@ impl AppBuilder {
     pub async fn build_all(mut self) -> Result<AppComponents, anyhow::Error> {
         self.init_database().await?;
         self.init_secrets().await?;
+
+        // Post-init validation: if a non-nearai backend was selected but
+        // credentials were never resolved (deferred resolution found no keys),
+        // fail early with a clear error instead of a confusing runtime failure.
+        if self.config.llm.backend != "nearai" && self.config.llm.provider.is_none() {
+            let backend = &self.config.llm.backend;
+            anyhow::bail!(
+                "LLM_BACKEND={backend} is configured but no credentials were found. \
+                 Set the appropriate API key environment variable or run the setup wizard."
+            );
+        }
 
         let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
             (llm, None, None)

@@ -83,6 +83,19 @@ pub fn build_turns_from_db_messages(
 
             turns.push(turn);
             turn_number += 1;
+        } else if msg.role == "assistant" {
+            // Standalone assistant message (e.g. routine output, heartbeat)
+            // with no preceding user message — render as a turn with empty input.
+            turns.push(TurnInfo {
+                turn_number,
+                user_input: String::new(),
+                response: Some(msg.content.clone()),
+                state: "Completed".to_string(),
+                started_at: msg.created_at.to_rfc3339(),
+                completed_at: Some(msg.created_at.to_rfc3339()),
+                tool_calls: Vec::new(),
+            });
+            turn_number += 1;
         }
     }
 
@@ -218,6 +231,29 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].tool_calls.is_empty());
         assert_eq!(turns[0].response.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn test_build_turns_standalone_assistant_messages() {
+        // Routine conversations only have assistant messages (no user messages).
+        let messages = vec![
+            make_msg("assistant", "Routine executed: all checks passed", 0),
+            make_msg("assistant", "Routine executed: found 2 issues", 5000),
+        ];
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 2);
+        // Standalone assistant messages should have empty user_input
+        assert_eq!(turns[0].user_input, "");
+        assert_eq!(
+            turns[0].response.as_deref(),
+            Some("Routine executed: all checks passed")
+        );
+        assert_eq!(turns[0].state, "Completed");
+        assert_eq!(turns[1].user_input, "");
+        assert_eq!(
+            turns[1].response.as_deref(),
+            Some("Routine executed: found 2 issues")
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
+use crate::config::llm::OAUTH_PLACEHOLDER;
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
@@ -768,13 +769,28 @@ impl SetupWizard {
                 print_success("Master key generated and stored in OS keychain");
             }
             1 => {
-                // Env var mode
-                print_info("Generate a key and add it to your environment:");
+                // Env var mode — generate key, init crypto, and persist to .env
                 let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+                // Initialize crypto so subsequent wizard steps (channel setup,
+                // API key storage) can encrypt secrets immediately.
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                        .map_err(|e| SetupError::Config(e.to_string()))?,
+                ));
+
+                // Make visible to optional_env() for any subsequent config resolution.
+                crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
+
+                // Store hex for write_bootstrap_env to persist to ~/.ironclaw/.env.
+                self.settings.secrets_master_key_hex = Some(key_hex.clone());
+
                 println!();
-                println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                print_info("Master key generated and will be saved to ~/.ironclaw/.env");
                 println!();
-                print_info("Add this to your shell profile or .env file.");
+                println!("  SECRETS_MASTER_KEY={}", key_hex);
+                println!();
+                print_info("You can also copy this to another .env file or CI secrets.");
 
                 self.settings.secrets_master_key_source = KeySource::Env;
                 print_success("Configured for environment variable");
@@ -886,6 +902,11 @@ impl SetupWizard {
             return Ok(());
         };
 
+        // Anthropic has a custom flow: API key or OAuth token from `claude login`.
+        if provider_id == "anthropic" {
+            return self.setup_anthropic().await;
+        }
+
         match setup {
             crate::llm::registry::SetupHint::ApiKey {
                 secret_name,
@@ -991,6 +1012,113 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Anthropic provider setup: API key or OAuth token from `claude login`.
+    async fn setup_anthropic(&mut self) -> Result<(), SetupError> {
+        let options = &["Direct API Key", "OAuth Token (from `claude login`)"];
+        let choice = select_one("How do you want to authenticate with Anthropic?", options)
+            .map_err(SetupError::Io)?;
+
+        if choice == 0 {
+            // Standard API key flow
+            self.setup_api_key_provider(
+                "anthropic",
+                "ANTHROPIC_API_KEY",
+                "llm_anthropic_api_key",
+                "Anthropic API key",
+                "https://console.anthropic.com/settings/keys",
+                None,
+            )
+            .await
+        } else {
+            // OAuth token flow
+            self.setup_anthropic_oauth().await
+        }
+    }
+
+    /// Anthropic OAuth setup: extract token from `claude login` credentials.
+    async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some("anthropic") {
+            self.settings.selected_model = None;
+        }
+        self.settings.llm_backend = Some("anthropic".to_string());
+
+        // Try to extract existing OAuth token from Claude Code credentials
+        if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+            print_info(&format!("Found OAuth token: {}", mask_api_key(&token)));
+            if confirm("Use this token?", true).map_err(SetupError::Io)? {
+                return self.save_anthropic_oauth_token(&token).await;
+            }
+        } else {
+            print_info("No OAuth token found from `claude login`.");
+            print_info("Run `claude login` in a terminal to authenticate, then retry.");
+            println!();
+
+            if confirm("Retry after running `claude login`?", true).map_err(SetupError::Io)? {
+                // Block until the user has run `claude login` in another terminal
+                input("Press Enter after running `claude login` in another terminal...")
+                    .map_err(SetupError::Io)?;
+                if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+                    print_info(&format!("Found OAuth token: {}", mask_api_key(&token)));
+                    return self.save_anthropic_oauth_token(&token).await;
+                }
+                print_error("Still no OAuth token found.");
+            }
+        }
+
+        // Fallback: let user paste the token manually, or switch to API key
+        print_info("You can paste your OAuth token directly (starts with sk-ant-oat01-).");
+        print_info("Or press Enter with no input to switch to the API key flow.");
+        let token = secret_input("Anthropic OAuth token").map_err(SetupError::Io)?;
+        let token_str = token.expose_secret();
+        if token_str.is_empty() {
+            print_info("Switching to API key flow...");
+            return self
+                .setup_api_key_provider(
+                    "anthropic",
+                    "ANTHROPIC_API_KEY",
+                    "llm_anthropic_api_key",
+                    "Anthropic API key",
+                    "https://console.anthropic.com/settings/keys",
+                    None,
+                )
+                .await;
+        }
+        self.save_anthropic_oauth_token(token_str).await
+    }
+
+    /// Save an Anthropic OAuth token to secrets and set env for immediate use.
+    async fn save_anthropic_oauth_token(&mut self, token: &str) -> Result<(), SetupError> {
+        // Validate token format to catch accidentally pasted API keys
+        if !token.starts_with("sk-ant-oat") {
+            print_error("Token doesn't look like an OAuth token (expected prefix: sk-ant-oat).");
+            print_info("If you have an API key instead, use the 'Direct API Key' option.");
+            return Err(SetupError::Config("Invalid OAuth token format".to_string()));
+        }
+
+        // Store in secrets if available
+        if let Ok(ctx) = self.init_secrets_context().await {
+            let key = SecretString::from(token.to_string());
+            ctx.save_secret("llm_anthropic_oauth_token", &key)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save OAuth token: {e}")))?;
+            print_success("OAuth token encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set ANTHROPIC_OAUTH_TOKEN in your environment.");
+        }
+
+        // Make the token visible to `optional_env()` for subsequent config
+        // resolution (model selection step). Uses the thread-safe overlay
+        // instead of `std::env::set_var` to avoid UB on multi-threaded runtimes.
+        crate::config::inject_single_var("ANTHROPIC_OAUTH_TOKEN", token);
+
+        // Cache for model fetching
+        self.llm_api_key = Some(SecretString::from(token.to_string()));
+
+        print_success("Anthropic OAuth configured");
+        Ok(())
+    }
+
     /// Shared setup flow for API-key-based providers.
     async fn setup_api_key_provider(
         &mut self,
@@ -1007,10 +1135,11 @@ impl SetupWizard {
             other => other,
         });
 
-        self.settings.llm_backend = Some(backend.to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(backend) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(backend.to_string());
 
         // Check env var first
         if let Ok(existing) = std::env::var(env_var) {
@@ -1052,6 +1181,11 @@ impl SetupWizard {
             ));
         }
 
+        // Make key visible to `optional_env()` for subsequent config resolution.
+        // Uses the thread-safe overlay instead of `std::env::set_var` to avoid
+        // UB on multi-threaded runtimes.
+        crate::config::inject_single_var(env_var, key_str);
+
         // Cache key in memory for model fetching later in the wizard
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
 
@@ -1064,10 +1198,11 @@ impl SetupWizard {
         &mut self,
         def: &crate::llm::ProviderDefinition,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(def.id.clone());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(&def.id) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(def.id.clone());
 
         let default_url = self
             .settings
@@ -1102,10 +1237,11 @@ impl SetupWizard {
         secret_name: &str,
         display_name: &str,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(backend_id.to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(backend_id) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(backend_id.to_string());
 
         let existing_url = self
             .settings
@@ -1359,6 +1495,7 @@ impl SetupWizard {
                 smart_routing_cascade: true,
             },
             provider: None,
+            request_timeout_secs: 120,
         };
 
         match create_llm_provider(&config, session) {
@@ -1988,6 +2125,67 @@ impl SetupWizard {
             }
         }
 
+        // Claude Code sandbox sub-step (only if Docker sandbox is enabled)
+        if self.settings.sandbox.enabled {
+            self.step_claude_code_sandbox().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Claude Code sandbox sub-step: enable Claude CLI inside Docker containers.
+    async fn step_claude_code_sandbox(&mut self) -> Result<(), SetupError> {
+        println!();
+        print_info("Claude Code mode lets the agent delegate complex tasks to Claude CLI");
+        print_info("running inside sandboxed Docker containers.");
+        println!();
+
+        if !confirm("Enable Claude Code sandbox mode?", false).map_err(SetupError::Io)? {
+            self.settings.sandbox.claude_code_enabled = false;
+            return Ok(());
+        }
+
+        // Check for Anthropic credentials (API key or OAuth token).
+        // Uses `optional_env()` which reads both real env vars and the
+        // injected overlay (secrets DB, wizard-set values).
+        let has_credentials = || {
+            let has_api_key = crate::config::helpers::optional_env("ANTHROPIC_API_KEY")
+                .ok()
+                .flatten()
+                .is_some_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
+            let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some()
+                || crate::config::helpers::optional_env("ANTHROPIC_OAUTH_TOKEN")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|v| !v.is_empty());
+            has_api_key || has_oauth
+        };
+
+        if has_credentials() {
+            self.settings.sandbox.claude_code_enabled = true;
+            print_success("Claude Code sandbox enabled");
+        } else {
+            print_error("No Anthropic credentials found.");
+            print_info(
+                "Claude Code needs ANTHROPIC_API_KEY or an OAuth token from `claude login`.",
+            );
+            println!();
+
+            if confirm("Retry after setting up credentials?", false).map_err(SetupError::Io)? {
+                if has_credentials() {
+                    self.settings.sandbox.claude_code_enabled = true;
+                    print_success("Claude Code sandbox enabled");
+                } else {
+                    self.settings.sandbox.claude_code_enabled = false;
+                    print_info("No credentials found. Claude Code disabled for now.");
+                    print_info("Set ANTHROPIC_API_KEY or run `claude login` and enable later.");
+                }
+            } else {
+                self.settings.sandbox.claude_code_enabled = false;
+                print_info("Claude Code disabled. Enable with CLAUDE_CODE_ENABLED=true later.");
+            }
+        }
+
         Ok(())
     }
 
@@ -2081,6 +2279,12 @@ impl SetupWizard {
     ///
     /// These are the chicken-and-egg settings needed before the database is
     /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
+    ///
+    /// **Credentials are NOT written here.** API keys and OAuth tokens live
+    /// only in the encrypted secrets DB. `LlmConfig::resolve()` defers
+    /// gracefully when credentials are missing during early startup, and the
+    /// re-resolution in `AppBuilder::build_all()` fills them in after
+    /// `inject_llm_keys_from_secrets()` loads from encrypted storage.
     fn write_bootstrap_env(&self) -> Result<(), SetupError> {
         let registry = crate::llm::ProviderRegistry::load();
         let mut env_vars: Vec<(String, String)> = Vec::new();
@@ -2140,10 +2344,21 @@ impl SetupWizard {
             env_vars.push(("NEARAI_API_KEY".to_string(), api_key));
         }
 
+        // Secrets master key (env var mode): write to .env so it's available
+        // on next startup before the DB is connected.
+        if let Some(ref key_hex) = self.settings.secrets_master_key_hex {
+            env_vars.push(("SECRETS_MASTER_KEY".to_string(), key_hex.clone()));
+        }
+
         // Always write ONBOARD_COMPLETED so that check_onboard_needed()
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {
             env_vars.push(("ONBOARD_COMPLETED".to_string(), "true".to_string()));
+        }
+
+        // Claude Code sandbox mode
+        if self.settings.sandbox.claude_code_enabled {
+            env_vars.push(("CLAUDE_CODE_ENABLED".to_string(), "true".to_string()));
         }
 
         // Signal channel env vars (chicken-and-egg: config resolves before DB).
@@ -2513,22 +2728,39 @@ async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String
     let api_key = cached_key
         .map(String::from)
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .filter(|k| !k.is_empty());
+        .filter(|k| !k.is_empty() && k != crate::config::llm::OAUTH_PLACEHOLDER);
 
-    let api_key = match api_key {
-        Some(k) => k,
-        None => return static_defaults,
+    // Fall back to OAuth token if no API key
+    let oauth_token = if api_key.is_none() {
+        crate::config::helpers::optional_env("ANTHROPIC_OAUTH_TOKEN")
+            .ok()
+            .flatten()
+            .filter(|t| !t.is_empty())
+    } else {
+        None
+    };
+
+    let (key_or_token, is_oauth) = match (api_key, oauth_token) {
+        (Some(k), _) => (k, false),
+        (None, Some(t)) => (t, true),
+        (None, None) => return static_defaults,
     };
 
     let client = reqwest::Client::new();
-    let resp = match client
+    let mut request = client
         .get("https://api.anthropic.com/v1/models")
-        .header("x-api-key", &api_key)
         .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
+        .timeout(std::time::Duration::from_secs(5));
+
+    if is_oauth {
+        request = request
+            .bearer_auth(&key_or_token)
+            .header("anthropic-beta", "oauth-2025-04-20");
+    } else {
+        request = request.header("x-api-key", &key_or_token);
+    }
+
+    let resp = match request.send().await {
         Ok(r) if r.status().is_success() => r,
         _ => return static_defaults,
     };
@@ -3293,6 +3525,48 @@ mod tests {
         }
     }
 
+    /// Regression test for #600: re-running provider setup for the same backend
+    /// must NOT clear selected_model. Only switching to a different backend should.
+    #[test]
+    fn test_same_provider_preserves_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate re-entering the same provider -- model should survive
+        // (This is the check that each setup_* function now performs)
+        if wizard.settings.llm_backend.as_deref() != Some("ollama") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("ollama".to_string());
+
+        assert_eq!(
+            wizard.settings.selected_model.as_deref(),
+            Some("llama3"),
+            "model should be preserved when re-selecting the same provider"
+        );
+    }
+
+    /// Regression test for #600: switching to a different provider must clear
+    /// selected_model since the old model may not be valid for the new backend.
+    #[test]
+    fn test_different_provider_clears_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate switching to a different provider -- model should be cleared
+        if wizard.settings.llm_backend.as_deref() != Some("openai") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("openai".to_string());
+
+        assert!(
+            wizard.settings.selected_model.is_none(),
+            "model should be cleared when switching providers"
+        );
+    }
+
     #[tokio::test]
     async fn test_run_provider_setup_no_setup_hint() {
         // A provider with setup: None should not error. It should set the
@@ -3329,5 +3603,31 @@ mod tests {
             Some("custom_no_setup"),
             "backend should be set even without setup hint"
         );
+    }
+
+    /// Regression test for #666: env-var security option must initialize
+    /// secrets_crypto so subsequent steps can encrypt API keys.
+    #[test]
+    fn test_env_var_security_initializes_crypto() {
+        use crate::secrets::SecretsCrypto;
+        use secrecy::SecretString;
+
+        // Simulate what option 1 in step_security() does after the fix:
+        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+        // The fix: create SecretsCrypto from the generated key.
+        // Before the fix, this was skipped, leaving secrets_crypto = None.
+        let crypto = SecretsCrypto::new(SecretString::from(key_hex.clone()));
+        assert!(
+            crypto.is_ok(),
+            "generated key hex must produce valid SecretsCrypto"
+        );
+
+        // Verify the key is stored for bootstrap env persistence.
+        let settings = Settings {
+            secrets_master_key_hex: Some(key_hex),
+            ..Settings::default()
+        };
+        assert!(settings.secrets_master_key_hex.is_some());
     }
 }

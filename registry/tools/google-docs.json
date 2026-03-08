@@ -2,8 +2,8 @@
   "name": "google-docs",
   "display_name": "Google Docs",
   "kind": "tool",
-  "version": "0.1.0",
-  "wit_version": "0.2.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Create and edit Google Docs documents",
   "keywords": [
     "documents",
@@ -19,7 +19,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/google-docs-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "385c04abd1e6b8011ccc330e1f4bd7ce58577e488959b51594aa04eb26cbe7cc"
     }
   },
   "auth_summary": {

@@ -42,6 +42,10 @@ pub struct Settings {
     #[serde(default)]
     pub secrets_master_key_source: KeySource,
 
+    /// Generated master key hex (env var mode only, written to .env by wizard).
+    #[serde(default, skip_serializing)]
+    pub secrets_master_key_hex: Option<String>,
+
     // === Step 3: Inference Provider ===
     /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible".
     #[serde(default)]
@@ -99,6 +103,10 @@ pub struct Settings {
     /// Builder configuration.
     #[serde(default)]
     pub builder: BuilderSettings,
+
+    /// Transcription configuration.
+    #[serde(default)]
+    pub transcription: Option<TranscriptionSettings>,
 }
 
 /// Source for the secrets master key.
@@ -287,6 +295,18 @@ pub struct HeartbeatSettings {
     /// User ID to notify on heartbeat findings.
     #[serde(default)]
     pub notify_user: Option<String>,
+
+    /// Hour (0-23) when quiet hours start (heartbeat skipped).
+    #[serde(default)]
+    pub quiet_hours_start: Option<u32>,
+
+    /// Hour (0-23) when quiet hours end (heartbeat resumes).
+    #[serde(default)]
+    pub quiet_hours_end: Option<u32>,
+
+    /// Timezone for quiet hours evaluation (IANA name, e.g. "America/New_York").
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -300,6 +320,9 @@ impl Default for HeartbeatSettings {
             interval_secs: default_heartbeat_interval(),
             notify_channel: None,
             notify_user: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            timezone: None,
         }
     }
 }
@@ -347,6 +370,10 @@ pub struct AgentSettings {
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     #[serde(default)]
     pub auto_approve_tools: bool,
+
+    /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
+    #[serde(default = "default_timezone")]
+    pub default_timezone: String,
 }
 
 fn default_agent_name() -> String {
@@ -381,6 +408,10 @@ fn default_max_tool_iterations() -> usize {
     50
 }
 
+fn default_timezone() -> String {
+    "UTC".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -398,6 +429,7 @@ impl Default for AgentSettings {
             session_idle_timeout_secs: default_session_idle_timeout(),
             max_tool_iterations: default_max_tool_iterations(),
             auto_approve_tools: false,
+            default_timezone: default_timezone(),
         }
     }
 }
@@ -494,6 +526,10 @@ pub struct SandboxSettings {
     /// Additional domains to allow through the network proxy.
     #[serde(default)]
     pub extra_allowed_domains: Vec<String>,
+
+    /// Whether Claude Code sandbox mode is enabled.
+    #[serde(default)]
+    pub claude_code_enabled: bool,
 }
 
 fn default_sandbox_policy() -> String {
@@ -527,6 +563,7 @@ impl Default for SandboxSettings {
             image: default_sandbox_image(),
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
+            claude_code_enabled: false,
         }
     }
 }
@@ -598,6 +635,14 @@ impl Default for BuilderSettings {
             auto_register: true,
         }
     }
+}
+
+/// Transcription pipeline settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionSettings {
+    /// Whether audio transcription is enabled.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Settings {
@@ -1155,6 +1200,31 @@ mod tests {
         assert_eq!(loaded.agent.name, "toml-bot");
         assert!(loaded.heartbeat.enabled);
         assert_eq!(loaded.heartbeat.interval_secs, 900);
+    }
+
+    /// Regression test: /model command must persist selected_model to TOML config.
+    /// Prior to the fix, `set_model()` only changed the in-memory provider and the
+    /// choice was lost on restart.
+    #[test]
+    fn toml_selected_model_update_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Start with a config that has a different model.
+        let settings = Settings {
+            selected_model: Some("old-model".to_string()),
+            ..Default::default()
+        };
+        settings.save_toml(&path).unwrap();
+
+        // Simulate what persist_selected_model does: load, update, save.
+        let mut loaded = Settings::load_toml(&path).unwrap().unwrap();
+        loaded.selected_model = Some("new-model".to_string());
+        loaded.save_toml(&path).unwrap();
+
+        // Verify the change survived a reload.
+        let reloaded = Settings::load_toml(&path).unwrap().unwrap();
+        assert_eq!(reloaded.selected_model, Some("new-model".to_string()));
     }
 
     #[test]

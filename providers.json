@@ -1,7 +1,9 @@
 [
   {
     "id": "openai",
-    "aliases": ["open_ai"],
+    "aliases": [
+      "open_ai"
+    ],
     "protocol": "open_ai_completions",
     "api_key_env": "OPENAI_API_KEY",
     "api_key_required": true,
@@ -19,7 +21,9 @@
   },
   {
     "id": "anthropic",
-    "aliases": ["claude"],
+    "aliases": [
+      "claude"
+    ],
     "protocol": "anthropic",
     "api_key_env": "ANTHROPIC_API_KEY",
     "api_key_required": true,
@@ -52,7 +56,10 @@
   },
   {
     "id": "openai_compatible",
-    "aliases": ["openai-compatible", "compatible"],
+    "aliases": [
+      "openai-compatible",
+      "compatible"
+    ],
     "protocol": "open_ai_completions",
     "base_url_env": "LLM_BASE_URL",
     "base_url_required": true,
@@ -89,7 +96,9 @@
   },
   {
     "id": "openrouter",
-    "aliases": ["open_router"],
+    "aliases": [
+      "open_router"
+    ],
     "protocol": "open_ai_completions",
     "default_base_url": "https://openrouter.ai/api/v1",
     "api_key_env": "OPENROUTER_API_KEY",
@@ -126,7 +135,10 @@
   },
   {
     "id": "nvidia",
-    "aliases": ["nvidia_nim", "nim"],
+    "aliases": [
+      "nvidia_nim",
+      "nim"
+    ],
     "protocol": "open_ai_completions",
     "default_base_url": "https://integrate.api.nvidia.com/v1",
     "api_key_env": "NVIDIA_API_KEY",
@@ -144,7 +156,10 @@
   },
   {
     "id": "venice",
-    "aliases": ["venice_ai", "veniceai"],
+    "aliases": [
+      "venice_ai",
+      "veniceai"
+    ],
     "protocol": "open_ai_completions",
     "default_base_url": "https://api.venice.ai/api/v1",
     "api_key_env": "VENICE_API_KEY",
@@ -162,7 +177,10 @@
   },
   {
     "id": "together",
-    "aliases": ["together_ai", "togetherai"],
+    "aliases": [
+      "together_ai",
+      "togetherai"
+    ],
     "protocol": "open_ai_completions",
     "default_base_url": "https://api.together.xyz/v1",
     "api_key_env": "TOGETHER_API_KEY",
@@ -180,7 +198,9 @@
   },
   {
     "id": "fireworks",
-    "aliases": ["fireworks_ai"],
+    "aliases": [
+      "fireworks_ai"
+    ],
     "protocol": "open_ai_completions",
     "default_base_url": "https://api.fireworks.ai/inference/v1",
     "api_key_env": "FIREWORKS_API_KEY",
@@ -198,7 +218,9 @@
   },
   {
     "id": "deepseek",
-    "aliases": ["deep_seek"],
+    "aliases": [
+      "deep_seek"
+    ],
     "protocol": "open_ai_completions",
     "default_base_url": "https://api.deepseek.com/v1",
     "api_key_env": "DEEPSEEK_API_KEY",
@@ -234,7 +256,9 @@
   },
   {
     "id": "sambanova",
-    "aliases": ["samba_nova"],
+    "aliases": [
+      "samba_nova"
+    ],
     "protocol": "open_ai_completions",
     "default_base_url": "https://api.sambanova.ai/v1",
     "api_key_env": "SAMBANOVA_API_KEY",
@@ -247,6 +271,132 @@
       "secret_name": "llm_sambanova_api_key",
       "key_url": "https://cloud.sambanova.ai/apis",
       "display_name": "SambaNova",
+      "can_list_models": false
+    }
+  },
+  {
+    "id": "gemini",
+    "aliases": [
+      "google_gemini",
+      "google"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "api_key_env": "GEMINI_API_KEY",
+    "api_key_required": true,
+    "model_env": "GEMINI_MODEL",
+    "default_model": "gemini-2.5-flash",
+    "description": "Google Gemini (via OpenAI-compatible endpoint)",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_gemini_api_key",
+      "key_url": "https://aistudio.google.com/app/apikey",
+      "display_name": "Google Gemini",
+      "can_list_models": true
+    }
+  },
+  {
+    "id": "bedrock",
+    "aliases": [
+      "aws_bedrock",
+      "aws"
+    ],
+    "protocol": "open_ai_completions",
+    "api_key_env": "BEDROCK_ACCESS_KEY",
+    "api_key_required": false,
+    "base_url_env": "BEDROCK_BASE_URL",
+    "model_env": "BEDROCK_MODEL",
+    "default_model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "description": "AWS Bedrock (requires LiteLLM or OpenAI-compatible proxy)",
+    "setup": {
+      "kind": "open_ai_compatible",
+      "secret_name": "llm_bedrock_api_key",
+      "display_name": "AWS Bedrock",
+      "can_list_models": false
+    }
+  },
+  {
+    "id": "ionet",
+    "aliases": [
+      "io_net",
+      "io.net"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://api.intelligence.io.solutions/api/v1",
+    "api_key_env": "IONET_API_KEY",
+    "api_key_required": true,
+    "model_env": "IONET_MODEL",
+    "default_model": "deepseek-coder-v2-instruct",
+    "description": "io.net Intelligence API",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_ionet_api_key",
+      "key_url": "https://cloud.io.net/intelligence",
+      "display_name": "io.net",
+      "can_list_models": true
+    }
+  },
+  {
+    "id": "mistral",
+    "aliases": [
+      "mistral_ai",
+      "mistralai"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://api.mistral.ai/v1",
+    "api_key_env": "MISTRAL_API_KEY",
+    "api_key_required": true,
+    "model_env": "MISTRAL_MODEL",
+    "default_model": "mistral-large-latest",
+    "description": "Mistral AI API",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_mistral_api_key",
+      "key_url": "https://console.mistral.ai/api-keys",
+      "display_name": "Mistral",
+      "can_list_models": true
+    }
+  },
+  {
+    "id": "yandex",
+    "aliases": [
+      "yandex_ai_studio",
+      "yandexgpt",
+      "yandex_gpt"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://ai.api.cloud.yandex.net/v1",
+    "api_key_env": "YANDEX_API_KEY",
+    "api_key_required": true,
+    "model_env": "YANDEX_MODEL",
+    "extra_headers_env": "YANDEX_EXTRA_HEADERS",
+    "default_model": "yandexgpt-lite",
+    "description": "Yandex AI Studio (YandexGPT)",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_yandex_api_key",
+      "key_url": "https://aistudio.yandex.ru/platform/folders/",
+      "display_name": "Yandex AI Studio",
+      "can_list_models": true
+    }
+  },
+  {
+    "id": "cloudflare",
+    "aliases": [
+      "cloudflare_ai",
+      "cf_ai"
+    ],
+    "protocol": "open_ai_completions",
+    "api_key_env": "CLOUDFLARE_API_KEY",
+    "api_key_required": true,
+    "base_url_env": "CLOUDFLARE_BASE_URL",
+    "model_env": "CLOUDFLARE_MODEL",
+    "default_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "description": "Cloudflare Workers AI",
+    "setup": {
+      "kind": "open_ai_compatible",
+      "secret_name": "llm_cloudflare_api_key",
+      "display_name": "Cloudflare Workers AI",
       "can_list_models": false
     }
   }

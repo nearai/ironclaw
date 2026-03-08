@@ -401,6 +401,9 @@ pub enum RoutineError {
     #[error("Routine not found: {id}")]
     NotFound { id: Uuid },
 
+    #[error("Not authorized to trigger routine {id}")]
+    NotAuthorized { id: Uuid },
+
     #[error("Routine {name} at max concurrent runs")]
     MaxConcurrent { name: String },
 

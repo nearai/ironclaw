@@ -158,7 +158,10 @@ async fn async_main() -> anyhow::Result<()> {
         wizard.run().await?;
     }
 
-    // Load initial config from env + disk + optional TOML (before DB is available)
+    // Load initial config from env + disk + optional TOML (before DB is available).
+    // Credentials may be missing at this point — that's fine. LlmConfig::resolve()
+    // defers gracefully, and AppBuilder::build_all() re-resolves after loading
+    // secrets from the encrypted DB.
     let toml_path = cli.config.as_deref();
     let config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
@@ -475,6 +478,7 @@ async fn async_main() -> anyhow::Result<()> {
     let mut sse_sender: Option<
         tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
     > = None;
+    let mut routine_engine_slot: Option<ironclaw::channels::web::server::RoutineEngineSlot> = None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw =
             GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
@@ -528,10 +532,11 @@ async fn async_main() -> anyhow::Result<()> {
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
-        // Capture SSE sender before moving gw into channels.
+        // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
         sse_sender = Some(gw.state().sse.sender());
+        routine_engine_slot = Some(Arc::clone(&gw.state().routine_engine));
 
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
@@ -669,9 +674,16 @@ async fn async_main() -> anyhow::Result<()> {
         cost_guard: components.cost_guard,
         sse_tx: sse_sender,
         http_interceptor,
+        transcription: config
+            .transcription
+            .create_provider()
+            .map(|p| Arc::new(ironclaw::transcription::TranscriptionMiddleware::new(p))),
+        document_extraction: Some(Arc::new(
+            ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
+        )),
     };
 
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         config.agent.clone(),
         deps,
         channels,
@@ -684,6 +696,11 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Fill the scheduler slot now that Agent (and its Scheduler) exist.
     *scheduler_slot.write().await = Some(agent.scheduler());
+
+    // Give the agent the routine engine slot so it can expose the engine to the gateway.
+    if let Some(slot) = routine_engine_slot {
+        agent.set_routine_engine_slot(slot);
+    }
 
     agent.run().await?;
 
@@ -1107,6 +1124,9 @@ fn check_onboard_needed() -> Option<&'static str> {
 ///
 /// Looks for secrets matching the pattern `{channel_name}_*` and injects them
 /// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
+///
+/// Falls back to environment variables with the uppercase name if not found
+/// in the secrets store (e.g., `TELEGRAM_BOT_TOKEN`).
 async fn inject_channel_credentials(
     channel: &Arc<ironclaw::channels::wasm::WasmChannel>,
     secrets: &dyn SecretsStore,
@@ -1119,6 +1139,7 @@ async fn inject_channel_credentials(
 
     let prefix = format!("{}_", channel_name);
     let mut count = 0;
+    let mut injected_placeholders = std::collections::HashSet::new();
 
     for secret_meta in all_secrets {
         if !secret_meta.name.starts_with(&prefix) {
@@ -1149,7 +1170,32 @@ async fn inject_channel_credentials(
         channel
             .set_credential(&placeholder, decrypted.expose().to_string())
             .await;
+        injected_placeholders.insert(placeholder);
         count += 1;
+    }
+
+    // Fall back to environment variables for required secrets not found in the store.
+    // This allows channels to work when configured via env vars (e.g., TELEGRAM_BOT_TOKEN)
+    // without requiring the setup wizard to have run.
+    let caps = channel.capabilities();
+    if let Some(ref http_cap) = caps.tool_capabilities.http {
+        for cred_mapping in http_cap.credentials.values() {
+            let placeholder = cred_mapping.secret_name.to_uppercase();
+            if injected_placeholders.contains(&placeholder) {
+                continue;
+            }
+            if let Ok(env_value) = std::env::var(&placeholder)
+                && !env_value.is_empty()
+            {
+                tracing::debug!(
+                    channel = %channel_name,
+                    placeholder = %placeholder,
+                    "Injecting credential from environment variable"
+                );
+                channel.set_credential(&placeholder, env_value).await;
+                count += 1;
+            }
+        }
     }
 
     Ok(count)

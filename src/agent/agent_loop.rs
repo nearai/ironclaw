@@ -77,6 +77,10 @@ pub struct AgentDeps {
     pub sse_tx: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
     /// HTTP interceptor for trace recording/replay.
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    /// Audio transcription middleware for voice messages.
+    pub transcription: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
+    /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
+    pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
 }
 
 /// The main agent that coordinates all components.
@@ -92,6 +96,9 @@ pub struct Agent {
     pub(super) heartbeat_config: Option<HeartbeatConfig>,
     pub(super) hygiene_config: Option<crate::config::HygieneConfig>,
     pub(super) routine_config: Option<RoutineConfig>,
+    /// Optional slot to expose the routine engine to the gateway for manual triggering.
+    pub(super) routine_engine_slot:
+        Option<Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>>,
 }
 
 impl Agent {
@@ -144,7 +151,16 @@ impl Agent {
             heartbeat_config,
             hygiene_config,
             routine_config,
+            routine_engine_slot: None,
         }
+    }
+
+    /// Set the routine engine slot for exposing the engine to the gateway.
+    pub fn set_routine_engine_slot(
+        &mut self,
+        slot: Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
+    ) {
+        self.routine_engine_slot = Some(slot);
     }
 
     // Convenience accessors
@@ -338,8 +354,19 @@ impl Agent {
         let heartbeat_handle = if let Some(ref hb_config) = self.heartbeat_config {
             if hb_config.enabled {
                 if let Some(workspace) = self.workspace() {
-                    let config = AgentHeartbeatConfig::default()
+                    let mut config = AgentHeartbeatConfig::default()
                         .with_interval(std::time::Duration::from_secs(hb_config.interval_secs));
+                    config.quiet_hours_start = hb_config.quiet_hours_start;
+                    config.quiet_hours_end = hb_config.quiet_hours_end;
+                    config.timezone = hb_config
+                        .timezone
+                        .clone()
+                        .or_else(|| Some(self.config.default_timezone.clone()));
+                    if let (Some(user), Some(channel)) =
+                        (&hb_config.notify_user, &hb_config.notify_channel)
+                    {
+                        config = config.with_notify(user, channel);
+                    }
 
                     // Set up notification channel
                     let (notify_tx, mut notify_rx) =
@@ -390,8 +417,8 @@ impl Agent {
                         hygiene,
                         workspace.clone(),
                         self.cheap_llm().clone(),
-                        self.safety().clone(),
                         Some(notify_tx),
+                        self.store().map(Arc::clone),
                     ))
                 } else {
                     tracing::warn!("Heartbeat enabled but no workspace available");
@@ -482,6 +509,11 @@ impl Agent {
                     // SAFETY: self is consumed by run(), we can smuggle the engine in
                     // via a local to use in the message loop below.
 
+                    // Expose engine to gateway for manual triggering
+                    if let Some(ref slot) = self.routine_engine_slot {
+                        *slot.write().await = Some(Arc::clone(&engine));
+                    }
+
                     tracing::info!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
                         rt_config.cron_check_interval_secs,
@@ -523,6 +555,20 @@ impl Agent {
                     }
                 }
             };
+
+            // Apply transcription middleware to audio attachments
+            let mut message = message;
+            if let Some(ref transcription) = self.deps.transcription {
+                transcription.process(&mut message).await;
+            }
+
+            // Apply document extraction middleware to document attachments
+            if let Some(ref doc_extraction) = self.deps.document_extraction {
+                doc_extraction.process(&mut message).await;
+            }
+
+            // Store successfully extracted document text in workspace for indexing
+            self.store_extracted_documents(&message).await;
 
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
@@ -620,6 +666,73 @@ impl Agent {
         self.channels.shutdown_all().await?;
 
         Ok(())
+    }
+
+    /// Store extracted document text in workspace memory for future search/recall.
+    async fn store_extracted_documents(&self, message: &IncomingMessage) {
+        let workspace = match self.workspace() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        for attachment in &message.attachments {
+            if attachment.kind != crate::channels::AttachmentKind::Document {
+                continue;
+            }
+            let text = match &attachment.extracted_text {
+                Some(t) if !t.starts_with('[') => t, // skip error messages like "[Failed to..."
+                _ => continue,
+            };
+
+            // Sanitize filename: strip path separators to prevent directory traversal
+            let raw_name = attachment.filename.as_deref().unwrap_or("unnamed_document");
+            let filename: String = raw_name
+                .chars()
+                .map(|c| {
+                    if c == '/' || c == '\\' || c == '\0' {
+                        '_'
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            let filename = filename.trim_start_matches('.');
+            let filename = if filename.is_empty() {
+                "unnamed_document"
+            } else {
+                filename
+            };
+            let date = chrono::Utc::now().format("%Y-%m-%d");
+            let path = format!("documents/{date}/{filename}");
+
+            let header = format!(
+                "# {filename}\n\n\
+                 > Uploaded by **{}** via **{}** on {date}\n\
+                 > MIME: {} | Size: {} bytes\n\n---\n\n",
+                message.user_id,
+                message.channel,
+                attachment.mime_type,
+                attachment.size_bytes.unwrap_or(0),
+            );
+            let content = format!("{header}{text}");
+
+            match workspace.write(&path, &content).await {
+                Ok(_) => {
+                    tracing::info!(
+                        path = %path,
+                        text_len = text.len(),
+                        "Stored extracted document in workspace memory"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path,
+                        error = %e,
+                        "Failed to store extracted document in workspace"
+                    );
+                }
+            }
+        }
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {

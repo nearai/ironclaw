@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub struct SendMessageRequest {
     pub content: String,
     pub thread_id: Option<String>,
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -28,6 +29,8 @@ pub struct ThreadInfo {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -401,6 +404,9 @@ pub struct ExtensionInfo {
     /// Human-readable error when activation_status is "failed".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
+    /// Extension version (semver).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -503,6 +509,8 @@ pub struct RegistryEntryInfo {
     pub description: String,
     pub keywords: Vec<String>,
     pub installed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -606,6 +614,7 @@ pub enum WsClientMessage {
     Message {
         content: String,
         thread_id: Option<String>,
+        timezone: Option<String>,
     },
     /// Approve or deny a pending tool execution.
     #[serde(rename = "approval")]
@@ -791,7 +800,9 @@ mod tests {
         let json = r#"{"type":"message","content":"hello","thread_id":"t1"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            WsClientMessage::Message { content, thread_id } => {
+            WsClientMessage::Message {
+                content, thread_id, ..
+            } => {
                 assert_eq!(content, "hello");
                 assert_eq!(thread_id.as_deref(), Some("t1"));
             }
@@ -804,7 +815,9 @@ mod tests {
         let json = r#"{"type":"message","content":"hi"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            WsClientMessage::Message { content, thread_id } => {
+            WsClientMessage::Message {
+                content, thread_id, ..
+            } => {
                 assert_eq!(content, "hi");
                 assert!(thread_id.is_none());
             }
@@ -1057,5 +1070,41 @@ mod tests {
         let json = r#"{"extension_name":"telegram"}"#;
         let req: AuthCancelRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.extension_name, "telegram");
+    }
+
+    // ---- ThreadInfo channel field tests ----
+
+    #[test]
+    fn test_thread_info_channel_serialized() {
+        let info = ThreadInfo {
+            id: Uuid::nil(),
+            state: "Idle".to_string(),
+            turn_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            title: None,
+            thread_type: None,
+            channel: Some("telegram".to_string()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["channel"], "telegram");
+    }
+
+    #[test]
+    fn test_thread_info_channel_omitted_when_none() {
+        let info = ThreadInfo {
+            id: Uuid::nil(),
+            state: "Idle".to_string(),
+            turn_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            title: None,
+            thread_type: None,
+            channel: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("channel").is_none());
     }
 }

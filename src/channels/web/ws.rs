@@ -156,8 +156,15 @@ async fn handle_client_message(
     direct_tx: &mpsc::Sender<WsServerMessage>,
 ) {
     match msg {
-        WsClientMessage::Message { content, thread_id } => {
+        WsClientMessage::Message {
+            content,
+            thread_id,
+            timezone,
+        } => {
             let mut incoming = IncomingMessage::new("gateway", user_id, &content);
+            if let Some(ref tz) = timezone {
+                incoming = incoming.with_timezone(tz);
+            }
             if let Some(ref tid) = thread_id {
                 incoming = incoming.with_thread(tid);
             }
@@ -349,6 +356,7 @@ mod tests {
             WsClientMessage::Message {
                 content: "hello agent".to_string(),
                 thread_id: Some("t1".to_string()),
+                timezone: None,
             },
             &state,
             "user1",
@@ -373,6 +381,7 @@ mod tests {
             WsClientMessage::Message {
                 content: "hello".to_string(),
                 thread_id: None,
+                timezone: None,
             },
             &state,
             "user1",
@@ -493,6 +502,7 @@ mod tests {
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
         }
     }

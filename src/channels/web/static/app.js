@@ -5,6 +5,7 @@ let eventSource = null;
 let logEventSource = null;
 let currentTab = 'chat';
 let currentThreadId = null;
+let currentThreadIsReadOnly = false;
 let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
@@ -13,6 +14,8 @@ let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
+let unreadThreads = new Map(); // thread_id -> unread count
+let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
@@ -178,6 +181,7 @@ function confirmRestart() {
     body: {
       content: '/restart',
       thread_id: currentThreadId,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     },
   })
     .then((response) => {
@@ -273,7 +277,13 @@ function connectSSE() {
 
   eventSource.addEventListener('response', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+        debouncedLoadThreads();
+      }
+      return;
+    }
     finalizeActivityGroup();
     addMessage('assistant', data.content);
     enableChatInput();
@@ -288,7 +298,10 @@ function connectSSE() {
 
   eventSource.addEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) debouncedLoadThreads();
+      return;
+    }
     showActivityThinking(data.message);
   });
 
@@ -324,7 +337,10 @@ function connectSSE() {
 
   eventSource.addEventListener('status', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) debouncedLoadThreads();
+      return;
+    }
     // "Done" and "Awaiting approval" are terminal signals from the agent:
     // the agentic loop finished, so re-enable input as a safety net in case
     // the response SSE event is empty or lost.
@@ -414,9 +430,9 @@ function connectSSE() {
 }
 
 // Check if an SSE event belongs to the currently viewed thread.
-// Events without a thread_id (legacy) are always shown.
+// Events without a thread_id are dropped (prevents notification leaking).
 function isCurrentThread(threadId) {
-  if (!threadId) return true;
+  if (!threadId) return false;
   if (!currentThreadId) return true;
   return threadId === currentThreadId;
 }
@@ -439,14 +455,21 @@ function sendMessage() {
 
   apiFetch('/api/chat/send', {
     method: 'POST',
-    body: { content, thread_id: currentThreadId || undefined },
+    body: { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
   }).catch((err) => {
     addMessage('system', 'Failed to send: ' + err.message);
   });
 }
 
 function enableChatInput() {
-  // no-op: input and send button are always enabled
+  if (currentThreadIsReadOnly) return;
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('send-btn');
+  if (input) {
+    input.disabled = false;
+    input.placeholder = 'Message or / for commands...';
+  }
+  if (btn) btn.disabled = false;
 }
 
 // --- Slash Autocomplete ---
@@ -541,6 +564,13 @@ function sendApprovalAction(requestId, action) {
 
 function renderMarkdown(text) {
   if (typeof marked !== 'undefined') {
+    // Escape raw HTML error pages instead of rendering them as markup.
+    // Only triggers when the text *starts with* a doctype or <html> tag
+    // (after optional whitespace), so normal messages that mention HTML
+    // tags in prose or code fences are not affected.  See #263.
+    if (/^\s*<!doctype\s/i.test(text) || /^\s*<html[\s>]/i.test(text)) {
+      return escapeHtml(text);
+    }
     let html = marked.parse(text);
     // Sanitize HTML output to prevent XSS from tool output or LLM responses.
     html = sanitizeRenderedHtml(html);
@@ -1134,7 +1164,9 @@ function loadHistory(before) {
       // Fresh load: clear and render
       container.innerHTML = '';
       for (const turn of data.turns) {
-        addMessage('user', turn.user_input);
+        if (turn.user_input) {
+          addMessage('user', turn.user_input);
+        }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
         }
@@ -1156,8 +1188,10 @@ function loadHistory(before) {
       const savedHeight = container.scrollHeight;
       const fragment = document.createDocumentFragment();
       for (const turn of data.turns) {
-        const userDiv = createMessageElement('user', turn.user_input);
-        fragment.appendChild(userDiv);
+        if (turn.user_input) {
+          const userDiv = createMessageElement('user', turn.user_input);
+          fragment.appendChild(userDiv);
+        }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           fragment.appendChild(createToolCallsSummaryElement(turn.tool_calls));
         }
@@ -1256,6 +1290,37 @@ function removeScrollSpinner() {
 
 // --- Threads ---
 
+function threadTitle(thread) {
+  if (thread.title) return thread.title;
+  const ch = thread.channel || 'gateway';
+  if (thread.thread_type === 'heartbeat') return 'Heartbeat Alerts';
+  if (thread.thread_type === 'routine') return 'Routine';
+  if (ch !== 'gateway') return ch.charAt(0).toUpperCase() + ch.slice(1);
+  if (thread.turn_count === 0) return 'New chat';
+  return thread.id.substring(0, 8);
+}
+
+function relativeTime(isoStr) {
+  if (!isoStr) return '';
+  const diff = Date.now() - new Date(isoStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  const days = Math.floor(hrs / 24);
+  return days + 'd ago';
+}
+
+function isReadOnlyChannel(channel) {
+  return channel && channel !== 'gateway' && channel !== 'routine' && channel !== 'heartbeat';
+}
+
+function debouncedLoadThreads() {
+  if (_loadThreadsTimer) clearTimeout(_loadThreadsTimer);
+  _loadThreadsTimer = setTimeout(() => { _loadThreadsTimer = null; loadThreads(); }, 500);
+}
+
 function loadThreads() {
   apiFetch('/api/chat/threads').then((data) => {
     // Pinned assistant thread
@@ -1264,9 +1329,13 @@ function loadThreads() {
       const el = document.getElementById('assistant-thread');
       const isActive = currentThreadId === assistantThreadId;
       el.className = 'assistant-item' + (isActive ? ' active' : '');
+      const labelEl = document.getElementById('assistant-label');
+      if (labelEl) {
+        const at = data.assistant_thread;
+        labelEl.textContent = 'Assistant';
+      }
       const meta = document.getElementById('assistant-meta');
-      const count = data.assistant_thread.turn_count || 0;
-      meta.textContent = count > 0 ? count + ' turns' : '';
+      meta.textContent = relativeTime(data.assistant_thread.updated_at);
     }
 
     // Regular threads
@@ -1275,16 +1344,38 @@ function loadThreads() {
     const threads = data.threads || [];
     for (const thread of threads) {
       const item = document.createElement('div');
-      item.className = 'thread-item' + (thread.id === currentThreadId ? ' active' : '');
+      const isActive = thread.id === currentThreadId;
+      item.className = 'thread-item' + (isActive ? ' active' : '');
+
+      // Channel badge for non-gateway threads
+      const ch = thread.channel || 'gateway';
+      if (ch !== 'gateway') {
+        const badge = document.createElement('span');
+        badge.className = 'thread-badge thread-badge-' + ch;
+        badge.textContent = ch;
+        item.appendChild(badge);
+      }
+
       const label = document.createElement('span');
       label.className = 'thread-label';
-      label.textContent = thread.title || thread.id.substring(0, 8);
-      label.title = thread.title ? thread.title + ' (' + thread.id + ')' : thread.id;
+      label.textContent = threadTitle(thread);
+      label.title = (thread.title || '') + ' (' + thread.id + ')';
       item.appendChild(label);
+
       const meta = document.createElement('span');
       meta.className = 'thread-meta';
-      meta.textContent = (thread.turn_count || 0) + ' turns';
+      meta.textContent = relativeTime(thread.updated_at);
       item.appendChild(meta);
+
+      // Unread dot
+      const unread = unreadThreads.get(thread.id) || 0;
+      if (unread > 0 && !isActive) {
+        const dot = document.createElement('span');
+        dot.className = 'thread-unread';
+        dot.textContent = unread > 9 ? '9+' : String(unread);
+        item.appendChild(dot);
+      }
+
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
     }
@@ -1294,17 +1385,36 @@ function loadThreads() {
       switchToAssistant();
     }
 
-    // Enable chat input once a thread is available
+    // Enable/disable chat input based on channel type
     if (currentThreadId) {
-      enableChatInput();
+      const currentThread = threads.find(t => t.id === currentThreadId);
+      const ch = currentThread ? currentThread.channel : 'gateway';
+      currentThreadIsReadOnly = isReadOnlyChannel(ch);
+      if (currentThreadIsReadOnly) {
+        disableChatInputReadOnly();
+      } else {
+        enableChatInput();
+      }
     }
   }).catch(() => {});
+}
+
+function disableChatInputReadOnly() {
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('send-btn');
+  if (input) {
+    input.disabled = true;
+    input.placeholder = 'Read-only thread (external channel)';
+  }
+  if (btn) btn.disabled = true;
 }
 
 function switchToAssistant() {
   if (!assistantThreadId) return;
   finalizeActivityGroup();
   currentThreadId = assistantThreadId;
+  currentThreadIsReadOnly = false;
+  unreadThreads.delete(assistantThreadId);
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
@@ -1314,6 +1424,7 @@ function switchToAssistant() {
 function switchThread(threadId) {
   finalizeActivityGroup();
   currentThreadId = threadId;
+  unreadThreads.delete(threadId);
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
@@ -1889,6 +2000,13 @@ function renderAvailableExtensionCard(entry) {
   kind.textContent = kindLabels[entry.kind] || entry.kind;
   header.appendChild(kind);
 
+  if (entry.version) {
+    const ver = document.createElement('span');
+    ver.className = 'ext-version';
+    ver.textContent = 'v' + entry.version;
+    header.appendChild(ver);
+  }
+
   card.appendChild(header);
 
   const desc = document.createElement('div');
@@ -2048,6 +2166,13 @@ function renderExtensionCard(ext) {
   kind.className = 'ext-kind kind-' + ext.kind;
   kind.textContent = kindLabels[ext.kind] || ext.kind;
   header.appendChild(kind);
+
+  if (ext.version) {
+    const ver = document.createElement('span');
+    ver.className = 'ext-version';
+    ver.textContent = 'v' + ext.version;
+    header.appendChild(ver);
+  }
 
   // Auth dot only for non-WASM-channel extensions (channels use the stepper instead)
   if (ext.kind !== 'wasm_channel') {

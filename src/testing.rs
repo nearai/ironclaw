@@ -451,6 +451,8 @@ impl TestHarnessBuilder {
             cost_guard,
             sse_tx: None,
             http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
         };
 
         TestHarness {
@@ -1007,6 +1009,7 @@ mod tests {
             enabled: true,
             trigger: Trigger::Cron {
                 schedule: "0 * * * *".to_string(),
+                timezone: None,
             },
             action: RoutineAction::Lightweight {
                 prompt: "Check status".to_string(),
