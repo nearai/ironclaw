@@ -44,6 +44,7 @@ pub mod boot_screen;
 pub mod bootstrap;
 pub mod channels;
 pub mod cli;
+pub mod codex_auth;
 pub mod config;
 pub mod context;
 pub mod db;
