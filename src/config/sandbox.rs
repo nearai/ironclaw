@@ -233,9 +233,14 @@ impl ClaudeCodeConfig {
 /// Expected shape: `{"claudeAiOauth": {"accessToken": "sk-ant-oat01-..."}}`
 fn parse_oauth_access_token(json: &str) -> Option<String> {
     let creds: serde_json::Value = serde_json::from_str(json).ok()?;
-    creds["claudeAiOauth"]["accessToken"]
-        .as_str()
-        .map(String::from)
+    let token = creds["claudeAiOauth"]["accessToken"].as_str()?;
+    // Validate that the token looks like a real OAuth token before using it.
+    // Claude CLI tokens start with "sk-ant-oat".
+    if !token.starts_with("sk-ant-oat") {
+        tracing::debug!("Ignoring credential store token with unexpected prefix");
+        return None;
+    }
+    Some(token.to_string())
 }
 
 #[cfg(test)]
@@ -401,20 +406,26 @@ mod tests {
     fn parse_oauth_token_nested_extra_fields() {
         let json = r#"{
             "claudeAiOauth": {
-                "accessToken": "sk-ant-real-token",
+                "accessToken": "sk-ant-oat01-real-token",
                 "refreshToken": "rt-abc",
                 "expiresAt": 1700000000
             }
         }"#;
         assert_eq!(
             parse_oauth_access_token(json),
-            Some("sk-ant-real-token".to_string())
+            Some("sk-ant-oat01-real-token".to_string())
         );
     }
 
     #[test]
     fn parse_oauth_token_access_token_is_not_string() {
         let json = r#"{"claudeAiOauth": {"accessToken": 12345}}"#;
+        assert_eq!(parse_oauth_access_token(json), None);
+    }
+
+    #[test]
+    fn parse_oauth_token_rejects_invalid_prefix() {
+        let json = r#"{"claudeAiOauth": {"accessToken": "not-an-oauth-token"}}"#;
         assert_eq!(parse_oauth_access_token(json), None);
     }
 

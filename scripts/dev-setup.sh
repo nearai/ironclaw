@@ -51,9 +51,11 @@ echo "[6/6] Installing git hooks..."
 HOOKS_DIR=$(git rev-parse --git-path hooks 2>/dev/null) || true
 if [ -n "$HOOKS_DIR" ]; then
     mkdir -p "$HOOKS_DIR"
-    SCRIPT_ABS="$(cd "$(dirname "$0")" && pwd)/commit-msg-regression.sh"
-    ln -sf "$SCRIPT_ABS" "$HOOKS_DIR/commit-msg"
+    SCRIPTS_ABS="$(cd "$(dirname "$0")" && pwd)"
+    ln -sf "$SCRIPTS_ABS/commit-msg-regression.sh" "$HOOKS_DIR/commit-msg"
     echo "  commit-msg hook installed (regression test enforcement)"
+    ln -sf "$SCRIPTS_ABS/pre-commit-safety.sh" "$HOOKS_DIR/pre-commit"
+    echo "  pre-commit hook installed (UTF-8, case-sensitivity, /tmp, redaction checks)"
 else
     echo "  Skipped: not a git repository"
 fi

@@ -158,7 +158,10 @@ async fn async_main() -> anyhow::Result<()> {
         wizard.run().await?;
     }
 
-    // Load initial config from env + disk + optional TOML (before DB is available)
+    // Load initial config from env + disk + optional TOML (before DB is available).
+    // Credentials may be missing at this point — that's fine. LlmConfig::resolve()
+    // defers gracefully, and AppBuilder::build_all() re-resolves after loading
+    // secrets from the encrypted DB.
     let toml_path = cli.config.as_deref();
     let config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,

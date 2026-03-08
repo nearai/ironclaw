@@ -7,6 +7,7 @@
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
+mod anthropic_oauth;
 pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
@@ -178,6 +179,24 @@ fn create_openai_compat_from_registry(
 fn create_anthropic_from_registry(
     config: &RegistryProviderConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    // Route to OAuth provider when an OAuth token is present and no real API
+    // key was provided. When both are set, the API key takes priority (standard
+    // x-api-key auth via rig-core).
+    let api_key_is_placeholder = config
+        .api_key
+        .as_ref()
+        .is_some_and(|k| k.expose_secret() == crate::config::llm::OAUTH_PLACEHOLDER);
+    if config.oauth_token.is_some() && (config.api_key.is_none() || api_key_is_placeholder) {
+        tracing::info!(
+            provider = %config.provider_id,
+            model = %config.model,
+            base_url = if config.base_url.is_empty() { "default" } else { &config.base_url },
+            "Using Anthropic OAuth API"
+        );
+        let provider = anthropic_oauth::AnthropicOAuthProvider::new(config)?;
+        return Ok(Arc::new(provider));
+    }
+
     use crate::config::CacheRetention;
     use crate::config::helpers::optional_env;
     use rig::providers::anthropic;

@@ -22,6 +22,7 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
+use crate::config::llm::OAUTH_PLACEHOLDER;
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
@@ -886,6 +887,11 @@ impl SetupWizard {
             return Ok(());
         };
 
+        // Anthropic has a custom flow: API key or OAuth token from `claude login`.
+        if provider_id == "anthropic" {
+            return self.setup_anthropic().await;
+        }
+
         match setup {
             crate::llm::registry::SetupHint::ApiKey {
                 secret_name,
@@ -991,6 +997,112 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Anthropic provider setup: API key or OAuth token from `claude login`.
+    async fn setup_anthropic(&mut self) -> Result<(), SetupError> {
+        let options = &["Direct API Key", "OAuth Token (from `claude login`)"];
+        let choice = select_one("How do you want to authenticate with Anthropic?", options)
+            .map_err(SetupError::Io)?;
+
+        if choice == 0 {
+            // Standard API key flow
+            self.setup_api_key_provider(
+                "anthropic",
+                "ANTHROPIC_API_KEY",
+                "llm_anthropic_api_key",
+                "Anthropic API key",
+                "https://console.anthropic.com/settings/keys",
+                None,
+            )
+            .await
+        } else {
+            // OAuth token flow
+            self.setup_anthropic_oauth().await
+        }
+    }
+
+    /// Anthropic OAuth setup: extract token from `claude login` credentials.
+    async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("anthropic".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        // Try to extract existing OAuth token from Claude Code credentials
+        if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+            print_info(&format!("Found OAuth token: {}", mask_api_key(&token)));
+            if confirm("Use this token?", true).map_err(SetupError::Io)? {
+                return self.save_anthropic_oauth_token(&token).await;
+            }
+        } else {
+            print_info("No OAuth token found from `claude login`.");
+            print_info("Run `claude login` in a terminal to authenticate, then retry.");
+            println!();
+
+            if confirm("Retry after running `claude login`?", true).map_err(SetupError::Io)? {
+                // Block until the user has run `claude login` in another terminal
+                input("Press Enter after running `claude login` in another terminal...")
+                    .map_err(SetupError::Io)?;
+                if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+                    print_info(&format!("Found OAuth token: {}", mask_api_key(&token)));
+                    return self.save_anthropic_oauth_token(&token).await;
+                }
+                print_error("Still no OAuth token found.");
+            }
+        }
+
+        // Fallback: let user paste the token manually, or switch to API key
+        print_info("You can paste your OAuth token directly (starts with sk-ant-oat01-).");
+        print_info("Or press Enter with no input to switch to the API key flow.");
+        let token = secret_input("Anthropic OAuth token").map_err(SetupError::Io)?;
+        let token_str = token.expose_secret();
+        if token_str.is_empty() {
+            print_info("Switching to API key flow...");
+            return self
+                .setup_api_key_provider(
+                    "anthropic",
+                    "ANTHROPIC_API_KEY",
+                    "llm_anthropic_api_key",
+                    "Anthropic API key",
+                    "https://console.anthropic.com/settings/keys",
+                    None,
+                )
+                .await;
+        }
+        self.save_anthropic_oauth_token(token_str).await
+    }
+
+    /// Save an Anthropic OAuth token to secrets and set env for immediate use.
+    async fn save_anthropic_oauth_token(&mut self, token: &str) -> Result<(), SetupError> {
+        // Validate token format to catch accidentally pasted API keys
+        if !token.starts_with("sk-ant-oat") {
+            print_error("Token doesn't look like an OAuth token (expected prefix: sk-ant-oat).");
+            print_info("If you have an API key instead, use the 'Direct API Key' option.");
+            return Err(SetupError::Config("Invalid OAuth token format".to_string()));
+        }
+
+        // Store in secrets if available
+        if let Ok(ctx) = self.init_secrets_context().await {
+            let key = SecretString::from(token.to_string());
+            ctx.save_secret("llm_anthropic_oauth_token", &key)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save OAuth token: {e}")))?;
+            print_success("OAuth token encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set ANTHROPIC_OAUTH_TOKEN in your environment.");
+        }
+
+        // Make the token visible to `optional_env()` for subsequent config
+        // resolution (model selection step). Uses the thread-safe overlay
+        // instead of `std::env::set_var` to avoid UB on multi-threaded runtimes.
+        crate::config::inject_single_var("ANTHROPIC_OAUTH_TOKEN", token);
+
+        // Cache for model fetching
+        self.llm_api_key = Some(SecretString::from(token.to_string()));
+
+        print_success("Anthropic OAuth configured");
+        Ok(())
+    }
+
     /// Shared setup flow for API-key-based providers.
     async fn setup_api_key_provider(
         &mut self,
@@ -1051,6 +1163,11 @@ impl SetupWizard {
                 "Secrets not available. Set {env_var} in your environment."
             ));
         }
+
+        // Make key visible to `optional_env()` for subsequent config resolution.
+        // Uses the thread-safe overlay instead of `std::env::set_var` to avoid
+        // UB on multi-threaded runtimes.
+        crate::config::inject_single_var(env_var, key_str);
 
         // Cache key in memory for model fetching later in the wizard
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
@@ -1988,6 +2105,67 @@ impl SetupWizard {
             }
         }
 
+        // Claude Code sandbox sub-step (only if Docker sandbox is enabled)
+        if self.settings.sandbox.enabled {
+            self.step_claude_code_sandbox().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Claude Code sandbox sub-step: enable Claude CLI inside Docker containers.
+    async fn step_claude_code_sandbox(&mut self) -> Result<(), SetupError> {
+        println!();
+        print_info("Claude Code mode lets the agent delegate complex tasks to Claude CLI");
+        print_info("running inside sandboxed Docker containers.");
+        println!();
+
+        if !confirm("Enable Claude Code sandbox mode?", false).map_err(SetupError::Io)? {
+            self.settings.sandbox.claude_code_enabled = false;
+            return Ok(());
+        }
+
+        // Check for Anthropic credentials (API key or OAuth token).
+        // Uses `optional_env()` which reads both real env vars and the
+        // injected overlay (secrets DB, wizard-set values).
+        let has_credentials = || {
+            let has_api_key = crate::config::helpers::optional_env("ANTHROPIC_API_KEY")
+                .ok()
+                .flatten()
+                .is_some_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
+            let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some()
+                || crate::config::helpers::optional_env("ANTHROPIC_OAUTH_TOKEN")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|v| !v.is_empty());
+            has_api_key || has_oauth
+        };
+
+        if has_credentials() {
+            self.settings.sandbox.claude_code_enabled = true;
+            print_success("Claude Code sandbox enabled");
+        } else {
+            print_error("No Anthropic credentials found.");
+            print_info(
+                "Claude Code needs ANTHROPIC_API_KEY or an OAuth token from `claude login`.",
+            );
+            println!();
+
+            if confirm("Retry after setting up credentials?", false).map_err(SetupError::Io)? {
+                if has_credentials() {
+                    self.settings.sandbox.claude_code_enabled = true;
+                    print_success("Claude Code sandbox enabled");
+                } else {
+                    self.settings.sandbox.claude_code_enabled = false;
+                    print_info("No credentials found. Claude Code disabled for now.");
+                    print_info("Set ANTHROPIC_API_KEY or run `claude login` and enable later.");
+                }
+            } else {
+                self.settings.sandbox.claude_code_enabled = false;
+                print_info("Claude Code disabled. Enable with CLAUDE_CODE_ENABLED=true later.");
+            }
+        }
+
         Ok(())
     }
 
@@ -2081,6 +2259,12 @@ impl SetupWizard {
     ///
     /// These are the chicken-and-egg settings needed before the database is
     /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
+    ///
+    /// **Credentials are NOT written here.** API keys and OAuth tokens live
+    /// only in the encrypted secrets DB. `LlmConfig::resolve()` defers
+    /// gracefully when credentials are missing during early startup, and the
+    /// re-resolution in `AppBuilder::build_all()` fills them in after
+    /// `inject_llm_keys_from_secrets()` loads from encrypted storage.
     fn write_bootstrap_env(&self) -> Result<(), SetupError> {
         let registry = crate::llm::ProviderRegistry::load();
         let mut env_vars: Vec<(String, String)> = Vec::new();
@@ -2144,6 +2328,11 @@ impl SetupWizard {
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {
             env_vars.push(("ONBOARD_COMPLETED".to_string(), "true".to_string()));
+        }
+
+        // Claude Code sandbox mode
+        if self.settings.sandbox.claude_code_enabled {
+            env_vars.push(("CLAUDE_CODE_ENABLED".to_string(), "true".to_string()));
         }
 
         // Signal channel env vars (chicken-and-egg: config resolves before DB).
@@ -2513,22 +2702,39 @@ async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String
     let api_key = cached_key
         .map(String::from)
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .filter(|k| !k.is_empty());
+        .filter(|k| !k.is_empty() && k != crate::config::llm::OAUTH_PLACEHOLDER);
 
-    let api_key = match api_key {
-        Some(k) => k,
-        None => return static_defaults,
+    // Fall back to OAuth token if no API key
+    let oauth_token = if api_key.is_none() {
+        crate::config::helpers::optional_env("ANTHROPIC_OAUTH_TOKEN")
+            .ok()
+            .flatten()
+            .filter(|t| !t.is_empty())
+    } else {
+        None
+    };
+
+    let (key_or_token, is_oauth) = match (api_key, oauth_token) {
+        (Some(k), _) => (k, false),
+        (None, Some(t)) => (t, true),
+        (None, None) => return static_defaults,
     };
 
     let client = reqwest::Client::new();
-    let resp = match client
+    let mut request = client
         .get("https://api.anthropic.com/v1/models")
-        .header("x-api-key", &api_key)
         .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
+        .timeout(std::time::Duration::from_secs(5));
+
+    if is_oauth {
+        request = request
+            .bearer_auth(&key_or_token)
+            .header("anthropic-beta", "oauth-2025-04-20");
+    } else {
+        request = request.header("x-api-key", &key_or_token);
+    }
+
+    let resp = match request.send().await {
         Ok(r) if r.status().is_success() => r,
         _ => return static_defaults,
     };
