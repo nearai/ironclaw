@@ -2,10 +2,11 @@
 //!
 //! Commands for adding, removing, authenticating, and testing MCP servers.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
 
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 
 use crate::config::Config;
 use crate::db::Database;
@@ -15,39 +16,67 @@ use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::tools::mcp::{
     McpClient, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
-    config::{self, McpServersFile},
+    config::{self, EffectiveTransport, McpServersFile},
 };
+
+/// Arguments for the `mcp add` subcommand.
+#[derive(Args, Debug, Clone)]
+pub struct McpAddArgs {
+    /// Server name (e.g., "notion", "github")
+    pub name: String,
+
+    /// Server URL (e.g., "https://mcp.notion.com") -- required for http transport
+    pub url: Option<String>,
+
+    /// Transport type: http (default), stdio, unix
+    #[arg(long, default_value = "http")]
+    pub transport: String,
+
+    /// Command to run (stdio transport)
+    #[arg(long)]
+    pub command: Option<String>,
+
+    /// Command arguments (stdio transport, can be repeated)
+    #[arg(long = "arg", num_args = 1..)]
+    pub cmd_args: Vec<String>,
+
+    /// Environment variables (stdio transport, KEY=VALUE format, can be repeated)
+    #[arg(long = "env", value_parser = parse_env_var)]
+    pub env: Vec<(String, String)>,
+
+    /// Unix socket path (unix transport)
+    #[arg(long)]
+    pub socket: Option<String>,
+
+    /// Custom HTTP headers (KEY:VALUE format, can be repeated)
+    #[arg(long = "header", value_parser = parse_header)]
+    pub headers: Vec<(String, String)>,
+
+    /// OAuth client ID (if authentication is required)
+    #[arg(long)]
+    pub client_id: Option<String>,
+
+    /// OAuth authorization URL (optional, can be discovered)
+    #[arg(long)]
+    pub auth_url: Option<String>,
+
+    /// OAuth token URL (optional, can be discovered)
+    #[arg(long)]
+    pub token_url: Option<String>,
+
+    /// Scopes to request (comma-separated)
+    #[arg(long)]
+    pub scopes: Option<String>,
+
+    /// Server description
+    #[arg(long)]
+    pub description: Option<String>,
+}
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum McpCommand {
     /// Add an MCP server
-    Add {
-        /// Server name (e.g., "notion", "github")
-        name: String,
-
-        /// Server URL (e.g., "https://mcp.notion.com")
-        url: String,
-
-        /// OAuth client ID (if authentication is required)
-        #[arg(long)]
-        client_id: Option<String>,
-
-        /// OAuth authorization URL (optional, can be discovered)
-        #[arg(long)]
-        auth_url: Option<String>,
-
-        /// OAuth token URL (optional, can be discovered)
-        #[arg(long)]
-        token_url: Option<String>,
-
-        /// Scopes to request (comma-separated)
-        #[arg(long)]
-        scopes: Option<String>,
-
-        /// Server description
-        #[arg(long)]
-        description: Option<String>,
-    },
+    Add(Box<McpAddArgs>),
 
     /// Remove an MCP server
     Remove {
@@ -97,29 +126,24 @@ pub enum McpCommand {
     },
 }
 
+fn parse_header(s: &str) -> Result<(String, String), String> {
+    let pos = s
+        .find(':')
+        .ok_or_else(|| format!("invalid header format '{}', expected KEY:VALUE", s))?;
+    Ok((s[..pos].trim().to_string(), s[pos + 1..].trim().to_string()))
+}
+
+fn parse_env_var(s: &str) -> Result<(String, String), String> {
+    let pos = s
+        .find('=')
+        .ok_or_else(|| format!("invalid env var format '{}', expected KEY=VALUE", s))?;
+    Ok((s[..pos].to_string(), s[pos + 1..].to_string()))
+}
+
 /// Run an MCP command.
 pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
     match cmd {
-        McpCommand::Add {
-            name,
-            url,
-            client_id,
-            auth_url,
-            token_url,
-            scopes,
-            description,
-        } => {
-            add_server(
-                name,
-                url,
-                client_id,
-                auth_url,
-                token_url,
-                scopes,
-                description,
-            )
-            .await
-        }
+        McpCommand::Add(args) => add_server(*args).await,
         McpCommand::Remove { name } => remove_server(name).await,
         McpCommand::List { verbose } => list_servers(verbose).await,
         McpCommand::Auth { name, user } => auth_server(name, user).await,
@@ -133,16 +157,58 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
 }
 
 /// Add a new MCP server.
-async fn add_server(
-    name: String,
-    url: String,
-    client_id: Option<String>,
-    auth_url: Option<String>,
-    token_url: Option<String>,
-    scopes: Option<String>,
-    description: Option<String>,
-) -> anyhow::Result<()> {
-    let mut config = McpServerConfig::new(&name, &url);
+async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
+    let McpAddArgs {
+        name,
+        url,
+        transport,
+        command,
+        cmd_args,
+        env,
+        socket,
+        headers,
+        client_id,
+        auth_url,
+        token_url,
+        scopes,
+        description,
+    } = args;
+
+    let transport_lower = transport.to_lowercase();
+
+    let mut config = match transport_lower.as_str() {
+        "stdio" => {
+            let cmd = command
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--command is required for stdio transport"))?;
+            let env_map: HashMap<String, String> = env.into_iter().collect();
+            McpServerConfig::new_stdio(&name, &cmd, cmd_args.clone(), env_map)
+        }
+        "unix" => {
+            let socket_path = socket
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--socket is required for unix transport"))?;
+            McpServerConfig::new_unix(&name, &socket_path)
+        }
+        "http" => {
+            let url_val = url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("URL is required for http transport"))?;
+            McpServerConfig::new(&name, url_val)
+        }
+        other => {
+            anyhow::bail!(
+                "Unknown transport type '{}'. Supported: http, stdio, unix",
+                other
+            );
+        }
+    };
+
+    // Apply headers if any
+    if !headers.is_empty() {
+        let headers_map: HashMap<String, String> = headers.into_iter().collect();
+        config = config.with_headers(headers_map);
+    }
 
     if let Some(desc) = description {
         config = config.with_description(desc);
@@ -151,8 +217,12 @@ async fn add_server(
     // Track if auth is required
     let requires_auth = client_id.is_some();
 
-    // Set up OAuth if client_id is provided
+    // Set up OAuth if client_id is provided (HTTP transport only)
     if let Some(client_id) = client_id {
+        if transport_lower != "http" {
+            anyhow::bail!("OAuth authentication is only supported with http transport");
+        }
+
         let mut oauth = OAuthConfig::new(client_id);
 
         if let (Some(auth), Some(token)) = (auth_url, token_url) {
@@ -181,7 +251,24 @@ async fn add_server(
 
     println!();
     println!("  ✓ Added MCP server '{}'", name);
-    println!("    URL: {}", url);
+
+    match transport_lower.as_str() {
+        "stdio" => {
+            println!(
+                "    Transport: stdio (command: {})",
+                command.as_deref().unwrap_or("")
+            );
+        }
+        "unix" => {
+            println!(
+                "    Transport: unix (socket: {})",
+                socket.as_deref().unwrap_or("")
+            );
+        }
+        _ => {
+            println!("    URL: {}", url.as_deref().unwrap_or(""));
+        }
+    }
 
     if requires_auth {
         println!();
@@ -236,9 +323,38 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
             ""
         };
 
+        let transport_label = match server.effective_transport() {
+            EffectiveTransport::Http => "http".to_string(),
+            EffectiveTransport::Stdio { command, .. } => {
+                format!("stdio ({})", command)
+            }
+            EffectiveTransport::Unix { socket_path } => {
+                format!("unix ({})", socket_path)
+            }
+        };
+
         if verbose {
             println!("  {} {}{}", status, server.name, auth_status);
-            println!("      URL: {}", server.url);
+            println!("      Transport: {}", transport_label);
+            match server.effective_transport() {
+                EffectiveTransport::Http => {
+                    println!("      URL: {}", server.url);
+                }
+                EffectiveTransport::Stdio { command, args, env } => {
+                    println!("      Command: {}", command);
+                    if !args.is_empty() {
+                        println!("      Args: {}", args.join(", "));
+                    }
+                    if !env.is_empty() {
+                        let env_pairs: Vec<String> =
+                            env.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+                        println!("      Env: {}", env_pairs.join(", "));
+                    }
+                }
+                EffectiveTransport::Unix { socket_path } => {
+                    println!("      Socket: {}", socket_path);
+                }
+            }
             if let Some(ref desc) = server.description {
                 println!("      Description: {}", desc);
             }
@@ -248,11 +364,27 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
                     println!("      Scopes: {}", oauth.scopes.join(", "));
                 }
             }
+            if !server.headers.is_empty() {
+                let header_keys: Vec<&String> = server.headers.keys().collect();
+                println!(
+                    "      Headers: {}",
+                    header_keys
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             println!();
         } else {
+            let display = match server.effective_transport() {
+                EffectiveTransport::Http => server.url.clone(),
+                EffectiveTransport::Stdio { command, .. } => command.to_string(),
+                EffectiveTransport::Unix { socket_path } => socket_path.to_string(),
+            };
             println!(
-                "  {} {} - {}{}",
-                status, server.name, server.url, auth_status
+                "  {} {} - {} [{}]{}",
+                status, server.name, display, transport_label, auth_status
             );
         }
     }
@@ -578,5 +710,47 @@ mod tests {
         }
 
         TestCli::command().debug_assert();
+    }
+
+    #[test]
+    fn test_parse_header_valid() {
+        let result = parse_header("Authorization: Bearer token123").unwrap();
+        assert_eq!(result.0, "Authorization");
+        assert_eq!(result.1, "Bearer token123");
+    }
+
+    #[test]
+    fn test_parse_header_no_spaces() {
+        let result = parse_header("X-Api-Key:abc123").unwrap();
+        assert_eq!(result.0, "X-Api-Key");
+        assert_eq!(result.1, "abc123");
+    }
+
+    #[test]
+    fn test_parse_header_invalid() {
+        let result = parse_header("no-colon-here");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid header format"));
+    }
+
+    #[test]
+    fn test_parse_env_var_valid() {
+        let result = parse_env_var("NODE_ENV=production").unwrap();
+        assert_eq!(result.0, "NODE_ENV");
+        assert_eq!(result.1, "production");
+    }
+
+    #[test]
+    fn test_parse_env_var_with_equals_in_value() {
+        let result = parse_env_var("KEY=value=with=equals").unwrap();
+        assert_eq!(result.0, "KEY");
+        assert_eq!(result.1, "value=with=equals");
+    }
+
+    #[test]
+    fn test_parse_env_var_invalid() {
+        let result = parse_env_var("no-equals-here");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid env var format"));
     }
 }

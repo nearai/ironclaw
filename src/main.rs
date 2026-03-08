@@ -75,7 +75,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
-            return run_mcp_command(mcp_cmd.clone()).await;
+            return run_mcp_command(*mcp_cmd.clone()).await;
         }
         Some(Command::Memory(mem_cmd)) => {
             init_cli_tracing();

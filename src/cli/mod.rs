@@ -132,7 +132,7 @@ pub enum Command {
         about = "Manage MCP servers",
         long_about = "Add, auth, list, or test MCP servers.\nExample: ironclaw mcp add notion https://mcp.notion.com"
     )]
-    Mcp(McpCommand),
+    Mcp(Box<McpCommand>),
 
     /// Query and manage workspace memory
     #[command(

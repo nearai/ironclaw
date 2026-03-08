@@ -1628,6 +1628,7 @@ impl ExtensionManager {
             &metadata.scopes_supported,
             Some(&pkce),
             &std::collections::HashMap::new(),
+            None,
         );
 
         // Store pending auth for later callback handling
