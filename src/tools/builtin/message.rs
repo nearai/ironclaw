@@ -111,24 +111,23 @@ impl Tool for MessageTool {
 
         let content = require_str(&params, "content")?;
 
-        // Get channel: use param → conversation default → job metadata
-        let channel = if let Some(c) = params.get("channel").and_then(|v| v.as_str()) {
-            c.to_string()
-        } else if let Some(c) = self
-            .default_channel
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
-            c
-        } else if let Some(c) = ctx.metadata.get("notify_channel").and_then(|v| v.as_str()) {
-            c.to_string()
-        } else {
-            return Err(ToolError::ExecutionFailed(
-                "No channel specified and no active conversation. Provide channel parameter."
-                    .to_string(),
-            ));
-        };
+        // Get channel: use param → conversation default → job metadata → None (broadcast all)
+        let channel: Option<String> =
+            if let Some(c) = params.get("channel").and_then(|v| v.as_str()) {
+                Some(c.to_string())
+            } else if let Some(c) = self
+                .default_channel
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                Some(c)
+            } else {
+                ctx.metadata
+                    .get("notify_channel")
+                    .and_then(|v| v.as_str())
+                    .map(|c| c.to_string())
+            };
 
         // Get target: use param → conversation default → job metadata
         let target = if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
@@ -187,36 +186,80 @@ impl Tool for MessageTool {
             response = response.with_attachments(attachments);
         }
 
-        match self
-            .channel_manager
-            .broadcast(&channel, &target, response)
-            .await
-        {
-            Ok(()) => {
-                tracing::info!(
-                    message_sent = true,
-                    channel = %channel,
-                    target = %target,
-                    attachments = attachment_count,
-                    "Message sent via message tool"
-                );
-                let msg = format!("Sent message to {}:{}", channel, target);
-                Ok(ToolOutput::text(msg, start.elapsed()))
+        if let Some(ref channel) = channel {
+            // Send to a specific channel
+            match self
+                .channel_manager
+                .broadcast(channel, &target, response)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        message_sent = true,
+                        channel = %channel,
+                        target = %target,
+                        attachments = attachment_count,
+                        "Message sent via message tool"
+                    );
+                    let msg = format!("Sent message to {}:{}", channel, target);
+                    Ok(ToolOutput::text(msg, start.elapsed()))
+                }
+                Err(e) => {
+                    let available = self.channel_manager.channel_names().await.join(", ");
+                    let err_msg = if available.is_empty() {
+                        format!(
+                            "Failed to send to {}:{}: {}. No channels connected.",
+                            channel, target, e
+                        )
+                    } else {
+                        format!(
+                            "Failed to send to {}:{}. Available channels: {}. Error: {}",
+                            channel, target, available, e
+                        )
+                    };
+                    Err(ToolError::ExecutionFailed(err_msg))
+                }
             }
-            Err(e) => {
+        } else {
+            // No channel specified — broadcast to all channels (routine with notify.channel = None)
+            let results = self.channel_manager.broadcast_all(&target, response).await;
+            let mut succeeded = Vec::new();
+            let mut failed = Vec::new();
+            for (ch, result) in &results {
+                match result {
+                    Ok(()) => succeeded.push(ch.as_str()),
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = %ch,
+                            target = %target,
+                            "broadcast_all: channel failed: {}", e
+                        );
+                        failed.push(ch.as_str());
+                    }
+                }
+            }
+            if succeeded.is_empty() {
                 let available = self.channel_manager.channel_names().await.join(", ");
                 let err_msg = if available.is_empty() {
-                    format!(
-                        "Failed to send to {}:{}: {}. No channels connected.",
-                        channel, target, e
-                    )
+                    "No channels connected.".to_string()
                 } else {
-                    format!(
-                        "Failed to send to {}:{}. Available channels: {}. Error: {}",
-                        channel, target, available, e
-                    )
+                    format!("All channels failed. Available: {}", available)
                 };
                 Err(ToolError::ExecutionFailed(err_msg))
+            } else {
+                tracing::info!(
+                    message_sent = true,
+                    channels = ?succeeded,
+                    target = %target,
+                    attachments = attachment_count,
+                    "Message broadcast via message tool"
+                );
+                let msg = format!(
+                    "Broadcast message to {} (target: {})",
+                    succeeded.join(", "),
+                    target
+                );
+                Ok(ToolOutput::text(msg, start.elapsed()))
             }
         }
     }
@@ -620,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn message_tool_no_metadata_still_errors() {
         // When neither conversation context nor metadata is set, should still
-        // return a clear error.
+        // return a clear error (target resolution fails).
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
         let ctx = crate::context::JobContext::new("orphan-job", "no notify config");
 
@@ -630,6 +673,42 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("No channel specified") || err.contains("No target specified"));
+        assert!(
+            err.contains("No target specified"),
+            "Expected 'No target specified' error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn message_tool_broadcasts_all_when_no_channel() {
+        // Regression: when notify.channel is None but notify_user is set,
+        // the message tool should attempt broadcast_all instead of erroring
+        // with "No channel specified".
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+
+        let mut ctx = crate::context::JobContext::new("routine-job", "price alert");
+        ctx.metadata = serde_json::json!({
+            "notify_user": "123456789",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "NEAR price is $5"}), &ctx)
+            .await;
+
+        // Should fail because no channels are registered (empty ChannelManager),
+        // NOT because "No channel specified".
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            !err.contains("No channel specified"),
+            "Should not get 'No channel specified' when broadcasting, got: {}",
+            err
+        );
+        assert!(
+            err.contains("No channels connected") || err.contains("All channels failed"),
+            "Expected channel delivery error, got: {}",
+            err
+        );
     }
 }
