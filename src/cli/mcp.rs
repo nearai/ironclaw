@@ -323,7 +323,9 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
             ""
         };
 
-        let transport_label = match server.effective_transport() {
+        let effective = server.effective_transport();
+
+        let transport_label = match &effective {
             EffectiveTransport::Http => "http".to_string(),
             EffectiveTransport::Stdio { command, .. } => {
                 format!("stdio ({})", command)
@@ -336,7 +338,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         if verbose {
             println!("  {} {}{}", status, server.name, auth_status);
             println!("      Transport: {}", transport_label);
-            match server.effective_transport() {
+            match &effective {
                 EffectiveTransport::Http => {
                     println!("      URL: {}", server.url);
                 }
@@ -377,7 +379,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
             }
             println!();
         } else {
-            let display = match server.effective_transport() {
+            let display = match &effective {
                 EffectiveTransport::Http => server.url.clone(),
                 EffectiveTransport::Stdio { command, .. } => command.to_string(),
                 EffectiveTransport::Unix { socket_path } => socket_path.to_string(),
@@ -506,7 +508,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         return Ok(());
     } else {
         // No OAuth and no tokens - try unauthenticated
-        McpClient::new_with_name(&server.name, &server.url)
+        McpClient::new_with_config(server.clone())
     };
 
     // Test connection

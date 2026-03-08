@@ -612,16 +612,10 @@ impl AppBuilder {
                                                     "default",
                                                 )
                                             } else {
-                                                McpClient::new_with_name(
-                                                    &server_name,
-                                                    &server.url,
-                                                )
+                                                McpClient::new_with_config(server)
                                             }
                                         } else {
-                                            McpClient::new_with_name(
-                                                &server_name,
-                                                &server.url,
-                                            )
+                                            McpClient::new_with_config(server)
                                         }
                                     }
                                 };

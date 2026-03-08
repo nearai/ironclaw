@@ -120,10 +120,15 @@ impl McpRequest {
     }
 
     /// Create an initialized notification (sent after initialize).
+    ///
+    /// Note: JSON-RPC 2.0 notifications should omit the `id` field entirely.
+    /// We set `id: 0` because `McpRequest` uses `u64` (not `Option<u64>`).
+    /// Most MCP servers tolerate this; a proper fix would use a separate
+    /// `McpNotification` type or make `id` optional with `skip_serializing_if`.
     pub fn initialized_notification() -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
-            id: 0, // Notifications don't have IDs, but we need one for the struct
+            id: 0,
             method: "notifications/initialized".to_string(),
             params: None,
         }

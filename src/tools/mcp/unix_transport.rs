@@ -72,14 +72,14 @@ impl UnixMcpTransport {
     }
 
     /// Get the path to the Unix domain socket.
-    #[allow(dead_code)]
-    pub fn socket_path(&self) -> &Path {
+    #[cfg(test)]
+    pub(crate) fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
     /// Get the server name.
-    #[allow(dead_code)]
-    pub fn server_name(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn server_name(&self) -> &str {
         &self.server_name
     }
 }

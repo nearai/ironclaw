@@ -104,6 +104,37 @@ impl McpClient {
         }
     }
 
+    /// Create a new simple MCP client from an HTTP server configuration (no authentication).
+    ///
+    /// Use this when you have an `McpServerConfig` with custom headers but no OAuth.
+    /// The config must use HTTP transport (the default); for stdio/UDS use `new_with_transport`.
+    pub fn new_with_config(config: McpServerConfig) -> Self {
+        debug_assert!(
+            matches!(
+                config.effective_transport(),
+                crate::tools::mcp::config::EffectiveTransport::Http
+            ),
+            "new_with_config only supports HTTP transport; use new_with_transport for stdio/UDS"
+        );
+        let transport = Arc::new(HttpMcpTransport::new(
+            config.url.clone(),
+            config.name.clone(),
+        ));
+
+        Self {
+            transport,
+            server_url: config.url.clone(),
+            server_name: config.name.clone(),
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
+            session_manager: None,
+            secrets: None,
+            user_id: "default".to_string(),
+            custom_headers: config.headers.clone(),
+            server_config: Some(config),
+        }
+    }
+
     /// Create a new authenticated MCP client.
     ///
     /// Use this for hosted MCP servers that require OAuth authentication.
@@ -148,6 +179,10 @@ impl McpClient {
             .as_ref()
             .map(|c| c.url.clone())
             .unwrap_or_default();
+        let custom_headers = server_config
+            .as_ref()
+            .map(|c| c.headers.clone())
+            .unwrap_or_default();
 
         Self {
             transport,
@@ -159,7 +194,7 @@ impl McpClient {
             secrets,
             user_id: user_id.into(),
             server_config,
-            custom_headers: HashMap::new(),
+            custom_headers,
         }
     }
 
@@ -607,6 +642,33 @@ mod tests {
         let cloned = client.clone();
         let cache = cloned.tools_cache.read().await;
         assert!(cache.is_none());
+    }
+
+    #[test]
+    fn test_new_with_config_carries_custom_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "secret".to_string());
+        headers.insert("X-Custom".to_string(), "value".to_string());
+
+        let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
+        let client = McpClient::new_with_config(config.clone());
+
+        assert_eq!(client.server_name(), "test");
+        assert_eq!(client.server_url(), "http://localhost:8080");
+        assert_eq!(client.custom_headers.len(), 2);
+        assert_eq!(client.custom_headers.get("X-API-Key").unwrap(), "secret");
+        assert!(client.server_config.is_some());
+    }
+
+    #[test]
+    fn test_new_with_config_no_headers() {
+        let config = McpServerConfig::new("bare", "http://localhost:9090");
+        let client = McpClient::new_with_config(config);
+
+        assert_eq!(client.server_name(), "bare");
+        assert!(client.custom_headers.is_empty());
+        assert!(client.secrets.is_none());
+        assert!(client.session_manager.is_none());
     }
 
     #[test]

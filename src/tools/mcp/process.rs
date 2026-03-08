@@ -101,7 +101,7 @@ impl McpProcessManager {
 
     /// Attempt to restart a crashed transport with exponential backoff.
     ///
-    /// Tries up to 5 times with delays of 1s, 2s, 4s, 8s, 16s.
+    /// Tries up to 5 times with delays of 1s, 2s, 4s, 8s, 16s (total: 31s max wait).
     pub async fn try_restart(&self, name: &str) -> Result<Arc<StdioMcpTransport>, ToolError> {
         let config = self
             .configs

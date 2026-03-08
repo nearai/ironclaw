@@ -265,7 +265,7 @@ fn is_dangerous_ip(ip: IpAddr) -> bool {
 }
 
 /// Validate that a URL is safe for server-side requests (SSRF protection).
-fn validate_url_safe(url: &str) -> Result<(), AuthError> {
+async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid URL: {}", e)))?;
 
@@ -282,7 +282,7 @@ fn validate_url_safe(url: &str) -> Result<(), AuthError> {
         .host_str()
         .ok_or_else(|| AuthError::DiscoveryFailed("URL has no host".to_string()))?;
 
-    // For IP literals, parse directly and check
+    // For IP literals, parse directly and check.
     if let Ok(ip) = host.parse::<IpAddr>()
         && is_dangerous_ip(ip)
     {
@@ -291,8 +291,33 @@ fn validate_url_safe(url: &str) -> Result<(), AuthError> {
             host
         )));
     }
-    // Note: DNS resolution happens at request time, we do best-effort here
-    // DNS-based SSRF requires runtime checks; this catches literal IPs
+
+    // For hostnames, resolve DNS and check each resolved address.
+    // This prevents DNS-based SSRF where a hostname resolves to an internal IP
+    // (e.g., 169.254.169.254 for cloud metadata endpoints).
+    if host.parse::<IpAddr>().is_err() {
+        let addr = format!("{}:{}", host, parsed.port_or_known_default().unwrap_or(443));
+        match tokio::net::lookup_host(&addr).await {
+            Ok(addrs) => {
+                for socket_addr in addrs {
+                    if is_dangerous_ip(socket_addr.ip()) {
+                        return Err(AuthError::DiscoveryFailed(format!(
+                            "URL hostname '{}' resolves to restricted IP address: {}",
+                            host,
+                            socket_addr.ip()
+                        )));
+                    }
+                }
+            }
+            Err(e) => {
+                // DNS failure = fail closed (do not allow the request)
+                return Err(AuthError::DiscoveryFailed(format!(
+                    "DNS resolution failed for '{}': {}",
+                    host, e
+                )));
+            }
+        }
+    }
 
     Ok(())
 }
@@ -332,7 +357,7 @@ fn parse_resource_metadata_url(www_authenticate: &str) -> Option<String> {
 
 /// Fetch protected resource metadata from a URL.
 async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata, AuthError> {
-    validate_url_safe(url)?;
+    validate_url_safe(url).await?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -361,7 +386,7 @@ async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata,
 
 /// Try to discover OAuth metadata via 401 challenge response.
 async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadata, AuthError> {
-    validate_url_safe(server_url)?;
+    validate_url_safe(server_url).await?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -422,7 +447,7 @@ async fn try_discover_from_auth_servers(
 pub async fn discover_protected_resource(
     server_url: &str,
 ) -> Result<ProtectedResourceMetadata, AuthError> {
-    validate_url_safe(server_url)?;
+    validate_url_safe(server_url).await?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -452,7 +477,7 @@ pub async fn discover_protected_resource(
 pub async fn discover_authorization_server(
     auth_server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
-    validate_url_safe(auth_server_url)?;
+    validate_url_safe(auth_server_url).await?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -545,7 +570,7 @@ pub async fn register_client(
     registration_endpoint: &str,
     redirect_uri: &str,
 ) -> Result<ClientRegistrationResponse, AuthError> {
-    validate_url_safe(registration_endpoint)?;
+    validate_url_safe(registration_endpoint).await?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -797,7 +822,7 @@ pub async fn exchange_code_for_token(
     pkce: Option<&PkceChallenge>,
     resource: Option<&str>,
 ) -> Result<AccessToken, AuthError> {
-    validate_url_safe(token_url)?;
+    validate_url_safe(token_url).await?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -988,7 +1013,7 @@ pub async fn refresh_access_token(
         auth_meta.token_endpoint
     };
 
-    validate_url_safe(&token_url)?;
+    validate_url_safe(&token_url).await?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -1552,33 +1577,37 @@ mod tests {
         assert!(is_dangerous_ip("::1".parse().unwrap()));
     }
 
-    #[test]
-    fn test_validate_url_safe_https() {
-        assert!(validate_url_safe("https://example.com/path").is_ok());
+    #[tokio::test]
+    async fn test_validate_url_safe_https() {
+        assert!(validate_url_safe("https://example.com/path").await.is_ok());
     }
 
-    #[test]
-    fn test_validate_url_safe_http() {
+    #[tokio::test]
+    async fn test_validate_url_safe_http() {
         // HTTP is allowed (for localhost dev scenarios)
-        assert!(validate_url_safe("http://example.com/path").is_ok());
+        assert!(validate_url_safe("http://example.com/path").await.is_ok());
     }
 
-    #[test]
-    fn test_validate_url_safe_bad_scheme() {
-        assert!(validate_url_safe("ftp://example.com/path").is_err());
-        assert!(validate_url_safe("file:///etc/passwd").is_err());
+    #[tokio::test]
+    async fn test_validate_url_safe_bad_scheme() {
+        assert!(validate_url_safe("ftp://example.com/path").await.is_err());
+        assert!(validate_url_safe("file:///etc/passwd").await.is_err());
     }
 
-    #[test]
-    fn test_validate_url_safe_private_ip() {
-        assert!(validate_url_safe("http://127.0.0.1/path").is_err());
-        assert!(validate_url_safe("http://10.0.0.1/path").is_err());
-        assert!(validate_url_safe("http://169.254.169.254/latest/meta-data").is_err());
+    #[tokio::test]
+    async fn test_validate_url_safe_private_ip() {
+        assert!(validate_url_safe("http://127.0.0.1/path").await.is_err());
+        assert!(validate_url_safe("http://10.0.0.1/path").await.is_err());
+        assert!(
+            validate_url_safe("http://169.254.169.254/latest/meta-data")
+                .await
+                .is_err()
+        );
     }
 
-    #[test]
-    fn test_validate_url_safe_public_ip() {
-        assert!(validate_url_safe("https://8.8.8.8/dns").is_ok());
+    #[tokio::test]
+    async fn test_validate_url_safe_public_ip() {
+        assert!(validate_url_safe("https://8.8.8.8/dns").await.is_ok());
     }
 
     // --- New tests for parse_resource_metadata_url ---

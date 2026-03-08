@@ -32,6 +32,10 @@ impl HttpMcpTransport {
         Self {
             server_url: server_url.into(),
             server_name: server_name.into(),
+            // reqwest::Client::builder().build() only fails if the TLS backend
+            // cannot initialize, which does not happen with the default rustls
+            // feature set. Panic is acceptable here (same as reqwest's own
+            // `Client::new()`).
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -48,21 +52,21 @@ impl HttpMcpTransport {
     }
 
     /// Set custom headers that will be sent with every request.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_custom_headers(mut self, headers: HashMap<String, String>) -> Self {
         self.custom_headers = headers;
         self
     }
 
     /// Get the server URL.
-    #[allow(dead_code)]
-    pub fn server_url(&self) -> &str {
+    #[cfg(test)]
+    pub(crate) fn server_url(&self) -> &str {
         &self.server_url
     }
 
     /// Get the session manager, if one is configured.
-    #[allow(dead_code)]
-    pub fn session_manager(&self) -> Option<&Arc<McpSessionManager>> {
+    #[cfg(test)]
+    pub(crate) fn session_manager(&self) -> Option<&Arc<McpSessionManager>> {
         self.session_manager.as_ref()
     }
 }
@@ -157,13 +161,15 @@ impl McpTransport for HttpMcpTransport {
 }
 
 impl HttpMcpTransport {
-    /// Parse a Server-Sent Events response, returning the last valid JSON
+    /// Parse a Server-Sent Events response, returning the first valid JSON-RPC
     /// `data:` line as an [`McpResponse`].
     async fn parse_sse_response(
         &self,
         response: reqwest::Response,
     ) -> Result<McpResponse, ToolError> {
         use futures::StreamExt;
+
+        const MAX_SSE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
@@ -178,14 +184,41 @@ impl HttpMcpTransport {
 
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-            // Scan for complete SSE data lines.
-            for line in buffer.lines() {
-                if let Some(json_str) = line.strip_prefix("data: ")
-                    && let Ok(response) = serde_json::from_str::<McpResponse>(json_str)
-                {
-                    return Ok(response);
+            if buffer.len() > MAX_SSE_BUFFER {
+                return Err(ToolError::ExternalService(format!(
+                    "[{}] SSE response exceeded {} byte limit",
+                    self.server_name, MAX_SSE_BUFFER
+                )));
+            }
+
+            // Process only complete lines (terminated by \n). The last
+            // element of split('\n') may be an incomplete line; keep it
+            // in the buffer for the next chunk.
+            let mut remaining_start = 0;
+            let bytes = buffer.as_bytes();
+            for (i, &b) in bytes.iter().enumerate() {
+                if b == b'\n' {
+                    let line = &buffer[remaining_start..i];
+                    remaining_start = i + 1;
+
+                    if let Some(json_str) = line.strip_prefix("data: ")
+                        && let Ok(response) = serde_json::from_str::<McpResponse>(json_str)
+                    {
+                        return Ok(response);
+                    }
                 }
             }
+            // Keep only the unprocessed trailing fragment.
+            if remaining_start > 0 {
+                buffer = buffer[remaining_start..].to_string();
+            }
+        }
+
+        // Process any remaining data without a trailing newline.
+        if let Some(json_str) = buffer.strip_prefix("data: ")
+            && let Ok(response) = serde_json::from_str::<McpResponse>(json_str.trim())
+        {
+            return Ok(response);
         }
 
         Err(ToolError::ExternalService(format!(
@@ -214,9 +247,9 @@ pub(crate) fn sanitize_error_body(body: &str) -> String {
         .filter(|&c| c >= '\x20' || c == '\n' || c == '\t')
         .collect();
 
-    // Truncate to 500 characters.
-    if cleaned.len() > 500 {
-        cleaned[..500].to_string()
+    // Truncate to 500 characters (char-based to avoid splitting multi-byte).
+    if cleaned.chars().count() > 500 {
+        cleaned.chars().take(500).collect()
     } else {
         cleaned
     }
@@ -255,6 +288,18 @@ mod tests {
         let body = "a".repeat(600);
         let result = sanitize_error_body(&body);
         assert_eq!(result.len(), 500);
+    }
+
+    #[test]
+    fn test_sanitize_error_body_truncates_multibyte_safely() {
+        // Each emoji is 4 bytes. 200 emojis = 800 bytes but 200 chars.
+        // Pad to >500 chars with multi-byte content.
+        let body = "é".repeat(600); // 'é' is 2 bytes
+        let result = sanitize_error_body(&body);
+        assert_eq!(result.chars().count(), 500);
+        // Ensure the result is valid UTF-8 (String guarantees this, but verify
+        // we didn't accidentally slice mid-character).
+        assert!(result.is_char_boundary(result.len()));
     }
 
     #[test]
