@@ -18,7 +18,7 @@
 //! - `Esc` - Interrupt current operation
 
 use std::borrow::Cow;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -411,10 +411,15 @@ impl Channel for ReplChannel {
                         }
                     }
                     Err(ReadlineError::Eof) => {
-                        // Ctrl+D: send /quit so the agent loop runs graceful shutdown
-                        let msg =
-                            IncomingMessage::new("repl", "default", "/quit").with_timezone(&sys_tz);
-                        let _ = tx.blocking_send(msg);
+                        // Ctrl+D in interactive mode: graceful shutdown.
+                        // In daemon mode (stdin = /dev/null, no TTY), EOF arrives
+                        // immediately — just drop the REPL thread silently so other
+                        // channels (gateway, telegram, …) keep running.
+                        if std::io::stdin().is_terminal() {
+                            let msg = IncomingMessage::new("repl", "default", "/quit")
+                                .with_timezone(&sys_tz);
+                            let _ = tx.blocking_send(msg);
+                        }
                         break;
                     }
                     Err(e) => {
