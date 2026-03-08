@@ -254,8 +254,17 @@ fn is_dangerous_ip(ip: IpAddr) -> bool {
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGNAT 100.64/10
         }
         IpAddr::V6(v6) => {
+            let segs = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
+                // Link-local (fe80::/10)
+                || (segs[0] & 0xffc0) == 0xfe80
+                // Site-local / deprecated (fec0::/10)
+                || (segs[0] & 0xffc0) == 0xfec0
+                // Unique local (fc00::/7)
+                || (segs[0] & 0xfe00) == 0xfc00
+                // Documentation (2001:db8::/32)
+                || (segs[0] == 0x2001 && segs[1] == 0x0db8)
                 // Check for IPv4-mapped IPv6 (::ffff:x.x.x.x)
                 || v6
                     .to_ipv4_mapped()
@@ -269,13 +278,27 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid URL: {}", e)))?;
 
-    // Must be HTTPS (or HTTP for localhost in dev)
+    // Must be HTTPS. HTTP is only allowed for localhost/loopback (dev scenarios).
     let scheme = parsed.scheme();
     if scheme != "https" && scheme != "http" {
         return Err(AuthError::DiscoveryFailed(format!(
             "Unsupported scheme: {}",
             scheme
         )));
+    }
+    if scheme == "http" {
+        let host = parsed.host_str().unwrap_or("");
+        let is_localhost =
+            host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]";
+        if !is_localhost {
+            return Err(AuthError::DiscoveryFailed(format!(
+                "HTTP is only allowed for localhost; use HTTPS for '{}'",
+                host
+            )));
+        }
+        // Localhost HTTP is allowed for dev — skip SSRF checks since we've
+        // already validated the host is localhost/loopback.
+        return Ok(());
     }
 
     let host = parsed
@@ -690,6 +713,12 @@ pub async fn authorize_mcp_server(
 
     // Compute canonical resource URI for RFC 8707
     let resource = canonical_resource_uri(&server_config.url);
+
+    // Validate the discovered authorization URL to prevent a malicious MCP server
+    // from redirecting the user to a phishing page or non-HTTPS endpoint.
+    validate_url_safe(&authorization_url)
+        .await
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Unsafe authorization endpoint: {}", e)))?;
 
     // Build authorization URL
     let auth_url = build_authorization_url(
@@ -1583,9 +1612,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_url_safe_http() {
-        // HTTP is allowed (for localhost dev scenarios)
-        assert!(validate_url_safe("http://example.com/path").await.is_ok());
+    async fn test_validate_url_safe_http_localhost_allowed() {
+        // HTTP is only allowed for localhost dev scenarios
+        assert!(validate_url_safe("http://localhost/path").await.is_ok());
+        assert!(
+            validate_url_safe("http://localhost:8080/path")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_url_safe_http_non_localhost_rejected() {
+        // HTTP to non-localhost hosts must be rejected (plaintext credential risk)
+        assert!(validate_url_safe("http://example.com/path").await.is_err());
     }
 
     #[tokio::test]
@@ -1596,13 +1636,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_url_safe_private_ip() {
-        assert!(validate_url_safe("http://127.0.0.1/path").await.is_err());
-        assert!(validate_url_safe("http://10.0.0.1/path").await.is_err());
+        // 127.0.0.1 over HTTP is allowed (localhost dev scenario)
+        assert!(validate_url_safe("http://127.0.0.1/path").await.is_ok());
+        // Private/link-local IPs over HTTPS are blocked (SSRF protection)
+        assert!(validate_url_safe("https://10.0.0.1/path").await.is_err());
         assert!(
-            validate_url_safe("http://169.254.169.254/latest/meta-data")
+            validate_url_safe("https://169.254.169.254/latest/meta-data")
                 .await
                 .is_err()
         );
+        // Private IPs over HTTP (non-localhost) are blocked
+        assert!(validate_url_safe("http://10.0.0.1/path").await.is_err());
     }
 
     #[tokio::test]

@@ -723,6 +723,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     // ── Shutdown ────────────────────────────────────────────────────────
 
+    // Shut down all stdio MCP server child processes.
+    components.mcp_process_manager.shutdown_all().await;
+
     // Flush LLM trace recording if enabled
     if let Some(ref recorder) = components.recording_handle
         && let Err(e) = recorder.flush().await

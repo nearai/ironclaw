@@ -116,8 +116,10 @@ impl McpProcessManager {
                 ))
             })?;
 
-        // Remove old transport
-        self.transports.write().await.remove(name);
+        // Shut down and remove old transport to avoid orphaning a wedged process.
+        if let Some(old_transport) = self.transports.write().await.remove(name) {
+            let _ = old_transport.shutdown().await;
+        }
 
         let max_retries = 5;
         let mut last_err = None;

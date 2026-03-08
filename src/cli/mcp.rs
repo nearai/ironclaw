@@ -348,9 +348,9 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
                         println!("      Args: {}", args.join(", "));
                     }
                     if !env.is_empty() {
-                        let env_pairs: Vec<String> =
-                            env.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-                        println!("      Env: {}", env_pairs.join(", "));
+                        // Only print env var names, not values (may contain secrets).
+                        let env_keys: Vec<&str> = env.keys().map(|k| k.as_str()).collect();
+                        println!("      Env: {}", env_keys.join(", "));
                     }
                 }
                 EffectiveTransport::Unix { socket_path } => {

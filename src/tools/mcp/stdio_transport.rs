@@ -143,7 +143,9 @@ impl McpTransport for StdioMcpTransport {
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => {
-                // Sender was dropped (reader task ended).
+                // Sender was dropped (reader task ended). Clean up pending entry.
+                let mut pending = self.pending.lock().await;
+                pending.remove(&request.id);
                 Err(ToolError::ExternalService(format!(
                     "[{}] MCP server closed connection before responding to request {}",
                     self.server_name, request.id
@@ -174,6 +176,13 @@ impl McpTransport for StdioMcpTransport {
         }
         if let Some(handle) = self.stderr_handle.lock().await.take() {
             handle.abort();
+        }
+
+        // Drain pending requests so waiters wake immediately instead of
+        // hanging until their 30s timeout.
+        {
+            let mut pending = self.pending.lock().await;
+            pending.clear(); // Dropping senders wakes receivers with Err
         }
 
         tracing::debug!("[{}] Stdio transport shut down", self.server_name);

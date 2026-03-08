@@ -116,7 +116,9 @@ impl McpTransport for UnixMcpTransport {
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => {
-                // Sender was dropped (reader task ended).
+                // Sender was dropped (reader task ended). Clean up pending entry.
+                let mut pending = self.pending.lock().await;
+                pending.remove(&request.id);
                 Err(ToolError::ExternalService(format!(
                     "[{}] MCP server closed connection before responding to request {}",
                     self.server_name, request.id
@@ -140,10 +142,12 @@ impl McpTransport for UnixMcpTransport {
             handle.abort();
         }
 
-        // Drop the writer by replacing it with a new connection attempt that
-        // we immediately discard. Since we hold an Arc<Mutex<WriteHalf>>, the
-        // actual drop happens when the last reference is released. Aborting the
-        // reader is sufficient to stop the transport.
+        // Drain pending requests so waiters wake immediately instead of
+        // hanging until their 30s timeout.
+        {
+            let mut pending = self.pending.lock().await;
+            pending.clear(); // Dropping senders wakes receivers with Err
+        }
 
         tracing::debug!(
             "[{}] Unix transport shut down (socket: {})",
@@ -166,9 +170,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_nonexistent_socket_fails() {
-        let result =
-            UnixMcpTransport::connect("test", "/tmp/ironclaw-test-nonexistent-socket-12345.sock")
-                .await;
+        let tmp_dir = tempfile::tempdir().expect("create temp dir");
+        let socket_path = tmp_dir.path().join("nonexistent.sock");
+
+        let result = UnixMcpTransport::connect("test", &socket_path).await;
 
         let err = result.err().expect("should be an error").to_string();
         assert!(

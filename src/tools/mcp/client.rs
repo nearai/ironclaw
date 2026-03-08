@@ -109,7 +109,7 @@ impl McpClient {
     /// Use this when you have an `McpServerConfig` with custom headers but no OAuth.
     /// The config must use HTTP transport (the default); for stdio/UDS use `new_with_transport`.
     pub fn new_with_config(config: McpServerConfig) -> Self {
-        debug_assert!(
+        assert!(
             matches!(
                 config.effective_transport(),
                 crate::tools::mcp::config::EffectiveTransport::Http
@@ -149,6 +149,8 @@ impl McpClient {
                 .with_session_manager(session_manager.clone()),
         );
 
+        let custom_headers = config.headers.clone();
+
         Self {
             transport,
             server_url: config.url.clone(),
@@ -159,7 +161,7 @@ impl McpClient {
             secrets: Some(secrets),
             user_id: user_id.into(),
             server_config: Some(config),
-            custom_headers: HashMap::new(),
+            custom_headers,
         }
     }
 

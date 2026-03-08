@@ -84,11 +84,14 @@ pub fn spawn_jsonrpc_reader<R: AsyncBufRead + Unpin + Send + 'static>(
             let response = match serde_json::from_str::<McpResponse>(&line) {
                 Ok(resp) => resp,
                 Err(e) => {
+                    // Truncate logged line to avoid leaking sensitive data in large payloads.
+                    let preview: String = line.chars().take(200).collect();
                     tracing::debug!(
-                        "[{}] Failed to parse JSON-RPC response: {} — line: {}",
+                        "[{}] Failed to parse JSON-RPC response: {} — line: {}{}",
                         server_name,
                         e,
-                        line
+                        preview,
+                        if line.len() > 200 { "…" } else { "" }
                     );
                     continue;
                 }
