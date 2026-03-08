@@ -6,6 +6,7 @@
 //! 3. Validates the configuration
 //! 4. Saves secrets to the database
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
@@ -736,6 +737,8 @@ pub async fn setup_wasm_channel(
     println!("{} Setup:", channel_name);
     println!();
 
+    let mut saved_secrets: HashMap<String, String> = HashMap::new();
+
     for secret_config in &setup.required_secrets {
         // Check if this secret already exists
         if secrets.secret_exists(&secret_config.name).await {
@@ -802,15 +805,29 @@ pub async fn setup_wasm_channel(
         // Save the secret
         secrets.save_secret(&secret_config.name, &value).await?;
         print_success(&format!("{} saved to database", secret_config.name));
+        saved_secrets.insert(secret_config.name.clone(), value.expose_secret().to_string());
     }
 
-    // TODO: Substitute secrets into the validation URL and make a
-    // GET request to verify the configured credentials actually work.
     if let Some(ref validation_endpoint) = setup.validation_endpoint {
-        print_info(&format!(
-            "Validation endpoint configured: {} (validation not yet implemented)",
-            validation_endpoint
-        ));
+        // Fill in any secrets that were not collected in this run.
+        for secret_config in &setup.required_secrets {
+            if !saved_secrets.contains_key(&secret_config.name)
+                && secrets.secret_exists(&secret_config.name).await
+            {
+                if let Ok(value) = secrets.get_secret(&secret_config.name).await {
+                    saved_secrets.insert(
+                        secret_config.name.clone(),
+                        value.expose_secret().to_string(),
+                    );
+                }
+            }
+        }
+
+        print_info("Validating credentials against configured endpoint...");
+        match validate_channel_credentials(validation_endpoint, &saved_secrets).await {
+            Ok(()) => print_success("Credential validation succeeded"),
+            Err(e) => print_warning(&format!("Credential validation failed: {}", e)),
+        }
     }
 
     print_success(&format!("{} channel configured", channel_name));
@@ -819,6 +836,158 @@ pub async fn setup_wasm_channel(
         enabled: true,
         channel_name: channel_name.to_string(),
     })
+}
+
+async fn validate_channel_credentials(
+    validation_endpoint: &str,
+    secrets: &HashMap<String, String>,
+) -> Result<(), String> {
+    let resolved = substitute_validation_placeholders(validation_endpoint, secrets);
+    let missing = find_unresolved_placeholders(&resolved);
+    if !missing.is_empty() {
+        return Err(format!(
+            "missing secrets for placeholders: {}",
+            missing.join(", ")
+        ));
+    }
+
+    ensure_public_http_url(&resolved)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let response = client
+        .get(&resolved)
+        .send()
+        .await
+        .map_err(|e| redact_secrets(&format!("Validation request failed: {e}"), secrets))?;
+
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let truncated = truncate_for_display(&redact_secrets(&body, secrets), 200);
+    Err(format!("Validation failed: HTTP {status} ({truncated})"))
+}
+
+fn substitute_validation_placeholders(
+    template: &str,
+    secrets: &HashMap<String, String>,
+) -> String {
+    let mut result = template.to_string();
+    for (name, value) in secrets {
+        if value.is_empty() {
+            continue;
+        }
+        let placeholder = format!("{{{}}}", name);
+        if result.contains(&placeholder) {
+            result = result.replace(&placeholder, value);
+        }
+    }
+    result
+}
+
+fn find_unresolved_placeholders(value: &str) -> Vec<String> {
+    let re = regex::Regex::new(r"\{([A-Za-z0-9_-]+)\}").unwrap();
+    re.captures_iter(value)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+        .collect()
+}
+
+fn ensure_public_http_url(value: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(value).map_err(|e| format!("Invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("URL contains userinfo which is not allowed".to_string());
+    }
+
+    let host = parsed
+        .host_str()
+        .map(|h| {
+            h.strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .unwrap_or(h)
+        })
+        .ok_or_else(|| "URL missing host".to_string())?;
+
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return Err("URL resolves to localhost".to_string());
+    }
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return if is_private_ip(ip) {
+            Err(format!("URL resolves to private IP {ip}"))
+        } else {
+            Ok(())
+        };
+    }
+
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = format!("{}:0", host)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for {host}: {e}"))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(format!("DNS resolution returned no addresses for {host}"));
+    }
+
+    for addr in &addrs {
+        if is_private_ip(addr.ip()) {
+            return Err(format!(
+                "DNS rebinding detected: {host} resolved to private IP {}",
+                addr.ip()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xFE00) == 0xFC00
+                || (v6.segments()[0] & 0xFFC0) == 0xFE80
+        }
+    }
+}
+
+fn truncate_for_display(value: &str, max: usize) -> String {
+    if value.len() <= max {
+        return value.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &value[..end])
+}
+
+fn redact_secrets(value: &str, secrets: &HashMap<String, String>) -> String {
+    let mut result = value.to_string();
+    for secret in secrets.values() {
+        if secret.is_empty() {
+            continue;
+        }
+        result = result.replace(secret, "[redacted]");
+    }
+    result
 }
 
 /// Validate a Cloudflare tunnel token by briefly running `cloudflared`.
