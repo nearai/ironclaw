@@ -105,42 +105,52 @@ impl Tool for MessageTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
         let content = require_str(&params, "content")?;
 
-        // Get channel: use param or fall back to default
+        // Get channel: use param → conversation default → job metadata
         let channel = if let Some(c) = params.get("channel").and_then(|v| v.as_str()) {
             c.to_string()
+        } else if let Some(c) = self
+            .default_channel
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            c
+        } else if let Some(c) = ctx
+            .metadata
+            .get("notify_channel")
+            .and_then(|v| v.as_str())
+        {
+            c.to_string()
         } else {
-            self.default_channel
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-                .ok_or_else(|| {
-                    ToolError::ExecutionFailed(
-                        "No channel specified and no active conversation. Provide channel parameter."
-                            .to_string(),
-                    )
-                })?
+            return Err(ToolError::ExecutionFailed(
+                "No channel specified and no active conversation. Provide channel parameter."
+                    .to_string(),
+            ));
         };
 
-        // Get target: use param or fall back to default
+        // Get target: use param → conversation default → job metadata
         let target = if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
             t.to_string()
+        } else if let Some(t) = self
+            .default_target
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            t
+        } else if let Some(t) = ctx.metadata.get("notify_user").and_then(|v| v.as_str()) {
+            t.to_string()
         } else {
-            self.default_target
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-                .ok_or_else(|| {
-                    ToolError::ExecutionFailed(
-                        "No target specified and no active conversation. Provide target parameter."
-                            .to_string(),
-                    )
-                })?
+            return Err(ToolError::ExecutionFailed(
+                "No target specified and no active conversation. Provide target parameter."
+                    .to_string(),
+            ));
         };
 
         let attachments: Vec<String> = match params.get("attachments") {
@@ -575,5 +585,55 @@ mod tests {
             tool.requires_approval(&serde_json::json!({"content": "hi", "channel": "telegram"})),
             ApprovalRequirement::Never,
         );
+    }
+
+    #[tokio::test]
+    async fn message_tool_falls_back_to_job_metadata() {
+        // Regression: when no conversation context is set (e.g. routine full-job),
+        // the message tool should fall back to notify_channel/notify_user from
+        // JobContext metadata instead of returning "No target specified".
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+
+        let mut ctx = crate::context::JobContext::new("routine-job", "price alert");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "telegram",
+            "notify_user": "123456789",
+        });
+
+        // No set_context called — simulates a routine full-job worker
+        let result = tool
+            .execute(serde_json::json!({"content": "NEAR price is $5"}), &ctx)
+            .await;
+
+        // Should fail at channel broadcast (no real channel), NOT at
+        // "No target specified and no active conversation"
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            !err.contains("No target specified"),
+            "Should not get 'No target specified' when metadata has notify_user, got: {}",
+            err
+        );
+        assert!(
+            !err.contains("No channel specified"),
+            "Should not get 'No channel specified' when metadata has notify_channel, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn message_tool_no_metadata_still_errors() {
+        // When neither conversation context nor metadata is set, should still
+        // return a clear error.
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        let ctx = crate::context::JobContext::new("orphan-job", "no notify config");
+
+        let result = tool
+            .execute(serde_json::json!({"content": "hello"}), &ctx)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("No channel specified") || err.contains("No target specified"));
     }
 }
