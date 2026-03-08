@@ -32,6 +32,13 @@ pub struct McpServerConfig {
     /// Optional description for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Custom HTTP headers to send with every request to this server.
+    ///
+    /// Useful for MCP servers that require non-OAuth authentication
+    /// (e.g., API keys via `X-API-Key` header).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
 }
 
 fn default_true() -> bool {
@@ -47,7 +54,14 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            headers: HashMap::new(),
         }
+    }
+
+    /// Set custom HTTP headers for this server.
+    pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
+        self.headers = headers;
+        self
     }
 
     /// Set OAuth configuration.
@@ -592,5 +606,80 @@ mod tests {
         // they wouldn't trigger HTTPS auth detection
         let config = McpServerConfig::new("bad", "http://mcp.example.com");
         assert!(!config.requires_auth());
+    }
+
+    #[test]
+    fn test_custom_headers_default_empty() {
+        let config = McpServerConfig::new("test", "http://localhost:8080");
+        assert!(config.headers.is_empty());
+    }
+
+    #[test]
+    fn test_custom_headers_with_builder() {
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "secret123".to_string());
+        headers.insert("X-Custom".to_string(), "value".to_string());
+
+        let config = McpServerConfig::new("browser-use", "https://mcp.browser-use.com")
+            .with_headers(headers.clone());
+
+        assert_eq!(config.headers.len(), 2);
+        assert_eq!(config.headers.get("X-API-Key").unwrap(), "secret123");
+    }
+
+    #[test]
+    fn test_custom_headers_serde_roundtrip() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer tok_123".to_string());
+
+        let config =
+            McpServerConfig::new("test-serde", "http://localhost:3000").with_headers(headers);
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: McpServerConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.headers.len(), 1);
+        assert_eq!(
+            deserialized.headers.get("Authorization").unwrap(),
+            "Bearer tok_123"
+        );
+    }
+
+    #[test]
+    fn test_custom_headers_absent_in_json_defaults_empty() {
+        let json = serde_json::json!({
+            "name": "legacy",
+            "url": "http://localhost:8080"
+        });
+        let config: McpServerConfig = serde_json::from_value(json).unwrap();
+        assert!(config.headers.is_empty());
+    }
+
+    #[test]
+    fn test_custom_headers_skipped_when_empty_in_serialization() {
+        let config = McpServerConfig::new("minimal", "http://localhost:8080");
+        let json = serde_json::to_value(&config).unwrap();
+        // Empty headers map should not appear in serialized output
+        assert!(json.get("headers").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_custom_headers_persist_to_disk() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-headers-test.json");
+
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "key123".to_string());
+
+        let mut config = McpServersFile::default();
+        config.upsert(
+            McpServerConfig::new("headered", "http://localhost:9090").with_headers(headers),
+        );
+
+        save_mcp_servers_to(&config, &path).await.unwrap();
+        let loaded = load_mcp_servers_from(&path).await.unwrap();
+
+        let server = loaded.get("headered").unwrap();
+        assert_eq!(server.headers.get("X-API-Key").unwrap(), "key123");
     }
 }

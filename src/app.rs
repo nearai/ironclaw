@@ -542,7 +542,7 @@ impl AppBuilder {
                                             server, mcp_sm, secrets, "default",
                                         )
                                     } else {
-                                        McpClient::new_with_name(&server_name, &server.url)
+                                        McpClient::new_with_config(server.clone())
                                     };
 
                                     match client.list_tools().await {

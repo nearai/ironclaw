@@ -47,6 +47,10 @@ pub enum McpCommand {
         /// Server description
         #[arg(long)]
         description: Option<String>,
+
+        /// Custom HTTP headers (format: "Key:Value", can be repeated)
+        #[arg(long = "header", short = 'H')]
+        headers: Vec<String>,
     },
 
     /// Remove an MCP server
@@ -108,6 +112,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
             token_url,
             scopes,
             description,
+            headers,
         } => {
             add_server(
                 name,
@@ -117,6 +122,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
                 token_url,
                 scopes,
                 description,
+                headers,
             )
             .await
         }
@@ -133,6 +139,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
 }
 
 /// Add a new MCP server.
+#[allow(clippy::too_many_arguments)]
 async fn add_server(
     name: String,
     url: String,
@@ -141,11 +148,24 @@ async fn add_server(
     token_url: Option<String>,
     scopes: Option<String>,
     description: Option<String>,
+    headers: Vec<String>,
 ) -> anyhow::Result<()> {
     let mut config = McpServerConfig::new(&name, &url);
 
     if let Some(desc) = description {
         config = config.with_description(desc);
+    }
+
+    // Parse custom headers (format: "Key:Value")
+    if !headers.is_empty() {
+        let mut header_map = std::collections::HashMap::new();
+        for h in &headers {
+            let (key, value) = h.split_once(':').ok_or_else(|| {
+                anyhow::anyhow!("Invalid header format '{}'. Expected 'Key:Value'.", h)
+            })?;
+            header_map.insert(key.trim().to_string(), value.trim().to_string());
+        }
+        config = config.with_headers(header_map);
     }
 
     // Track if auth is required
@@ -241,6 +261,17 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
             println!("      URL: {}", server.url);
             if let Some(ref desc) = server.description {
                 println!("      Description: {}", desc);
+            }
+            if !server.headers.is_empty() {
+                println!(
+                    "      Custom headers: {}",
+                    server
+                        .headers
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
             if let Some(ref oauth) = server.oauth {
                 println!("      OAuth Client ID: {}", oauth.client_id);
@@ -374,7 +405,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         return Ok(());
     } else {
         // No OAuth and no tokens - try unauthenticated
-        McpClient::new_with_name(&server.name, &server.url)
+        McpClient::new_with_config(server.clone())
     };
 
     // Test connection

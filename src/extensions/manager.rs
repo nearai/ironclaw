@@ -2508,7 +2508,7 @@ impl ExtensionManager {
                 &self.user_id,
             )
         } else {
-            McpClient::new_with_name(&server.name, &server.url)
+            McpClient::new_with_config(server.clone())
         };
 
         // Try to list and create tools

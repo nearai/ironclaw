@@ -3,6 +3,7 @@
 //! Supports both local (unauthenticated) and hosted (OAuth-authenticated) servers.
 //! Uses the Streamable HTTP transport with session management.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -52,6 +53,9 @@ pub struct McpClient {
 
     /// Server configuration (for token secret name lookup).
     server_config: Option<McpServerConfig>,
+
+    /// Custom HTTP headers injected into every request.
+    custom_headers: HashMap<String, String>,
 }
 
 impl McpClient {
@@ -75,6 +79,7 @@ impl McpClient {
             secrets: None,
             user_id: "default".to_string(),
             server_config: None,
+            custom_headers: HashMap::new(),
         }
     }
 
@@ -95,6 +100,28 @@ impl McpClient {
             secrets: None,
             user_id: "default".to_string(),
             server_config: None,
+            custom_headers: HashMap::new(),
+        }
+    }
+
+    /// Create a new simple MCP client from a server configuration (no authentication).
+    ///
+    /// Use this when you have an `McpServerConfig` with custom headers but no OAuth.
+    pub fn new_with_config(config: McpServerConfig) -> Self {
+        Self {
+            server_name: config.name.clone(),
+            server_url: config.url.clone(),
+            http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("Failed to create HTTP client"),
+            next_id: AtomicU64::new(1),
+            tools_cache: RwLock::new(None),
+            session_manager: None,
+            secrets: None,
+            user_id: "default".to_string(),
+            custom_headers: config.headers.clone(),
+            server_config: Some(config),
         }
     }
 
@@ -119,6 +146,7 @@ impl McpClient {
             session_manager: Some(session_manager),
             secrets: Some(secrets),
             user_id: user_id.into(),
+            custom_headers: config.headers.clone(),
             server_config: Some(config),
         }
     }
@@ -178,7 +206,12 @@ impl McpClient {
                 .header("Content-Type", "application/json")
                 .json(&request);
 
-            // Add Authorization header if we have a token
+            // Add custom headers from config
+            for (key, value) in &self.custom_headers {
+                req_builder = req_builder.header(key, value);
+            }
+
+            // Add Authorization header if we have a token (overrides custom Authorization)
             if let Some(token) = self.get_access_token().await? {
                 req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
             }
@@ -474,6 +507,7 @@ impl Clone for McpClient {
             secrets: self.secrets.clone(),
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
+            custom_headers: self.custom_headers.clone(),
         }
     }
 }
@@ -690,6 +724,26 @@ mod tests {
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(id3, 3);
+    }
+
+    #[test]
+    fn test_custom_headers_from_config() {
+        use std::collections::HashMap;
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "secret".to_string());
+        headers.insert("X-Custom".to_string(), "value".to_string());
+
+        let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
+
+        let client = McpClient::new_with_config(config);
+        assert_eq!(client.custom_headers.len(), 2);
+        assert_eq!(client.custom_headers.get("X-API-Key").unwrap(), "secret");
+    }
+
+    #[test]
+    fn test_new_has_no_custom_headers() {
+        let client = McpClient::new("http://localhost:8080");
+        assert!(client.custom_headers.is_empty());
     }
 
     #[test]
