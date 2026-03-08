@@ -240,6 +240,8 @@ impl LlmProvider for OpenAiCodexProvider {
             input_tokens: parsed.input_tokens,
             output_tokens: parsed.output_tokens,
             finish_reason: parsed.finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         })
     }
 
@@ -266,6 +268,8 @@ impl LlmProvider for OpenAiCodexProvider {
             input_tokens: parsed.input_tokens,
             output_tokens: parsed.output_tokens,
             finish_reason,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         })
     }
 

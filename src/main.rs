@@ -116,6 +116,26 @@ async fn async_main() -> anyhow::Result<()> {
             )
             .await;
         }
+        Some(Command::Login { openai_codex }) => {
+            init_cli_tracing();
+            if *openai_codex {
+                let config = Config::from_env()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                let codex_config = config.llm.openai_codex.unwrap_or_default();
+                let mgr = ironclaw::llm::OpenAiCodexSessionManager::new(codex_config);
+                mgr.device_code_login()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                println!(
+                    "OpenAI Codex authentication complete. Set LLM_BACKEND=openai_codex to use it."
+                );
+            } else {
+                println!("Specify a provider to authenticate with:");
+                println!("  ironclaw login --openai-codex   (ChatGPT subscription)");
+            }
+            return Ok(());
+        }
         Some(Command::Onboard {
             skip_auth,
             channels_only,

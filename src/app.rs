@@ -660,7 +660,10 @@ impl AppBuilder {
         // Post-init validation: if a non-nearai backend was selected but
         // credentials were never resolved (deferred resolution found no keys),
         // fail early with a clear error instead of a confusing runtime failure.
-        if self.config.llm.backend != "nearai" && self.config.llm.provider.is_none() {
+        if self.config.llm.backend != "nearai"
+            && self.config.llm.backend != "openai_codex"
+            && self.config.llm.provider.is_none()
+        {
             let backend = &self.config.llm.backend;
             anyhow::bail!(
                 "LLM_BACKEND={backend} is configured but no credentials were found. \
