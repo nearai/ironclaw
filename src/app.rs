@@ -333,7 +333,7 @@ impl AppBuilder {
     /// Delegates to `build_provider_chain` which applies all decorators
     /// (retry, smart routing, failover, circuit breaker, response cache).
     #[allow(clippy::type_complexity)]
-    pub fn init_llm(
+    pub async fn init_llm(
         &self,
     ) -> Result<
         (
@@ -344,7 +344,7 @@ impl AppBuilder {
         anyhow::Error,
     > {
         let (llm, cheap_llm, recording_handle) =
-            crate::llm::build_provider_chain(&self.config.llm, self.session.clone())?;
+            crate::llm::build_provider_chain(&self.config.llm, self.session.clone()).await?;
         Ok((llm, cheap_llm, recording_handle))
     }
 
@@ -693,7 +693,7 @@ impl AppBuilder {
         let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
             (llm, None, None)
         } else {
-            self.init_llm()?
+            self.init_llm().await?
         };
         let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
 

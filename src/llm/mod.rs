@@ -57,7 +57,7 @@ use crate::error::LlmError;
 ///
 /// - NearAI backend: Uses session manager for authentication
 /// - Registry providers: Looked up by protocol and constructed generically
-pub fn create_llm_provider(
+pub async fn create_llm_provider(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -71,7 +71,7 @@ pub fn create_llm_provider(
     if config.backend == "bedrock" {
         #[cfg(feature = "bedrock")]
         {
-            return create_bedrock_provider(config);
+            return create_bedrock_provider(config).await;
         }
         #[cfg(not(feature = "bedrock"))]
         {
@@ -136,7 +136,7 @@ fn create_registry_provider(
 }
 
 #[cfg(feature = "bedrock")]
-fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let br = config
         .bedrock
         .as_ref()
@@ -144,7 +144,7 @@ fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
             provider: "bedrock".to_string(),
         })?;
 
-    let provider = bedrock::BedrockProvider::new(br)?;
+    let provider = bedrock::BedrockProvider::new(br).await?;
     tracing::info!(
         "Using AWS Bedrock (Converse API, region: {}, model: {})",
         br.region,
@@ -377,7 +377,7 @@ pub fn create_cheap_llm_provider(
 /// This is the single source of truth for provider chain construction,
 /// called by both `main.rs` and `app.rs`.
 #[allow(clippy::type_complexity)]
-pub fn build_provider_chain(
+pub async fn build_provider_chain(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<
@@ -388,7 +388,7 @@ pub fn build_provider_chain(
     ),
     LlmError,
 > {
-    let llm = create_llm_provider(config, session.clone())?;
+    let llm = create_llm_provider(config, session.clone()).await?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
 
     // 1. Retry

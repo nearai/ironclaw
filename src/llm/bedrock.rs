@@ -41,10 +41,9 @@ pub struct BedrockProvider {
 impl BedrockProvider {
     /// Create a new Bedrock provider from configuration.
     ///
-    /// Uses `block_in_place` because the AWS SDK config loader is async
-    /// but `create_llm_provider` is sync. This is safe because IronClaw
-    /// uses the multi-threaded tokio runtime.
-    pub fn new(config: &BedrockConfig) -> Result<Self, LlmError> {
+    /// Async because the AWS SDK config loader requires an async context
+    /// to resolve credentials from SSO profiles, IMDS, etc.
+    pub async fn new(config: &BedrockConfig) -> Result<Self, LlmError> {
         let cross_region_prefix = config
             .cross_region
             .as_ref()
@@ -53,16 +52,12 @@ impl BedrockProvider {
 
         let model_id = format!("{}{}", cross_region_prefix, config.model);
 
-        let sdk_config = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut builder = aws_config::defaults(BehaviorVersion::latest())
-                    .region(Region::new(config.region.clone()));
-                if let Some(ref profile) = config.profile {
-                    builder = builder.profile_name(profile);
-                }
-                builder.load().await
-            })
-        });
+        let mut builder = aws_config::defaults(BehaviorVersion::latest())
+            .region(Region::new(config.region.clone()));
+        if let Some(ref profile) = config.profile {
+            builder = builder.profile_name(profile);
+        }
+        let sdk_config = builder.load().await;
 
         let client = Client::new(&sdk_config);
 

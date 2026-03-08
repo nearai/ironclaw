@@ -79,6 +79,12 @@ Pull a model first: `ollama pull llama3.2`
 Uses the native AWS Converse API via `aws-sdk-bedrockruntime`. Supports standard AWS
 authentication methods: IAM credentials, SSO profiles, and instance roles.
 
+> **Build prerequisite:** The `aws-lc-sys` crate (transitive dependency via AWS SDK)
+> requires **CMake** to compile. Install it before building with `--features bedrock`:
+> - macOS: `brew install cmake`
+> - Ubuntu/Debian: `sudo apt install cmake`
+> - Fedora: `sudo dnf install cmake`
+
 ### With AWS credentials (IAM, SSO, instance roles)
 
 ```env

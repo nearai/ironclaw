@@ -296,26 +296,6 @@
     }
   },
   {
-    "id": "bedrock",
-    "aliases": [
-      "aws_bedrock",
-      "aws"
-    ],
-    "protocol": "open_ai_completions",
-    "api_key_env": "BEDROCK_ACCESS_KEY",
-    "api_key_required": false,
-    "base_url_env": "BEDROCK_BASE_URL",
-    "model_env": "BEDROCK_MODEL",
-    "default_model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "description": "AWS Bedrock (requires LiteLLM or OpenAI-compatible proxy)",
-    "setup": {
-      "kind": "open_ai_compatible",
-      "secret_name": "llm_bedrock_api_key",
-      "display_name": "AWS Bedrock",
-      "can_list_models": false
-    }
-  },
-  {
     "id": "ionet",
     "aliases": [
       "io_net",
