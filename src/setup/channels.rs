@@ -960,6 +960,9 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
         }
         std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4() {
+                return is_private_ip(std::net::IpAddr::V4(v4));
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
                 || (v6.segments()[0] & 0xFE00) == 0xFC00

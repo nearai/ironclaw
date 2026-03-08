@@ -5,6 +5,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
@@ -124,6 +125,9 @@ impl RateLimiter {
         }
     }
 }
+
+/// Rate limiter for public webhook triggers.
+static WEBHOOK_RATE_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 /// Shared state for all gateway handlers.
 pub struct GatewayState {
@@ -2126,6 +2130,14 @@ async fn webhook_trigger_handler(
     Query(query): Query<WebhookTriggerQuery>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limiter = WEBHOOK_RATE_LIMITER.get_or_init(|| RateLimiter::new(60, 60));
+    if !limiter.check() {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Rate limit exceeded. Try again shortly.".to_string(),
+        ));
+    }
+
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -2142,13 +2154,12 @@ async fn webhook_trigger_handler(
     let requested_path = normalize_webhook_path(&path);
 
     let routines = store
-        .list_all_routines()
+        .list_routines(&state.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut matches: Vec<crate::agent::routine::Routine> = routines
         .into_iter()
-        .filter(|routine| routine.user_id == state.user_id)
         .filter(|routine| {
             webhook_path_for_routine(routine).as_deref() == Some(requested_path.as_str())
         })
@@ -2194,7 +2205,26 @@ async fn webhook_trigger_handler(
     let run_id = engine
         .fire_webhook(routine.id, Some(&state.user_id), Some(requested_path.clone()))
         .await
-        .map_err(|e| (routine_error_status(&e), e.to_string()))?;
+        .map_err(|e| {
+            let status = match &e {
+                crate::error::RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
+                crate::error::RoutineError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
+                crate::error::RoutineError::Disabled { .. }
+                | crate::error::RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            let message = match &e {
+                crate::error::RoutineError::NotFound { .. } => "Routine not found",
+                crate::error::RoutineError::NotAuthorized { .. } => {
+                    "Not authorized to trigger routine"
+                }
+                crate::error::RoutineError::Disabled { .. } => "Routine is disabled",
+                crate::error::RoutineError::MaxConcurrent { .. } => "Routine already running",
+                _ => "Failed to trigger routine",
+            };
+            tracing::warn!(error = %e, routine_id = %routine.id, "Webhook trigger failed");
+            (status, message.to_string())
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",
