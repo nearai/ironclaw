@@ -35,24 +35,56 @@ impl CodexChatGptProvider {
         }
     }
 
-    /// Create a provider, auto-detecting the default model from the `/models` endpoint.
+    /// Create a provider, resolving the model to use.
+    ///
+    /// **Model selection priority:**
+    /// 1. If `configured_model` is non-empty, validate it against the
+    ///    `/models` endpoint. If it isn't in the supported list, log a
+    ///    warning with available models and fall back to the top model.
+    /// 2. If `configured_model` is empty (or a generic placeholder like
+    ///    "default"), auto-detect the highest-priority model from the API.
     ///
     /// A single `reqwest::Client` is created and reused for both the model
     /// discovery request and all subsequent LLM calls.
-    ///
-    /// If model discovery fails or the configured model is already Codex-specific,
-    /// falls back to `fallback_model`.
     pub async fn with_auto_model(
         base_url: &str,
         api_key: &str,
-        fallback_model: &str,
+        configured_model: &str,
     ) -> Self {
         let base = base_url.trim_end_matches('/');
         let client = Client::new();
-        let model = Self::fetch_default_model(&client, base, api_key)
-            .await
-            .unwrap_or_else(|| fallback_model.to_string());
-        tracing::info!(model = %model, "Codex ChatGPT: resolved model");
+        let available = Self::fetch_available_models(&client, base, api_key).await;
+
+        let model = if !configured_model.is_empty() && configured_model != "default" {
+            // User explicitly configured a model — validate it
+            if available.is_empty() {
+                // Could not reach the /models endpoint; trust the user's choice
+                tracing::warn!(
+                    "Could not fetch model list; using configured model '{configured_model}'"
+                );
+                configured_model.to_string()
+            } else if available.iter().any(|m| m == configured_model) {
+                tracing::info!(model = %configured_model, "Codex ChatGPT: using configured model");
+                configured_model.to_string()
+            } else {
+                tracing::warn!(
+                    configured = %configured_model,
+                    available = ?available,
+                    "Configured model not found in supported list, falling back to top model"
+                );
+                available.into_iter().next().unwrap_or_else(|| configured_model.to_string())
+            }
+        } else {
+            // No user preference — auto-detect
+            if let Some(top) = available.into_iter().next() {
+                tracing::info!(model = %top, "Codex ChatGPT: auto-detected model");
+                top
+            } else {
+                tracing::warn!("Could not auto-detect model, using fallback '{configured_model}'");
+                configured_model.to_string()
+            }
+        };
+
         Self {
             client,
             base_url: base.to_string(),
@@ -61,27 +93,35 @@ impl CodexChatGptProvider {
         }
     }
 
-    /// Query `/models?client_version=1.0.0` and return the default model slug.
-    async fn fetch_default_model(client: &Client, base_url: &str, api_key: &str) -> Option<String> {
+    /// Query `/models?client_version=1.0.0` and return the list of available
+    /// model slugs, ordered by priority (highest first).
+    async fn fetch_available_models(client: &Client, base_url: &str, api_key: &str) -> Vec<String> {
         let url = format!("{base_url}/models?client_version=1.0.0");
-        let resp = client
-            .get(&url)
-            .bearer_auth(api_key)
-            .send()
-            .await
-            .ok()?;
+        let resp = match client.get(&url).bearer_auth(api_key).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Failed to fetch Codex models: {e}");
+                return Vec::new();
+            }
+        };
         if !resp.status().is_success() {
             tracing::warn!(status = %resp.status(), "Failed to fetch Codex models");
-            return None;
+            return Vec::new();
         }
-        let body: Value = resp.json().await.ok()?;
+        let body: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
         // The response has { "models": [ { "slug": "...", ... }, ... ] }
-        let models = body.get("models")?.as_array()?;
-        // Find the model with highest priority or is_default
-        models
-            .iter()
-            .filter_map(|m| m.get("slug").and_then(|s| s.as_str()).map(|s| s.to_string()))
-            .next()
+        body.get("models")
+            .and_then(|m| m.as_array())
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|m| m.get("slug").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Convert IronClaw messages to Responses API request JSON.
