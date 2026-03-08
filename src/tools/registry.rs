@@ -14,7 +14,9 @@ use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
-use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
+use crate::tools::builder::{
+    BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
+};
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
@@ -487,12 +489,12 @@ impl ToolRegistry {
         llm: Arc<dyn LlmProvider>,
         safety: Arc<SafetyLayer>,
         config: Option<BuilderConfig>,
-    ) {
+    ) -> Arc<dyn SoftwareBuilder> {
         // First register dev tools needed by the builder
         self.register_dev_tools();
 
         // Create the builder (arg order: config, llm, safety, tools)
-        let builder = Arc::new(LlmSoftwareBuilder::new(
+        let builder: Arc<dyn SoftwareBuilder> = Arc::new(LlmSoftwareBuilder::new(
             config.unwrap_or_default(),
             llm,
             safety,
@@ -500,10 +502,11 @@ impl ToolRegistry {
         ));
 
         // Register the build_software tool
-        self.register(Arc::new(BuildSoftwareTool::new(builder)))
+        self.register(Arc::new(BuildSoftwareTool::new(Arc::clone(&builder))))
             .await;
 
         tracing::info!("Registered software builder tool");
+        builder
     }
 
     /// Register a WASM tool from bytes.
