@@ -384,11 +384,31 @@ fn download_slack_file(url: &str) -> Result<Vec<u8>, String> {
 /// Downloads all file types (images, documents, etc.) so the host-side
 /// middleware can process them (vision pipeline for images, text extraction
 /// for documents, transcription for audio, etc.).
+/// Maximum file size to download (20 MB). Files larger than this are skipped
+/// to avoid excessive memory use and slow downloads in the WASM runtime.
+const MAX_DOWNLOAD_SIZE_BYTES: u64 = 20 * 1024 * 1024;
+
 fn download_and_store_slack_files(attachments: &[InboundAttachment]) {
     for att in attachments {
         let Some(ref url) = att.source_url else {
             continue;
         };
+
+        // Skip files that exceed the size limit
+        if let Some(size) = att.size_bytes {
+            if size > MAX_DOWNLOAD_SIZE_BYTES {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Skipping Slack file download: {} bytes exceeds {} MB limit (id={})",
+                        size,
+                        MAX_DOWNLOAD_SIZE_BYTES / (1024 * 1024),
+                        att.id
+                    ),
+                );
+                continue;
+            }
+        }
 
         match download_slack_file(url) {
             Ok(bytes) => {
@@ -784,5 +804,11 @@ mod tests {
 
         let event: SlackEvent = serde_json::from_str(json).unwrap();
         assert!(event.files.is_none());
+    }
+
+    #[test]
+    fn test_max_download_size_constant() {
+        // Verify the constant is 20 MB
+        assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
     }
 }
