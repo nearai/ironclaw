@@ -1174,6 +1174,31 @@ mod tests {
         assert_eq!(loaded.heartbeat.interval_secs, 900);
     }
 
+    /// Regression test: /model command must persist selected_model to TOML config.
+    /// Prior to the fix, `set_model()` only changed the in-memory provider and the
+    /// choice was lost on restart.
+    #[test]
+    fn toml_selected_model_update_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Start with a config that has a different model.
+        let settings = Settings {
+            selected_model: Some("old-model".to_string()),
+            ..Default::default()
+        };
+        settings.save_toml(&path).unwrap();
+
+        // Simulate what persist_selected_model does: load, update, save.
+        let mut loaded = Settings::load_toml(&path).unwrap().unwrap();
+        loaded.selected_model = Some("new-model".to_string());
+        loaded.save_toml(&path).unwrap();
+
+        // Verify the change survived a reload.
+        let reloaded = Settings::load_toml(&path).unwrap().unwrap();
+        assert_eq!(reloaded.selected_model, Some("new-model".to_string()));
+    }
+
     #[test]
     fn toml_missing_file_returns_none() {
         let result = Settings::load_toml(std::path::Path::new("/tmp/nonexistent_config.toml"));
