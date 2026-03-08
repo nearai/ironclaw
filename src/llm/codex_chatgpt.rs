@@ -61,9 +61,9 @@ impl CodexChatGptProvider {
         }
     }
 
-    /// Query `/models?client_version=0.1.0` and return the default model slug.
+    /// Query `/models?client_version=1.0.0` and return the default model slug.
     async fn fetch_default_model(client: &Client, base_url: &str, api_key: &str) -> Option<String> {
-        let url = format!("{base_url}/models?client_version=0.1.0");
+        let url = format!("{base_url}/models?client_version=1.0.0");
         let resp = client
             .get(&url)
             .bearer_auth(api_key)
