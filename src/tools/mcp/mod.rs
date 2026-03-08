@@ -37,6 +37,7 @@ mod protocol;
 pub mod session;
 pub(crate) mod stdio_transport;
 pub(crate) mod transport;
+#[cfg(unix)]
 pub(crate) mod unix_transport;
 
 pub use auth::{is_authenticated, refresh_access_token};

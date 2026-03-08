@@ -522,7 +522,6 @@ impl Tool for McpToolWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::mcp::http_transport::sanitize_error_body;
 
     #[test]
     fn test_mcp_request_list_tools() {

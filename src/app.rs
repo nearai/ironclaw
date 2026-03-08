@@ -568,6 +568,7 @@ impl AppBuilder {
                                             }
                                         }
                                     }
+                                    #[cfg(unix)]
                                     crate::tools::mcp::config::EffectiveTransport::Unix {
                                         socket_path,
                                     } => {
@@ -594,6 +595,14 @@ impl AppBuilder {
                                                 return;
                                             }
                                         }
+                                    }
+                                    #[cfg(not(unix))]
+                                    crate::tools::mcp::config::EffectiveTransport::Unix { .. } => {
+                                        tracing::warn!(
+                                            "Unix socket transport is not supported on this platform (server '{}')",
+                                            server_name
+                                        );
+                                        return;
                                     }
                                     crate::tools::mcp::config::EffectiveTransport::Http => {
                                         if let Some(ref secrets) = secrets {
