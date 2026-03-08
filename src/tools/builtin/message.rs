@@ -121,11 +121,7 @@ impl Tool for MessageTool {
             .clone()
         {
             c
-        } else if let Some(c) = ctx
-            .metadata
-            .get("notify_channel")
-            .and_then(|v| v.as_str())
-        {
+        } else if let Some(c) = ctx.metadata.get("notify_channel").and_then(|v| v.as_str()) {
             c.to_string()
         } else {
             return Err(ToolError::ExecutionFailed(
