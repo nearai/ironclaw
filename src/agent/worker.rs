@@ -124,7 +124,6 @@ impl Worker {
             });
         }
 
-
         // Broadcast SSE for live web UI updates
         if let Some(ref tx) = self.deps.sse_tx {
             let job_id_str = job_id.to_string();

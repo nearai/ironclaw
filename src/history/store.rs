@@ -577,7 +577,7 @@ impl Store {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
-                FROM agent_jobs WHERE id = $1
+                FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
                 "#,
                 &[&id],
             )
@@ -646,7 +646,7 @@ impl Store {
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
-                FROM agent_jobs WHERE user_id = $1
+                FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
                 ORDER BY created_at DESC
                 "#,
                 &[&user_id],
@@ -681,7 +681,7 @@ impl Store {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE user_id = $1 GROUP BY status",
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1 GROUP BY status",
                 &[&user_id],
             )
             .await?;
@@ -713,7 +713,7 @@ impl Store {
         let conn = self.conn().await?;
         let row = conn
             .query_opt(
-                "SELECT 1 FROM agent_jobs WHERE id = $1 AND user_id = $2",
+                "SELECT 1 FROM agent_jobs WHERE id = $1 AND user_id = $2 AND source = 'sandbox'",
                 &[&job_id, &user_id],
             )
             .await?;
