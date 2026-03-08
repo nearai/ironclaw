@@ -208,6 +208,10 @@ pub async fn start_server(
         .route(
             "/oauth/slack/callback",
             get(slack_relay_oauth_callback_handler),
+        )
+        .route(
+            "/api/webhooks/{path}",
+            post(crate::channels::web::handlers::webhooks::webhook_trigger_handler),
         );
 
     // Protected routes (require auth)
