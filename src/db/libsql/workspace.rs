@@ -438,13 +438,16 @@ impl WorkspaceStore for LibSqlBackend {
         let agent_id_str = agent_id.map(|id| id.to_string());
 
         // Find documents that have at least one chunk with version < target
+        // Note: SQLite's IS operator only works for IS NULL/IS NOT NULL.
+        // For parameterized NULL comparison, we use explicit OR logic.
         let mut rows = conn
             .query(
                 r#"
                 SELECT DISTINCT c.document_id
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
-                WHERE d.user_id = ?1 AND d.agent_id IS ?2
+                WHERE d.user_id = ?1 
+                  AND ((?2 IS NULL AND d.agent_id IS NULL) OR d.agent_id = ?2)
                   AND c.chunk_version < ?3
                 LIMIT ?4
                 "#,
@@ -494,6 +497,61 @@ impl WorkspaceStore for LibSqlBackend {
         })?;
 
         Ok(())
+    }
+
+    async fn get_orphaned_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let agent_id_str = agent_id.map(|id| id.to_string());
+
+        // Find documents that have zero chunks (orphaned due to failed reindex)
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT d.id
+                FROM memory_documents d
+                LEFT JOIN memory_chunks c ON c.document_id = d.id
+                WHERE d.user_id = ?1 
+                  AND ((?2 IS NULL AND d.agent_id IS NULL) OR d.agent_id = ?2)
+                  AND c.id IS NULL
+                LIMIT ?3
+                "#,
+                params![user_id, agent_id_str.as_deref(), limit as i64],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?;
+
+        let mut doc_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Row fetch failed: {}", e),
+            })?
+        {
+            let id_str = get_text(&row, 0);
+            match id_str.parse() {
+                Ok(id) => doc_ids.push(id),
+                Err(_) => {
+                    tracing::warn!(
+                        "Failed to parse document ID '{}' from orphaned query",
+                        id_str
+                    );
+                }
+            }
+        }
+        Ok(doc_ids)
     }
 
     async fn update_chunk_embedding(

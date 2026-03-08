@@ -26,6 +26,12 @@
 /// Increment this when changing chunking parameters (size, overlap, algorithm).
 /// Existing chunks with lower versions will be re-indexed on startup.
 ///
+/// ## Usage
+/// This constant is re-exported from `workspace::mod` and used by:
+/// - `Workspace::reindex_stale_chunks()` — detects stale chunks
+/// - `Workspace::insert_chunks_for_document()` — stamps new chunks
+/// - `hygiene::run_if_due()` — triggers re-indexing during cleanup
+///
 /// ## Version History
 /// - V1: Initial (800 words, 15% overlap, min 50)
 /// - V2: Smaller chunks for better recall (300 words, 15% overlap, min 30)

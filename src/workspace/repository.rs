@@ -374,6 +374,36 @@ impl Repository {
         Ok(())
     }
 
+    /// Get document IDs that have no chunks at all (orphaned).
+    ///
+    /// Used for recovery when both chunk insertion AND placeholder insertion fail.
+    pub async fn get_orphaned_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT d.id
+                FROM memory_documents d
+                LEFT JOIN memory_chunks c ON c.document_id = d.id
+                WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
+                  AND c.id IS NULL
+                LIMIT $3
+                "#,
+                &[&user_id, &agent_id, &(limit as i64)],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?;
+
+        Ok(rows.iter().map(|row| row.get("id")).collect())
+    }
+
     /// Update a chunk's embedding.
     pub async fn update_chunk_embedding(
         &self,

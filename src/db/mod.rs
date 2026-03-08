@@ -387,6 +387,21 @@ pub trait WorkspaceStore: Send + Sync {
     /// the next hygiene pass.
     async fn mark_document_for_reindex(&self, document_id: Uuid) -> Result<(), WorkspaceError>;
 
+    /// Get document IDs that have no chunks at all.
+    ///
+    /// Used for recovery: if `reindex_document` fails after deleting chunks AND
+    /// the placeholder insertion also fails, the document ends up orphaned (no
+    /// chunks). This method finds those documents so they can be re-indexed.
+    ///
+    /// Note: This is a fallback for catastrophic failures. Normal stale detection
+    /// uses `get_documents_with_stale_chunks` which requires at least one chunk.
+    async fn get_orphaned_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError>;
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,

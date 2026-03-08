@@ -626,6 +626,17 @@ impl WorkspaceStore for PgBackend {
         self.repo.mark_document_for_reindex(document_id).await
     }
 
+    async fn get_orphaned_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError> {
+        self.repo
+            .get_orphaned_documents(user_id, agent_id, limit)
+            .await
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,

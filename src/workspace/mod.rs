@@ -245,6 +245,19 @@ impl WorkspaceStorage {
         }
     }
 
+    async fn get_orphaned_documents(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.get_orphaned_documents(user_id, agent_id, limit).await,
+            Self::Db(db) => db.get_orphaned_documents(user_id, agent_id, limit).await,
+        }
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
@@ -794,9 +807,10 @@ impl Workspace {
     ///
     /// ## How?
     /// 1. Query for documents with any chunk_version < CHUNK_VERSION
-    /// 2. For each document: delete old chunks, re-chunk, insert with new version
-    /// 3. Generate new embeddings if provider is available
-    /// 4. Throttle between documents to avoid overwhelming embedding APIs
+    /// 2. Also query for orphaned documents (no chunks at all, from failed reindex)
+    /// 3. For each document: delete old chunks, re-chunk, insert with new version
+    /// 4. Generate new embeddings if provider is available
+    /// 5. Throttle between documents to avoid overwhelming embedding APIs
     ///
     /// ## When to call?
     /// - During hygiene passes (automatic, with throttling)
@@ -808,12 +822,12 @@ impl Workspace {
     /// causing duplicate work or UNIQUE constraint violations.
     ///
     /// Returns `ReindexReport` with progress and whether more documents remain.
-    pub async fn reindex_stale_chunks(&self, batch_size: usize) -> Result<ReindexReport, WorkspaceError> {
+    pub async fn reindex_stale_chunks(&self, batch_size: usize, throttle_ms: u64) -> Result<ReindexReport, WorkspaceError> {
         // Acquire mutex to prevent concurrent reindex operations
         let _guard = self.reindex_mutex.lock().await;
 
         // Find documents with stale chunks
-        let stale_doc_ids = self
+        let mut stale_doc_ids = self
             .storage
             .get_documents_with_stale_chunks(
                 &self.user_id,
@@ -822,6 +836,24 @@ impl Workspace {
                 batch_size,
             )
             .await?;
+
+        // Also find orphaned documents (no chunks at all, from double-failure scenarios)
+        // These are documents where both chunk insertion AND placeholder insertion failed.
+        let remaining_slots = batch_size.saturating_sub(stale_doc_ids.len());
+        if remaining_slots > 0 {
+            let orphaned_doc_ids = self
+                .storage
+                .get_orphaned_documents(&self.user_id, self.agent_id, remaining_slots)
+                .await?;
+            
+            if !orphaned_doc_ids.is_empty() {
+                tracing::info!(
+                    "Found {} orphaned documents (no chunks), including in reindex batch",
+                    orphaned_doc_ids.len()
+                );
+                stale_doc_ids.extend(orphaned_doc_ids);
+            }
+        }
 
         let batch_count = stale_doc_ids.len();
         if batch_count == 0 {
@@ -858,10 +890,10 @@ impl Workspace {
                 }
             }
 
-            // Throttle: sleep 100ms between documents to avoid overwhelming embedding APIs.
-            // Skip sleep after the last document.
-            if i < batch_count - 1 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            // Throttle between documents to avoid overwhelming embedding APIs.
+            // Skip sleep after the last document or if throttle is disabled.
+            if throttle_ms > 0 && i < batch_count - 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(throttle_ms)).await;
             }
         }
 
@@ -1112,8 +1144,8 @@ mod tests {
             .unwrap();
         assert_eq!(stale_before.len(), 1, "Should find 1 document with stale chunks");
 
-        // Run reindex
-        let report = workspace.reindex_stale_chunks(10).await.unwrap();
+        // Run reindex (no throttle in tests)
+        let report = workspace.reindex_stale_chunks(10, 0).await.unwrap();
         assert_eq!(report.processed, 1, "Should process 1 document");
         assert_eq!(report.failed, 0, "Should have no failures");
         assert!(!report.has_more, "Should have no more to process");
@@ -1204,5 +1236,93 @@ mod tests {
             .unwrap();
         assert_eq!(stale_after.len(), 1, "Document should be marked for reindex");
         assert_eq!(stale_after[0], doc_id);
+    }
+
+    #[tokio::test]
+    async fn test_orphaned_document_recovery() {
+        use crate::db::libsql::LibSqlBackend;
+        use crate::db::WorkspaceStore;
+
+        // Setup test database
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_orphan.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let user_id = "test_user";
+        let conn = backend.connect().await.unwrap();
+
+        // Create a document with NO chunks (simulating double-failure scenario)
+        let orphan_doc_id = uuid::Uuid::new_v4();
+        conn.execute(
+            r#"INSERT INTO memory_documents (id, user_id, path, content, metadata)
+               VALUES (?1, ?2, ?3, ?4, '{}')"#,
+            libsql::params![
+                orphan_doc_id.to_string(),
+                user_id,
+                "orphan.md",
+                "This document has no chunks due to failed reindex"
+            ],
+        )
+        .await
+        .unwrap();
+
+        // Create a normal document with chunks (for comparison)
+        let normal_doc_id = uuid::Uuid::new_v4();
+        conn.execute(
+            r#"INSERT INTO memory_documents (id, user_id, path, content, metadata)
+               VALUES (?1, ?2, ?3, ?4, '{}')"#,
+            libsql::params![
+                normal_doc_id.to_string(),
+                user_id,
+                "normal.md",
+                "Normal document"
+            ],
+        )
+        .await
+        .unwrap();
+        let chunk_id = uuid::Uuid::new_v4();
+        conn.execute(
+            r#"INSERT INTO memory_chunks (id, document_id, chunk_index, content, chunk_version)
+               VALUES (?1, ?2, ?3, ?4, ?5)"#,
+            libsql::params![
+                chunk_id.to_string(),
+                normal_doc_id.to_string(),
+                0i64,
+                "Normal chunk",
+                CHUNK_VERSION as i64
+            ],
+        )
+        .await
+        .unwrap();
+
+        // get_documents_with_stale_chunks should NOT find the orphan (no chunks to check)
+        let stale = backend
+            .get_documents_with_stale_chunks(user_id, None, CHUNK_VERSION, 100)
+            .await
+            .unwrap();
+        assert!(stale.is_empty(), "Orphaned doc should not appear in stale query");
+
+        // get_orphaned_documents SHOULD find the orphan
+        let orphans = backend
+            .get_orphaned_documents(user_id, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(orphans.len(), 1, "Should find 1 orphaned document");
+        assert_eq!(orphans[0], orphan_doc_id);
+
+        // Now test that reindex_stale_chunks picks up the orphan
+        let workspace = Workspace::new_with_db(user_id, std::sync::Arc::new(backend.clone()));
+        let report = workspace.reindex_stale_chunks(10, 0).await.unwrap();
+        
+        assert_eq!(report.processed, 1, "Should process 1 orphaned document");
+        assert_eq!(report.failed, 0, "Should have no failures");
+
+        // After reindex, orphan should have chunks
+        let orphans_after = backend
+            .get_orphaned_documents(user_id, None, 100)
+            .await
+            .unwrap();
+        assert!(orphans_after.is_empty(), "Orphaned doc should now have chunks");
     }
 }

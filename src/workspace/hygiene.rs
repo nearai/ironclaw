@@ -38,6 +38,11 @@ pub struct HygieneConfig {
     /// Re-indexing involves embedding API calls, so we process in batches
     /// to avoid overwhelming the API or blocking startup.
     pub reindex_batch_size: usize,
+    /// Milliseconds to sleep between re-indexing documents.
+    ///
+    /// Throttling prevents overwhelming embedding APIs. Default: 100ms.
+    /// Set to 0 for no throttling (e.g., local embeddings).
+    pub reindex_throttle_ms: u64,
 }
 
 impl Default for HygieneConfig {
@@ -52,10 +57,11 @@ impl Default for HygieneConfig {
             cadence_hours: 12,
             state_dir,
             // Process 20 docs per pass. Actual duration depends on document sizes and
-            // embedding API latency (100ms throttle between docs, plus embedding time
-            // per chunk). A document with 1000 words at 300 words/chunk ≈ 4 chunks ×
-            // ~200ms API latency = ~800ms per doc. 20 documents could take 16-20+ seconds.
+            // embedding API latency, plus throttle time between docs. A document with
+            // 1000 words at 300 words/chunk ≈ 4 chunks × ~200ms API latency = ~800ms
+            // per doc. 20 documents could take 16-20+ seconds.
             reindex_batch_size: 20,
+            reindex_throttle_ms: 100,
         }
     }
 }
@@ -134,7 +140,7 @@ pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> Hygien
     }
 
     // Re-index documents with stale chunks
-    match workspace.reindex_stale_chunks(config.reindex_batch_size).await {
+    match workspace.reindex_stale_chunks(config.reindex_batch_size, config.reindex_throttle_ms).await {
         Ok(reindex_report) => {
             report.docs_reindexed = reindex_report.processed;
             report.reindex_failed = reindex_report.failed;

@@ -329,15 +329,12 @@ impl LibSqlBackend {
             }
             Err(e) => {
                 let err_msg = e.to_string();
-                // SQLite returns "duplicate column name" if column already exists
+                // SQLite returns "duplicate column name" if column already exists.
+                // Fresh DBs get the column via CREATE TABLE; existing DBs need ALTER TABLE.
                 if err_msg.contains("duplicate column name") {
                     tracing::debug!("libSQL migration: chunk_version column already exists");
                 } else {
-                    // It's possible the table doesn't exist yet if run_migrations failed silently
-                    // or if SCHEMA didn't create it. But SCHEMA should have created it.
-                    // Wait, if this is a fresh DB, SCHEMA creates memory_chunks WITH chunk_version.
-                    // So ALTER TABLE will fail with "duplicate column name".
-                    // If the table doesn't exist (should not happen), it will fail with "no such table".
+                    // Other errors (e.g., "no such table") indicate a real problem.
                     return Err(DatabaseError::Migration(format!(
                         "Failed to add chunk_version column: {}",
                         e
