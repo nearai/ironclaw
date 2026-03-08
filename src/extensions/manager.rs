@@ -2500,7 +2500,7 @@ impl ExtensionManager {
 
         let has_tokens = is_authenticated(&server, &self.secrets, &self.user_id).await;
 
-        let client = if has_tokens || server.requires_auth() {
+        let client = if has_tokens || server.requires_auth() || server.has_custom_headers() {
             McpClient::new_authenticated(
                 server.clone(),
                 Arc::clone(&self.mcp_session_manager),

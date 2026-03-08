@@ -44,6 +44,13 @@ pub enum McpCommand {
         #[arg(long)]
         scopes: Option<String>,
 
+        /// Custom HTTP header (repeatable, format: "Name:Value")
+        ///
+        /// For MCP servers that use header-based auth instead of OAuth.
+        /// Example: --header "X-API-Key:sk-abc123"
+        #[arg(long = "header", value_name = "NAME:VALUE")]
+        headers: Vec<String>,
+
         /// Server description
         #[arg(long)]
         description: Option<String>,
@@ -107,6 +114,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
             auth_url,
             token_url,
             scopes,
+            headers,
             description,
         } => {
             add_server(
@@ -116,6 +124,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
                 auth_url,
                 token_url,
                 scopes,
+                headers,
                 description,
             )
             .await
@@ -133,6 +142,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
 }
 
 /// Add a new MCP server.
+#[allow(clippy::too_many_arguments)]
 async fn add_server(
     name: String,
     url: String,
@@ -140,6 +150,7 @@ async fn add_server(
     auth_url: Option<String>,
     token_url: Option<String>,
     scopes: Option<String>,
+    headers: Vec<String>,
     description: Option<String>,
 ) -> anyhow::Result<()> {
     let mut config = McpServerConfig::new(&name, &url);
@@ -148,8 +159,8 @@ async fn add_server(
         config = config.with_description(desc);
     }
 
-    // Track if auth is required
-    let requires_auth = client_id.is_some();
+    // Track if OAuth auth is required
+    let requires_oauth = client_id.is_some();
 
     // Set up OAuth if client_id is provided
     if let Some(client_id) = client_id {
@@ -170,7 +181,24 @@ async fn add_server(
         config = config.with_oauth(oauth);
     }
 
-    // Validate
+    // Parse custom headers (format: "Name:Value")
+    if !headers.is_empty() {
+        let mut header_map = std::collections::HashMap::new();
+        for raw in &headers {
+            let (key, value) = raw.split_once(':').ok_or_else(|| {
+                anyhow::anyhow!("Invalid header format '{}'. Expected 'Name:Value'.", raw)
+            })?;
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            if key.is_empty() {
+                anyhow::bail!("Header name cannot be empty in '{}'", raw);
+            }
+            header_map.insert(key, value);
+        }
+        config = config.with_headers(header_map);
+    }
+
+    // Validate (includes header name/value safety checks)
     config.validate()?;
 
     // Save (DB if available, else disk)
@@ -183,9 +211,11 @@ async fn add_server(
     println!("  ✓ Added MCP server '{}'", name);
     println!("    URL: {}", url);
 
-    if requires_auth {
+    if requires_oauth {
         println!();
         println!("  Run 'ironclaw mcp auth {}' to authenticate.", name);
+    } else if !headers.is_empty() {
+        println!("    Auth: custom headers ({} configured)", headers.len());
     }
 
     println!();
@@ -230,7 +260,9 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 
     for server in &servers.servers {
         let status = if server.enabled { "●" } else { "○" };
-        let auth_status = if server.requires_auth() {
+        let auth_status = if server.has_custom_headers() {
+            " (header auth)"
+        } else if server.requires_auth() {
             " (auth required)"
         } else {
             ""
@@ -246,6 +278,17 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
                 println!("      OAuth Client ID: {}", oauth.client_id);
                 if !oauth.scopes.is_empty() {
                     println!("      Scopes: {}", oauth.scopes.join(", "));
+                }
+            }
+            if let Some(ref headers) = server.headers {
+                for (name, value) in headers {
+                    // Mask header values to avoid leaking secrets in logs/terminal
+                    let masked = if value.len() <= 4 {
+                        "****".to_string()
+                    } else {
+                        format!("{}...{}", &value[..2], &value[value.len() - 2..])
+                    };
+                    println!("      Header: {}: {}", name, masked);
                 }
             }
             println!();
@@ -360,8 +403,9 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     let secrets = get_secrets_store().await?;
     let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
 
-    let client = if has_tokens {
-        // We have stored tokens, use authenticated client
+    let client = if has_tokens || server.has_custom_headers() {
+        // We have stored tokens or custom headers — use authenticated client
+        // (custom headers are injected via server_config in send_request)
         McpClient::new_authenticated(server.clone(), session_manager, secrets, user_id)
     } else if server.requires_auth() {
         // OAuth configured but no tokens - need to authenticate
@@ -373,7 +417,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         println!();
         return Ok(());
     } else {
-        // No OAuth and no tokens - try unauthenticated
+        // No OAuth, no tokens, no custom headers - try unauthenticated
         McpClient::new_with_name(&server.name, &server.url)
     };
 
