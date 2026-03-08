@@ -345,7 +345,6 @@ impl Agent {
             crate::workspace::hygiene::HygieneConfig::default(),
             workspace.clone(),
             self.llm().clone(),
-            self.safety().clone(),
         );
 
         match runner.check_heartbeat().await {
@@ -406,7 +405,7 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let reasoning = Reasoning::new(self.llm().clone());
         match reasoning.complete(request).await {
             Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
                 "Thread Summary:\n\n{}",
@@ -454,7 +453,7 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.5);
 
-        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let reasoning = Reasoning::new(self.llm().clone());
         match reasoning.complete(request).await {
             Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
                 "Suggested Next Steps:\n\n{}",
