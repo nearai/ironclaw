@@ -663,10 +663,14 @@ impl Agent {
                     }
 
                     match self.llm().set_model(requested) {
-                        Ok(()) => Ok(SubmissionResult::response(format!(
-                            "Switched model to: {}",
-                            requested
-                        ))),
+                        Ok(()) => {
+                            // Persist the model choice so it survives restarts.
+                            self.persist_selected_model(requested).await;
+                            Ok(SubmissionResult::response(format!(
+                                "Switched model to: {}",
+                                requested
+                            )))
+                        }
                         Err(e) => Ok(SubmissionResult::error(format!(
                             "Failed to switch model: {}",
                             e
@@ -820,6 +824,37 @@ impl Agent {
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             _ => Ok(None),
+        }
+    }
+
+    /// Persist the selected model to the settings store (DB and/or TOML config).
+    ///
+    /// Best-effort: logs warnings on failure but does not propagate errors,
+    /// since the in-memory model switch already succeeded.
+    async fn persist_selected_model(&self, model: &str) {
+        // 1. Persist to DB if available.
+        if let Some(store) = self.store() {
+            let value = serde_json::Value::String(model.to_string());
+            if let Err(e) = store.set_setting("default", "selected_model", &value).await {
+                tracing::warn!("Failed to persist model to DB: {}", e);
+            }
+        }
+
+        // 2. Update TOML config file if it exists.
+        let toml_path = crate::settings::Settings::default_toml_path();
+        if toml_path.exists() {
+            match crate::settings::Settings::load_toml(&toml_path) {
+                Ok(Some(mut settings)) => {
+                    settings.selected_model = Some(model.to_string());
+                    if let Err(e) = settings.save_toml(&toml_path) {
+                        tracing::warn!("Failed to persist model to config.toml: {}", e);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to load config.toml for model persistence: {}", e);
+                }
+            }
         }
     }
 }
