@@ -174,6 +174,7 @@ env-var mode or skipped secrets.
 | Ollama | None | - | - |
 | OpenRouter¹ | API key | `llm_compatible_api_key` | `LLM_API_KEY` |
 | OpenAI-compatible¹ | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+| AWS Bedrock | API key or AWS credentials | `bedrock_api_key` | `AWS_BEARER_TOKEN_BEDROCK` |
 
 ¹ OpenRouter and OpenAI-compatible share the same secret name and env var because
 OpenRouter is stored as `llm_backend = "openai_compatible"` under the hood.
@@ -479,7 +480,7 @@ pub struct Settings {
     pub secrets_master_key_source: KeySource, // Keychain | Env | None
 
     // Step 3: Inference
-    pub llm_backend: Option<String>,         // "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+    pub llm_backend: Option<String>,         // "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "bedrock"
     pub ollama_base_url: Option<String>,
     pub openai_compatible_base_url: Option<String>,
 

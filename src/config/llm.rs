@@ -86,6 +86,19 @@ pub struct RegistryProviderConfig {
     pub oauth_token: Option<SecretString>,
 }
 
+/// Configuration for AWS Bedrock (native Converse API).
+#[derive(Debug, Clone)]
+pub struct BedrockConfig {
+    /// AWS region (e.g. "us-east-1").
+    pub region: String,
+    /// Bedrock model ID (e.g. "anthropic.claude-opus-4-6-v1").
+    pub model: String,
+    /// Cross-region inference prefix: "us", "eu", "apac", "global", or None.
+    pub cross_region: Option<String>,
+    /// AWS named profile (for SSO / assume-role workflows).
+    pub profile: Option<String>,
+}
+
 /// LLM provider configuration.
 ///
 /// NearAI remains the default backend with its own config struct (session auth).
@@ -101,8 +114,10 @@ pub struct LlmConfig {
     /// NEAR AI config (always populated, also used for embeddings).
     pub nearai: NearAiConfig,
     /// Resolved provider config for registry-based providers.
-    /// `None` when backend is "nearai".
+    /// `None` when backend is "nearai" or "bedrock".
     pub provider: Option<RegistryProviderConfig>,
+    /// AWS Bedrock config (populated when backend=bedrock, requires --features bedrock).
+    pub bedrock: Option<BedrockConfig>,
 }
 
 /// NEAR AI configuration.
@@ -165,6 +180,7 @@ impl LlmConfig {
                 smart_routing_cascade: false,
             },
             provider: None,
+            bedrock: None,
         }
     }
 
@@ -243,8 +259,11 @@ impl LlmConfig {
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
-        // Resolve registry provider config (for non-NearAI backends)
-        let provider = if is_nearai {
+        let is_bedrock =
+            backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
+
+        // Resolve registry provider config (for non-NearAI, non-Bedrock backends)
+        let provider = if is_nearai || is_bedrock {
             None
         } else {
             Some(Self::resolve_registry_provider(
@@ -252,6 +271,43 @@ impl LlmConfig {
                 &registry,
                 settings,
             )?)
+        };
+
+        let bedrock = if is_bedrock {
+            let explicit_region =
+                optional_env("BEDROCK_REGION")?.or_else(|| settings.bedrock_region.clone());
+            if explicit_region.is_none() {
+                tracing::info!("BEDROCK_REGION not set, defaulting to us-east-1");
+            }
+            let region = explicit_region.unwrap_or_else(|| "us-east-1".to_string());
+            let model = optional_env("BEDROCK_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "BEDROCK_MODEL".to_string(),
+                    hint: "Set BEDROCK_MODEL when LLM_BACKEND=bedrock".to_string(),
+                })?;
+            let cross_region = optional_env("BEDROCK_CROSS_REGION")?
+                .or_else(|| settings.bedrock_cross_region.clone());
+            if let Some(ref cr) = cross_region
+                && !matches!(cr.as_str(), "us" | "eu" | "apac" | "global")
+            {
+                return Err(ConfigError::InvalidValue {
+                    key: "BEDROCK_CROSS_REGION".to_string(),
+                    message: format!(
+                        "'{}' is not valid, expected one of: us, eu, apac, global",
+                        cr
+                    ),
+                });
+            }
+            let profile = optional_env("AWS_PROFILE")?;
+            Some(BedrockConfig {
+                region,
+                model,
+                cross_region,
+                profile,
+            })
+        } else {
+            None
         };
 
         Ok(Self {
@@ -265,6 +321,7 @@ impl LlmConfig {
             session,
             nearai,
             provider,
+            bedrock,
         })
     }
 
