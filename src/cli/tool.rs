@@ -565,15 +565,10 @@ async fn init_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sy
 
     let crypto = SecretsCrypto::new(master_key.clone())?;
 
-    let store: Arc<dyn SecretsStore + Send + Sync> = {
-        #[cfg(feature = "postgres")]
-        {
-            let store = crate::history::Store::new(&config.database).await?;
-            store.run_migrations().await?;
-            Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)))
-        }
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
+    let crypto = Arc::new(crypto);
+    let store: Arc<dyn SecretsStore + Send + Sync> = match config.database.backend {
+        #[cfg(feature = "libsql")]
+        crate::config::DatabaseBackend::LibSql => {
             use crate::db::Database as _;
             use crate::db::libsql::LibSqlBackend;
             use secrecy::ExposeSecret as _;
@@ -604,12 +599,17 @@ async fn init_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sy
 
             Arc::new(crate::secrets::LibSqlSecretsStore::new(
                 backend.shared_db(),
-                Arc::new(crypto),
+                Arc::clone(&crypto),
             ))
         }
-        #[cfg(not(any(feature = "postgres", feature = "libsql")))]
-        {
-            let _ = crypto;
+        #[cfg(feature = "postgres")]
+        crate::config::DatabaseBackend::Postgres => {
+            let store = crate::history::Store::new(&config.database).await?;
+            store.run_migrations().await?;
+            Arc::new(PostgresSecretsStore::new(store.pool(), Arc::clone(&crypto)))
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
             anyhow::bail!(
                 "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
             );

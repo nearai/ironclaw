@@ -4,6 +4,14 @@
   "type": "channel",
   "name": "telegram",
   "description": "Telegram Bot API channel for receiving and responding to Telegram messages",
+  "auth": {
+    "secret_name": "telegram_bot_token",
+    "display_name": "Telegram",
+    "instructions": "Get your bot token from @BotFather on Telegram (https://t.me/BotFather). Send /newbot or /token to get it.",
+    "setup_url": "https://t.me/BotFather",
+    "token_hint": "Looks like 123456789:AABBccDDeeFFgg...",
+    "env_var": "TELEGRAM_BOT_TOKEN"
+  },
   "setup": {
     "required_secrets": [
       {
