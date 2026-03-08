@@ -828,25 +828,37 @@ async fn validate_channel_credentials(
     validation_endpoint: &str,
 ) -> Result<(), ChannelSetupError> {
     let validation_url = substitute_validation_placeholders(secrets, validation_endpoint).await?;
-    let parsed = validate_public_https_url(&validation_url)?;
-    let client = reqwest::Client::builder()
+    let (parsed, resolved_addrs) = validate_public_https_url(&validation_url).await?;
+    let target = validation_target_display(&parsed);
+    let mut client_builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+
+    if matches!(parsed.host(), Some(url::Host::Domain(_)))
+        && let Some(host) = parsed.host_str()
+    {
+        client_builder = client_builder.resolve_to_addrs(host, &resolved_addrs);
+    }
+
+    let client = client_builder
         .build()
         .map_err(|e| ChannelSetupError::Network(format!("Failed to build HTTP client: {}", e)))?;
 
-    let response = client
-        .get(parsed.clone())
-        .send()
-        .await
-        .map_err(|e| ChannelSetupError::Network(format!("Validation request failed: {}", e)))?;
+    let response = client.get(parsed.clone()).send().await.map_err(|e| {
+        ChannelSetupError::Network(format!(
+            "Validation request to {} failed: {}",
+            target,
+            describe_validation_request_error(&e)
+        ))
+    })?;
 
     if response.status().is_success() {
         Ok(())
     } else {
         Err(ChannelSetupError::Validation(format!(
-            "Validation endpoint returned HTTP {} for {}",
+            "Validation endpoint returned HTTP {} from {}",
             response.status(),
-            parsed
+            target
         )))
     }
 }
@@ -868,14 +880,17 @@ async fn substitute_validation_placeholders(
     for secret_name in placeholder_names {
         let secret_value = secrets.get_secret(&secret_name).await?;
         let placeholder = format!("{{{}}}", secret_name);
-        resolved = resolved.replace(&placeholder, secret_value.expose_secret());
+        let encoded_value = urlencoding::encode(secret_value.expose_secret());
+        resolved = resolved.replace(&placeholder, encoded_value.as_ref());
     }
 
     Ok(resolved)
 }
 
-fn validate_public_https_url(url: &str) -> Result<Url, ChannelSetupError> {
-    use std::net::{IpAddr, ToSocketAddrs};
+async fn validate_public_https_url(
+    url: &str,
+) -> Result<(Url, Vec<std::net::SocketAddr>), ChannelSetupError> {
+    use std::net::{IpAddr, SocketAddr};
 
     let parsed = Url::parse(url)
         .map_err(|e| ChannelSetupError::Validation(format!("Invalid URL: {}", e)))?;
@@ -895,7 +910,8 @@ fn validate_public_https_url(url: &str) -> Result<Url, ChannelSetupError> {
     let host = parsed
         .host_str()
         .ok_or_else(|| ChannelSetupError::Validation("Validation URL missing host".to_string()))?;
-    let host_lower = host.to_lowercase();
+    let normalized_host = normalize_validation_domain(host);
+    let host_lower = normalized_host.to_ascii_lowercase();
 
     if host_lower == "localhost" || host_lower.ends_with(".localhost") {
         return Err(ChannelSetupError::Validation(
@@ -903,42 +919,77 @@ fn validate_public_https_url(url: &str) -> Result<Url, ChannelSetupError> {
         ));
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_disallowed_ip(&ip) {
-            return Err(ChannelSetupError::Validation(format!(
-                "Validation endpoint cannot target private or local IP {}",
-                ip
-            )));
-        }
-        return Ok(parsed);
-    }
-
     let port = parsed.port_or_known_default().unwrap_or(443);
-    let socket_addr = format!("{}:{}", host, port);
-    if let Ok(addrs) = socket_addr.to_socket_addrs() {
-        for addr in addrs {
-            if is_disallowed_ip(&addr.ip()) {
+
+    match parsed
+        .host()
+        .ok_or_else(|| ChannelSetupError::Validation("Validation URL missing host".to_string()))?
+    {
+        url::Host::Ipv4(v4) => {
+            let ip = IpAddr::V4(v4);
+            if is_disallowed_ip(&ip) {
                 return Err(ChannelSetupError::Validation(format!(
-                    "Validation hostname '{}' resolves to disallowed IP {}",
-                    host,
-                    addr.ip()
+                    "Validation endpoint cannot target private or local IP {}",
+                    ip
                 )));
             }
+
+            Ok((parsed, vec![SocketAddr::new(ip, port)]))
+        }
+        url::Host::Ipv6(v6) => {
+            let ip = normalize_ip(IpAddr::V6(v6));
+            if is_disallowed_ip(&ip) {
+                return Err(ChannelSetupError::Validation(format!(
+                    "Validation endpoint cannot target private or local IP {}",
+                    ip
+                )));
+            }
+
+            Ok((parsed, vec![SocketAddr::new(ip, port)]))
+        }
+        url::Host::Domain(domain) => {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((normalized_host, port))
+                .await
+                .map_err(|e| {
+                    ChannelSetupError::Validation(format!(
+                        "DNS resolution failed for {}: {}",
+                        normalized_host, e
+                    ))
+                })?
+                .map(|addr| SocketAddr::new(normalize_ip(addr.ip()), addr.port()))
+                .collect();
+
+            if addrs.is_empty() {
+                return Err(ChannelSetupError::Validation(format!(
+                    "Validation hostname '{}' did not resolve to any IP addresses",
+                    domain
+                )));
+            }
+
+            for addr in &addrs {
+                if is_disallowed_ip(&addr.ip()) {
+                    return Err(ChannelSetupError::Validation(format!(
+                        "Validation hostname '{}' resolves to disallowed IP {}",
+                        domain,
+                        addr.ip()
+                    )));
+                }
+            }
+
+            Ok((parsed, addrs))
         }
     }
-
-    Ok(parsed)
 }
 
 fn is_disallowed_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
+    match normalize_ip(*ip) {
         std::net::IpAddr::V4(v4) => {
             v4.is_private()
                 || v4.is_loopback()
                 || v4.is_link_local()
                 || v4.is_multicast()
                 || v4.is_unspecified()
-                || *v4 == std::net::Ipv4Addr::new(169, 254, 169, 254)
+                || v4 == std::net::Ipv4Addr::new(169, 254, 169, 254)
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
         }
         std::net::IpAddr::V6(v6) => {
@@ -948,6 +999,42 @@ fn is_disallowed_ip(ip: &std::net::IpAddr) -> bool {
                 || v6.is_multicast()
                 || v6.is_unspecified()
         }
+    }
+}
+
+fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(v6)),
+        other => other,
+    }
+}
+
+fn normalize_validation_domain(host: &str) -> &str {
+    host.trim_end_matches('.')
+}
+
+fn validation_target_display(parsed: &Url) -> String {
+    let host = parsed.host_str().unwrap_or("unknown host");
+    match parsed.port() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host.to_string(),
+    }
+}
+
+fn describe_validation_request_error(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "request timed out"
+    } else if error.is_redirect() {
+        "redirects are not allowed"
+    } else if error.is_connect() {
+        "connection failed"
+    } else if error.is_request() {
+        "request could not be sent"
+    } else {
+        "request failed"
     }
 }
 
@@ -1146,6 +1233,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_substitute_validation_placeholders_url_encodes_secrets() {
+        let secrets = test_secrets_context();
+        secrets
+            .save_secret(
+                "telegram_bot_token",
+                &secrecy::SecretString::from("abc123?foo=1&bar=#baz/slash".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let resolved = substitute_validation_placeholders(
+            &secrets,
+            "https://api.example.com/verify?token={telegram_bot_token}",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            "https://api.example.com/verify?token=abc123%3Ffoo%3D1%26bar%3D%23baz%2Fslash"
+        );
+    }
+
+    #[tokio::test]
     async fn test_substitute_validation_placeholders_missing_secret() {
         let secrets = test_secrets_context();
         let err = substitute_validation_placeholders(
@@ -1159,33 +1270,67 @@ mod tests {
         assert!(err.contains("Failed to read secret"));
     }
 
-    #[test]
-    fn test_validate_public_https_url_rejects_localhost() {
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_localhost() {
         let err = validate_public_https_url("https://localhost/api")
+            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("localhost"));
     }
 
-    #[test]
-    fn test_validate_public_https_url_rejects_private_ip() {
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_localhost_with_trailing_dot() {
+        let err = validate_public_https_url("https://localhost./api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("localhost"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_private_ip() {
         let err = validate_public_https_url("https://192.168.1.10/api")
+            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("private or local IP"));
     }
 
-    #[test]
-    fn test_validate_public_https_url_rejects_http() {
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_ipv4_mapped_ipv6() {
+        let err = validate_public_https_url("https://[::ffff:127.0.0.1]/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("private or local IP"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_http() {
         let err = validate_public_https_url("http://example.com/api")
+            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("must use https"));
     }
 
-    #[test]
-    fn test_validate_public_https_url_accepts_public_https_literal_ip() {
-        let parsed = validate_public_https_url("https://8.8.8.8/api").unwrap();
+    #[tokio::test]
+    async fn test_validate_public_https_url_accepts_public_https_literal_ip() {
+        let (parsed, addrs) = validate_public_https_url("https://8.8.8.8/api")
+            .await
+            .unwrap();
         assert_eq!(parsed.as_str(), "https://8.8.8.8/api");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].ip().to_string(), "8.8.8.8");
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_fails_closed_on_dns_error() {
+        let err = validate_public_https_url("https://should-not-resolve.invalid/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("DNS resolution failed"));
     }
 }
