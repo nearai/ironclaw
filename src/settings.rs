@@ -1183,8 +1183,10 @@ mod tests {
         let path = dir.path().join("config.toml");
 
         // Start with a config that has a different model.
-        let mut settings = Settings::default();
-        settings.selected_model = Some("old-model".to_string());
+        let settings = Settings {
+            selected_model: Some("old-model".to_string()),
+            ..Default::default()
+        };
         settings.save_toml(&path).unwrap();
 
         // Simulate what persist_selected_model does: load, update, save.

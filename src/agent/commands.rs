@@ -840,21 +840,28 @@ impl Agent {
             }
         }
 
-        // 2. Update TOML config file if it exists.
-        let toml_path = crate::settings::Settings::default_toml_path();
-        if toml_path.exists() {
-            match crate::settings::Settings::load_toml(&toml_path) {
-                Ok(Some(mut settings)) => {
-                    settings.selected_model = Some(model.to_string());
-                    if let Err(e) = settings.save_toml(&toml_path) {
-                        tracing::warn!("Failed to persist model to config.toml: {}", e);
+        // 2. Update TOML config file if it exists (sync I/O in spawn_blocking).
+        let model_owned = model.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            let toml_path = crate::settings::Settings::default_toml_path();
+            if toml_path.exists() {
+                match crate::settings::Settings::load_toml(&toml_path) {
+                    Ok(Some(mut settings)) => {
+                        settings.selected_model = Some(model_owned);
+                        if let Err(e) = settings.save_toml(&toml_path) {
+                            tracing::warn!("Failed to persist model to config.toml: {}", e);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to load config.toml for model persistence: {}",
+                            e
+                        );
                     }
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!("Failed to load config.toml for model persistence: {}", e);
-                }
             }
-        }
+        })
+        .await;
     }
 }
