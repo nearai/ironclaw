@@ -488,9 +488,6 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    // Notify config is carried in job metadata (populated below) and read by
-    // MessageTool::execute from JobContext — no global state mutation needed.
-
     let mut metadata = serde_json::json!({ "max_iterations": max_iterations });
     // Carry the routine's notify config in job metadata so the message tool
     // can resolve channel/target per-job without global state mutation.

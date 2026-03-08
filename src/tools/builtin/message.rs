@@ -224,7 +224,7 @@ impl Tool for MessageTool {
             // No channel specified — broadcast to all channels (routine with notify.channel = None)
             let results = self.channel_manager.broadcast_all(&target, response).await;
             let mut succeeded = Vec::new();
-            let mut failed = Vec::new();
+            let mut failed: Vec<&str> = Vec::new();
             for (ch, result) in &results {
                 match result {
                     Ok(()) => succeeded.push(ch.as_str()),
@@ -239,11 +239,10 @@ impl Tool for MessageTool {
                 }
             }
             if succeeded.is_empty() {
-                let available = self.channel_manager.channel_names().await.join(", ");
-                let err_msg = if available.is_empty() {
+                let err_msg = if failed.is_empty() {
                     "No channels connected.".to_string()
                 } else {
-                    format!("All channels failed. Available: {}", available)
+                    format!("All channels failed: {}", failed.join(", "))
                 };
                 Err(ToolError::ExecutionFailed(err_msg))
             } else {
