@@ -411,7 +411,6 @@ impl Agent {
                         hygiene,
                         workspace.clone(),
                         self.cheap_llm().clone(),
-                        self.safety().clone(),
                         Some(notify_tx),
                         self.store().map(Arc::clone),
                     ))
