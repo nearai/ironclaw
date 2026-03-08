@@ -488,18 +488,13 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    // Set the message tool's default channel/target from the routine's notify config
-    // so the LLM can send results without triggering cross-channel approval.
-    // TODO: This mutates shared global state and can race with concurrent jobs.
-    // Move notify config into JobContext metadata and apply per-job instead.
+    let mut metadata = serde_json::json!({ "max_iterations": max_iterations });
+    // Carry the routine's notify config in job metadata so the message tool
+    // can resolve channel/target per-job without global state mutation.
     if let Some(channel) = &routine.notify.channel {
-        scheduler
-            .tools()
-            .set_message_tool_context(Some(channel.clone()), Some(routine.notify.user.clone()))
-            .await;
+        metadata["notify_channel"] = serde_json::json!(channel);
     }
-
-    let metadata = serde_json::json!({ "max_iterations": max_iterations });
+    metadata["notify_user"] = serde_json::json!(&routine.notify.user);
 
     // Build approval context: UnlessAutoApproved tools are auto-approved for routines;
     // Always tools require explicit listing in tool_permissions.
