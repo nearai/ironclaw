@@ -13,7 +13,6 @@ use crate::agent::context_monitor::{CompactionStrategy, ContextBreakdown};
 use crate::agent::session::Thread;
 use crate::error::Error;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
-use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
 
 /// Result of a compaction operation.
@@ -34,13 +33,12 @@ pub struct CompactionResult {
 /// Compacts conversation context to stay within limits.
 pub struct ContextCompactor {
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
 }
 
 impl ContextCompactor {
     /// Create a new context compactor.
-    pub fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
-        Self { llm, safety }
+    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
+        Self { llm }
     }
 
     /// Compact a thread's context using the given strategy.
@@ -233,7 +231,7 @@ Be brief but capture all important details. Use bullet points."#,
             .with_max_tokens(1024)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let reasoning = Reasoning::new(self.llm.clone());
         let (text, _) = reasoning.complete(request).await?;
         Ok(text)
     }
@@ -346,17 +344,11 @@ mod tests {
     // === QA Plan - Compaction strategy tests ===
 
     use crate::agent::context_monitor::CompactionStrategy;
-    use crate::config::SafetyConfig;
-    use crate::safety::SafetyLayer;
     use crate::testing::StubLlm;
 
     /// Helper: build a `ContextCompactor` with the given `StubLlm`.
     fn make_compactor(llm: Arc<StubLlm>) -> ContextCompactor {
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
-        ContextCompactor::new(llm, safety)
+        ContextCompactor::new(llm)
     }
 
     /// Helper: build a thread with `n` completed turns.
