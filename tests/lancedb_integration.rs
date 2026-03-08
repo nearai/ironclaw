@@ -1,20 +1,18 @@
-//! Integration tests for LanceDB vector store with Database wrapper.
+//! Integration tests for LanceDB vector store with Workspace composition.
 //!
 //! Requires: cargo test --features "libsql,lancedb"
 //!
-//! Verifies DbWithLanceVectorStore: document + chunk insert, hybrid search
-//! (FTS from libSQL, vector from LanceDB), delete_chunks sync.
+//! Verifies that Workspace correctly composes FTS from libSQL with vector
+//! search from LanceDB via the VectorStore trait.
 
 #![cfg(all(feature = "libsql", feature = "lancedb"))]
 
 use std::sync::Arc;
 
-use ironclaw::db::lancedb_wrapper::DbWithLanceVectorStore;
 use ironclaw::db::Database;
 use ironclaw::db::libsql_backend::LibSqlBackend;
-use ironclaw::workspace::{LanceDbVectorStore, SearchConfig};
+use ironclaw::workspace::{LanceDbVectorStore, SearchConfig, Workspace};
 use tempfile::TempDir;
-use uuid::Uuid;
 
 const EMBEDDING_DIM: usize = 1536;
 
@@ -24,136 +22,102 @@ fn make_embedding(seed: f32) -> Vec<f32> {
         .collect()
 }
 
-async fn setup_wrapped_db() -> (Arc<dyn Database>, TempDir) {
-    let libsql = LibSqlBackend::new_memory().await.unwrap();
+/// Mock embedding provider that returns deterministic embeddings.
+struct FixedEmbeddings {
+    embedding: Vec<f32>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw::workspace::EmbeddingProvider for FixedEmbeddings {
+    fn dimension(&self) -> usize {
+        EMBEDDING_DIM
+    }
+
+    fn model_name(&self) -> &str {
+        "fixed-test"
+    }
+
+    fn max_input_length(&self) -> usize {
+        8192
+    }
+
+    async fn embed(
+        &self,
+        _text: &str,
+    ) -> Result<Vec<f32>, ironclaw::workspace::embeddings::EmbeddingError> {
+        Ok(self.embedding.clone())
+    }
+}
+
+async fn setup_workspace() -> (Workspace, TempDir, TempDir) {
+    // Use a temp file (not :memory:) because libSQL in-memory DBs are connection-local
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let libsql = LibSqlBackend::new_local(&db_path).await.unwrap();
     libsql.run_migrations().await.unwrap();
 
     let lancedb_dir = TempDir::new().unwrap();
-    let store = LanceDbVectorStore::new(lancedb_dir.path())
-        .await
-        .unwrap();
+    let store = LanceDbVectorStore::new(lancedb_dir.path()).await.unwrap();
 
-    let db = Arc::new(DbWithLanceVectorStore::new(
-        Arc::new(libsql) as Arc<dyn Database>,
-        Arc::new(store),
-    )) as Arc<dyn Database>;
+    let embedding = make_embedding(1.0);
+    let ws = Workspace::new_with_db("test_user", Arc::new(libsql) as Arc<dyn Database>)
+        .with_vector_store(Arc::new(store))
+        .with_embeddings(Arc::new(FixedEmbeddings { embedding }));
 
-    (db, lancedb_dir)
+    (ws, lancedb_dir, db_dir)
 }
 
 #[tokio::test]
-async fn test_wrapper_hybrid_search_combines_fts_and_vector() {
-    let (db, _) = setup_wrapped_db().await;
+async fn test_workspace_hybrid_search_with_lancedb() {
+    let (ws, _keep_lance, _keep_db) = setup_workspace().await;
 
-    let user_id = "test_user";
-    let agent_id: Option<Uuid> = None;
+    // Write a document — this triggers chunking + embedding + LanceDB sync
+    ws.write(
+        "context/rust.md",
+        "Rust is a systems programming language focused on safety.",
+    )
+    .await
+    .unwrap();
 
-    // Create document
-    let doc = db
-        .get_or_create_document_by_path(user_id, agent_id, "context/rust.md")
-        .await
-        .unwrap();
-
-    // Write content for FTS
-    db.update_document(doc.id, "Rust is a systems programming language focused on safety and performance.")
-        .await
-        .unwrap();
-
-    // Chunk and insert with embedding (triggers sync to LanceDB)
-    let content = "Rust is a systems programming language focused on safety.";
-    let embedding = make_embedding(1.0);
-
-    let chunk_id = db
-        .insert_chunk(doc.id, 0, content, Some(&embedding))
-        .await
-        .unwrap();
-
-    // Hybrid search: FTS for "Rust" + vector for semantic
-    let config = SearchConfig::default().with_limit(5);
-    let results = db
-        .hybrid_search(
-            user_id,
-            agent_id,
-            "Rust",
-            Some(&embedding),
-            &config,
-        )
-        .await
-        .unwrap();
+    // Hybrid search: FTS for "Rust" + vector from LanceDB
+    let results = ws.search("Rust", 5).await.unwrap();
 
     assert!(!results.is_empty(), "hybrid search should return results");
-    assert_eq!(results[0].chunk_id, chunk_id);
     assert!(results[0].content.contains("Rust"));
 }
 
 #[tokio::test]
-async fn test_wrapper_delete_chunks_removes_from_both() {
-    let (db, _) = setup_wrapped_db().await;
+async fn test_workspace_delete_removes_from_lancedb() {
+    let (ws, _keep_lance, _keep_db) = setup_workspace().await;
 
-    let user_id = "test_user";
-    let agent_id: Option<Uuid> = None;
-
-    let doc = db
-        .get_or_create_document_by_path(user_id, agent_id, "notes/deleted.md")
+    ws.write("notes/deleted.md", "Content to be deleted.")
         .await
         .unwrap();
 
-    db.update_document(doc.id, "Content to be deleted.").await.unwrap();
-
-    let embedding = make_embedding(2.0);
-    db.insert_chunk(doc.id, 0, "Content to be deleted.", Some(&embedding))
-        .await
-        .unwrap();
-
-    let before = db
-        .hybrid_search(user_id, agent_id, "deleted", Some(&embedding), &SearchConfig::default())
-        .await
-        .unwrap();
+    let before = ws.search("deleted", 5).await.unwrap();
     assert_eq!(before.len(), 1);
 
-    db.delete_chunks(doc.id).await.unwrap();
+    ws.delete("notes/deleted.md").await.unwrap();
 
-    let after = db
-        .hybrid_search(user_id, agent_id, "deleted", Some(&embedding), &SearchConfig::default())
-        .await
-        .unwrap();
+    let after = ws.search("deleted", 5).await.unwrap();
     assert!(after.is_empty());
 }
 
 #[tokio::test]
-async fn test_wrapper_insert_chunk_syncs_to_lancedb() {
-    let (db, _) = setup_wrapped_db().await;
+async fn test_workspace_vector_only_search_uses_lancedb() {
+    let (ws, _keep_lance, _keep_db) = setup_workspace().await;
 
-    let user_id = "sync_user";
-    let agent_id: Option<Uuid> = None;
-
-    let doc = db
-        .get_or_create_document_by_path(user_id, agent_id, "sync/test.md")
+    ws.write("sync/test.md", "Semantic content for vector search")
         .await
         .unwrap();
 
-    let content = "Semantic content for vector search";
-    let embedding = make_embedding(3.0);
-
-    let chunk_id = db
-        .insert_chunk(doc.id, 0, content, Some(&embedding))
-        .await
-        .unwrap();
-
-    // Vector-only search (no FTS query match) - should still find via LanceDB
+    // Vector-only search should find via LanceDB even with non-matching FTS query
     let config = SearchConfig::default().vector_only().with_limit(5);
-    let results = db
-        .hybrid_search(
-            user_id,
-            agent_id,
-            "nonexistent_fts_term",
-            Some(&embedding),
-            &config,
-        )
+    let results = ws
+        .search_with_config("nonexistent_fts_term", config)
         .await
         .unwrap();
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].chunk_id, chunk_id);
-    assert_eq!(results[0].content, content);
+    assert!(results[0].content.contains("Semantic content"));
 }

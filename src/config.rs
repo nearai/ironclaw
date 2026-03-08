@@ -409,18 +409,19 @@ impl DatabaseConfig {
             });
         }
 
-        let vector_backend: VectorBackend =
-            optional_env("VECTOR_BACKEND")?
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_default();
+        let vector_backend: VectorBackend = optional_env("VECTOR_BACKEND")?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default();
 
-        let lancedb_path = optional_env("LANCEDB_PATH")?.map(PathBuf::from).or_else(|| {
-            if vector_backend == VectorBackend::LanceDb {
-                Some(default_lancedb_path())
-            } else {
-                None
-            }
-        });
+        let lancedb_path = optional_env("LANCEDB_PATH")?
+            .map(PathBuf::from)
+            .or_else(|| {
+                if vector_backend == VectorBackend::LanceDb {
+                    Some(default_lancedb_path())
+                } else {
+                    None
+                }
+            });
 
         Ok(Self {
             backend,
@@ -454,31 +455,6 @@ pub fn default_lancedb_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".ironclaw")
         .join("lancedb")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::VectorBackend;
-
-    #[test]
-    fn test_vector_backend_parse() {
-        assert_eq!("builtin".parse::<VectorBackend>().unwrap(), VectorBackend::Builtin);
-        assert_eq!("pgvector".parse::<VectorBackend>().unwrap(), VectorBackend::Builtin);
-        assert_eq!("libsql".parse::<VectorBackend>().unwrap(), VectorBackend::Builtin);
-        assert_eq!("".parse::<VectorBackend>().unwrap(), VectorBackend::Builtin);
-
-        assert_eq!("lancedb".parse::<VectorBackend>().unwrap(), VectorBackend::LanceDb);
-        assert_eq!("lance".parse::<VectorBackend>().unwrap(), VectorBackend::LanceDb);
-        assert_eq!("Lancedb".parse::<VectorBackend>().unwrap(), VectorBackend::LanceDb);
-
-        assert!("invalid".parse::<VectorBackend>().is_err());
-    }
-
-    #[test]
-    fn test_default_lancedb_path() {
-        let path = super::default_lancedb_path();
-        assert!(path.to_string_lossy().ends_with(".ironclaw/lancedb"));
-    }
 }
 
 /// Which LLM backend to use.
@@ -2021,5 +1997,43 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_MODEL");
         }
+    }
+
+    #[test]
+    fn test_vector_backend_parse() {
+        assert_eq!(
+            "builtin".parse::<VectorBackend>().unwrap(),
+            VectorBackend::Builtin
+        );
+        assert_eq!(
+            "pgvector".parse::<VectorBackend>().unwrap(),
+            VectorBackend::Builtin
+        );
+        assert_eq!(
+            "libsql".parse::<VectorBackend>().unwrap(),
+            VectorBackend::Builtin
+        );
+        assert_eq!("".parse::<VectorBackend>().unwrap(), VectorBackend::Builtin);
+
+        assert_eq!(
+            "lancedb".parse::<VectorBackend>().unwrap(),
+            VectorBackend::LanceDb
+        );
+        assert_eq!(
+            "lance".parse::<VectorBackend>().unwrap(),
+            VectorBackend::LanceDb
+        );
+        assert_eq!(
+            "Lancedb".parse::<VectorBackend>().unwrap(),
+            VectorBackend::LanceDb
+        );
+
+        assert!("invalid".parse::<VectorBackend>().is_err());
+    }
+
+    #[test]
+    fn test_default_lancedb_path() {
+        let path = super::default_lancedb_path();
+        assert!(path.to_string_lossy().ends_with(".ironclaw/lancedb"));
     }
 }

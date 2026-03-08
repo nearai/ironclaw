@@ -614,13 +614,6 @@ impl Database for PgBackend {
             .await
     }
 
-    async fn get_chunk_by_id(
-        &self,
-        chunk_id: Uuid,
-    ) -> Result<Option<MemoryChunk>, WorkspaceError> {
-        self.repo.get_chunk_by_id(chunk_id).await
-    }
-
     // ==================== Workspace: Search ====================
 
     async fn hybrid_search(

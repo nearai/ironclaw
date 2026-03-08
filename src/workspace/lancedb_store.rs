@@ -8,77 +8,26 @@
 //!   LANCEDB_PATH=~/.ironclaw/lancedb   # Default
 //!   VECTOR_BACKEND=lancedb             # Use LanceDB for vector search
 
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use uuid::Uuid;
-
-use crate::error::WorkspaceError;
-use crate::workspace::search::RankedResult;
-
 /// Embedding dimension (text-embedding-3-small default).
 /// Must match the embedding model used.
 pub const DEFAULT_EMBEDDING_DIM: i32 = 1536;
-
-/// Vector store abstraction for semantic search.
-///
-/// Implementations: pgvector/libsql (embedded in Database), LanceDB (this module).
-#[async_trait]
-pub trait VectorStore: Send + Sync {
-    /// Insert a chunk with its embedding.
-    async fn insert_chunk(
-        &self,
-        chunk_id: Uuid,
-        document_id: Uuid,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-        content: &str,
-        embedding: &[f32],
-    ) -> Result<(), WorkspaceError>;
-
-    /// Update an existing chunk's embedding.
-    ///
-    /// For LanceDB, this performs delete+insert since LanceDB has limited update
-    /// support. Caller must provide full chunk metadata for the re-insert.
-    async fn update_chunk_embedding(
-        &self,
-        chunk_id: Uuid,
-        document_id: Uuid,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-        content: &str,
-        embedding: &[f32],
-    ) -> Result<(), WorkspaceError>;
-
-    /// Delete all chunks for a document.
-    async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError>;
-
-    /// Vector similarity search, filtered by user and agent.
-    async fn vector_search(
-        &self,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-        embedding: &[f32],
-        limit: usize,
-    ) -> Result<Vec<RankedResult>, WorkspaceError>;
-}
 
 #[cfg(feature = "lancedb")]
 mod impl_lancedb {
     use std::sync::Arc;
 
     use arrow_array::types::Float32Type;
-    use arrow_array::{
-        Array, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray,
-    };
+    use arrow_array::{Array, FixedSizeListArray, RecordBatch, RecordBatchIterator, StringArray};
     use arrow_schema::{DataType, Field, Schema};
     use async_trait::async_trait;
     use futures::StreamExt;
-    use lancedb::index::Index;
+    use lancedb::query::{ExecutableQuery, QueryBase};
     use uuid::Uuid;
 
-    use super::{RankedResult, VectorStore, DEFAULT_EMBEDDING_DIM};
+    use super::DEFAULT_EMBEDDING_DIM;
     use crate::error::WorkspaceError;
+    use crate::workspace::search::RankedResult;
+    use crate::workspace::vector_store::VectorStore;
 
     const TABLE_NAME: &str = "memory_chunks";
 
@@ -105,12 +54,11 @@ mod impl_lancedb {
                     reason: "Invalid LanceDB path".to_string(),
                 })?;
 
-            let db = lancedb::connect(path_str)
-                .execute()
-                .await
-                .map_err(|e| WorkspaceError::SearchFailed {
+            let db = lancedb::connect(path_str).execute().await.map_err(|e| {
+                WorkspaceError::SearchFailed {
                     reason: format!("Failed to connect to LanceDB: {}", e),
-                })?;
+                }
+            })?;
 
             let store = Self {
                 db: Arc::new(db),
@@ -142,20 +90,9 @@ mod impl_lancedb {
                     reason: format!("Failed to create table: {}", e),
                 })?;
 
-            let table = self.db.open_table(&self.table_name).execute().await.map_err(|e| {
-                WorkspaceError::SearchFailed {
-                    reason: format!("Failed to open table: {}", e),
-                }
-            })?;
-
-            table
-                .create_index(&["vector"], Index::Auto)
-                .execute()
-                .await
-                .map_err(|e| WorkspaceError::SearchFailed {
-                    reason: format!("Failed to create vector index: {}", e),
-                })?;
-
+            // Index creation is deferred — brute-force search via
+            // bypass_vector_index() works without a pre-built index and is
+            // sufficient for personal workspace sizes.
             Ok(())
         }
 
@@ -180,7 +117,7 @@ mod impl_lancedb {
 
     #[async_trait]
     impl VectorStore for LanceDbVectorStore {
-        async fn insert_chunk(
+        async fn store_embedding(
             &self,
             chunk_id: Uuid,
             document_id: Uuid,
@@ -199,21 +136,23 @@ mod impl_lancedb {
                 });
             }
 
-            let table = self.db.open_table(&self.table_name).execute().await.map_err(|e| {
-                WorkspaceError::SearchFailed {
+            let table = self
+                .db
+                .open_table(&self.table_name)
+                .execute()
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
                     reason: format!("Failed to open table: {}", e),
-                }
-            })?;
+                })?;
 
             let chunk_ids = StringArray::from(vec![chunk_id.to_string()]);
             let document_ids = StringArray::from(vec![document_id.to_string()]);
             let user_ids = StringArray::from(vec![user_id]);
             let agent_ids = StringArray::from(vec![agent_id.map(|a| a.to_string())]);
             let contents = StringArray::from(vec![content]);
-            let vec_values: Vec<Option<f32>> =
-                embedding.iter().map(|&x| Some(x)).collect();
+            let vec_values: Vec<Option<f32>> = embedding.iter().map(|&x| Some(x)).collect();
             let vectors = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                vec![Some(vec_values)].into_iter(),
+                vec![Some(vec_values)],
                 self.embedding_dim,
             );
 
@@ -232,13 +171,11 @@ mod impl_lancedb {
                 reason: format!("Failed to create record batch: {}", e),
             })?;
 
-            let batches = RecordBatchIterator::new(
-                vec![Ok(batch)].into_iter(),
-                Arc::new(self.schema()),
-            );
+            let batches =
+                RecordBatchIterator::new(vec![Ok(batch)].into_iter(), Arc::new(self.schema()));
 
             table
-                .add(Box::new(batches))
+                .add(Box::new(batches) as Box<dyn arrow_array::RecordBatchReader + Send>)
                 .execute()
                 .await
                 .map_err(|e| WorkspaceError::ChunkingFailed {
@@ -248,7 +185,7 @@ mod impl_lancedb {
             Ok(())
         }
 
-        async fn update_chunk_embedding(
+        async fn update_embedding(
             &self,
             chunk_id: Uuid,
             document_id: Uuid,
@@ -257,11 +194,14 @@ mod impl_lancedb {
             content: &str,
             embedding: &[f32],
         ) -> Result<(), WorkspaceError> {
-            let table = self.db.open_table(&self.table_name).execute().await.map_err(|e| {
-                WorkspaceError::SearchFailed {
+            let table = self
+                .db
+                .open_table(&self.table_name)
+                .execute()
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
                     reason: format!("Failed to open table: {}", e),
-                }
-            })?;
+                })?;
 
             table
                 .delete(&format!(
@@ -273,16 +213,19 @@ mod impl_lancedb {
                     reason: format!("Failed to delete chunk for update: {}", e),
                 })?;
 
-            self.insert_chunk(chunk_id, document_id, user_id, agent_id, content, embedding)
+            self.store_embedding(chunk_id, document_id, user_id, agent_id, content, embedding)
                 .await
         }
 
-        async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
-            let table = self.db.open_table(&self.table_name).execute().await.map_err(|e| {
-                WorkspaceError::SearchFailed {
+        async fn delete_embeddings(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
+            let table = self
+                .db
+                .open_table(&self.table_name)
+                .execute()
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
                     reason: format!("Failed to open table: {}", e),
-                }
-            })?;
+                })?;
 
             table
                 .delete(&format!(
@@ -304,11 +247,14 @@ mod impl_lancedb {
             embedding: &[f32],
             limit: usize,
         ) -> Result<Vec<RankedResult>, WorkspaceError> {
-            let table = self.db.open_table(&self.table_name).execute().await.map_err(|e| {
-                WorkspaceError::SearchFailed {
+            let table = self
+                .db
+                .open_table(&self.table_name)
+                .execute()
+                .await
+                .map_err(|e| WorkspaceError::SearchFailed {
                     reason: format!("Failed to open table: {}", e),
-                }
-            })?;
+                })?;
 
             let filter = if let Some(aid) = agent_id {
                 format!(
@@ -323,79 +269,81 @@ mod impl_lancedb {
                 )
             };
 
-            let mut stream = table
+            let query = table
                 .query()
                 .nearest_to(embedding)
                 .map_err(|e| WorkspaceError::SearchFailed {
                     reason: format!("Invalid query vector: {}", e),
                 })?
                 .only_if(&filter)
-                .limit(limit as u32)
-                .execute()
-                .await
-                .map_err(|e| WorkspaceError::SearchFailed {
+                .bypass_vector_index()
+                .limit(limit);
+            let mut stream = ExecutableQuery::execute(&query).await.map_err(|e| {
+                WorkspaceError::SearchFailed {
                     reason: format!("Vector search failed: {}", e),
-                })?;
+                }
+            })?;
 
             let mut results = Vec::new();
             let mut rank: u32 = 1;
-            while let Some(batch) = stream.next().await {
-                let batch = batch.map_err(|e| WorkspaceError::SearchFailed {
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.map_err(|e| WorkspaceError::SearchFailed {
                     reason: format!("Stream error: {}", e),
                 })?;
 
-                let chunk_id_col = batch
-                    .column_by_name("chunk_id")
-                    .ok_or_else(|| WorkspaceError::SearchFailed {
+                let chunk_id_col = batch.column_by_name("chunk_id").ok_or_else(|| {
+                    WorkspaceError::SearchFailed {
                         reason: "chunk_id column missing".to_string(),
-                    })?;
-                let document_id_col = batch
-                    .column_by_name("document_id")
-                    .ok_or_else(|| WorkspaceError::SearchFailed {
+                    }
+                })?;
+                let document_id_col = batch.column_by_name("document_id").ok_or_else(|| {
+                    WorkspaceError::SearchFailed {
                         reason: "document_id column missing".to_string(),
-                    })?;
-                let content_col = batch
-                    .column_by_name("content")
-                    .ok_or_else(|| WorkspaceError::SearchFailed {
+                    }
+                })?;
+                let content_col = batch.column_by_name("content").ok_or_else(|| {
+                    WorkspaceError::SearchFailed {
                         reason: "content column missing".to_string(),
-                    })?;
+                    }
+                })?;
 
-                let chunk_ids = chunk_id_col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                    WorkspaceError::SearchFailed {
+                let chunk_ids = chunk_id_col
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| WorkspaceError::SearchFailed {
                         reason: "chunk_id wrong type".to_string(),
-                    }
-                })?;
-                let document_ids = document_id_col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                    WorkspaceError::SearchFailed {
+                    })?;
+                let document_ids = document_id_col
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| WorkspaceError::SearchFailed {
                         reason: "document_id wrong type".to_string(),
-                    }
-                })?;
-                let contents = content_col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                    WorkspaceError::SearchFailed {
+                    })?;
+                let contents = content_col
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| WorkspaceError::SearchFailed {
                         reason: "content wrong type".to_string(),
-                    }
-                })?;
+                    })?;
 
                 for i in 0..batch.num_rows() {
                     let raw_chunk_id = chunk_ids.value(i);
-                    let chunk_id = raw_chunk_id
-                        .parse::<Uuid>()
-                        .map_err(|e| WorkspaceError::SearchFailed {
-                            reason: format!(
-                                "Invalid chunk_id UUID '{}': {}",
-                                raw_chunk_id, e
-                            ),
-                        })?;
+                    let chunk_id =
+                        raw_chunk_id
+                            .parse::<Uuid>()
+                            .map_err(|e| WorkspaceError::SearchFailed {
+                                reason: format!("Invalid chunk_id UUID '{}': {}", raw_chunk_id, e),
+                            })?;
 
                     let raw_document_id = document_ids.value(i);
-                    let document_id = raw_document_id
-                        .parse::<Uuid>()
-                        .map_err(|e| WorkspaceError::SearchFailed {
+                    let document_id = raw_document_id.parse::<Uuid>().map_err(|e| {
+                        WorkspaceError::SearchFailed {
                             reason: format!(
                                 "Invalid document_id UUID '{}': {}",
                                 raw_document_id, e
                             ),
-                        })?;
+                        }
+                    })?;
                     let content = contents.value(i).to_string();
 
                     results.push(RankedResult {
@@ -418,12 +366,11 @@ pub use impl_lancedb::LanceDbVectorStore;
 
 #[cfg(all(test, feature = "lancedb"))]
 mod tests {
-    use std::sync::Arc;
-
     use tempfile::TempDir;
     use uuid::Uuid;
 
-    use super::{LanceDbVectorStore, VectorStore, DEFAULT_EMBEDDING_DIM};
+    use super::{DEFAULT_EMBEDDING_DIM, LanceDbVectorStore};
+    use crate::workspace::vector_store::VectorStore;
 
     fn make_embedding(seed: f32) -> Vec<f32> {
         (0..DEFAULT_EMBEDDING_DIM as usize)
@@ -443,14 +390,7 @@ mod tests {
         let embedding = make_embedding(1.0);
 
         store
-            .insert_chunk(
-                chunk_id,
-                document_id,
-                user_id,
-                None,
-                content,
-                &embedding,
-            )
+            .store_embedding(chunk_id, document_id, user_id, None, content, &embedding)
             .await
             .unwrap();
 
@@ -474,10 +414,9 @@ mod tests {
         let doc_id = Uuid::new_v4();
         let user_id = "user1";
 
-        // Insert 3 chunks with different embeddings
         for (i, seed) in [1.0, 2.0, 3.0].iter().enumerate() {
             store
-                .insert_chunk(
+                .store_embedding(
                     Uuid::new_v4(),
                     doc_id,
                     user_id,
@@ -489,7 +428,6 @@ mod tests {
                 .unwrap();
         }
 
-        // Search returns all 3, ordered by similarity
         let query_emb = make_embedding(2.0);
         let results = store
             .vector_search(user_id, None, &query_emb, 5)
@@ -512,7 +450,7 @@ mod tests {
         let user_id = "user1";
 
         store
-            .insert_chunk(
+            .store_embedding(
                 Uuid::new_v4(),
                 doc_id,
                 user_id,
@@ -529,7 +467,7 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
 
-        store.delete_chunks(doc_id).await.unwrap();
+        store.delete_embeddings(doc_id).await.unwrap();
 
         let results_after = store
             .vector_search(user_id, None, &make_embedding(1.0), 5)
@@ -549,7 +487,7 @@ mod tests {
         let content = "original content";
 
         store
-            .insert_chunk(
+            .store_embedding(
                 chunk_id,
                 doc_id,
                 user_id,
@@ -560,14 +498,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Update with new embedding
         let new_embedding = make_embedding(5.0);
         store
-            .update_chunk_embedding(chunk_id, doc_id, user_id, None, content, &new_embedding)
+            .update_embedding(chunk_id, doc_id, user_id, None, content, &new_embedding)
             .await
             .unwrap();
 
-        // Search with new embedding should find it
         let results = store
             .vector_search(user_id, None, &new_embedding, 5)
             .await
@@ -585,7 +521,7 @@ mod tests {
         let embedding = make_embedding(1.0);
 
         store
-            .insert_chunk(
+            .store_embedding(
                 Uuid::new_v4(),
                 doc_id,
                 "user1",
@@ -597,7 +533,7 @@ mod tests {
             .unwrap();
 
         store
-            .insert_chunk(
+            .store_embedding(
                 Uuid::new_v4(),
                 doc_id,
                 "user2",
@@ -637,7 +573,7 @@ mod tests {
         let wrong_dim: Vec<f32> = vec![1.0; 100];
 
         let err = store
-            .insert_chunk(
+            .store_embedding(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
                 "user1",
@@ -648,6 +584,9 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, crate::error::WorkspaceError::EmbeddingFailed { .. }));
+        assert!(matches!(
+            err,
+            crate::error::WorkspaceError::EmbeddingFailed { .. }
+        ));
     }
 }

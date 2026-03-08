@@ -110,6 +110,8 @@ pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # LanceDB vector store (optional alternative to pgvector/libsql for workspace search)
 lancedb = { version = "0.26", optional = true }
+arrow-array = { version = "57", optional = true }
+arrow-schema = { version = "57", optional = true }
 
 # WASM sandbox for untrusted tool execution
 wasmtime = { version = "28", features = ["component-model"] }
@@ -156,7 +158,7 @@ tempfile = "3"
 
 [features]
 default = ["postgres", "libsql"]
-lancedb = ["dep:lancedb"]
+lancedb = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",

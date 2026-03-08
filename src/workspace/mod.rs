@@ -42,22 +42,24 @@
 
 mod chunker;
 mod document;
-mod embeddings;
+pub mod embeddings;
 pub mod hygiene;
 #[cfg(feature = "lancedb")]
 pub mod lancedb_store;
 #[cfg(feature = "postgres")]
 mod repository;
 mod search;
+pub mod vector_store;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 pub use embeddings::{EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
+#[cfg(feature = "lancedb")]
+pub use lancedb_store::{DEFAULT_EMBEDDING_DIM, LanceDbVectorStore};
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
-#[cfg(feature = "lancedb")]
-pub use lancedb_store::{LanceDbVectorStore, VectorStore, DEFAULT_EMBEDDING_DIM};
 pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
+pub use vector_store::VectorStore;
 
 use std::sync::Arc;
 
@@ -279,6 +281,12 @@ pub struct Workspace {
     storage: WorkspaceStorage,
     /// Embedding provider for semantic search.
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    /// Optional external vector store for semantic search.
+    ///
+    /// When set, embeddings are stored here instead of (or in addition to)
+    /// the database's built-in vector support, and hybrid search uses this
+    /// for the vector component while FTS comes from the database.
+    vector_store: Option<Arc<dyn VectorStore>>,
 }
 
 impl Workspace {
@@ -290,6 +298,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Repo(Repository::new(pool)),
             embeddings: None,
+            vector_store: None,
         }
     }
 
@@ -302,6 +311,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Db(db),
             embeddings: None,
+            vector_store: None,
         }
     }
 
@@ -314,6 +324,17 @@ impl Workspace {
     /// Set the embedding provider for semantic search.
     pub fn with_embeddings(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embeddings = Some(provider);
+        self
+    }
+
+    /// Set an external vector store for semantic search.
+    ///
+    /// When set, vector operations (store/search/delete embeddings) use this
+    /// store instead of the database's built-in vector support. FTS continues
+    /// to use the database. Hybrid search combines FTS from the database with
+    /// vector results from this store via RRF.
+    pub fn with_vector_store(mut self, store: Arc<dyn VectorStore>) -> Self {
+        self.vector_store = Some(store);
         self
     }
 
@@ -405,9 +426,21 @@ impl Workspace {
 
     /// Delete a file.
     ///
-    /// Also deletes associated chunks.
+    /// Also deletes associated chunks (from both DB and external vector store).
     pub async fn delete(&self, path: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
+
+        // Clean up external vector store before DB cascade deletes chunks
+        if let Some(ref vs) = self.vector_store
+            && let Ok(doc) = self
+                .storage
+                .get_document_by_path(&self.user_id, self.agent_id, &path)
+                .await
+            && let Err(e) = vs.delete_embeddings(doc.id).await
+        {
+            tracing::warn!("Failed to delete embeddings from vector store: {}", e);
+        }
+
         self.storage
             .delete_document_by_path(&self.user_id, self.agent_id, &path)
             .await
@@ -599,6 +632,50 @@ impl Workspace {
             None
         };
 
+        // When an external vector store is configured, do FTS from the
+        // database and vector search from the store, then fuse with RRF.
+        if let Some(ref vs) = self.vector_store {
+            // FTS from database (disable vector to avoid double-searching)
+            let fts_results = if config.use_fts {
+                let fts_config = SearchConfig {
+                    use_fts: true,
+                    use_vector: false,
+                    ..config.clone()
+                };
+                let fts_search = self
+                    .storage
+                    .hybrid_search(&self.user_id, self.agent_id, query, None, &fts_config)
+                    .await?;
+                fts_search
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, r)| RankedResult {
+                        chunk_id: r.chunk_id,
+                        document_id: r.document_id,
+                        content: r.content,
+                        rank: (i + 1) as u32,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Vector search from external store
+            let vector_results = if config.use_vector {
+                if let Some(ref emb) = embedding {
+                    vs.vector_search(&self.user_id, self.agent_id, emb, config.pre_fusion_limit)
+                        .await?
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            return Ok(reciprocal_rank_fusion(fts_results, vector_results, &config));
+        }
+
+        // No external vector store — use database's built-in hybrid search
         self.storage
             .hybrid_search(
                 &self.user_id,
@@ -620,8 +697,13 @@ impl Workspace {
         // Chunk the content
         let chunks = chunk_document(&doc.content, ChunkConfig::default());
 
-        // Delete old chunks
+        // Delete old chunks from database
         self.storage.delete_chunks(document_id).await?;
+
+        // Delete old embeddings from external vector store
+        if let Some(ref vs) = self.vector_store {
+            vs.delete_embeddings(document_id).await?;
+        }
 
         // Insert new chunks
         for (index, content) in chunks.into_iter().enumerate() {
@@ -638,9 +720,26 @@ impl Workspace {
                 None
             };
 
-            self.storage
+            let chunk_id = self
+                .storage
                 .insert_chunk(document_id, index as i32, &content, embedding.as_deref())
                 .await?;
+
+            // Sync embedding to external vector store
+            if let (Some(vs), Some(emb)) = (&self.vector_store, &embedding)
+                && let Err(e) = vs
+                    .store_embedding(
+                        chunk_id,
+                        document_id,
+                        &doc.user_id,
+                        doc.agent_id,
+                        &content,
+                        emb,
+                    )
+                    .await
+            {
+                tracing::warn!("Failed to store embedding in vector store: {}", e);
+            }
         }
 
         Ok(())
@@ -757,6 +856,29 @@ impl Workspace {
                     self.storage
                         .update_chunk_embedding(chunk.id, &embedding)
                         .await?;
+
+                    // Sync to external vector store
+                    if let Some(ref vs) = self.vector_store {
+                        let doc = self.storage.get_document_by_id(chunk.document_id).await?;
+                        if let Err(e) = vs
+                            .update_embedding(
+                                chunk.id,
+                                chunk.document_id,
+                                &doc.user_id,
+                                doc.agent_id,
+                                &chunk.content,
+                                &embedding,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to sync embedding to vector store for chunk {}: {}",
+                                chunk.id,
+                                e
+                            );
+                        }
+                    }
+
                     count += 1;
                 }
                 Err(e) => {

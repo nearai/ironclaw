@@ -378,7 +378,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "libsql")]
     let mut libsql_db: Option<std::sync::Arc<libsql::Database>> = None;
 
-    let mut inner_db: Option<Arc<dyn ironclaw::db::Database>> = if cli.no_db {
+    let db: Option<Arc<dyn ironclaw::db::Database>> = if cli.no_db {
         tracing::warn!("Running without database connection");
         None
     } else {
@@ -435,8 +435,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Optionally wrap with LanceDB vector store for workspace semantic search
-    let db: Option<Arc<dyn ironclaw::db::Database>> = if let Some(inner) = inner_db.take() {
+    // Create optional external vector store for workspace semantic search
+    let vector_store: Option<Arc<dyn ironclaw::workspace::VectorStore>> = {
         #[cfg(feature = "lancedb")]
         {
             if config.database.vector_backend == ironclaw::config::VectorBackend::LanceDb {
@@ -449,12 +449,9 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .map_err(|e| anyhow::anyhow!("LanceDB: {}", e))?;
                 tracing::info!("LanceDB vector store connected for workspace search");
-                Some(Arc::new(ironclaw::db::lancedb_wrapper::DbWithLanceVectorStore::new(
-                    inner,
-                    Arc::new(store),
-                )) as Arc<dyn ironclaw::db::Database>)
+                Some(Arc::new(store) as Arc<dyn ironclaw::workspace::VectorStore>)
             } else {
-                Some(inner)
+                None
             }
         }
         #[cfg(not(feature = "lancedb"))]
@@ -463,12 +460,9 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!(
                     "VECTOR_BACKEND=lancedb requires the 'lancedb' feature. Build with: cargo build --features lancedb"
                 );
-            } else {
-                Some(inner)
             }
+            None
         }
-    } else {
-        None
     };
 
     // Post-init operations using the database
@@ -760,6 +754,9 @@ async fn main() -> anyhow::Result<()> {
         let mut workspace = Workspace::new_with_db("default", Arc::clone(db));
         if let Some(ref emb) = embeddings {
             workspace = workspace.with_embeddings(emb.clone());
+        }
+        if let Some(ref vs) = vector_store {
+            workspace = workspace.with_vector_store(vs.clone());
         }
         let workspace = Arc::new(workspace);
         tools.register_memory_tools(workspace);
@@ -1264,6 +1261,9 @@ async fn main() -> anyhow::Result<()> {
         let mut ws = Workspace::new_with_db("default", Arc::clone(db_ref));
         if let Some(ref emb) = embeddings {
             ws = ws.with_embeddings(emb.clone());
+        }
+        if let Some(ref vs) = vector_store {
+            ws = ws.with_vector_store(vs.clone());
         }
         Some(Arc::new(ws))
     } else {
