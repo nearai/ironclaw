@@ -423,7 +423,10 @@ mod tests {
         assert_eq!(with_millis, expected + chrono::Duration::milliseconds(789));
 
         let naive_with_millis = parse_timestamp("2026-03-07 12:34:56.789").unwrap();
-        assert_eq!(naive_with_millis, expected + chrono::Duration::milliseconds(789));
+        assert_eq!(
+            naive_with_millis,
+            expected + chrono::Duration::milliseconds(789)
+        );
 
         let naive_without_millis = parse_timestamp("2026-03-07 12:34:56").unwrap();
         assert_eq!(naive_without_millis, expected);
@@ -436,17 +439,17 @@ mod tests {
 
         let conn = backend.connect().await.unwrap();
         let mut rows = conn
-            .query(
-                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
-                (),
-            )
+            .query("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", ())
             .await
             .unwrap();
         let row = rows.next().await.unwrap().unwrap();
         let ts: String = row.get(0).unwrap();
 
         let parsed = parse_timestamp(&ts).unwrap();
-        assert_eq!(ts, parsed.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        assert_eq!(
+            ts,
+            parsed.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
     }
 
     #[tokio::test]
