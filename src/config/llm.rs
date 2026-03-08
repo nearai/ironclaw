@@ -211,8 +211,10 @@ impl LlmConfig {
         let backend_lower = backend.to_lowercase();
         let is_nearai =
             backend_lower == "nearai" || backend_lower == "near_ai" || backend_lower == "near";
+        let is_bedrock =
+            backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
 
-        if !is_nearai && registry.find(&backend_lower).is_none() {
+        if !is_nearai && !is_bedrock && registry.find(&backend_lower).is_none() {
             tracing::warn!(
                 "Unknown LLM backend '{}'. Will attempt as openai_compatible fallback.",
                 backend
@@ -259,9 +261,6 @@ impl LlmConfig {
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
-        let is_bedrock =
-            backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
-
         // Resolve registry provider config (for non-NearAI, non-Bedrock backends)
         let provider = if is_nearai || is_bedrock {
             None
@@ -299,7 +298,8 @@ impl LlmConfig {
                     ),
                 });
             }
-            let profile = optional_env("AWS_PROFILE")?;
+            let profile =
+                optional_env("AWS_PROFILE")?.or_else(|| settings.bedrock_profile.clone());
             Some(BedrockConfig {
                 region,
                 model,
@@ -313,6 +313,8 @@ impl LlmConfig {
         Ok(Self {
             backend: if is_nearai {
                 "nearai".to_string()
+            } else if is_bedrock {
+                "bedrock".to_string()
             } else if let Some(ref p) = provider {
                 p.provider_id.clone()
             } else {
