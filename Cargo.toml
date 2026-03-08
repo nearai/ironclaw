@@ -73,6 +73,8 @@ toml = "0.8"
 # Core types
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 rust_decimal_macros = "1"
 

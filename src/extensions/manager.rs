@@ -1405,38 +1405,6 @@ impl ExtensionManager {
         Ok(())
     }
 
-    #[allow(dead_code)] // Used by upcoming hot-activation flow
-    async fn install_bundled_channel_from_artifacts(
-        &self,
-        name: &str,
-    ) -> Result<InstallResult, ExtensionError> {
-        // Check if already installed
-        let channel_wasm = self.wasm_channels_dir.join(format!("{}.wasm", name));
-        if channel_wasm.exists() {
-            return Err(ExtensionError::AlreadyInstalled(name.to_string()));
-        }
-
-        crate::channels::wasm::install_bundled_channel(name, &self.wasm_channels_dir, false)
-            .await
-            .map_err(ExtensionError::InstallFailed)?;
-
-        tracing::info!(
-            "Installed bundled channel '{}' to {}",
-            name,
-            self.wasm_channels_dir.display()
-        );
-
-        Ok(InstallResult {
-            name: name.to_string(),
-            kind: ExtensionKind::WasmChannel,
-            message: format!(
-                "Channel '{}' installed. \
-                 Run tool_auth('{}') to configure authentication, then activate.",
-                name, name,
-            ),
-        })
-    }
-
     /// Install a WASM extension from local build artifacts (WasmBuildable source).
     ///
     /// Resolves the build directory (relative to `CARGO_MANIFEST_DIR` or absolute),

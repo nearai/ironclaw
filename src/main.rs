@@ -145,6 +145,24 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // ── PID lock (prevent multiple instances) ────────────────────────
+    let _pid_lock = match ironclaw::bootstrap::PidLock::acquire() {
+        Ok(lock) => Some(lock),
+        Err(ironclaw::bootstrap::PidLockError::AlreadyRunning { pid }) => {
+            anyhow::bail!(
+                "Another IronClaw instance is already running (PID {}). \
+                 If this is incorrect, remove the stale PID file: {}",
+                pid,
+                ironclaw::bootstrap::pid_lock_path().display()
+            );
+        }
+        Err(e) => {
+            eprintln!("Warning: Could not acquire PID lock: {}", e);
+            eprintln!("Continuing without PID lock protection.");
+            None
+        }
+    };
+
     // ── Agent startup ──────────────────────────────────────────────────
 
     // Enhanced first-run detection
@@ -166,13 +184,12 @@ async fn async_main() -> anyhow::Result<()> {
     let config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
-            eprintln!("Configuration error: Missing required setting '{}'", key);
-            eprintln!("  {}", hint);
-            eprintln!();
-            eprintln!(
-                "Run 'ironclaw onboard' to configure, or set the required environment variables."
+            anyhow::bail!(
+                "Configuration error: Missing required setting '{}'. {}. \
+                 Run 'ironclaw onboard' to configure, or set the required environment variables.",
+                key,
+                hint
             );
-            std::process::exit(1);
         }
         Err(e) => return Err(e.into()),
     };

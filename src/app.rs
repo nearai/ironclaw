@@ -256,15 +256,18 @@ impl AppBuilder {
                     self.libsql_db.take();
                 }
 
-                // Re-resolve config with OS credentials
-                if let Some(ref db) = self.db {
-                    let toml_path = self.toml_path.as_deref();
-                    if let Ok(refreshed) =
-                        Config::from_db_with_toml(db.as_ref(), "default", toml_path).await
-                    {
-                        self.config = refreshed;
-                        tracing::debug!("LlmConfig re-resolved after OS credential injection");
-                    }
+                // Re-resolve only the LLM config with OS credentials.
+                let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
+                    self.db.as_ref().map(|db| db.as_ref() as _);
+                let toml_path = self.toml_path.as_deref();
+                if let Err(e) = self
+                    .config
+                    .re_resolve_llm(store, "default", toml_path)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to re-resolve LLM config after OS credential injection: {e}"
+                    );
                 }
 
                 return Ok(());
@@ -309,18 +312,16 @@ impl AppBuilder {
             // Inject LLM API keys from encrypted storage
             crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), "default").await;
 
-            // Re-resolve config with newly available keys
-            if let Some(ref db) = self.db {
-                let toml_path = self.toml_path.as_deref();
-                match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
-                    Ok(refreshed) => {
-                        self.config = refreshed;
-                        tracing::debug!("LlmConfig re-resolved after secret injection");
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to re-resolve config after secret injection: {}", e);
-                    }
-                }
+            // Re-resolve only the LLM config with newly available keys.
+            let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
+                self.db.as_ref().map(|db| db.as_ref() as _);
+            let toml_path = self.toml_path.as_deref();
+            if let Err(e) = self
+                .config
+                .re_resolve_llm(store, "default", toml_path)
+                .await
+            {
+                tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
             }
         }
 
@@ -404,11 +405,7 @@ impl AppBuilder {
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
             tools
-                .register_builder_tool(
-                    llm.clone(),
-                    safety.clone(),
-                    Some(self.config.builder.to_builder_config()),
-                )
+                .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
             tracing::info!("Builder mode enabled");
         }

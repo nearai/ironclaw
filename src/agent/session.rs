@@ -164,6 +164,10 @@ pub struct PendingApproval {
     /// executed yet when approval was requested.
     #[serde(default)]
     pub deferred_tool_calls: Vec<ToolCall>,
+    /// User timezone at the time the approval was requested, so it persists
+    /// through the approval flow even if the approval message lacks timezone.
+    #[serde(default)]
+    pub user_timezone: Option<String>,
 }
 
 /// A conversation thread within a session.
@@ -976,6 +980,7 @@ mod tests {
             tool_call_id: "call_123".to_string(),
             context_messages: vec![ChatMessage::user("do it")],
             deferred_tool_calls: vec![],
+            user_timezone: None,
         };
 
         thread.await_approval(approval);
@@ -1001,6 +1006,7 @@ mod tests {
             tool_call_id: "call_456".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            user_timezone: None,
         };
 
         thread.await_approval(approval);

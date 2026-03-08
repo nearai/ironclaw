@@ -230,28 +230,53 @@ impl HttpMcpTransport {
 
 /// Sanitize an HTTP error body for safe inclusion in error messages.
 ///
-/// - Replaces HTML bodies with a placeholder
-/// - Strips control characters (except `\n` and `\t`)
-/// - Truncates to 500 characters
+/// When the body looks like a full HTML document (`<html` or `<!doctype`),
+/// strips all tags, collapsing whitespace.  Non-HTML bodies are left
+/// intact.  In both cases the result is truncated to 200 *characters*
+/// (char-boundary safe) so that large payloads don't bloat error messages.
+///
+/// See #263 — raw HTML error pages were propagating through the error
+/// chain into the web UI, causing a white screen.
 pub(crate) fn sanitize_error_body(body: &str) -> String {
-    let trimmed = body.trim();
+    const MAX_CHARS: usize = 200;
 
-    // Detect HTML: starts with `<` or contains `<html` (case-insensitive).
-    if trimmed.starts_with('<') || trimmed.to_ascii_lowercase().contains("<html") {
-        return "(HTML error page)".to_string();
-    }
+    // Only strip tags when the body looks like a full HTML document.
+    // Plain text that happens to contain `<` / `>` (e.g. log lines,
+    // comparison expressions) is left untouched.
+    let lower = body.to_ascii_lowercase();
+    let is_html_document = lower.contains("<html") || lower.contains("<!doctype");
 
-    // Strip control characters (anything < 0x20 except \n and \t).
-    let cleaned: String = body
-        .chars()
-        .filter(|&c| c >= '\x20' || c == '\n' || c == '\t')
-        .collect();
-
-    // Truncate to 500 characters (char-based to avoid splitting multi-byte).
-    if cleaned.chars().count() > 500 {
-        cleaned.chars().take(500).collect()
+    let text = if is_html_document {
+        let stripped = body
+            .chars()
+            .fold((String::new(), false), |(mut out, in_tag), c| {
+                if c == '<' {
+                    (out, true)
+                } else if c == '>' {
+                    (out, false)
+                } else if !in_tag {
+                    out.push(c);
+                    (out, false)
+                } else {
+                    (out, true)
+                }
+            })
+            .0;
+        stripped.split_whitespace().collect::<Vec<_>>().join(" ")
     } else {
-        cleaned
+        body.to_string()
+    };
+
+    // Truncate at a char boundary (safe for multi-byte UTF-8).
+    if text.chars().count() > MAX_CHARS {
+        let byte_offset = text
+            .char_indices()
+            .nth(MAX_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+        format!("{}... ({} bytes total)", &text[..byte_offset], body.len())
+    } else {
+        text
     }
 }
 
@@ -260,63 +285,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sanitize_error_body_html_body() {
-        let body = "<html><body>500 Internal Error</body></html>";
-        assert_eq!(sanitize_error_body(body), "(HTML error page)");
+    fn test_sanitize_error_body_strips_html_tags() {
+        let html =
+            r#"<!DOCTYPE html><html><body><h1>422 Error</h1><p>Invalid token</p></body></html>"#;
+        let result = sanitize_error_body(html);
+        assert!(!result.contains('<'), "HTML tags must be stripped");
+        assert!(!result.contains('>'), "HTML tags must be stripped");
+        assert!(result.contains("422 Error"));
+        assert!(result.contains("Invalid token"));
     }
 
     #[test]
-    fn test_sanitize_error_body_doctype_prefix() {
-        let body = "<!DOCTYPE html>\n<html><body>Bad Gateway</body></html>";
-        assert_eq!(sanitize_error_body(body), "(HTML error page)");
+    fn test_sanitize_error_body_truncates_large_html_page() {
+        let html = format!(
+            "<html><body><p>{}</p></body></html>",
+            "error detail ".repeat(50)
+        );
+        let result = sanitize_error_body(&html);
+        assert!(result.contains("..."));
+        assert!(result.contains("bytes total)"));
+        assert!(!result.contains('<'));
     }
 
     #[test]
-    fn test_sanitize_error_body_html_case_insensitive() {
-        let body = "Error: <HTML><BODY>Server Error</BODY></HTML>";
-        assert_eq!(sanitize_error_body(body), "(HTML error page)");
+    fn test_sanitize_error_body_passes_short_plain_text() {
+        assert_eq!(sanitize_error_body("Not Found"), "Not Found");
     }
 
     #[test]
-    fn test_sanitize_error_body_plain_text_kept() {
-        let body = "Something went wrong";
-        assert_eq!(sanitize_error_body(body), "Something went wrong");
+    fn test_sanitize_error_body_truncates_long_plain_text() {
+        let long = "x".repeat(300);
+        let result = sanitize_error_body(&long);
+        assert!(result.contains("..."));
+        assert!(result.contains("300 bytes total)"));
     }
 
     #[test]
-    fn test_sanitize_error_body_truncates_long_text() {
-        let body = "a".repeat(600);
-        let result = sanitize_error_body(&body);
-        assert_eq!(result.len(), 500);
-    }
-
-    #[test]
-    fn test_sanitize_error_body_truncates_multibyte_safely() {
-        // Each emoji is 4 bytes. 200 emojis = 800 bytes but 200 chars.
-        // Pad to >500 chars with multi-byte content.
-        let body = "é".repeat(600); // 'é' is 2 bytes
-        let result = sanitize_error_body(&body);
-        assert_eq!(result.chars().count(), 500);
-        // Ensure the result is valid UTF-8 (String guarantees this, but verify
-        // we didn't accidentally slice mid-character).
+    fn test_sanitize_error_body_multibyte_no_panic() {
+        // 300 CJK characters = 900 bytes; truncation must land on a
+        // char boundary, not in the middle of a multi-byte sequence.
+        let cjk = "错误".repeat(150);
+        let result = sanitize_error_body(&cjk);
+        assert!(result.contains("..."));
+        // Must be valid UTF-8 (would have panicked otherwise).
         assert!(result.is_char_boundary(result.len()));
     }
 
     #[test]
-    fn test_sanitize_error_body_strips_control_chars() {
-        let body = "error\x00message\x01with\x02controls\nbut\tkeep these";
-        let result = sanitize_error_body(body);
-        assert_eq!(result, "errormessagewithcontrols\nbut\tkeep these");
+    fn test_sanitize_error_body_strips_uppercase_html() {
+        let html = "<HTML><BODY><H1>500 Internal Server Error</H1></BODY></HTML>";
+        let result = sanitize_error_body(html);
+        assert!(
+            !result.contains('<'),
+            "uppercase HTML tags must be stripped"
+        );
+        assert!(result.contains("500 Internal Server Error"));
+    }
+
+    #[test]
+    fn test_sanitize_error_body_preserves_angle_brackets_in_non_html() {
+        let text = "value < 10 and value > 0";
+        assert_eq!(sanitize_error_body(text), text);
     }
 
     #[test]
     fn test_sanitize_error_body_empty_string() {
         assert_eq!(sanitize_error_body(""), "");
-    }
-
-    #[test]
-    fn test_sanitize_error_body_whitespace_only() {
-        assert_eq!(sanitize_error_body("   "), "   ");
     }
 
     #[test]

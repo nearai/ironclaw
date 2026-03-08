@@ -514,6 +514,9 @@ impl Tool for McpToolWrapper {
     }
 }
 
+/// Sanitize an HTTP error response body for safe display.
+///
+/// Detects full HTML error pages (containing `<html` or `<!DOCTYPE`) and
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,51 +726,6 @@ mod tests {
             annotations: None,
         };
         assert!(!tool.requires_approval());
-    }
-
-    #[test]
-    fn test_sanitize_error_body_html_body() {
-        assert_eq!(
-            sanitize_error_body("<html><body>500 Internal Error</body></html>"),
-            "(HTML error page)"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_error_body_doctype_prefix() {
-        assert_eq!(
-            sanitize_error_body("<!DOCTYPE html>\n<html><body>Bad Gateway</body></html>"),
-            "(HTML error page)"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_error_body_html_case_insensitive() {
-        assert_eq!(
-            sanitize_error_body("Error: <HTML><BODY>Server Error</BODY></HTML>"),
-            "(HTML error page)"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_error_body_plain_text_kept() {
-        assert_eq!(
-            sanitize_error_body("Something went wrong"),
-            "Something went wrong"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_error_body_truncates_long_text() {
-        assert_eq!(sanitize_error_body(&"a".repeat(600)).len(), 500);
-    }
-
-    #[test]
-    fn test_sanitize_error_body_strips_control_chars() {
-        assert_eq!(
-            sanitize_error_body("error\x00message\x01with\x02controls\nbut\tkeep these"),
-            "errormessagewithcontrols\nbut\tkeep these"
-        );
     }
 
     /// Mock transport for testing transport abstraction behavior.
