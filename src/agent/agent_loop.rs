@@ -358,6 +358,10 @@ impl Agent {
                         .with_interval(std::time::Duration::from_secs(hb_config.interval_secs));
                     config.quiet_hours_start = hb_config.quiet_hours_start;
                     config.quiet_hours_end = hb_config.quiet_hours_end;
+                    config.timezone = hb_config
+                        .timezone
+                        .clone()
+                        .or_else(|| Some(self.config.default_timezone.clone()));
                     if let (Some(user), Some(channel)) =
                         (&hb_config.notify_user, &hb_config.notify_channel)
                     {

@@ -571,14 +571,59 @@ mod tests {
 
     #[test]
     fn test_quiet_hours_inside() {
+        use chrono::{Timelike, Utc};
+
+        let now_utc = Utc::now();
+        let hour = now_utc.hour();
+        let start = hour;
+        let end = (hour + 1) % 24;
+
         let config = HeartbeatConfig {
-            quiet_hours_start: Some(22),
-            quiet_hours_end: Some(6),
+            quiet_hours_start: Some(start),
+            quiet_hours_end: Some(end),
             timezone: Some("UTC".to_string()),
             ..HeartbeatConfig::default()
         };
-        // We can't control the clock, so just verify the method doesn't panic
-        let _ = config.is_quiet_hours();
+        // Current UTC hour is inside [start, end) by construction
+        assert!(config.is_quiet_hours());
+    }
+
+    #[test]
+    fn test_quiet_hours_outside() {
+        use chrono::{Timelike, Utc};
+
+        let now_utc = Utc::now();
+        let hour = now_utc.hour();
+        let start = (hour + 1) % 24;
+        let end = (hour + 2) % 24;
+
+        let config = HeartbeatConfig {
+            quiet_hours_start: Some(start),
+            quiet_hours_end: Some(end),
+            timezone: Some("UTC".to_string()),
+            ..HeartbeatConfig::default()
+        };
+        // Current UTC hour is outside [start, end) by construction
+        assert!(!config.is_quiet_hours());
+    }
+
+    #[test]
+    fn test_quiet_hours_wraparound_excludes_now() {
+        use chrono::{Timelike, Utc};
+
+        let now_utc = Utc::now();
+        let hour = now_utc.hour();
+        // Window covers all hours except the current one
+        let start = (hour + 1) % 24;
+        let end = hour;
+
+        let config = HeartbeatConfig {
+            quiet_hours_start: Some(start),
+            quiet_hours_end: Some(end),
+            timezone: Some("UTC".to_string()),
+            ..HeartbeatConfig::default()
+        };
+        assert!(!config.is_quiet_hours());
     }
 
     #[test]

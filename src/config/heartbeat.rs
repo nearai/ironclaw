@@ -17,6 +17,8 @@ pub struct HeartbeatConfig {
     pub quiet_hours_start: Option<u32>,
     /// Hour (0-23) when quiet hours end.
     pub quiet_hours_end: Option<u32>,
+    /// Timezone for quiet hours evaluation (IANA name).
+    pub timezone: Option<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -28,6 +30,7 @@ impl Default for HeartbeatConfig {
             notify_user: None,
             quiet_hours_start: None,
             quiet_hours_end: None,
+            timezone: None,
         }
     }
 }
@@ -68,6 +71,19 @@ impl HeartbeatConfig {
                     Ok(h)
                 })
                 .transpose()?,
+            timezone: {
+                let tz = optional_env("HEARTBEAT_TIMEZONE")?
+                    .or_else(|| settings.heartbeat.timezone.clone());
+                if let Some(ref tz_str) = tz
+                    && crate::timezone::parse_timezone(tz_str).is_none()
+                {
+                    return Err(ConfigError::InvalidValue {
+                        key: "HEARTBEAT_TIMEZONE".into(),
+                        message: format!("invalid IANA timezone: '{tz_str}'"),
+                    });
+                }
+                tz
+            },
         })
     }
 }
@@ -106,5 +122,23 @@ mod tests {
         let config = HeartbeatConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.quiet_hours_start, Some(0));
         assert_eq!(config.quiet_hours_end, Some(23));
+    }
+
+    #[test]
+    fn test_heartbeat_timezone_rejects_invalid() {
+        let mut settings = Settings::default();
+        settings.heartbeat.timezone = Some("Fake/Zone".to_string());
+
+        let result = HeartbeatConfig::resolve(&settings);
+        assert!(result.is_err(), "invalid IANA timezone should be rejected");
+    }
+
+    #[test]
+    fn test_heartbeat_timezone_accepts_valid() {
+        let mut settings = Settings::default();
+        settings.heartbeat.timezone = Some("America/New_York".to_string());
+
+        let config = HeartbeatConfig::resolve(&settings).expect("resolve");
+        assert_eq!(config.timezone.as_deref(), Some("America/New_York"));
     }
 }

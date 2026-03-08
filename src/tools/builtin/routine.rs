@@ -434,6 +434,10 @@ impl Tool for RoutineUpdateTool {
                     "type": "string",
                     "description": "New cron schedule (for cron triggers)"
                 },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone for cron schedule (e.g. 'America/New_York'). Only valid for cron triggers."
+                },
                 "description": {
                     "type": "string",
                     "description": "New description"
@@ -511,16 +515,10 @@ impl Tool for RoutineUpdateTool {
                 };
                 routine.next_fire_at =
                     next_cron_fire(effective_schedule, effective_tz.as_deref()).unwrap_or(None);
-            } else if let Some(schedule) = new_schedule {
-                let tz = new_timezone;
-                next_cron_fire(schedule, tz.as_deref()).map_err(|e| {
-                    ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
-                })?;
-                routine.trigger = Trigger::Cron {
-                    schedule: schedule.to_string(),
-                    timezone: tz.clone(),
-                };
-                routine.next_fire_at = next_cron_fire(schedule, tz.as_deref()).unwrap_or(None);
+            } else {
+                return Err(ToolError::InvalidParameters(
+                    "Cannot update schedule or timezone on a non-cron routine.".to_string(),
+                ));
             }
         }
 

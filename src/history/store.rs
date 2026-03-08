@@ -241,6 +241,8 @@ impl Store {
                     tool_output_stash: std::sync::Arc::new(tokio::sync::RwLock::new(
                         std::collections::HashMap::new(),
                     )),
+                    // TODO(#661): persist user_timezone in agent_jobs table so
+                    // background/routine jobs retain the session's timezone context.
                     user_timezone: "UTC".to_string(),
                 }))
             }

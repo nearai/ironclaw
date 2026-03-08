@@ -106,7 +106,17 @@ impl Trigger {
                 let timezone = config
                     .get("timezone")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
+                    .and_then(|tz| {
+                        if crate::timezone::parse_timezone(tz).is_some() {
+                            Some(tz.to_string())
+                        } else {
+                            tracing::warn!(
+                                "Ignoring invalid timezone '{}' from DB for cron trigger",
+                                tz
+                            );
+                            None
+                        }
+                    });
                 Ok(Trigger::Cron { schedule, timezone })
             }
             "event" => {
@@ -562,6 +572,16 @@ mod tests {
         let json = serde_json::json!({"schedule": "0 9 * * *"});
         let parsed = Trigger::from_db("cron", json).expect("parse cron");
         assert!(matches!(parsed, Trigger::Cron { timezone, .. } if timezone.is_none()));
+    }
+
+    #[test]
+    fn test_trigger_cron_invalid_timezone_coerced_to_none() {
+        let json = serde_json::json!({"schedule": "0 9 * * *", "timezone": "Fake/Zone"});
+        let parsed = Trigger::from_db("cron", json).expect("parse cron");
+        assert!(
+            matches!(parsed, Trigger::Cron { timezone, .. } if timezone.is_none()),
+            "invalid timezone should be coerced to None"
+        );
     }
 
     #[test]

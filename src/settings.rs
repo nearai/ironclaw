@@ -299,6 +299,10 @@ pub struct HeartbeatSettings {
     /// Hour (0-23) when quiet hours end (heartbeat resumes).
     #[serde(default)]
     pub quiet_hours_end: Option<u32>,
+
+    /// Timezone for quiet hours evaluation (IANA name, e.g. "America/New_York").
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -314,6 +318,7 @@ impl Default for HeartbeatSettings {
             notify_user: None,
             quiet_hours_start: None,
             quiet_hours_end: None,
+            timezone: None,
         }
     }
 }

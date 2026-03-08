@@ -746,9 +746,14 @@ impl Agent {
             let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
-            // Prefer timezone from the approval message, fall back to the
-            // timezone stored when the approval was originally requested.
-            if let Some(ref tz) = message.timezone.as_ref().or(pending.user_timezone.as_ref()) {
+            // Prefer a valid timezone from the approval message, fall back to the
+            // resolved timezone stored when the approval was originally requested.
+            let tz_candidate = message
+                .timezone
+                .as_deref()
+                .filter(|tz| crate::timezone::parse_timezone(tz).is_some())
+                .or(pending.user_timezone.as_deref());
+            if let Some(tz) = tz_candidate {
                 job_ctx.user_timezone = tz.to_string();
             }
 

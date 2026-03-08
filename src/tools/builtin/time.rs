@@ -57,18 +57,16 @@ impl Tool for TimeTool {
         let result = match operation {
             "now" => {
                 let now = Utc::now();
-                let mut result = serde_json::json!({
+                let tz =
+                    crate::timezone::parse_timezone(&ctx.user_timezone).unwrap_or(chrono_tz::UTC);
+                let local = now.with_timezone(&tz);
+                serde_json::json!({
                     "iso": now.to_rfc3339(),
                     "unix": now.timestamp(),
-                    "unix_millis": now.timestamp_millis()
-                });
-                // Include local time in the user's timezone if set
-                if let Some(tz) = crate::timezone::parse_timezone(&ctx.user_timezone) {
-                    let local = now.with_timezone(&tz);
-                    result["local_iso"] = serde_json::Value::String(local.to_rfc3339());
-                    result["timezone"] = serde_json::Value::String(tz.name().to_string());
-                }
-                result
+                    "unix_millis": now.timestamp_millis(),
+                    "local_iso": local.to_rfc3339(),
+                    "timezone": tz.name()
+                })
             }
             "parse" => {
                 let timestamp = require_str(&params, "timestamp")?;
