@@ -178,8 +178,26 @@ impl McpClient {
                 .header("Content-Type", "application/json")
                 .json(&request);
 
-            // Add Authorization header if we have a token
-            if let Some(token) = self.get_access_token().await? {
+            // Add custom headers from config (if any)
+            let has_custom_auth = if let Some(ref config) = self.server_config
+                && config.has_custom_headers()
+            {
+                let has_auth = config.has_custom_auth_header();
+                if let Some(ref headers) = config.headers {
+                    for (name, value) in headers {
+                        // Headers were validated at config time (CRLF-safe)
+                        req_builder = req_builder.header(name.as_str(), value.as_str());
+                    }
+                }
+                has_auth
+            } else {
+                false
+            };
+
+            // Add OAuth Bearer token if we have one and the user hasn't
+            // supplied a custom Authorization header (case-insensitive check
+            // already done by has_custom_auth_header).
+            if !has_custom_auth && let Some(token) = self.get_access_token().await? {
                 req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
             }
 
@@ -739,5 +757,173 @@ mod tests {
             annotations: None,
         };
         assert!(!tool.requires_approval());
+    }
+
+    #[test]
+    fn test_custom_auth_header_skips_bearer() {
+        // When config has a custom Authorization header,
+        // has_custom_auth_header() should return true so send_request
+        // skips auto Bearer injection.
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer static-tok".to_string());
+        let config = McpServerConfig::new("test", "https://mcp.example.com").with_headers(headers);
+        assert!(config.has_custom_auth_header());
+    }
+
+    #[test]
+    fn test_non_auth_headers_allow_bearer() {
+        // Custom headers that aren't Authorization should NOT block Bearer
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-API-Key".to_string(), "sk-abc".to_string());
+        let config = McpServerConfig::new("test", "https://mcp.example.com").with_headers(headers);
+        assert!(!config.has_custom_auth_header());
+    }
+
+    /// Spin up a lightweight axum server that echoes back all received request
+    /// headers as a JSON-RPC result, so we can assert on the actual wire-level
+    /// headers sent by `send_request`.
+    async fn mock_mcp_echo_server() -> (String, tokio::task::JoinHandle<()>) {
+        use axum::http::StatusCode;
+        use axum::{Router, extract::Request, routing::post};
+
+        let app = Router::new().route(
+            "/",
+            post(|req: Request| async move {
+                // Collect headers into a map for easy assertion.
+                let headers: std::collections::HashMap<String, String> = req
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+                    .collect();
+                let body = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": headers
+                });
+                (StatusCode::OK, axum::Json(body))
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, handle)
+    }
+
+    /// Helper: call send_request on a client and return the echoed headers.
+    async fn send_and_get_headers(client: &McpClient) -> std::collections::HashMap<String, String> {
+        let req = McpRequest::initialize(1);
+        let resp = client.send_request(req).await.unwrap();
+        serde_json::from_value(resp.result.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_wire_custom_headers_injected() {
+        // Custom headers should appear in the outbound request.
+        let (url, handle) = mock_mcp_echo_server().await;
+        let mut hdrs = std::collections::HashMap::new();
+        hdrs.insert("X-Api-Key".to_string(), "sk-test-123".to_string());
+        let config = McpServerConfig::new("test", &url).with_headers(hdrs);
+        let client = McpClient::new_with_name("test", &url);
+        // Inject config so send_request reads custom headers
+        let client = McpClient {
+            server_config: Some(config),
+            ..client
+        };
+        let headers = send_and_get_headers(&client).await;
+        assert_eq!(headers.get("x-api-key").unwrap(), "sk-test-123");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_wire_custom_auth_suppresses_bearer() {
+        // When config has a custom Authorization header, auto Bearer must NOT appear.
+        let (url, handle) = mock_mcp_echo_server().await;
+        let mut hdrs = std::collections::HashMap::new();
+        hdrs.insert(
+            "Authorization".to_string(),
+            "Token my-static-token".to_string(),
+        );
+        let config = McpServerConfig::new("test", &url).with_headers(hdrs);
+        let client = McpClient::new_with_name("test", &url);
+        let client = McpClient {
+            server_config: Some(config),
+            ..client
+        };
+        let headers = send_and_get_headers(&client).await;
+        assert_eq!(
+            headers.get("authorization").unwrap(),
+            "Token my-static-token"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_wire_non_auth_headers_allow_bearer() {
+        // Custom non-Authorization headers must NOT suppress auto Bearer.
+        // Use a real InMemorySecretsStore with a stored token to prove Bearer
+        // IS injected alongside the custom header.
+        use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto};
+        use secrecy::SecretString;
+
+        let (url, handle) = mock_mcp_echo_server().await;
+
+        // Set up secrets store with a token
+        let crypto = Arc::new(
+            SecretsCrypto::new(SecretString::from("test-master-key-32chars!!!!!!!!xx")).unwrap(),
+        );
+        let secrets: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        let mut hdrs = std::collections::HashMap::new();
+        hdrs.insert("X-Custom".to_string(), "value".to_string());
+        let config = McpServerConfig::new("test", &url).with_headers(hdrs);
+
+        // Store a token under the expected secret name
+        let token_name = config.token_secret_name(); // "mcp_test_access_token"
+        secrets
+            .create(
+                "default",
+                CreateSecretParams::new(&token_name, "oauth-bearer-tok"),
+            )
+            .await
+            .unwrap();
+
+        let session_manager = Arc::new(McpSessionManager::new());
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "default");
+
+        let headers = send_and_get_headers(&client).await;
+        // Custom header present
+        assert_eq!(headers.get("x-custom").unwrap(), "value");
+        // Bearer token also present (not suppressed by non-auth custom header)
+        let auth = headers.get("authorization").unwrap();
+        assert!(
+            auth.starts_with("Bearer "),
+            "expected Bearer token, got: {}",
+            auth
+        );
+        handle.abort();
+    }
+
+    #[test]
+    fn test_client_creation_branches() {
+        // No headers, no OAuth, localhost → new_with_name path
+        let config = McpServerConfig::new("local", "http://localhost:8080");
+        assert!(!config.requires_auth());
+        assert!(!config.has_custom_headers());
+
+        // Headers only, localhost → has_custom_headers triggers authenticated path
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Key".to_string(), "val".to_string());
+        let config = McpServerConfig::new("local", "http://localhost:8080").with_headers(headers);
+        assert!(!config.requires_auth());
+        assert!(config.has_custom_headers());
+
+        // Remote HTTPS, no headers → requires_auth triggers authenticated path
+        let config = McpServerConfig::new("remote", "https://mcp.example.com");
+        assert!(config.requires_auth());
+        assert!(!config.has_custom_headers());
     }
 }

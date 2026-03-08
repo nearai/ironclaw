@@ -25,6 +25,13 @@ pub struct McpServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthConfig>,
 
+    /// Custom HTTP headers to send with every request.
+    ///
+    /// Used for MCP servers that require non-OAuth authentication
+    /// (e.g., `X-API-Key`, `Authorization: Bearer <static-token>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+
     /// Whether this server is enabled.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -45,6 +52,7 @@ impl McpServerConfig {
             name: name.into(),
             url: url.into(),
             oauth: None,
+            headers: None,
             enabled: true,
             description: None,
         }
@@ -60,6 +68,28 @@ impl McpServerConfig {
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
+    }
+
+    /// Set custom HTTP headers.
+    pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
+        if headers.is_empty() {
+            self.headers = None;
+        } else {
+            self.headers = Some(headers);
+        }
+        self
+    }
+
+    /// Check if this server has custom headers configured.
+    pub fn has_custom_headers(&self) -> bool {
+        self.headers.as_ref().is_some_and(|h| !h.is_empty())
+    }
+
+    /// Check if custom headers include an Authorization header (case-insensitive).
+    pub fn has_custom_auth_header(&self) -> bool {
+        self.headers
+            .as_ref()
+            .is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("authorization")))
     }
 
     /// Validate the server configuration.
@@ -83,6 +113,25 @@ impl McpServerConfig {
             return Err(ConfigError::InvalidConfig {
                 reason: "Remote MCP servers must use HTTPS".to_string(),
             });
+        }
+
+        // Validate custom headers (reject invalid header names/values to prevent CRLF injection)
+        if let Some(ref headers) = self.headers {
+            for (name, value) in headers {
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    ConfigError::InvalidConfig {
+                        reason: format!("Invalid header name: '{}'", name),
+                    }
+                })?;
+                reqwest::header::HeaderValue::from_str(value).map_err(|_| {
+                    ConfigError::InvalidConfig {
+                        reason: format!(
+                            "Invalid header value for '{}' (must be visible ASCII, no CRLF)",
+                            name
+                        ),
+                    }
+                })?;
+            }
         }
 
         Ok(())
@@ -592,5 +641,105 @@ mod tests {
         // they wouldn't trigger HTTPS auth detection
         let config = McpServerConfig::new("bad", "http://mcp.example.com");
         assert!(!config.requires_auth());
+    }
+
+    #[test]
+    fn test_has_custom_headers() {
+        let config = McpServerConfig::new("test", "https://mcp.example.com");
+        assert!(!config.has_custom_headers());
+
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "sk-abc".to_string());
+        let config = config.with_headers(headers);
+        assert!(config.has_custom_headers());
+    }
+
+    #[test]
+    fn test_has_custom_auth_header_case_insensitive() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer token".to_string());
+        let config = McpServerConfig::new("test", "https://mcp.example.com").with_headers(headers);
+        assert!(config.has_custom_auth_header());
+
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer token".to_string());
+        let config = McpServerConfig::new("test", "https://mcp.example.com").with_headers(headers);
+        assert!(config.has_custom_auth_header());
+
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "key".to_string());
+        let config = McpServerConfig::new("test", "https://mcp.example.com").with_headers(headers);
+        assert!(!config.has_custom_auth_header());
+    }
+
+    #[test]
+    fn test_requires_auth_unchanged_by_headers() {
+        // Custom headers should NOT change requires_auth() semantics
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "sk-abc".to_string());
+        let config = McpServerConfig::new("local", "http://localhost:8080").with_headers(headers);
+        assert!(!config.requires_auth());
+        assert!(config.has_custom_headers());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_header_name() {
+        let mut headers = HashMap::new();
+        headers.insert("Bad\r\nHeader".to_string(), "value".to_string());
+        let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_crlf_header_value() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Key".to_string(), "val\r\nInjected: bad".to_string());
+        let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_valid_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "sk-abc123".to_string());
+        headers.insert("Authorization".to_string(), "Bearer my-token".to_string());
+        let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_with_headers_empty_clears() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Key".to_string(), "val".to_string());
+        let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
+        assert!(config.has_custom_headers());
+
+        let config = config.with_headers(HashMap::new());
+        assert!(!config.has_custom_headers());
+    }
+
+    #[test]
+    fn test_headers_serialization_roundtrip() {
+        let mut headers = HashMap::new();
+        headers.insert("X-API-Key".to_string(), "sk-abc".to_string());
+        let config = McpServerConfig::new("test", "https://mcp.example.com").with_headers(headers);
+
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("X-API-Key"));
+
+        let restored: McpServerConfig = serde_json::from_str(&json).unwrap();
+        assert!(restored.has_custom_headers());
+        assert_eq!(
+            restored.headers.unwrap().get("X-API-Key").unwrap(),
+            "sk-abc"
+        );
+    }
+
+    #[test]
+    fn test_headers_deserialization_missing_field() {
+        // Old config without headers field should deserialize fine
+        let json = r#"{"name":"test","url":"https://mcp.example.com","enabled":true}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert!(!config.has_custom_headers());
     }
 }

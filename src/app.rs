@@ -537,7 +537,10 @@ impl AppBuilder {
                                     let has_tokens =
                                         is_authenticated(&server, &secrets, "default").await;
 
-                                    let client = if has_tokens || server.requires_auth() {
+                                    let client = if has_tokens
+                                        || server.requires_auth()
+                                        || server.has_custom_headers()
+                                    {
                                         McpClient::new_authenticated(
                                             server, mcp_sm, secrets, "default",
                                         )
