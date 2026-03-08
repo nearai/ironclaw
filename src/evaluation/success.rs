@@ -1,13 +1,10 @@
 //! Success evaluation for jobs.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::context::{ActionRecord, JobContext};
 use crate::error::EvaluationError;
-use crate::llm::LlmProvider;
 
 /// Result of evaluating job success.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,14 +79,12 @@ impl RuleBasedEvaluator {
     }
 
     /// Set minimum action success rate.
-    #[allow(dead_code)] // Public API for configuring evaluation threshold
     pub fn with_min_success_rate(mut self, rate: f64) -> Self {
         self.min_action_success_rate = rate;
         self
     }
 
     /// Set maximum failures.
-    #[allow(dead_code)] // Public API for configuring failure tolerance
     pub fn with_max_failures(mut self, max: u32) -> Self {
         self.max_failures = max;
         self
@@ -195,95 +190,6 @@ impl SuccessEvaluator for RuleBasedEvaluator {
                 quality_score,
             })
         }
-    }
-}
-
-/// LLM-based success evaluator for more nuanced evaluation.
-pub struct LlmEvaluator {
-    llm: Arc<dyn LlmProvider>,
-}
-
-impl LlmEvaluator {
-    /// Create a new LLM-based evaluator.
-    #[allow(dead_code)] // Public API for LLM-based evaluation
-    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
-        Self { llm }
-    }
-}
-
-#[async_trait]
-impl SuccessEvaluator for LlmEvaluator {
-    async fn evaluate(
-        &self,
-        job: &JobContext,
-        actions: &[ActionRecord],
-        output: Option<&str>,
-    ) -> Result<EvaluationResult, EvaluationError> {
-        // Build evaluation prompt
-        let actions_summary: Vec<String> = actions
-            .iter()
-            .map(|a| {
-                format!(
-                    "- {}: {} ({})",
-                    a.tool_name,
-                    if a.success { "success" } else { "failed" },
-                    a.error.as_deref().unwrap_or("ok")
-                )
-            })
-            .collect();
-
-        let prompt = format!(
-            r#"Evaluate if this job was completed successfully.
-
-Job: {}
-Description: {}
-State: {:?}
-
-Actions taken:
-{}
-
-{}
-
-Respond in JSON format:
-{{
-    "success": true/false,
-    "confidence": 0.0-1.0,
-    "reasoning": "...",
-    "issues": ["..."],
-    "suggestions": ["..."],
-    "quality_score": 0-100
-}}"#,
-            job.title,
-            job.description,
-            job.state,
-            actions_summary.join("\n"),
-            output
-                .map(|o| format!("Output:\n{}", o))
-                .unwrap_or_default()
-        );
-
-        let request =
-            crate::llm::CompletionRequest::new(vec![crate::llm::ChatMessage::user(prompt)])
-                .with_max_tokens(1024)
-                .with_temperature(0.1);
-
-        let response = self
-            .llm
-            .complete(request)
-            .await
-            .map_err(|e| EvaluationError::Failed {
-                job_id: job.job_id,
-                reason: e.to_string(),
-            })?;
-
-        // Parse the response
-        let result: EvaluationResult =
-            serde_json::from_str(&response.content).map_err(|e| EvaluationError::Failed {
-                job_id: job.job_id,
-                reason: format!("Failed to parse LLM evaluation: {}", e),
-            })?;
-
-        Ok(result)
     }
 }
 
