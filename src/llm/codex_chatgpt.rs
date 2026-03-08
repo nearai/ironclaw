@@ -37,6 +37,9 @@ impl CodexChatGptProvider {
 
     /// Create a provider, auto-detecting the default model from the `/models` endpoint.
     ///
+    /// A single `reqwest::Client` is created and reused for both the model
+    /// discovery request and all subsequent LLM calls.
+    ///
     /// If model discovery fails or the configured model is already Codex-specific,
     /// falls back to `fallback_model`.
     pub async fn with_auto_model(
@@ -45,17 +48,22 @@ impl CodexChatGptProvider {
         fallback_model: &str,
     ) -> Self {
         let base = base_url.trim_end_matches('/');
-        let model = Self::fetch_default_model(base, api_key)
+        let client = Client::new();
+        let model = Self::fetch_default_model(&client, base, api_key)
             .await
             .unwrap_or_else(|| fallback_model.to_string());
         tracing::info!(model = %model, "Codex ChatGPT: resolved model");
-        Self::new(base_url, api_key, &model)
+        Self {
+            client,
+            base_url: base.to_string(),
+            api_key: api_key.to_string(),
+            model,
+        }
     }
 
     /// Query `/models?client_version=0.1.0` and return the default model slug.
-    async fn fetch_default_model(base_url: &str, api_key: &str) -> Option<String> {
+    async fn fetch_default_model(client: &Client, base_url: &str, api_key: &str) -> Option<String> {
         let url = format!("{base_url}/models?client_version=0.1.0");
-        let client = Client::new();
         let resp = client
             .get(&url)
             .bearer_auth(api_key)
