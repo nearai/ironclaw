@@ -164,6 +164,12 @@ pub struct JobContext {
     /// previous results by ID via `$tool_call_id` parameter syntax.
     #[serde(skip)]
     pub tool_output_stash: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    /// Current nesting depth for programmatic tool calling (PTC).
+    ///
+    /// Tracks how deep we are in a tool-invokes-tool chain so the executor
+    /// can enforce MAX_NESTING_DEPTH globally, even across WASM→executor→WASM chains.
+    #[serde(skip)]
+    pub tool_nesting_depth: u32,
 }
 
 impl JobContext {
@@ -203,6 +209,7 @@ impl JobContext {
             http_interceptor: None,
             metadata: serde_json::Value::Null,
             tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            tool_nesting_depth: 0,
         }
     }
 

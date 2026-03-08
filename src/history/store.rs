@@ -241,6 +241,7 @@ impl Store {
                     tool_output_stash: std::sync::Arc::new(tokio::sync::RwLock::new(
                         std::collections::HashMap::new(),
                     )),
+                    tool_nesting_depth: 0,
                 }))
             }
             None => Ok(None),
