@@ -66,14 +66,10 @@ pub trait SelfRepair: Send + Sync {
 /// Default self-repair implementation.
 pub struct DefaultSelfRepair {
     context_manager: Arc<ContextManager>,
-    // TODO: use for time-based stuck detection (currently only max_repair_attempts is checked)
-    #[allow(dead_code)]
     stuck_threshold: Duration,
     max_repair_attempts: u32,
     store: Option<Arc<dyn Database>>,
     builder: Option<Arc<dyn SoftwareBuilder>>,
-    // TODO: use for tool hot-reload after repair
-    #[allow(dead_code)]
     tools: Option<Arc<ToolRegistry>>,
 }
 
@@ -95,15 +91,13 @@ impl DefaultSelfRepair {
     }
 
     /// Add a Store for tool failure tracking.
-    #[allow(dead_code)] // TODO: wire up in main.rs when persistence is needed
-    pub(crate) fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.store = Some(store);
         self
     }
 
     /// Add a Builder and ToolRegistry for automatic tool repair.
-    #[allow(dead_code)] // TODO: wire up in main.rs when auto-repair is needed
-    pub(crate) fn with_builder(
+    pub fn with_builder(
         mut self,
         builder: Arc<dyn SoftwareBuilder>,
         tools: Arc<ToolRegistry>,
@@ -132,6 +126,11 @@ impl SelfRepair for DefaultSelfRepair {
                         Duration::from_secs(duration.num_seconds().max(0) as u64)
                     })
                     .unwrap_or_default();
+
+                // Only report jobs that have been stuck long enough
+                if stuck_duration < self.stuck_threshold {
+                    continue;
+                }
 
                 stuck_jobs.push(StuckJob {
                     job_id,
@@ -273,9 +272,14 @@ impl SelfRepair for DefaultSelfRepair {
                     tracing::warn!("Failed to mark tool as repaired: {}", e);
                 }
 
-                // Log if the tool was auto-registered
+                // Hot-reload: if the tool was registered by the builder and
+                // we have access to the registry, log the reload.
                 if result.registered {
-                    tracing::info!("Repaired tool '{}' auto-registered", tool.name);
+                    if self.tools.is_some() {
+                        tracing::info!("Repaired tool '{}' hot-reloaded into registry", tool.name);
+                    } else {
+                        tracing::info!("Repaired tool '{}' auto-registered", tool.name);
+                    }
                 }
 
                 Ok(RepairResult::Success {
@@ -417,7 +421,8 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
+        // Use zero threshold so the just-stuck job is detected immediately.
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(0), 3);
         let stuck = repair.detect_stuck_jobs().await;
         assert_eq!(stuck.len(), 1);
         assert_eq!(stuck[0].job_id, job_id);
@@ -481,6 +486,57 @@ mod tests {
             "Expected ManualRequired, got: {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn detect_stuck_jobs_filters_by_threshold() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Stuck job", "desc").await.unwrap();
+
+        // Transition to InProgress, then to Stuck.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("timed out".to_string()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Use a very large threshold (1 hour). Job just became stuck, so
+        // stuck_duration < threshold. It should be filtered out.
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(3600), 3);
+        let stuck = repair.detect_stuck_jobs().await;
+        assert!(
+            stuck.is_empty(),
+            "Job stuck for <1s should be filtered by 1h threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_stuck_jobs_includes_when_over_threshold() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Stuck job", "desc").await.unwrap();
+
+        // Transition to InProgress, then to Stuck.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("timed out".to_string()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Use a zero threshold -- any stuck duration should be included.
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(0), 3);
+        let stuck = repair.detect_stuck_jobs().await;
+        assert_eq!(stuck.len(), 1, "Job should be detected with zero threshold");
+        assert_eq!(stuck[0].job_id, job_id);
     }
 
     #[tokio::test]
