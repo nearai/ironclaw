@@ -54,7 +54,7 @@ impl Tunnel for NgrokTunnel {
             .stdout
             .take()
             .ok_or_else(|| anyhow::anyhow!("Failed to capture ngrok stdout"))?;
-
+        let stderr = child.stderr.take();
         let mut reader = tokio::io::BufReader::new(stdout).lines();
         let mut public_url = String::new();
 
@@ -84,8 +84,40 @@ impl Tunnel for NgrokTunnel {
         }
 
         if public_url.is_empty() {
+            let error_detail = if let Some(stderr) = stderr {
+                let mut err_reader = tokio::io::BufReader::new(stderr).lines();
+                let mut lines = Vec::new();
+                while let Ok(Ok(Some(line))) = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(1),
+                    err_reader.next_line(),
+                )
+                .await
+                {
+                    lines.push(line);
+                }
+                lines.join("\n")
+            } else {
+                String::new()
+            };
             child.kill().await.ok();
-            bail!("ngrok did not produce a public URL within 15s. Is the auth token valid?");
+            if error_detail.is_empty() {
+                bail!("ngrok did not produce a public URL within 15s");
+            } else {
+                bail!("ngrok failed to start: {error_detail}");
+            }
+        }
+
+        // Drain stdout silently — ngrok only emits low-level connection events
+        // to stdout; the pipe must be consumed to prevent SIGPIPE/buffer stalls.
+        tokio::spawn(async move { while let Ok(Some(_)) = reader.next_line().await {} });
+
+        // Drain stderr silently — with --log stdout all meaningful output goes
+        // to stdout; stderr only needs to be consumed to prevent pipe stalls.
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut err_reader = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(_)) = err_reader.next_line().await {}
+            });
         }
 
         if let Ok(mut guard) = self.url.write() {
