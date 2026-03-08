@@ -357,9 +357,72 @@ fn extract_slack_attachments(files: &Option<Vec<SlackFile>>) -> Vec<InboundAttac
         .collect()
 }
 
+/// Download a file from Slack using the url_private endpoint.
+///
+/// Slack file downloads require Bearer auth with the bot token, which is
+/// injected by the host credential system via `channel_host::http_request`.
+fn download_slack_file(url: &str) -> Result<Vec<u8>, String> {
+    let headers = serde_json::json!({});
+
+    let result = channel_host::http_request("GET", url, &headers.to_string(), None, None);
+
+    let response = result.map_err(|e| format!("Slack file download failed: {}", e))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "Slack file download returned {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    Ok(response.body)
+}
+
+/// Download file bytes and store them via the host for processing.
+///
+/// Downloads all file types (images, documents, etc.) so the host-side
+/// middleware can process them (vision pipeline for images, text extraction
+/// for documents, transcription for audio, etc.).
+fn download_and_store_slack_files(attachments: &[InboundAttachment]) {
+    for att in attachments {
+        let Some(ref url) = att.source_url else {
+            continue;
+        };
+
+        match download_slack_file(url) {
+            Ok(bytes) => {
+                channel_host::log(
+                    channel_host::LogLevel::Info,
+                    &format!(
+                        "Downloaded Slack file: {} bytes, mime={}",
+                        bytes.len(),
+                        att.mime_type
+                    ),
+                );
+                if let Err(e) = channel_host::store_attachment_data(&att.id, &bytes) {
+                    channel_host::log(
+                        channel_host::LogLevel::Error,
+                        &format!("Failed to store Slack file data: {}", e),
+                    );
+                }
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Failed to download Slack file: {}", e),
+                );
+            }
+        }
+    }
+}
+
 /// Handle a Slack event and emit message if applicable.
 fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Option<String>) {
     let attachments = extract_slack_attachments(&event.files);
+
+    // Download and store file attachments for host-side processing
+    download_and_store_slack_files(&attachments);
 
     match event.event_type.as_str() {
         // Direct mention of the bot (always in a channel, not a DM)

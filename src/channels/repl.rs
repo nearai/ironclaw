@@ -600,6 +600,13 @@ impl Channel for ReplChannel {
                     eprintln!("\x1b[31m  {extension_name}: {message}\x1b[0m");
                 }
             }
+            StatusUpdate::ImageGenerated { path, .. } => {
+                if let Some(ref p) = path {
+                    eprintln!("\x1b[36m  [image] {p}\x1b[0m");
+                } else {
+                    eprintln!("\x1b[36m  [image generated]\x1b[0m");
+                }
+            }
         }
         Ok(())
     }

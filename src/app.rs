@@ -399,6 +399,54 @@ impl AppBuilder {
             None
         };
 
+        // Register image/vision tools if we have a workspace and LLM API credentials
+        if let Some(ref ws) = workspace {
+            let (api_base, api_key_opt) = if let Some(ref provider) = self.config.llm.provider {
+                (
+                    provider.base_url.clone(),
+                    provider.api_key.as_ref().map(|s| {
+                        use secrecy::ExposeSecret;
+                        s.expose_secret().to_string()
+                    }),
+                )
+            } else {
+                (
+                    self.config.llm.nearai.base_url.clone(),
+                    self.config.llm.nearai.api_key.as_ref().map(|s| {
+                        use secrecy::ExposeSecret;
+                        s.expose_secret().to_string()
+                    }),
+                )
+            };
+
+            if let Some(api_key) = api_key_opt {
+                // Check for image generation models
+                let model_name = self
+                    .config
+                    .llm
+                    .provider
+                    .as_ref()
+                    .map(|p| p.model.clone())
+                    .unwrap_or_else(|| self.config.llm.nearai.model.clone());
+                let models = vec![model_name.clone()];
+                let gen_model = crate::llm::image_models::suggest_image_model(&models)
+                    .unwrap_or("flux-1.1-pro")
+                    .to_string();
+                tools.register_image_tools(
+                    api_base.clone(),
+                    api_key.clone(),
+                    gen_model,
+                    Arc::clone(ws),
+                );
+
+                // Check for vision models
+                let vision_model = crate::llm::vision_models::suggest_vision_model(&models)
+                    .unwrap_or(&model_name)
+                    .to_string();
+                tools.register_vision_tools(api_base, api_key, vision_model, Arc::clone(ws));
+            }
+        }
+
         // Register builder tool if enabled
         if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)

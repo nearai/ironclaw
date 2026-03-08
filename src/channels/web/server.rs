@@ -608,6 +608,43 @@ async fn oauth_callback_handler(
 
 // --- Chat handlers ---
 
+/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
+pub(crate) fn images_to_attachments(images: &[ImageData]) -> Vec<crate::channels::IncomingAttachment> {
+    use base64::Engine;
+    images
+        .iter()
+        .enumerate()
+        .filter_map(|(i, img)| {
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(&img.data)
+                .ok()?;
+            Some(crate::channels::IncomingAttachment {
+                id: format!("web-image-{i}"),
+                kind: crate::channels::AttachmentKind::Image,
+                mime_type: img.media_type.clone(),
+                filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
+}
+
+/// Map MIME type to file extension.
+fn mime_to_ext(mime: &str) -> &str {
+    match mime {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "jpg",
+    }
+}
+
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     headers: axum::http::HeaderMap,
@@ -641,11 +678,18 @@ async fn chat_send_handler(
         msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
     }
 
+    // Convert uploaded images to IncomingAttachments
+    if !req.images.is_empty() {
+        let attachments = images_to_attachments(&req.images);
+        msg = msg.with_attachments(attachments);
+    }
+
     let msg_id = msg.id;
     tracing::debug!(
-        "[chat_send_handler] Created message id={}, content={:?}",
+        "[chat_send_handler] Created message id={}, content={:?}, images={}",
         msg_id,
-        req.content
+        req.content,
+        req.images.len()
     );
 
     let tx_guard = state.msg_tx.read().await;

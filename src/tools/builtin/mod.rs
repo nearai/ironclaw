@@ -40,5 +40,11 @@ pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
 mod html_converter;
+pub mod image_analyze;
+pub mod image_edit;
+pub mod image_gen;
 
 pub use html_converter::convert_html_to_markdown;
+pub use image_analyze::ImageAnalyzeTool;
+pub use image_edit::ImageEditTool;
+pub use image_gen::ImageGenerateTool;

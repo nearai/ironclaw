@@ -160,6 +160,7 @@ async fn handle_client_message(
             content,
             thread_id,
             timezone,
+            images,
         } => {
             let mut incoming = IncomingMessage::new("gateway", user_id, &content);
             if let Some(ref tz) = timezone {
@@ -167,6 +168,13 @@ async fn handle_client_message(
             }
             if let Some(ref tid) = thread_id {
                 incoming = incoming.with_thread(tid);
+            }
+
+            // Convert uploaded images to IncomingAttachments
+            if !images.is_empty() {
+                let attachments =
+                    crate::channels::web::server::images_to_attachments(&images);
+                incoming = incoming.with_attachments(attachments);
             }
 
             let tx_guard = state.msg_tx.read().await;
@@ -357,6 +365,7 @@ mod tests {
                 content: "hello agent".to_string(),
                 thread_id: Some("t1".to_string()),
                 timezone: None,
+                images: Vec::new(),
             },
             &state,
             "user1",
@@ -382,6 +391,7 @@ mod tests {
                 content: "hello".to_string(),
                 thread_id: None,
                 timezone: None,
+                images: Vec::new(),
             },
             &state,
             "user1",

@@ -130,7 +130,10 @@
         <div class="chat-messages" id="chat-messages"></div>
         <div id="slash-autocomplete" class="slash-autocomplete" style="display:none"></div>
         <div class="chat-input">
+          <div id="image-preview-strip" class="image-preview-strip"></div>
           <textarea id="chat-input" placeholder="Message or / for commands..." rows="1"></textarea>
+          <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
+          <button id="attach-btn" class="attach-btn" title="Attach images">&#x1F4CE;</button>
           <button id="send-btn" onclick="sendMessage()">Send</button>
         </div>
       </div>

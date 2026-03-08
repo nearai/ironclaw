@@ -878,10 +878,6 @@ fn send_message(
 // Voice File Download
 // ============================================================================
 
-/// Download a voice file from Telegram by file_id.
-///
-/// 1. Call getFile to get the file_path.
-/// 2. Download the file bytes from /file/bot{TOKEN}/{file_path}.
 /// Percent-encode a string for safe use as a URL query parameter value.
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -1535,6 +1531,39 @@ fn download_and_store_voice(attachments: &[InboundAttachment]) {
     }
 }
 
+/// Download image file bytes and store them via the host for the vision pipeline.
+///
+/// Separated from `extract_attachments` so that function stays pure (no host
+/// calls) and remains testable in native unit tests.
+fn download_and_store_images(attachments: &[InboundAttachment]) {
+    for att in attachments {
+        if !att.mime_type.starts_with("image/") {
+            continue;
+        }
+
+        match download_telegram_file(&att.id) {
+            Ok(bytes) => {
+                channel_host::log(
+                    channel_host::LogLevel::Info,
+                    &format!("Downloaded image file: {} bytes", bytes.len()),
+                );
+                if let Err(e) = channel_host::store_attachment_data(&att.id, &bytes) {
+                    channel_host::log(
+                        channel_host::LogLevel::Error,
+                        &format!("Failed to store image data: {}", e),
+                    );
+                }
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Failed to download image file: {}", e),
+                );
+            }
+        }
+    }
+}
+
 /// Returns true if the attachment should be downloaded for document text extraction.
 ///
 /// Excludes voice (handled by transcription), image (vision pipeline),
@@ -1607,6 +1636,9 @@ fn handle_message(message: TelegramMessage) {
 
     // Download and store voice attachments for host-side transcription
     download_and_store_voice(&attachments);
+
+    // Download and store image attachments for host-side vision pipeline
+    download_and_store_images(&attachments);
 
     // Download and store document attachments for host-side text extraction
     download_and_store_documents(&mut attachments);
@@ -1681,7 +1713,7 @@ fn handle_message(message: TelegramMessage) {
             let username_opt = from.username.as_deref();
             let is_allowed = allowed.contains(&"*".to_string())
                 || allowed.contains(&id_str)
-                || username_opt.map_or(false, |u| allowed.contains(&u.to_string()));
+                || username_opt.is_some_and(|u| allowed.contains(&u.to_string()));
 
             if !is_allowed {
                 if is_private && dm_policy == "pairing" {

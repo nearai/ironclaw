@@ -696,6 +696,22 @@ impl Agent {
                                             &message.metadata,
                                         )
                                         .await;
+
+                                    // Detect image generation sentinel in tool output
+                                    if let Ok(sentinel) = serde_json::from_str::<serde_json::Value>(output)
+                                        && sentinel.get("type").and_then(|v| v.as_str()) == Some("image_generated")
+                                    {
+                                        let data_url = sentinel.get("data").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                                        let path = sentinel.get("path").and_then(|v| v.as_str()).map(String::from);
+                                        let _ = self
+                                            .channels
+                                            .send_status(
+                                                &message.channel,
+                                                StatusUpdate::ImageGenerated { data_url, path },
+                                                &message.metadata,
+                                            )
+                                            .await;
+                                    }
                                 }
 
                                 // Record result in thread
