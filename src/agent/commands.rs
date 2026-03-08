@@ -854,10 +854,7 @@ impl Agent {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to load config.toml for model persistence: {}",
-                            e
-                        );
+                        tracing::warn!("Failed to load config.toml for model persistence: {}", e);
                     }
                 }
             }
