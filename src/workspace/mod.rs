@@ -565,11 +565,26 @@ impl Workspace {
     ///
     /// Daily logs are raw, append-only notes for the current day.
     pub async fn append_daily_log(&self, entry: &str) -> Result<(), WorkspaceError> {
-        let today = Utc::now().date_naive();
+        self.append_daily_log_tz(entry, chrono_tz::Tz::UTC)
+            .await
+            .map(|_| ())
+    }
+
+    /// Append an entry to today's daily log using the given timezone.
+    ///
+    /// Returns the path that was written to (e.g. `daily/2024-01-15.md`).
+    pub async fn append_daily_log_tz(
+        &self,
+        entry: &str,
+        tz: chrono_tz::Tz,
+    ) -> Result<String, WorkspaceError> {
+        let now = crate::timezone::now_in_tz(tz);
+        let today = now.date_naive();
         let path = format!("daily/{}.md", today.format("%Y-%m-%d"));
-        let timestamp = Utc::now().format("%H:%M:%S");
+        let timestamp = now.format("%H:%M:%S");
         let timestamped_entry = format!("[{}] {}", timestamp, entry);
-        self.append(&path, &timestamped_entry).await
+        self.append(&path, &timestamped_entry).await?;
+        Ok(path)
     }
 
     // ==================== System Prompt ====================
@@ -584,6 +599,18 @@ impl Workspace {
         self.system_prompt_for_context(false).await
     }
 
+    /// Build the system prompt with timezone-aware daily log dates.
+    ///
+    /// Uses the given timezone to determine "today" and "yesterday" for daily log injection.
+    pub async fn system_prompt_for_context_tz(
+        &self,
+        is_group_chat: bool,
+        tz: chrono_tz::Tz,
+    ) -> Result<String, WorkspaceError> {
+        self.system_prompt_for_context_inner(is_group_chat, Some(tz))
+            .await
+    }
+
     /// Build the system prompt, optionally excluding personal memory.
     ///
     /// When `is_group_chat` is true, MEMORY.md is excluded to prevent
@@ -591,6 +618,16 @@ impl Workspace {
     pub async fn system_prompt_for_context(
         &self,
         is_group_chat: bool,
+    ) -> Result<String, WorkspaceError> {
+        self.system_prompt_for_context_inner(is_group_chat, None)
+            .await
+    }
+
+    /// Inner implementation for system prompt building.
+    async fn system_prompt_for_context_inner(
+        &self,
+        is_group_chat: bool,
+        tz: Option<chrono_tz::Tz>,
     ) -> Result<String, WorkspaceError> {
         let mut parts = Vec::new();
 
@@ -645,7 +682,10 @@ impl Workspace {
         }
 
         // Add today's memory context (last 2 days of daily logs)
-        let today = Utc::now().date_naive();
+        let today = match tz {
+            Some(t) => crate::timezone::today_in_tz(t),
+            None => Utc::now().date_naive(),
+        };
         let yesterday = today.pred_opt().unwrap_or(today);
 
         for date in [today, yesterday] {

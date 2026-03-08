@@ -79,6 +79,8 @@ pub struct IncomingMessage {
     pub received_at: DateTime<Utc>,
     /// Channel-specific metadata.
     pub metadata: serde_json::Value,
+    /// IANA timezone string from the client (e.g. "America/New_York").
+    pub timezone: Option<String>,
     /// File or media attachments on this message.
     pub attachments: Vec<IncomingAttachment>,
 }
@@ -99,6 +101,7 @@ impl IncomingMessage {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
+            timezone: None,
             attachments: Vec::new(),
         }
     }
@@ -118,6 +121,12 @@ impl IncomingMessage {
     /// Set user name.
     pub fn with_user_name(mut self, name: impl Into<String>) -> Self {
         self.user_name = Some(name.into());
+        self
+    }
+
+    /// Set the client timezone.
+    pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
+        self.timezone = Some(tz.into());
         self
     }
 
@@ -453,5 +462,11 @@ mod tests {
         } else {
             panic!("expected ToolCompleted variant");
         }
+    }
+
+    #[test]
+    fn test_incoming_message_with_timezone() {
+        let msg = IncomingMessage::new("test", "user1", "hello").with_timezone("America/New_York");
+        assert_eq!(msg.timezone.as_deref(), Some("America/New_York"));
     }
 }

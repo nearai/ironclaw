@@ -133,7 +133,7 @@ impl WorkerRuntime {
             .await?;
 
         // Create reasoning engine
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let reasoning = Reasoning::new(self.llm.clone());
 
         // Build initial context
         let mut reason_ctx = ReasoningContext::new().with_job(&job.description);

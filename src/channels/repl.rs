@@ -297,9 +297,11 @@ impl Channel for ReplChannel {
         let esc_interrupt_triggered_for_thread = Arc::new(AtomicBool::new(false));
 
         std::thread::spawn(move || {
+            let sys_tz = crate::timezone::detect_system_timezone().name().to_string();
+
             // Single message mode: send it and return
             if let Some(msg) = single_message {
-                let incoming = IncomingMessage::new("repl", "default", &msg);
+                let incoming = IncomingMessage::new("repl", "default", &msg).with_timezone(&sys_tz);
                 let _ = tx.blocking_send(incoming);
                 return;
             }
@@ -361,7 +363,8 @@ impl Channel for ReplChannel {
                             "/quit" | "/exit" => {
                                 // Forward shutdown command so the agent loop exits even
                                 // when other channels (e.g. web gateway) are still active.
-                                let msg = IncomingMessage::new("repl", "default", "/quit");
+                                let msg = IncomingMessage::new("repl", "default", "/quit")
+                                    .with_timezone(&sys_tz);
                                 let _ = tx.blocking_send(msg);
                                 break;
                             }
@@ -382,7 +385,8 @@ impl Channel for ReplChannel {
                             _ => {}
                         }
 
-                        let msg = IncomingMessage::new("repl", "default", line);
+                        let msg =
+                            IncomingMessage::new("repl", "default", line).with_timezone(&sys_tz);
                         if tx.blocking_send(msg).is_err() {
                             break;
                         }
@@ -390,20 +394,23 @@ impl Channel for ReplChannel {
                     Err(ReadlineError::Interrupted) => {
                         if esc_interrupt_triggered_for_thread.swap(false, Ordering::Relaxed) {
                             // Esc: interrupt current operation and keep REPL open.
-                            let msg = IncomingMessage::new("repl", "default", "/interrupt");
+                            let msg = IncomingMessage::new("repl", "default", "/interrupt")
+                                .with_timezone(&sys_tz);
                             if tx.blocking_send(msg).is_err() {
                                 break;
                             }
                         } else {
                             // Ctrl+C (VINTR): request graceful shutdown.
-                            let msg = IncomingMessage::new("repl", "default", "/quit");
+                            let msg = IncomingMessage::new("repl", "default", "/quit")
+                                .with_timezone(&sys_tz);
                             let _ = tx.blocking_send(msg);
                             break;
                         }
                     }
                     Err(ReadlineError::Eof) => {
                         // Ctrl+D: send /quit so the agent loop runs graceful shutdown
-                        let msg = IncomingMessage::new("repl", "default", "/quit");
+                        let msg =
+                            IncomingMessage::new("repl", "default", "/quit").with_timezone(&sys_tz);
                         let _ = tx.blocking_send(msg);
                         break;
                     }
