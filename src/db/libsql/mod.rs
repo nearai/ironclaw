@@ -169,10 +169,18 @@ pub(crate) fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
     }
     // Naive with fractional seconds (legacy or SQLite datetime() output)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        tracing::warn!(
+            timestamp = s,
+            "parsing naive timestamp without timezone; assuming UTC — consider re-running migrations"
+        );
         return Ok(ndt.and_utc());
     }
     // Naive without fractional seconds (legacy format)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        tracing::warn!(
+            timestamp = s,
+            "parsing naive timestamp without timezone; assuming UTC — consider re-running migrations"
+        );
         return Ok(ndt.and_utc());
     }
     Err(format!("unparseable timestamp: {:?}", s))
@@ -509,5 +517,99 @@ mod tests {
                 result.err()
             );
         }
+    }
+
+    #[test]
+    fn test_parse_timestamp_rfc3339() {
+        use super::parse_timestamp;
+
+        // Standard RFC 3339 with Z suffix
+        let dt = parse_timestamp("2024-01-15T10:30:00.123Z").unwrap();
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2024-01-15T10:30:00.123Z"
+        );
+
+        // RFC 3339 with +00:00 offset
+        let dt = parse_timestamp("2024-01-15T10:30:00.000+00:00").unwrap();
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2024-01-15T10:30:00.000Z"
+        );
+    }
+
+    #[test]
+    fn test_parse_timestamp_naive_fallback() {
+        use super::parse_timestamp;
+
+        // Naive with fractional seconds (legacy datetime('now') output)
+        let dt = parse_timestamp("2024-01-15 10:30:00.123").unwrap();
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2024-01-15T10:30:00.123Z"
+        );
+
+        // Naive without fractional seconds
+        let dt = parse_timestamp("2024-01-15 10:30:00").unwrap();
+        assert_eq!(
+            dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2024-01-15T10:30:00.000Z"
+        );
+    }
+
+    #[test]
+    fn test_parse_timestamp_invalid() {
+        use super::parse_timestamp;
+
+        assert!(parse_timestamp("not-a-timestamp").is_err());
+        assert!(parse_timestamp("").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_default_timestamps_are_rfc3339() {
+        // Verify that DEFAULT column values produce RFC 3339 timestamps
+        // after the migration change from datetime('now') to strftime.
+        // Use file-based DB because in-memory doesn't share schema across connections.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_ts.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conn = backend.connect().await.unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO conversations (id, channel, user_id) VALUES (?1, ?2, ?3)",
+            libsql::params![id.clone(), "test", "user1"],
+        )
+        .await
+        .unwrap();
+
+        let mut rows = conn
+            .query(
+                "SELECT started_at, last_activity FROM conversations WHERE id = ?1",
+                libsql::params![id],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let started_at: String = row.get(0).unwrap();
+        let last_activity: String = row.get(1).unwrap();
+
+        // Must end with 'Z' (RFC 3339 UTC) and contain 'T' separator
+        assert!(
+            started_at.ends_with('Z') && started_at.contains('T'),
+            "started_at should be RFC 3339, got: {started_at}"
+        );
+        assert!(
+            last_activity.ends_with('Z') && last_activity.contains('T'),
+            "last_activity should be RFC 3339, got: {last_activity}"
+        );
+
+        // Must be parseable by the RFC 3339 parser directly (not just naive fallback)
+        use chrono::DateTime;
+        assert!(
+            DateTime::parse_from_rfc3339(&started_at).is_ok(),
+            "started_at not valid RFC 3339: {started_at}"
+        );
     }
 }
