@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/nearai/ironclaw/compare/v0.16.1...v0.17.0) - 2026-03-08
+
+### Added
+
+- *(setup)* Anthropic OAuth onboarding with setup-token support ([#384](https://github.com/nearai/ironclaw/pull/384))
+- *(llm)* add Google Gemini, AWS Bedrock, io.net, Mistral, Yandex, and Cloudflare WS AI providers ([#676](https://github.com/nearai/ironclaw/pull/676))
+- unified thread model for web gateway ([#607](https://github.com/nearai/ironclaw/pull/607))
+- WASM channel attachments with LLM pipeline integration ([#596](https://github.com/nearai/ironclaw/pull/596))
+- enable Anthropic prompt caching via automatic cache_control injection ([#660](https://github.com/nearai/ironclaw/pull/660))
+- *(routines)* approval context for autonomous job execution ([#577](https://github.com/nearai/ironclaw/pull/577))
+- *(llm)* declarative provider registry ([#618](https://github.com/nearai/ironclaw/pull/618))
+- *(gateway)* show IronClaw version in status popover [skip-regression-check] ([#636](https://github.com/nearai/ironclaw/pull/636))
+- Wire memory hygiene retention policy into heartbeat loop ([#629](https://github.com/nearai/ironclaw/pull/629))
+
+### Fixed
+
+- sanitize HTML error bodies from MCP servers to prevent web UI white screen ([#263](https://github.com/nearai/ironclaw/pull/263)) ([#656](https://github.com/nearai/ironclaw/pull/656))
+- prevent Instant duration overflow on Windows ([#657](https://github.com/nearai/ironclaw/pull/657)) ([#664](https://github.com/nearai/ironclaw/pull/664))
+- enable libsql remote + tls features for Turso cloud sync ([#587](https://github.com/nearai/ironclaw/pull/587))
+- *(tests)* replace hardcoded /tmp paths with tempdir + add 300 unit tests ([#659](https://github.com/nearai/ironclaw/pull/659))
+- *(llm)* nudge LLM when it expresses tool intent without calling tools ([#653](https://github.com/nearai/ironclaw/pull/653))
+- *(llm)* report zero cost for OpenRouter free-tier models ([#463](https://github.com/nearai/ironclaw/pull/463)) ([#613](https://github.com/nearai/ironclaw/pull/613))
+- reliable network tests and improved tool error messages ([#626](https://github.com/nearai/ironclaw/pull/626))
+- *(wasm)* use per-engine cache dirs on Windows to avoid file lock error ([#624](https://github.com/nearai/ironclaw/pull/624))
+- *(libsql)* support flexible embedding dimensions ([#534](https://github.com/nearai/ironclaw/pull/534))
+
+### Other
+
+- add reviewer-feedback guardrails (CLAUDE.md, pre-commit hook, skill) ([#665](https://github.com/nearai/ironclaw/pull/665))
+- update WASM artifact SHA256 checksums [skip ci] ([#631](https://github.com/nearai/ironclaw/pull/631))
+- add explanatory comments to coverage workflow ([#610](https://github.com/nearai/ironclaw/pull/610))
+- build system prompt once per turn, skip tools on force-text ([#583](https://github.com/nearai/ironclaw/pull/583))
+- add comprehensive subdirectory CLAUDE.md files and update root ([#589](https://github.com/nearai/ironclaw/pull/589))
+- Improve test infrastructure: StubChannel, gateway helpers, security tests, search edge cases ([#623](https://github.com/nearai/ironclaw/pull/623))
+- *(workspace)* regression test for document_path in search results ([#509](https://github.com/nearai/ironclaw/pull/509))
+
 ## [0.16.1](https://github.com/nearai/ironclaw/compare/v0.16.0...v0.16.1) - 2026-03-06
 
 ### Fixed
