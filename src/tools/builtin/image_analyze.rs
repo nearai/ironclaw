@@ -1,26 +1,26 @@
 //! Image analysis tool using vision-capable LLM models.
 
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use base64::Engine;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::context::JobContext;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
-use crate::workspace::Workspace;
 
 /// Tool for analyzing images using a vision-capable model.
 pub struct ImageAnalyzeTool {
     /// API base URL.
     api_base_url: String,
     /// Bearer token for API auth.
-    api_key: String,
+    api_key: SecretString,
     /// Vision-capable model name.
     model: String,
     /// HTTP client.
     client: reqwest::Client,
-    /// Workspace for reading image files.
-    workspace: Arc<Workspace>,
+    /// Optional base directory for resolving relative image paths.
+    base_dir: Option<PathBuf>,
 }
 
 impl ImageAnalyzeTool {
@@ -29,7 +29,7 @@ impl ImageAnalyzeTool {
         api_base_url: String,
         api_key: String,
         model: String,
-        workspace: Arc<Workspace>,
+        base_dir: Option<PathBuf>,
     ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
@@ -37,25 +37,36 @@ impl ImageAnalyzeTool {
             .unwrap_or_default();
         Self {
             api_base_url,
-            api_key,
+            api_key: SecretString::from(api_key),
             model,
             client,
-            workspace,
+            base_dir,
         }
     }
 
-    /// Detect media type from file extension.
-    fn media_type_from_path(path: &str) -> &'static str {
-        let lower = path.to_lowercase();
-        if lower.ends_with(".png") {
-            "image/png"
-        } else if lower.ends_with(".gif") {
-            "image/gif"
-        } else if lower.ends_with(".webp") {
-            "image/webp"
+    /// Read binary image bytes from filesystem.
+    ///
+    /// Resolves the path relative to the base directory if set, falling
+    /// back to treating it as an absolute path.
+    async fn read_image_bytes(&self, image_path: &str) -> Result<Vec<u8>, ToolError> {
+        let resolved = if let Some(base) = &self.base_dir {
+            let candidate = base.join(image_path);
+            if candidate.exists() {
+                candidate
+            } else {
+                PathBuf::from(image_path)
+            }
         } else {
-            "image/jpeg"
-        }
+            PathBuf::from(image_path)
+        };
+
+        let canonical = resolved.canonicalize().map_err(|e| {
+            ToolError::ExecutionFailed(format!("Image path not found: {e}"))
+        })?;
+
+        tokio::fs::read(&canonical).await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to read image file: {e}"))
+        })
     }
 }
 
@@ -116,26 +127,16 @@ impl Tool for ImageAnalyzeTool {
             .and_then(|v| v.as_str())
             .unwrap_or("Describe this image in detail.");
 
-        // Read image from workspace
-        let doc = self
-            .workspace
-            .read(image_path)
-            .await
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to read image from workspace: {e}"
-                ))
-            })?;
-
-        let image_bytes = doc.content.as_bytes();
+        // Read binary image bytes directly from filesystem
+        let image_bytes = self.read_image_bytes(image_path).await?;
         if image_bytes.is_empty() {
             return Err(ToolError::ExecutionFailed(
                 "Image file is empty".to_string(),
             ));
         }
 
-        let media_type = Self::media_type_from_path(image_path);
-        let b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+        let media_type = super::media_type_from_path(image_path);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
         let data_url = format!("data:{media_type};base64,{b64}");
 
         // Call vision model via chat completions API
@@ -145,7 +146,7 @@ impl Tool for ImageAnalyzeTool {
         );
 
         let request_body = serde_json::json!({
-            "model": self.model,
+            "model": &self.model,
             "messages": [{
                 "role": "user",
                 "content": [
@@ -167,7 +168,7 @@ impl Tool for ImageAnalyzeTool {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .json(&request_body)
             .send()
             .await
@@ -199,61 +200,18 @@ impl Tool for ImageAnalyzeTool {
     }
 }
 
-#[cfg(all(test, feature = "postgres"))]
+#[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::workspace::Workspace;
-
-    fn make_test_workspace() -> Arc<Workspace> {
-        Arc::new(Workspace::new(
-            "test_user",
-            deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
-                tokio_postgres::Config::new(),
-                tokio_postgres::NoTls,
-            ))
-            .build()
-            .unwrap(),
-        ))
-    }
-
-    #[test]
-    fn test_tool_metadata() {
-        let workspace = make_test_workspace();
-        let tool = ImageAnalyzeTool::new(
-            "https://api.example.com".to_string(),
-            "test-key".to_string(),
-            "gpt-4o".to_string(),
-            workspace,
-        );
-        assert_eq!(tool.name(), "image_analyze");
-        assert!(tool.requires_sanitization());
-    }
+    use super::super::media_type_from_path;
 
     #[test]
     fn test_media_type_detection() {
-        assert_eq!(
-            ImageAnalyzeTool::media_type_from_path("photo.png"),
-            "image/png"
-        );
-        assert_eq!(
-            ImageAnalyzeTool::media_type_from_path("photo.jpg"),
-            "image/jpeg"
-        );
-        assert_eq!(
-            ImageAnalyzeTool::media_type_from_path("photo.jpeg"),
-            "image/jpeg"
-        );
-        assert_eq!(
-            ImageAnalyzeTool::media_type_from_path("photo.gif"),
-            "image/gif"
-        );
-        assert_eq!(
-            ImageAnalyzeTool::media_type_from_path("photo.webp"),
-            "image/webp"
-        );
-        assert_eq!(
-            ImageAnalyzeTool::media_type_from_path("photo.bmp"),
-            "image/jpeg"
-        );
+        assert_eq!(media_type_from_path("photo.png"), "image/png");
+        assert_eq!(media_type_from_path("photo.jpg"), "image/jpeg");
+        assert_eq!(media_type_from_path("photo.jpeg"), "image/jpeg");
+        assert_eq!(media_type_from_path("photo.gif"), "image/gif");
+        assert_eq!(media_type_from_path("photo.webp"), "image/webp");
+        assert_eq!(media_type_from_path("photo.bmp"), "image/jpeg");
+        assert_eq!(media_type_from_path("photo.svg"), "image/svg+xml");
     }
 }

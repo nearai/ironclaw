@@ -513,9 +513,20 @@ function renderImagePreviews() {
   });
 }
 
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per image
+const MAX_STAGED_IMAGES = 5;
+
 function handleImageFiles(files) {
   Array.from(files).forEach(file => {
     if (!file.type.startsWith('image/')) return;
+    if (file.size > MAX_IMAGE_SIZE_BYTES) {
+      alert(`Image "${file.name}" exceeds 5 MB limit (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      return;
+    }
+    if (stagedImages.length >= MAX_STAGED_IMAGES) {
+      alert(`Maximum ${MAX_STAGED_IMAGES} images allowed per message`);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = function(e) {
       const dataUrl = e.target.result;

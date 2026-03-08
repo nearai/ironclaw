@@ -487,7 +487,7 @@ impl ToolRegistry {
         api_base_url: String,
         api_key: String,
         gen_model: String,
-        workspace: Arc<Workspace>,
+        base_dir: Option<std::path::PathBuf>,
     ) {
         use crate::tools::builtin::{ImageEditTool, ImageGenerateTool};
         self.register_sync(Arc::new(ImageGenerateTool::new(
@@ -499,7 +499,7 @@ impl ToolRegistry {
             api_base_url,
             api_key,
             gen_model,
-            workspace,
+            base_dir,
         )));
         tracing::info!("Registered 2 image tools (generate, edit)");
     }
@@ -512,14 +512,14 @@ impl ToolRegistry {
         api_base_url: String,
         api_key: String,
         vision_model: String,
-        workspace: Arc<Workspace>,
+        base_dir: Option<std::path::PathBuf>,
     ) {
         use crate::tools::builtin::ImageAnalyzeTool;
         self.register_sync(Arc::new(ImageAnalyzeTool::new(
             api_base_url,
             api_key,
             vision_model,
-            workspace,
+            base_dir,
         )));
         tracing::info!("Registered 1 vision tool (analyze)");
     }

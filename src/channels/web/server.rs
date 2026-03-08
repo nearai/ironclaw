@@ -351,7 +351,7 @@ pub async fn start_server(
         .merge(statics)
         .merge(projects)
         .merge(protected)
-        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB max request body
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -615,9 +615,13 @@ pub(crate) fn images_to_attachments(images: &[ImageData]) -> Vec<crate::channels
         .iter()
         .enumerate()
         .filter_map(|(i, img)| {
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(&img.data)
-                .ok()?;
+            let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("Skipping image {i}: invalid base64 data: {e}");
+                    return None;
+                }
+            };
             Some(crate::channels::IncomingAttachment {
                 id: format!("web-image-{i}"),
                 kind: crate::channels::AttachmentKind::Image,

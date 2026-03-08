@@ -400,7 +400,7 @@ impl AppBuilder {
         };
 
         // Register image/vision tools if we have a workspace and LLM API credentials
-        if let Some(ref ws) = workspace {
+        if workspace.is_some() {
             let (api_base, api_key_opt) = if let Some(ref provider) = self.config.llm.provider {
                 (
                     provider.base_url.clone(),
@@ -436,14 +436,14 @@ impl AppBuilder {
                     api_base.clone(),
                     api_key.clone(),
                     gen_model,
-                    Arc::clone(ws),
+                    None,
                 );
 
                 // Check for vision models
                 let vision_model = crate::llm::vision_models::suggest_vision_model(&models)
                     .unwrap_or(&model_name)
                     .to_string();
-                tools.register_vision_tools(api_base, api_key, vision_model, Arc::clone(ws));
+                tools.register_vision_tools(api_base, api_key, vision_model, None);
             }
         }
 

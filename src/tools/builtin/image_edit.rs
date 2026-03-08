@@ -1,26 +1,25 @@
 //! Image editing tool using cloud API.
 
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
-use base64::Engine;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::context::JobContext;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
-use crate::workspace::Workspace;
 
 /// Tool for editing images using an AI image editing API.
 pub struct ImageEditTool {
     /// API base URL.
     api_base_url: String,
     /// Bearer token for API auth.
-    api_key: String,
+    api_key: SecretString,
     /// Model to use.
     model: String,
     /// HTTP client.
     client: reqwest::Client,
-    /// Workspace for reading source images.
-    workspace: Arc<Workspace>,
+    /// Optional base directory for resolving relative image paths.
+    base_dir: Option<PathBuf>,
 }
 
 impl ImageEditTool {
@@ -29,7 +28,7 @@ impl ImageEditTool {
         api_base_url: String,
         api_key: String,
         model: String,
-        workspace: Arc<Workspace>,
+        base_dir: Option<PathBuf>,
     ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(180))
@@ -37,25 +36,33 @@ impl ImageEditTool {
             .unwrap_or_default();
         Self {
             api_base_url,
-            api_key,
+            api_key: SecretString::from(api_key),
             model,
             client,
-            workspace,
+            base_dir,
         }
     }
 
-    /// Detect media type from file extension.
-    fn media_type_from_path(path: &str) -> &'static str {
-        let lower = path.to_lowercase();
-        if lower.ends_with(".png") {
-            "image/png"
-        } else if lower.ends_with(".gif") {
-            "image/gif"
-        } else if lower.ends_with(".webp") {
-            "image/webp"
+    /// Read binary image bytes from filesystem.
+    async fn read_image_bytes(&self, image_path: &str) -> Result<Vec<u8>, ToolError> {
+        let resolved = if let Some(base) = &self.base_dir {
+            let candidate = base.join(image_path);
+            if candidate.exists() {
+                candidate
+            } else {
+                PathBuf::from(image_path)
+            }
         } else {
-            "image/jpeg"
-        }
+            PathBuf::from(image_path)
+        };
+
+        let canonical = resolved.canonicalize().map_err(|e| {
+            ToolError::ExecutionFailed(format!("Image path not found: {e}"))
+        })?;
+
+        tokio::fs::read(&canonical).await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to read image file: {e}"))
+        })
     }
 }
 
@@ -88,7 +95,7 @@ impl Tool for ImageEditTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::Never
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -126,24 +133,15 @@ impl Tool for ImageEditTool {
             ));
         }
 
-        // Read source image from workspace
-        let doc = self
-            .workspace
-            .read(image_path)
-            .await
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Failed to read source image: {e}"))
-            })?;
-
-        let image_bytes = doc.content.as_bytes();
+        // Read binary image bytes directly from filesystem
+        let image_bytes = self.read_image_bytes(image_path).await?;
         if image_bytes.is_empty() {
             return Err(ToolError::ExecutionFailed(
                 "Source image file is empty".to_string(),
             ));
         }
 
-        let media_type = Self::media_type_from_path(image_path);
-        let b64_image = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+        let media_type = super::media_type_from_path(image_path);
 
         // Use multipart form for image edit API
         let url = format!(
@@ -157,7 +155,7 @@ impl Tool for ImageEditTool {
             .text("response_format", "b64_json")
             .part(
                 "image",
-                reqwest::multipart::Part::bytes(image_bytes.to_vec())
+                reqwest::multipart::Part::bytes(image_bytes)
                     .mime_str(media_type)
                     .map_err(|e| {
                         ToolError::ExecutionFailed(format!("Invalid media type: {e}"))
@@ -168,7 +166,7 @@ impl Tool for ImageEditTool {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .multipart(form)
             .send()
             .await
@@ -180,11 +178,13 @@ impl Tool for ImageEditTool {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
 
-            // Fall back to chat-based editing if edits endpoint not available
+            // Fall back to generation if edits endpoint not available
             if status.as_u16() == 404 {
-                return self
-                    .fallback_chat_edit(prompt, &b64_image, media_type, start)
-                    .await;
+                tracing::warn!(
+                    "Image edit endpoint returned 404, falling back to generation API. \
+                     Note: the source image will NOT be used — a new image will be generated from the prompt alone."
+                );
+                return self.fallback_generate(prompt, start).await;
             }
 
             return Err(ToolError::ExecutionFailed(format!(
@@ -221,22 +221,22 @@ impl Tool for ImageEditTool {
 }
 
 impl ImageEditTool {
-    /// Fallback: use the generation API with the source image described in the prompt.
-    async fn fallback_chat_edit(
+    /// Fallback: generate a new image from the prompt when the edit endpoint is unavailable.
+    ///
+    /// The source image is NOT used — this generates a completely new image.
+    /// The response includes a `note` field warning the user.
+    async fn fallback_generate(
         &self,
         prompt: &str,
-        _b64_image: &str,
-        _media_type: &str,
         start: std::time::Instant,
     ) -> Result<ToolOutput, ToolError> {
-        // If the edit endpoint is not available, generate a new image with the prompt
         let url = format!(
             "{}/v1/images/generations",
             self.api_base_url.trim_end_matches('/')
         );
 
         let request_body = serde_json::json!({
-            "model": self.model,
+            "model": &self.model,
             "prompt": prompt,
             "size": "1024x1024",
             "response_format": "b64_json",
@@ -246,7 +246,7 @@ impl ImageEditTool {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .json(&request_body)
             .send()
             .await
@@ -285,60 +285,30 @@ impl ImageEditTool {
             "data": format!("data:image/png;base64,{}", image_data),
             "media_type": "image/png",
             "prompt": prompt,
-            "note": "Generated new image (edit endpoint unavailable)"
+            "note": "Generated new image (edit endpoint unavailable — source image was NOT used)"
         });
 
         Ok(ToolOutput::text(sentinel.to_string(), start.elapsed()))
     }
 }
 
-#[cfg(all(test, feature = "postgres"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::Workspace;
-
-    fn make_test_workspace() -> Arc<Workspace> {
-        Arc::new(Workspace::new(
-            "test_user",
-            deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
-                tokio_postgres::Config::new(),
-                tokio_postgres::NoTls,
-            ))
-            .build()
-            .unwrap(),
-        ))
-    }
 
     #[test]
     fn test_tool_metadata() {
-        let workspace = make_test_workspace();
         let tool = ImageEditTool::new(
             "https://api.example.com".to_string(),
             "test-key".to_string(),
             "flux-1".to_string(),
-            workspace,
+            None,
         );
         assert_eq!(tool.name(), "image_edit");
         assert!(!tool.requires_sanitization());
-    }
-
-    #[test]
-    fn test_media_type_detection() {
         assert_eq!(
-            ImageEditTool::media_type_from_path("photo.png"),
-            "image/png"
-        );
-        assert_eq!(
-            ImageEditTool::media_type_from_path("photo.jpg"),
-            "image/jpeg"
-        );
-        assert_eq!(
-            ImageEditTool::media_type_from_path("photo.gif"),
-            "image/gif"
-        );
-        assert_eq!(
-            ImageEditTool::media_type_from_path("photo.webp"),
-            "image/webp"
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
         );
     }
 }

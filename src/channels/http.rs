@@ -48,8 +48,9 @@ struct RateLimitState {
     request_count: u32,
 }
 
-/// Maximum JSON body size for webhook requests (10 MB, to support base64 image attachments).
-const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// Maximum JSON body size for webhook requests (15 MB, to support base64 image attachments
+/// with ~33% overhead from base64 encoding).
+const MAX_BODY_BYTES: usize = 15 * 1024 * 1024;
 
 /// Maximum number of pending wait-for-response requests.
 const MAX_PENDING_RESPONSES: usize = 100;

@@ -1,9 +1,11 @@
 //! Image generation tool using cloud API.
 
 use async_trait::async_trait;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::context::JobContext;
+use crate::tools::tool::ApprovalRequirement;
 use crate::tools::{Tool, ToolError, ToolOutput};
 
 /// Tool for generating images using FLUX or compatible image generation APIs.
@@ -11,7 +13,7 @@ pub struct ImageGenerateTool {
     /// API base URL (e.g., "https://cloud-api.near.ai").
     api_base_url: String,
     /// Bearer token for API auth.
-    api_key: String,
+    api_key: SecretString,
     /// Model to use (e.g., "black-forest-labs/FLUX.1-schnell").
     model: String,
     /// HTTP client.
@@ -48,7 +50,7 @@ impl ImageGenerateTool {
             .unwrap_or_default();
         Self {
             api_base_url,
-            api_key,
+            api_key: SecretString::from(api_key),
             model,
             client,
         }
@@ -85,8 +87,8 @@ impl Tool for ImageGenerateTool {
         })
     }
 
-    fn requires_approval(&self, _params: &serde_json::Value) -> crate::tools::tool::ApprovalRequirement {
-        crate::tools::tool::ApprovalRequirement::Never
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -138,7 +140,7 @@ impl Tool for ImageGenerateTool {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .json(&request_body)
             .send()
             .await
@@ -194,7 +196,7 @@ mod tests {
         assert_eq!(tool.name(), "image_generate");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            crate::tools::tool::ApprovalRequirement::Never
+            ApprovalRequirement::UnlessAutoApproved
         );
 
         let schema = tool.parameters_schema();

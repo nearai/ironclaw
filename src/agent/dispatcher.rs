@@ -681,23 +681,11 @@ impl Agent {
                                         .into())
                                     });
 
-                                // Send ToolResult preview
-                                if let Ok(ref output) = tool_result
-                                    && !output.is_empty()
+                                // Detect image generation sentinel in tool output
+                                // (only from image tools — avoids parsing all tool outputs)
+                                let is_image_sentinel = if let Ok(ref output) = tool_result
+                                    && matches!(tc.name.as_str(), "image_generate" | "image_edit")
                                 {
-                                    let _ = self
-                                        .channels
-                                        .send_status(
-                                            &message.channel,
-                                            StatusUpdate::ToolResult {
-                                                name: tc.name.clone(),
-                                                preview: output.clone(),
-                                            },
-                                            &message.metadata,
-                                        )
-                                        .await;
-
-                                    // Detect image generation sentinel in tool output
                                     if let Ok(sentinel) = serde_json::from_str::<serde_json::Value>(output)
                                         && sentinel.get("type").and_then(|v| v.as_str()) == Some("image_generated")
                                     {
@@ -711,7 +699,31 @@ impl Agent {
                                                 &message.metadata,
                                             )
                                             .await;
+                                        true
+                                    } else {
+                                        false
                                     }
+                                } else {
+                                    false
+                                };
+
+                                // Send ToolResult preview (skip for image sentinels to avoid
+                                // broadcasting multi-MB base64 data as a preview)
+                                if !is_image_sentinel
+                                    && let Ok(ref output) = tool_result
+                                    && !output.is_empty()
+                                {
+                                    let _ = self
+                                        .channels
+                                        .send_status(
+                                            &message.channel,
+                                            StatusUpdate::ToolResult {
+                                                name: tc.name.clone(),
+                                                preview: output.clone(),
+                                            },
+                                            &message.metadata,
+                                        )
+                                        .await;
                                 }
 
                                 // Record result in thread
