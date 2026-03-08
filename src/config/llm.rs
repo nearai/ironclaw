@@ -298,8 +298,7 @@ impl LlmConfig {
                     ),
                 });
             }
-            let profile =
-                optional_env("AWS_PROFILE")?.or_else(|| settings.bedrock_profile.clone());
+            let profile = optional_env("AWS_PROFILE")?.or_else(|| settings.bedrock_profile.clone());
             Some(BedrockConfig {
                 region,
                 model,

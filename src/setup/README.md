@@ -174,7 +174,7 @@ env-var mode or skipped secrets.
 | Ollama | None | - | - |
 | OpenRouter¹ | API key | `llm_compatible_api_key` | `LLM_API_KEY` |
 | OpenAI-compatible¹ | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
-| AWS Bedrock | API key or AWS credentials | `bedrock_api_key` | `AWS_BEARER_TOKEN_BEDROCK` |
+| AWS Bedrock | AWS credentials (IAM, SSO, instance roles) | - | - |
 
 ¹ OpenRouter and OpenAI-compatible share the same secret name and env var because
 OpenRouter is stored as `llm_backend = "openai_compatible"` under the hood.

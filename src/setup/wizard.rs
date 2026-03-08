@@ -855,9 +855,7 @@ impl SetupWizard {
         }
 
         // Bedrock is a special case (native AWS SDK, not registry-based)
-        options.push(
-            "AWS Bedrock      - Claude & other models via AWS (API key, IAM, SSO)".to_string(),
-        );
+        options.push("AWS Bedrock      - Claude & other models via AWS (IAM, SSO)".to_string());
         provider_ids.push("bedrock".to_string());
 
         let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
@@ -2419,7 +2417,10 @@ impl SetupWizard {
         // model before the DB is connected, so we must persist it to .env.
         // Write the backend-specific env var so the correct resolution path
         // picks it up (looked up from the provider registry).
-        if let Some(ref model) = self.settings.selected_model {
+        // Bedrock model is already written above as BEDROCK_MODEL, skip here.
+        if self.settings.llm_backend.as_deref() != Some("bedrock")
+            && let Some(ref model) = self.settings.selected_model
+        {
             let backend_str = self.settings.llm_backend.as_deref().unwrap_or("nearai");
             let model_env = registry.model_env_var(backend_str);
             env_vars.push((model_env.to_string(), model.clone()));

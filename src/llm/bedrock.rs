@@ -123,7 +123,11 @@ impl LlmProvider for BedrockProvider {
             })
             .set_messages(Some(bedrock_messages));
 
-        if let Some(config) = build_inference_config(request.temperature, request.max_tokens) {
+        if let Some(config) = build_inference_config(
+            request.temperature,
+            request.max_tokens,
+            request.stop_sequences.as_deref(),
+        ) {
             builder = builder.inference_config(config);
         }
 
@@ -177,7 +181,8 @@ impl LlmProvider for BedrockProvider {
             builder = builder.tool_config(tc);
         }
 
-        if let Some(config) = build_inference_config(request.temperature, request.max_tokens) {
+        if let Some(config) = build_inference_config(request.temperature, request.max_tokens, None)
+        {
             builder = builder.inference_config(config);
         }
 
@@ -238,6 +243,7 @@ impl LlmProvider for BedrockProvider {
 fn build_inference_config(
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    stop_sequences: Option<&[String]>,
 ) -> Option<InferenceConfiguration> {
     let mut builder = InferenceConfiguration::builder();
     let mut needs_config = false;
@@ -248,6 +254,12 @@ fn build_inference_config(
     }
     if let Some(tokens) = max_tokens {
         builder = builder.max_tokens(i32::try_from(tokens).unwrap_or(i32::MAX));
+        needs_config = true;
+    }
+    if let Some(seqs) = stop_sequences
+        && !seqs.is_empty()
+    {
+        builder = builder.set_stop_sequences(Some(seqs.to_vec()));
         needs_config = true;
     }
 
@@ -1089,33 +1101,47 @@ mod tests {
 
     #[test]
     fn test_build_inference_config_none_none() {
-        assert!(build_inference_config(None, None).is_none());
+        assert!(build_inference_config(None, None, None).is_none());
     }
 
     #[test]
     fn test_build_inference_config_temperature_only() {
-        let config = build_inference_config(Some(0.7), None);
+        let config = build_inference_config(Some(0.7), None, None);
         assert!(config.is_some());
     }
 
     #[test]
     fn test_build_inference_config_max_tokens_only() {
-        let config = build_inference_config(None, Some(1024));
+        let config = build_inference_config(None, Some(1024), None);
         assert!(config.is_some());
     }
 
     #[test]
     fn test_build_inference_config_both() {
-        let config = build_inference_config(Some(0.5), Some(2048));
+        let config = build_inference_config(Some(0.5), Some(2048), None);
         assert!(config.is_some());
     }
 
     #[test]
     fn test_build_inference_config_max_tokens_overflow() {
         // u32::MAX exceeds i32::MAX, should clamp to i32::MAX not wrap
-        let config = build_inference_config(None, Some(u32::MAX)).unwrap();
+        let config = build_inference_config(None, Some(u32::MAX), None).unwrap();
         // Just verify it builds without panic — the clamped value is inside the opaque struct
         let _ = config;
+    }
+
+    #[test]
+    fn test_build_inference_config_stop_sequences() {
+        let seqs = vec!["STOP".to_string(), "END".to_string()];
+        let config = build_inference_config(None, None, Some(&seqs));
+        assert!(config.is_some());
+    }
+
+    #[test]
+    fn test_build_inference_config_empty_stop_sequences_ignored() {
+        let seqs: Vec<String> = vec![];
+        let config = build_inference_config(None, None, Some(&seqs));
+        assert!(config.is_none());
     }
 
     #[test]
