@@ -1251,7 +1251,6 @@ impl SetupWizard {
         print_info("Select authentication method:");
         println!();
         let auth_options = &[
-            "Bedrock API key (bearer token, simplest)",
             "AWS default credentials (env vars, ~/.aws/credentials, IAM roles)",
             "AWS named profile (SSO / assume-role)",
         ];
@@ -1259,63 +1258,12 @@ impl SetupWizard {
 
         match auth_choice {
             0 => {
-                // Bedrock API key (bearer token)
-                // Check env var first
-                if let Ok(existing) = std::env::var("AWS_BEARER_TOKEN_BEDROCK")
-                    && !existing.is_empty()
-                {
-                    print_info(&format!(
-                        "AWS_BEARER_TOKEN_BEDROCK found: {}",
-                        mask_api_key(&existing)
-                    ));
-                    if confirm("Use this key?", true).map_err(SetupError::Io)? {
-                        // Persist to secrets store for future runs
-                        if let Ok(ctx) = self.init_secrets_context().await {
-                            let key = SecretString::from(existing);
-                            if let Err(e) = ctx.save_secret("bedrock_api_key", &key).await {
-                                tracing::warn!(
-                                    "Failed to persist Bedrock API key to secrets: {}",
-                                    e
-                                );
-                            }
-                        }
-                        print_success("AWS Bedrock configured (from env)");
-                        // Skip to cross-region
-                        return self.setup_bedrock_cross_region();
-                    }
-                }
-
-                println!();
-                print_info("Get your API key from: AWS Console → Bedrock → API keys");
-                println!();
-
-                let key = secret_input("Bedrock API key").map_err(SetupError::Io)?;
-                let key_str = key.expose_secret();
-
-                if key_str.is_empty() {
-                    return Err(SetupError::Config("API key cannot be empty".to_string()));
-                }
-
-                if let Ok(ctx) = self.init_secrets_context().await {
-                    ctx.save_secret("bedrock_api_key", &key)
-                        .await
-                        .map_err(|e| {
-                            SetupError::Config(format!("Failed to save API key: {}", e))
-                        })?;
-                    print_success("API key encrypted and saved");
-                } else {
-                    print_info(
-                        "Secrets not available. Set AWS_BEARER_TOKEN_BEDROCK in your environment.",
-                    );
-                }
-            }
-            1 => {
                 // Default AWS credentials
                 print_info(
                     "Using default AWS credential chain (env vars, ~/.aws/credentials, IAM roles).",
                 );
             }
-            2 => {
+            1 => {
                 // Named profile
                 let profile =
                     input("AWS profile name (from ~/.aws/config)").map_err(SetupError::Io)?;
@@ -2453,17 +2401,17 @@ impl SetupWizard {
             env_vars.push(("OLLAMA_BASE_URL".to_string(), url.clone()));
         }
         if let Some(ref region) = self.settings.bedrock_region {
-            env_vars.push(("BEDROCK_REGION", region.clone()));
+            env_vars.push(("BEDROCK_REGION".to_string(), region.clone()));
         }
         if self.settings.llm_backend.as_deref() == Some("bedrock") {
             if let Some(ref model) = self.settings.selected_model {
-                env_vars.push(("BEDROCK_MODEL", model.clone()));
+                env_vars.push(("BEDROCK_MODEL".to_string(), model.clone()));
             }
             if let Some(ref cross) = self.settings.bedrock_cross_region {
-                env_vars.push(("BEDROCK_CROSS_REGION", cross.clone()));
+                env_vars.push(("BEDROCK_CROSS_REGION".to_string(), cross.clone()));
             }
             if let Some(ref profile) = self.settings.bedrock_profile {
-                env_vars.push(("AWS_PROFILE", profile.clone()));
+                env_vars.push(("AWS_PROFILE".to_string(), profile.clone()));
             }
         }
 

@@ -75,8 +75,7 @@ pub fn create_llm_provider(
         {
             return Err(LlmError::RequestFailed {
                 provider: "bedrock".to_string(),
-                reason: "Bedrock support not compiled. Rebuild with --features bedrock"
-                    .to_string(),
+                reason: "Bedrock support not compiled. Rebuild with --features bedrock".to_string(),
             });
         }
     }

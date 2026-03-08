@@ -259,9 +259,8 @@ impl LlmConfig {
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
-        let is_bedrock = backend_lower == "bedrock"
-            || backend_lower == "aws_bedrock"
-            || backend_lower == "aws";
+        let is_bedrock =
+            backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
 
         // Resolve registry provider config (for non-NearAI, non-Bedrock backends)
         let provider = if is_nearai || is_bedrock {

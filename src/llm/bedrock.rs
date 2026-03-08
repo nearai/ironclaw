@@ -1,9 +1,9 @@
 //! AWS Bedrock LLM provider using the native Converse API.
 //!
 //! Uses `aws-sdk-bedrockruntime` to call `client.converse()` directly,
-//! bypassing the OpenAI-compatible layer. Supports all Bedrock auth methods:
-//! bearer token (`AWS_BEARER_TOKEN_BEDROCK`), IAM credentials, SSO profiles,
-//! and instance roles — all handled transparently by the AWS SDK credential chain.
+//! bypassing the OpenAI-compatible layer. Supports standard AWS auth methods:
+//! IAM credentials, SSO profiles, and instance roles — all handled
+//! transparently by the AWS SDK credential chain.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -137,6 +137,8 @@ impl LlmProvider for BedrockProvider {
             input_tokens,
             output_tokens,
             finish_reason: map_stop_reason(response.stop_reason()),
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
         })
     }
 
@@ -190,6 +192,8 @@ impl LlmProvider for BedrockProvider {
             input_tokens,
             output_tokens,
             finish_reason: map_stop_reason(response.stop_reason()),
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
         })
     }
 
@@ -903,6 +907,7 @@ mod tests {
                 tool_call_id: Some("call_1".to_string()),
                 name: Some("echo".to_string()),
                 tool_calls: None,
+                content_parts: Vec::new(),
             },
         ];
 

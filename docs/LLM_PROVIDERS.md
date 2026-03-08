@@ -12,13 +12,12 @@ configurations.
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
 | Google Gemini | `gemini` | `GEMINI_API_KEY` | Gemini models |
-| AWS Bedrock | `bedrock` | `BEDROCK_ACCESS_KEY` | Requires OpenAI proxy (e.g. LiteLLM) |
 | io.net | `ionet` | `IONET_API_KEY` | Intelligence API |
 | Mistral | `mistral` | `MISTRAL_API_KEY` | Mistral models |
 | Yandex AI Studio | `yandex` | `YANDEX_API_KEY` | YandexGPT models |
 | Cloudflare Workers AI | `cloudflare` | `CLOUDFLARE_API_KEY` | Access to Workers AI |
 | Ollama | `ollama` | No | Local inference |
-| AWS Bedrock | `bedrock` | `AWS_BEARER_TOKEN_BEDROCK` or AWS creds | Native Converse API |
+| AWS Bedrock | `bedrock` | AWS credentials | Native Converse API |
 | OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | Fireworks AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
@@ -77,21 +76,8 @@ Pull a model first: `ollama pull llama3.2`
 
 ## AWS Bedrock (requires `--features bedrock`)
 
-Uses the native AWS Converse API via `aws-sdk-bedrockruntime`. Supports all Bedrock
-authentication methods: API key (bearer token), IAM credentials, SSO profiles, and
-instance roles.
-
-### With Bedrock API key (bearer token)
-
-```env
-LLM_BACKEND=bedrock
-BEDROCK_MODEL=anthropic.claude-opus-4-6-v1
-BEDROCK_REGION=us-east-1
-BEDROCK_CROSS_REGION=us
-AWS_BEARER_TOKEN_BEDROCK=<your-bedrock-api-key>
-```
-
-Generate a Bedrock API key from: AWS Console → Bedrock → API keys.
+Uses the native AWS Converse API via `aws-sdk-bedrockruntime`. Supports standard AWS
+authentication methods: IAM credentials, SSO profiles, and instance roles.
 
 ### With AWS credentials (IAM, SSO, instance roles)
 
