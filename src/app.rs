@@ -403,11 +403,7 @@ impl AppBuilder {
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
             tools
-                .register_builder_tool(
-                    llm.clone(),
-                    safety.clone(),
-                    Some(self.config.builder.to_builder_config()),
-                )
+                .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
             tracing::info!("Builder mode enabled");
         }

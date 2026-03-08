@@ -230,7 +230,7 @@ impl Agent {
                     )
                     .await;
 
-                let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+                let compactor = ContextCompactor::new(self.llm().clone());
                 if let Err(e) = compactor
                     .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
                     .await
@@ -627,7 +627,7 @@ impl Agent {
                 crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
             );
 
-        let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
+        let compactor = ContextCompactor::new(self.llm().clone());
         match compactor
             .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
             .await
@@ -746,6 +746,16 @@ impl Agent {
             let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
+            // Prefer a valid timezone from the approval message, fall back to the
+            // resolved timezone stored when the approval was originally requested.
+            let tz_candidate = message
+                .timezone
+                .as_deref()
+                .filter(|tz| crate::timezone::parse_timezone(tz).is_some())
+                .or(pending.user_timezone.as_deref());
+            if let Some(tz) = tz_candidate {
+                job_ctx.user_timezone = tz.to_string();
+            }
 
             let _ = self
                 .channels
@@ -1111,6 +1121,8 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
+                    // Carry forward the resolved timezone from the original pending approval
+                    user_timezone: pending.user_timezone.clone(),
                 };
 
                 let request_id = new_pending.request_id;
