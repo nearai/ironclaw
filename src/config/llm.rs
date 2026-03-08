@@ -118,6 +118,10 @@ pub struct LlmConfig {
     pub provider: Option<RegistryProviderConfig>,
     /// AWS Bedrock config (populated when backend=bedrock, requires --features bedrock).
     pub bedrock: Option<BedrockConfig>,
+    /// HTTP request timeout in seconds for LLM API calls.
+    /// Default: 120. Increase for local LLMs (Ollama, vLLM, LM Studio) that
+    /// need more time for prompt evaluation on consumer hardware.
+    pub request_timeout_secs: u64,
 }
 
 /// NEAR AI configuration.
@@ -181,6 +185,7 @@ impl LlmConfig {
             },
             provider: None,
             bedrock: None,
+            request_timeout_secs: 120,
         }
     }
 
@@ -309,6 +314,8 @@ impl LlmConfig {
             None
         };
 
+        let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
+
         Ok(Self {
             backend: if is_nearai {
                 "nearai".to_string()
@@ -323,6 +330,7 @@ impl LlmConfig {
             nearai,
             provider,
             bedrock,
+            request_timeout_secs,
         })
     }
 
@@ -1072,6 +1080,32 @@ mod tests {
             let s = variant.to_string();
             let parsed: CacheRetention = s.parse().unwrap();
             assert_eq!(parsed, variant, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn test_request_timeout_defaults_to_120() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
+        }
+        let config = LlmConfig::resolve(&Settings::default()).expect("resolve");
+        assert_eq!(config.request_timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_request_timeout_configurable() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_REQUEST_TIMEOUT_SECS", "300");
+        }
+        let config = LlmConfig::resolve(&Settings::default()).expect("resolve");
+        assert_eq!(config.request_timeout_secs, 300);
+        // SAFETY: Cleanup
+        unsafe {
+            std::env::remove_var("LLM_REQUEST_TIMEOUT_SECS");
         }
     }
 }

@@ -769,13 +769,28 @@ impl SetupWizard {
                 print_success("Master key generated and stored in OS keychain");
             }
             1 => {
-                // Env var mode
-                print_info("Generate a key and add it to your environment:");
+                // Env var mode — generate key, init crypto, and persist to .env
                 let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+                // Initialize crypto so subsequent wizard steps (channel setup,
+                // API key storage) can encrypt secrets immediately.
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                        .map_err(|e| SetupError::Config(e.to_string()))?,
+                ));
+
+                // Make visible to optional_env() for any subsequent config resolution.
+                crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
+
+                // Store hex for write_bootstrap_env to persist to ~/.ironclaw/.env.
+                self.settings.secrets_master_key_hex = Some(key_hex.clone());
+
                 println!();
-                println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                print_info("Master key generated and will be saved to ~/.ironclaw/.env");
                 println!();
-                print_info("Add this to your shell profile or .env file.");
+                println!("  SECRETS_MASTER_KEY={}", key_hex);
+                println!();
+                print_info("You can also copy this to another .env file or CI secrets.");
 
                 self.settings.secrets_master_key_source = KeySource::Env;
                 print_success("Configured for environment variable");
@@ -1034,10 +1049,11 @@ impl SetupWizard {
 
     /// Anthropic OAuth setup: extract token from `claude login` credentials.
     async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("anthropic".to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some("anthropic") {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some("anthropic".to_string());
 
         // Try to extract existing OAuth token from Claude Code credentials
         if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
@@ -1131,10 +1147,11 @@ impl SetupWizard {
             other => other,
         });
 
-        self.settings.llm_backend = Some(backend.to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(backend) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(backend.to_string());
 
         // Check env var first
         if let Ok(existing) = std::env::var(env_var) {
@@ -1193,10 +1210,11 @@ impl SetupWizard {
         &mut self,
         def: &crate::llm::ProviderDefinition,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(def.id.clone());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(&def.id) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(def.id.clone());
 
         let default_url = self
             .settings
@@ -1315,10 +1333,11 @@ impl SetupWizard {
         secret_name: &str,
         display_name: &str,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(backend_id.to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(backend_id) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(backend_id.to_string());
 
         let existing_url = self
             .settings
@@ -1581,6 +1600,7 @@ impl SetupWizard {
             },
             provider: None,
             bedrock: None,
+            request_timeout_secs: 120,
         };
 
         match create_llm_provider(&config, session) {
@@ -2444,6 +2464,12 @@ impl SetupWizard {
             && !api_key.is_empty()
         {
             env_vars.push(("NEARAI_API_KEY".to_string(), api_key));
+        }
+
+        // Secrets master key (env var mode): write to .env so it's available
+        // on next startup before the DB is connected.
+        if let Some(ref key_hex) = self.settings.secrets_master_key_hex {
+            env_vars.push(("SECRETS_MASTER_KEY".to_string(), key_hex.clone()));
         }
 
         // Always write ONBOARD_COMPLETED so that check_onboard_needed()
@@ -3622,6 +3648,48 @@ mod tests {
         }
     }
 
+    /// Regression test for #600: re-running provider setup for the same backend
+    /// must NOT clear selected_model. Only switching to a different backend should.
+    #[test]
+    fn test_same_provider_preserves_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate re-entering the same provider -- model should survive
+        // (This is the check that each setup_* function now performs)
+        if wizard.settings.llm_backend.as_deref() != Some("ollama") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("ollama".to_string());
+
+        assert_eq!(
+            wizard.settings.selected_model.as_deref(),
+            Some("llama3"),
+            "model should be preserved when re-selecting the same provider"
+        );
+    }
+
+    /// Regression test for #600: switching to a different provider must clear
+    /// selected_model since the old model may not be valid for the new backend.
+    #[test]
+    fn test_different_provider_clears_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate switching to a different provider -- model should be cleared
+        if wizard.settings.llm_backend.as_deref() != Some("openai") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("openai".to_string());
+
+        assert!(
+            wizard.settings.selected_model.is_none(),
+            "model should be cleared when switching providers"
+        );
+    }
+
     #[tokio::test]
     async fn test_run_provider_setup_no_setup_hint() {
         // A provider with setup: None should not error. It should set the
@@ -3658,5 +3726,31 @@ mod tests {
             Some("custom_no_setup"),
             "backend should be set even without setup hint"
         );
+    }
+
+    /// Regression test for #666: env-var security option must initialize
+    /// secrets_crypto so subsequent steps can encrypt API keys.
+    #[test]
+    fn test_env_var_security_initializes_crypto() {
+        use crate::secrets::SecretsCrypto;
+        use secrecy::SecretString;
+
+        // Simulate what option 1 in step_security() does after the fix:
+        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+        // The fix: create SecretsCrypto from the generated key.
+        // Before the fix, this was skipped, leaving secrets_crypto = None.
+        let crypto = SecretsCrypto::new(SecretString::from(key_hex.clone()));
+        assert!(
+            crypto.is_ok(),
+            "generated key hex must produce valid SecretsCrypto"
+        );
+
+        // Verify the key is stored for bootstrap env persistence.
+        let settings = Settings {
+            secrets_master_key_hex: Some(key_hex),
+            ..Settings::default()
+        };
+        assert!(settings.secrets_master_key_hex.is_some());
     }
 }

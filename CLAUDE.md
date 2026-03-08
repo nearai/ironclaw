@@ -387,12 +387,27 @@ Dead code behind the wrong `#[cfg]` gate will only show up when building with a 
 
 **Zero clippy warnings policy:** Fix ALL clippy warnings before committing, including pre-existing ones in files you didn't change. Never leave warnings behind — treat `cargo clippy` output as a zero-tolerance gate.
 
+**Transaction safety:** Multi-step database operations (INSERT+INSERT, UPDATE+DELETE, read-then-write) MUST be wrapped in a transaction. Never assume sequential calls are atomic. Before committing DB code, ask: "If this crashes between step N and N+1, is the database consistent?" If not, wrap in a transaction. This applies to both postgres and libsql backends.
+
+**UTF-8 string safety:** Never use byte-index slicing (`&s[..n]`) on user-supplied or external strings — it panics on multi-byte characters. Use `is_char_boundary()` to walk backwards from the desired length, or iterate with `char_indices()`. Grep for `[..` in changed files to catch violations.
+
+**Case-insensitive comparisons:** When comparing user-supplied strings (file paths, media types, extension names), always normalize to lowercase first with `.to_ascii_lowercase()`. On case-insensitive filesystems (macOS, Windows), path comparisons must be case-insensitive. File extension checks (`.png`, `.jpg`) and media type checks (`image/jpeg`) are common offenders.
+
+**Decorator/wrapper trait delegation:** When adding a new method to `LlmProvider` (or any trait with decorator wrappers), you MUST update ALL wrapper types to delegate to their inner provider. Grep for `impl LlmProvider for` to find all implementations. Add a test that exercises the method through the full provider chain (`build_provider_chain()`), not just the base impl.
+
+**Sensitive data in logs & events:** Tool parameters and outputs MUST be redacted before logging or broadcasting via SSE/WebSocket. Use `redact_params()` before any `tracing::info!`, `JobEvent`, or SSE emission that includes tool call data. Never log raw parameters from tool calls.
+
+**Test temporary files:** Use the `tempfile` crate for test directories/files. Never hardcode `/tmp/...` paths — they collide in parallel test runs and break on non-Unix platforms.
+
+**Trust boundaries in multi-process architecture:** Data from worker containers is untrusted. The orchestrator MUST validate: tool domain (never execute `Container`-domain tools on the host), nesting depth (server-side tracking, not client-supplied), and parameter sensitivity (redact before logging/broadcasting).
+
 **Mechanical verification before committing:** Run these checks on changed files before committing:
 - `cargo clippy --all --benches --tests --examples --all-features` -- zero warnings
 - `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
 - `grep -rn 'super::' <files>` -- use `crate::` imports
 - If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
 - Fix commits must include regression tests (enforced by `commit-msg` hook; bypass with `[skip-regression-check]`)
+- Run `scripts/pre-commit-safety.sh` to catch UTF-8, case-sensitivity, hardcoded /tmp, and logging issues
 
 ## Configuration
 
