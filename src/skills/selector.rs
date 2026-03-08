@@ -379,4 +379,96 @@ mod tests {
         let result = prefilter_skills("test", &skills, 5, 1);
         assert_eq!(result.len(), 1);
     }
+
+    fn make_skill_with_excludes(
+        name: &str,
+        keywords: &[&str],
+        exclude_keywords: &[&str],
+        tags: &[&str],
+        patterns: &[&str],
+    ) -> LoadedSkill {
+        let mut skill = make_skill(name, keywords, tags, patterns);
+        let excl_vec: Vec<String> = exclude_keywords.iter().map(|s| s.to_string()).collect();
+        skill.lowercased_exclude_keywords = excl_vec
+            .iter()
+            .map(|k| k.to_lowercase())
+            .collect();
+        skill.manifest.activation.exclude_keywords = excl_vec;
+        skill
+    }
+
+    // --- exclude_keywords tests ---
+
+    #[test]
+    fn test_exclude_keyword_vetos_match() {
+        // Skill matches on "write" but exclude_keywords: ["route"] — message contains "route"
+        // so the skill should score 0 and be excluded.
+        let skills = vec![make_skill_with_excludes("writer", &["write"], &["route"], &[], &[])];
+        let result = prefilter_skills(
+            "route this write request to another agent",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(
+            result.is_empty(),
+            "skill with matching exclude_keyword should score 0"
+        );
+    }
+
+    #[test]
+    fn test_exclude_keyword_absent_does_not_block() {
+        // Same skill, message does NOT contain the exclude keyword — should activate normally.
+        let skills = vec![make_skill_with_excludes("writer", &["write"], &["route"], &[], &[])];
+        let result = prefilter_skills(
+            "help me write an email",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(
+            result.len(),
+            1,
+            "skill should activate when no exclude_keyword is present"
+        );
+    }
+
+    #[test]
+    fn test_exclude_keyword_veto_wins_over_positive_match() {
+        // Both a keyword match AND an exclude_keyword match are present.
+        // The veto must win regardless of how high the positive score is.
+        let skills = vec![make_skill_with_excludes(
+            "writer",
+            &["write", "draft", "compose"],
+            &["redirect"],
+            &[],
+            &[],
+        )];
+        let result = prefilter_skills(
+            "write and draft and compose — but redirect this somewhere else",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(
+            result.is_empty(),
+            "exclude_keyword veto must win even when multiple positive keywords match"
+        );
+    }
+
+    #[test]
+    fn test_exclude_keyword_case_insensitive() {
+        // exclude_keywords are pre-lowercased; the veto must fire regardless of case in the message.
+        let skills = vec![make_skill_with_excludes("writer", &["write"], &["Route"], &[], &[])];
+        let result = prefilter_skills(
+            "please ROUTE this write request",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert!(
+            result.is_empty(),
+            "exclude_keyword veto should be case-insensitive"
+        );
+    }
 }
