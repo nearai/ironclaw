@@ -200,9 +200,10 @@ impl SessionManager {
 
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        let preview = crate::agent::truncate_for_preview(&body, 200);
         Err(LlmError::SessionRenewalFailed {
             provider: "nearai".to_string(),
-            reason: format!("Validation failed: HTTP {}: {}", status, body),
+            reason: format!("Validation failed: HTTP {status}: {preview}"),
         })
     }
 
