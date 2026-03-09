@@ -319,6 +319,7 @@ pub fn weighted_score_fusion(
 ) -> Vec<SearchResult> {
     struct ChunkInfo {
         document_id: Uuid,
+        document_path: String,
         content: String,
         score: f32,
         fts_rank: Option<u32>,
@@ -338,6 +339,7 @@ pub fn weighted_score_fusion(
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
+                document_path: result.document_path,
                 content: result.content,
                 score,
                 fts_rank: Some(result.rank),
@@ -356,6 +358,7 @@ pub fn weighted_score_fusion(
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
+                document_path: result.document_path,
                 content: result.content,
                 score,
                 fts_rank: None,
@@ -367,6 +370,7 @@ pub fn weighted_score_fusion(
         .into_iter()
         .map(|(chunk_id, info)| SearchResult {
             document_id: info.document_id,
+            document_path: info.document_path,
             chunk_id,
             content: info.content,
             score: info.score,
