@@ -32,7 +32,7 @@ use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::{ApprovalContext, ApprovalRequirement, ToolRegistry, redact_params};
+use crate::tools::{ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry, redact_params};
 use crate::workspace::Workspace;
 
 /// The routine execution engine.
@@ -881,14 +881,20 @@ async fn execute_routine_tool(
         .await
         .ok_or_else(|| format!("Tool '{}' not found", tc.name))?;
 
-    // Check approval requirement: auto-approve everything except Always tools
+    // Check approval requirement: only allow Never tools in lightweight routines.
+    // UnlessAutoApproved and Always tools are blocked to prevent prompt injection attacks.
+    // Lightweight routines can be triggered by external events and may process untrusted data,
+    // making them vulnerable to prompt injection that could trick the LLM into calling
+    // sensitive tools. Blocking these tools entirely is the safest approach.
     match tool.requires_approval(&tc.arguments) {
         ApprovalRequirement::Never => {}
-        ApprovalRequirement::UnlessAutoApproved => {}
-        ApprovalRequirement::Always => {
+        ApprovalRequirement::UnlessAutoApproved | ApprovalRequirement::Always => {
             return Err(
-                format!("Tool '{}' requires manual approval in lightweight routines", tc.name)
-                    .into(),
+                format!(
+                    "Tool '{}' requires manual approval and cannot be used in lightweight routines",
+                    tc.name
+                )
+                .into(),
             );
         }
     }
@@ -951,12 +957,8 @@ async fn execute_routine_tool(
     }
 
     let result = result
-        .map_err(|_| {
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("Tool execution timed out after {:?}", timeout),
-            )) as Box<dyn std::error::Error + Send + Sync>
-        })?
+        .map_err(|_| ToolError::Timeout(timeout))
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
     // Serialize result to JSON string
@@ -1087,15 +1089,18 @@ mod tests {
     }
 
     #[test]
-    fn test_routine_config_lightweight_max_iterations_capped_at_five() {
-        // The resolve() method caps max_iterations at 5
+    fn test_routine_config_can_hold_uncapped_max_iterations() {
+        // The `RoutineConfig` struct can hold a value greater than the safety cap.
         let config = RoutineConfig {
-            lightweight_max_iterations: 10, // Try to set higher
+            lightweight_max_iterations: 10, // Set a value higher than the cap.
             ..RoutineConfig::default()
         };
-        // After capping, should be min(10, 5) = 5 when used in actual execution
-        // (This is handled in execute_lightweight_with_tools via min(5))
-        assert_eq!(config.lightweight_max_iterations, 10, "Config can store higher value");
+        // The actual capping to a maximum of 5 is handled at runtime in
+        // `execute_lightweight_with_tools` and during config resolution from env vars.
+        assert_eq!(
+            config.lightweight_max_iterations, 10,
+            "Config struct should store the provided value"
+        );
     }
 
     #[test]
@@ -1149,17 +1154,6 @@ mod tests {
                 content, should_match, matches
             );
         }
-    }
-
-    #[test]
-    fn test_iteration_limit_safety_ceiling() {
-        // Ensure the safety ceiling of 5 iterations is enforced
-        let max_iterations = RoutineConfig::default().lightweight_max_iterations.min(5);
-        assert!(
-            max_iterations <= 5,
-            "Max iterations should never exceed 5, got {}",
-            max_iterations
-        );
     }
 
     #[test]
