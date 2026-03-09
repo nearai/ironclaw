@@ -25,8 +25,8 @@ use crate::codex_auth;
 use crate::error::LlmError;
 
 use super::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
+    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 /// Provider that speaks the Responses API protocol against the ChatGPT backend.
@@ -141,10 +141,10 @@ impl CodexChatGptProvider {
             .await
     }
 
-    /// Query `/models?client_version=1.0.0` and return the list of available
+    /// Query `/models?client_version=0.111.0` and return the list of available
     /// model slugs, ordered by priority (highest first).
     async fn fetch_available_models(client: &Client, base_url: &str, api_key: &str) -> Vec<String> {
-        let url = format!("{base_url}/models?client_version=1.0.0");
+        let url = format!("{base_url}/models?client_version=0.111.0");
         let resp = match client.get(&url).bearer_auth(api_key).timeout(Duration::from_secs(10)).send().await {
             Ok(r) => r,
             Err(e) => {
@@ -230,13 +230,34 @@ impl CodexChatGptProvider {
 
         match msg.role {
             Role::User => {
+                // Build content array: if content_parts is populated, use it
+                // to include multimodal content (images). Otherwise fall back
+                // to the plain text content field.
+                let content = if !msg.content_parts.is_empty() {
+                    msg.content_parts
+                        .iter()
+                        .map(|part| match part {
+                            ContentPart::Text { text } => json!({
+                                "type": "input_text",
+                                "text": text,
+                            }),
+                            ContentPart::ImageUrl { image_url } => json!({
+                                "type": "input_image",
+                                "image_url": image_url.url,
+                            }),
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![json!({
+                        "type": "input_text",
+                        "text": msg.content,
+                    })]
+                };
+
                 items.push(json!({
                     "type": "message",
                     "role": "user",
-                    "content": [{
-                        "type": "input_text",
-                        "text": msg.content,
-                    }],
+                    "content": content,
                 }));
             }
             Role::Assistant => {
@@ -640,6 +661,32 @@ mod tests {
         assert_eq!(items[0]["content"][0]["text"], "hello");
     }
 
+    #[test]
+    fn test_message_conversion_user_with_image() {
+        use super::super::provider::ImageUrl;
+        let parts = vec![
+            ContentPart::Text {
+                text: "What's in this image?".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,iVBOR...".to_string(),
+                    detail: None,
+                },
+            },
+        ];
+        let msg = ChatMessage::user_with_parts("", parts);
+        let items = CodexChatGptProvider::message_to_input_items(&msg);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["type"], "message");
+        assert_eq!(items[0]["role"], "user");
+        let content = items[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "What's in this image?");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/png;base64,iVBOR...");
+    }
     #[test]
     fn test_message_conversion_assistant() {
         let items = CodexChatGptProvider::message_to_input_items(&ChatMessage::assistant("hi"));
