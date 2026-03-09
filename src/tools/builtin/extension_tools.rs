@@ -451,8 +451,8 @@ impl Tool for ToolRemoveTool {
     }
 
     fn description(&self) -> &str {
-        "Remove an installed extension (channel, tool, or MCP server). \
-         Unregisters tools and deletes configuration."
+        "Permanently remove an installed extension (channel, tool, or MCP server) from disk. \
+         This action cannot be undone — the WASM binary and configuration files will be deleted."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -492,7 +492,7 @@ impl Tool for ToolRemoveTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
+        ApprovalRequirement::Always
     }
 }
 
@@ -701,7 +701,46 @@ mod tests {
         assert_eq!(tool.name(), "tool_remove");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Always
+        );
+    }
+
+    #[test]
+    fn tool_remove_always_requires_approval() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = ToolRemoveTool {
+            manager: test_manager_stub(),
+        };
+        // Test with multiple different tool names — all must require approval
+        for name in &["slack", "echo", "github-cli", "my-custom-tool"] {
+            let params = serde_json::json!({"name": name});
+            assert_eq!(
+                tool.requires_approval(&params),
+                ApprovalRequirement::Always,
+                "tool_remove must always require approval for {} regardless of auto-approve state",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn tool_remove_approval_not_affected_by_params() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = ToolRemoveTool {
+            manager: test_manager_stub(),
+        };
+        // Approval requirement should not change based on parameters
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Always
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"name": ""})),
+            ApprovalRequirement::Always
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"name": "tool", "extra": "field"})),
+            ApprovalRequirement::Always
         );
     }
 

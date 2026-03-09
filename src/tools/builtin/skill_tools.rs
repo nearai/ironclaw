@@ -709,7 +709,8 @@ impl Tool for SkillRemoveTool {
     }
 
     fn description(&self) -> &str {
-        "Remove an installed skill by name. Only user-installed skills can be removed."
+        "Permanently remove an installed skill from disk. This action cannot be undone — \
+         the skill files will be deleted."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -770,7 +771,7 @@ impl Tool for SkillRemoveTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
+        ApprovalRequirement::Always
     }
 }
 
@@ -837,10 +838,45 @@ mod tests {
         assert_eq!(tool.name(), "skill_remove");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Always
         );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
+    }
+
+    #[test]
+    fn skill_remove_always_requires_approval() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = SkillRemoveTool::new(test_registry());
+        // Test with multiple different skill names — all must require approval
+        for name in &["deployment", "web-ui-test", "custom-skill", "my-skill"] {
+            let params = serde_json::json!({"name": name});
+            assert_eq!(
+                tool.requires_approval(&params),
+                ApprovalRequirement::Always,
+                "skill_remove must always require approval for {} regardless of auto-approve state",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn skill_remove_approval_not_affected_by_params() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = SkillRemoveTool::new(test_registry());
+        // Approval requirement should not change based on parameters
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Always
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"name": ""})),
+            ApprovalRequirement::Always
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"name": "skill", "extra": "field"})),
+            ApprovalRequirement::Always
+        );
     }
 
     #[test]
