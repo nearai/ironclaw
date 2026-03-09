@@ -195,6 +195,7 @@ impl ExtensionManifest {
             source,
             fallback_source,
             auth_hint,
+            version: Some(self.version.clone()),
         }
     }
 }

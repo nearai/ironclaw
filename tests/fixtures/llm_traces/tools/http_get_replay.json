@@ -1,0 +1,51 @@
+{
+  "model_name": "test-http-get-replay",
+  "expects": {
+    "tools_used": ["http"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "http_exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "url": "https://httpbin.org/get?test=1",
+        "headers": [],
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "headers": [["content-type", "application/json"]],
+        "body": "{\"args\": {\"test\": \"1\"}, \"url\": \"https://httpbin.org/get?test=1\"}"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "http" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_http_1",
+            "name": "http",
+            "arguments": {
+              "method": "GET",
+              "url": "https://httpbin.org/get?test=1"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 25
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The HTTP GET request to httpbin returned a 200 OK with the args confirming test=1.",
+        "input_tokens": 200,
+        "output_tokens": 25
+      }
+    }
+  ]
+}

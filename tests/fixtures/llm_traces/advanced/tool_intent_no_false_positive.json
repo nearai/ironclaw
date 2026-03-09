@@ -1,0 +1,16 @@
+{
+  "model_name": "advanced-tool-intent-no-false-positive",
+  "steps": [
+    {
+      "response": {
+        "type": "text",
+        "content": "Let me explain how the authentication system works. It uses JWT tokens with a 24-hour expiry. The job is complete.",
+        "input_tokens": 50,
+        "output_tokens": 30
+      }
+    }
+  ],
+  "expects": {
+    "response_contains": ["authentication"]
+  }
+}

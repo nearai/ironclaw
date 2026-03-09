@@ -1,0 +1,57 @@
+{
+  "model_name": "test-write-chunk-search",
+  "expects": {
+    "tools_used": [
+      "memory_write",
+      "memory_search"
+    ],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": {
+        "last_user_message_contains": "document"
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mw_long",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# System Architecture\n\nThis document describes the complete architecture of our distributed system.\n\n## Overview\n\nThe system consists of multiple microservices communicating via message queues. Each service is independently deployable and follows the single responsibility principle. The main services include: User Service, Order Service, Payment Service, Notification Service, and Analytics Service.\n\n## User Service\n\nThe User Service manages user authentication, authorization, and profile management. It uses JWT tokens for session management and bcrypt for password hashing. The service exposes a REST API on port 8001 and maintains its own PostgreSQL database for user data. Rate limiting is applied at 100 requests per minute per user.\n\n## Order Service\n\nThe Order Service handles the complete order lifecycle from creation to fulfillment. Orders go through states: Created, Confirmed, Processing, Shipped, Delivered, or Cancelled. Each state transition is recorded as an event in the event store. The service uses an event-sourced architecture with CQRS for read optimization.\n\n## Payment Service\n\nThe Payment Service integrates with multiple payment providers including Stripe, PayPal, and cryptocurrency gateways. It implements the saga pattern for distributed transactions, ensuring consistency across the Order and Inventory services. Failed payments trigger automatic retry with exponential backoff.\n\n## Notification Service\n\nThe Notification Service sends alerts via email, SMS, push notifications, and webhooks. It uses a template engine for message formatting and supports multiple languages. Notifications are queued in RabbitMQ with priority levels and delivery guarantees.\n\n## Analytics Service\n\nThe Analytics Service collects metrics from all other services via event streams. It processes data in real-time using Apache Kafka and stores aggregated results in ClickHouse for fast querying. Dashboards are served via a Grafana integration.\n\n## Infrastructure\n\nAll services are containerized with Docker and orchestrated via Kubernetes. The cluster runs on AWS EKS with auto-scaling policies based on CPU and memory utilization. Service mesh is provided by Istio for traffic management, security, and observability.\n\n## Database Strategy\n\nEach microservice owns its database schema. Cross-service data access happens only through published APIs or event streams. Database migrations are managed via Flyway and executed during deployment. Read replicas are used for analytics queries to avoid impacting production workloads.\n\n## Security\n\nAll inter-service communication uses mTLS certificates managed by cert-manager. External traffic passes through AWS ALB with WAF rules. Secrets are stored in HashiCorp Vault and injected at runtime. Regular penetration testing is conducted quarterly.\n\n## Monitoring\n\nThe observability stack includes Prometheus for metrics, Jaeger for distributed tracing, and ELK for log aggregation. SLOs are defined per service with error budgets tracked via SLI dashboards. PagerDuty handles on-call alerting with escalation policies.\n\n## Deployment\n\nCI/CD pipelines run on GitHub Actions with stages for lint, test, build, and deploy. Feature flags are managed via LaunchDarkly for gradual rollouts. Blue-green deployments minimize downtime, with automatic rollback on health check failures.\n\n## Performance Requirements\n\nThe system targets 99.9% uptime with P99 latency under 200ms for API calls. Load testing with k6 validates performance before each release. CDN caching reduces origin load for static assets and frequently accessed API responses.",
+              "target": "context/architecture.md"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 50
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ms_chunk",
+            "name": "memory_search",
+            "arguments": {
+              "query": "payment service saga pattern"
+            }
+          }
+        ],
+        "input_tokens": 200,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I wrote the architecture document and searched for payment-related content. The search found the Payment Service section describing the saga pattern for distributed transactions.",
+        "input_tokens": 300,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

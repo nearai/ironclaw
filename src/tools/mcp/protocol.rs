@@ -1,6 +1,19 @@
 //! MCP protocol types.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Flexibly deserialize a JSON-RPC id that may be a number, string, or null.
+fn deserialize_flexible_id<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        Some(serde_json::Value::Number(n)) => Ok(n.as_u64()),
+        Some(serde_json::Value::String(s)) => Ok(s.parse::<u64>().ok()),
+        _ => Ok(None),
+    }
+}
 
 /// MCP protocol version.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -80,8 +93,9 @@ impl McpTool {
 pub struct McpRequest {
     /// JSON-RPC version.
     pub jsonrpc: String,
-    /// Request ID.
-    pub id: u64,
+    /// Request ID (None for notifications per JSON-RPC spec).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     /// Method name.
     pub method: String,
     /// Request parameters.
@@ -94,7 +108,7 @@ impl McpRequest {
     pub fn new(id: u64, method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
-            id,
+            id: Some(id),
             method: method.into(),
             params,
         }
@@ -120,10 +134,11 @@ impl McpRequest {
     }
 
     /// Create an initialized notification (sent after initialize).
+    /// Per JSON-RPC spec, notifications MUST NOT have an id field.
     pub fn initialized_notification() -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
-            id: 0, // Notifications don't have IDs, but we need one for the struct
+            id: None,
             method: "notifications/initialized".to_string(),
             params: None,
         }
@@ -152,8 +167,9 @@ impl McpRequest {
 pub struct McpResponse {
     /// JSON-RPC version.
     pub jsonrpc: String,
-    /// Request ID.
-    pub id: u64,
+    /// Request ID (may be missing for notifications or non-standard for errors).
+    #[serde(deserialize_with = "deserialize_flexible_id")]
+    pub id: Option<u64>,
     /// Result (on success).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
@@ -350,6 +366,328 @@ mod tests {
         let tool: McpTool = serde_json::from_value(json).expect("deserialize McpTool");
         assert_eq!(tool.input_schema["type"], "object");
         assert!(tool.input_schema["properties"].is_object());
+    }
+
+    #[test]
+    fn test_initialize_request() {
+        let req = McpRequest::initialize(42);
+        assert_eq!(req.jsonrpc, "2.0");
+        assert_eq!(req.id, Some(42));
+        assert_eq!(req.method, "initialize");
+
+        let params = req.params.expect("initialize must have params");
+        assert_eq!(params["protocolVersion"], PROTOCOL_VERSION);
+        assert!(params["capabilities"].is_object());
+        assert!(params["capabilities"]["roots"].is_object());
+        assert!(params["capabilities"]["sampling"].is_object());
+        assert_eq!(params["clientInfo"]["name"], "ironclaw");
+        assert!(params["clientInfo"]["version"].is_string());
+    }
+
+    #[test]
+    fn test_initialized_notification() {
+        let req = McpRequest::initialized_notification();
+        assert_eq!(req.jsonrpc, "2.0");
+        assert_eq!(req.method, "notifications/initialized");
+        assert!(req.params.is_none());
+    }
+
+    #[test]
+    fn test_call_tool_request() {
+        let args = serde_json::json!({"query": "rust async"});
+        let req = McpRequest::call_tool(7, "search", args.clone());
+        assert_eq!(req.id, Some(7));
+        assert_eq!(req.method, "tools/call");
+
+        let params = req.params.expect("call_tool must have params");
+        assert_eq!(params["name"], "search");
+        assert_eq!(params["arguments"], args);
+    }
+
+    #[test]
+    fn test_mcp_response_deserialize_success() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "tools": [] }
+        });
+        let resp: McpResponse = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(resp.id, Some(1));
+        assert!(resp.result.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_mcp_response_deserialize_error() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "error": {
+                "code": -32601,
+                "message": "Method not found"
+            }
+        });
+        let resp: McpResponse = serde_json::from_value(json).expect("deserialize");
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("should have error");
+        assert_eq!(err.code, -32601);
+        assert_eq!(err.message, "Method not found");
+        assert!(err.data.is_none());
+    }
+
+    #[test]
+    fn test_mcp_error_roundtrip() {
+        let err = McpError {
+            code: -32600,
+            message: "Invalid Request".to_string(),
+            data: Some(serde_json::json!({"detail": "missing field"})),
+        };
+        let serialized = serde_json::to_string(&err).expect("serialize");
+        let deserialized: McpError = serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(deserialized.code, err.code);
+        assert_eq!(deserialized.message, err.message);
+        assert_eq!(deserialized.data, err.data);
+    }
+
+    #[test]
+    fn test_initialize_result_full() {
+        let json = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": { "listChanged": true },
+                "resources": { "subscribe": true, "listChanged": false },
+                "prompts": { "listChanged": true },
+                "logging": {}
+            },
+            "serverInfo": {
+                "name": "test-server",
+                "version": "1.2.3"
+            },
+            "instructions": "Use this server for testing."
+        });
+        let result: InitializeResult = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(result.protocol_version.as_deref(), Some("2024-11-05"));
+
+        let tools_cap = result.capabilities.tools.expect("has tools capability");
+        assert!(tools_cap.list_changed);
+
+        let res_cap = result
+            .capabilities
+            .resources
+            .expect("has resources capability");
+        assert!(res_cap.subscribe);
+        assert!(!res_cap.list_changed);
+
+        let prompts_cap = result.capabilities.prompts.expect("has prompts capability");
+        assert!(prompts_cap.list_changed);
+
+        assert!(result.capabilities.logging.is_some());
+
+        let info = result.server_info.expect("has server info");
+        assert_eq!(info.name, "test-server");
+        assert_eq!(info.version.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            result.instructions.as_deref(),
+            Some("Use this server for testing.")
+        );
+    }
+
+    #[test]
+    fn test_content_block_as_text() {
+        let text_block = ContentBlock::Text {
+            text: "hello".to_string(),
+        };
+        assert_eq!(text_block.as_text(), Some("hello"));
+
+        let image_block = ContentBlock::Image {
+            data: "base64data".to_string(),
+            mime_type: "image/png".to_string(),
+        };
+        assert!(image_block.as_text().is_none());
+
+        let resource_block = ContentBlock::Resource {
+            uri: "file:///tmp/a.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            text: Some("content".to_string()),
+        };
+        assert!(resource_block.as_text().is_none());
+    }
+
+    #[test]
+    fn test_content_block_serde_tagged_union() {
+        let text_block = ContentBlock::Text {
+            text: "hi".to_string(),
+        };
+        let json = serde_json::to_value(&text_block).expect("serialize");
+        assert_eq!(json["type"], "text");
+        assert_eq!(json["text"], "hi");
+
+        let image_block = ContentBlock::Image {
+            data: "abc".to_string(),
+            mime_type: "image/jpeg".to_string(),
+        };
+        let json = serde_json::to_value(&image_block).expect("serialize");
+        assert_eq!(json["type"], "image");
+        assert_eq!(json["data"], "abc");
+        assert_eq!(json["mime_type"], "image/jpeg");
+
+        let resource_block = ContentBlock::Resource {
+            uri: "file:///x".to_string(),
+            mime_type: None,
+            text: None,
+        };
+        let json = serde_json::to_value(&resource_block).expect("serialize");
+        assert_eq!(json["type"], "resource");
+        assert_eq!(json["uri"], "file:///x");
+    }
+
+    #[test]
+    fn test_call_tool_result_is_error() {
+        let success: CallToolResult = serde_json::from_value(serde_json::json!({
+            "content": [{"type": "text", "text": "done"}],
+            "is_error": false
+        }))
+        .expect("deserialize");
+        assert!(!success.is_error);
+        assert_eq!(success.content.len(), 1);
+
+        let failure: CallToolResult = serde_json::from_value(serde_json::json!({
+            "content": [{"type": "text", "text": "boom"}],
+            "is_error": true
+        }))
+        .expect("deserialize");
+        assert!(failure.is_error);
+    }
+
+    #[test]
+    fn test_call_tool_result_is_error_defaults_false() {
+        let result: CallToolResult = serde_json::from_value(serde_json::json!({
+            "content": []
+        }))
+        .expect("deserialize");
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn test_requires_approval_with_destructive_hint() {
+        let tool = McpTool {
+            name: "delete_all".to_string(),
+            description: "Deletes everything".to_string(),
+            input_schema: default_input_schema(),
+            annotations: Some(McpToolAnnotations {
+                destructive_hint: true,
+                ..Default::default()
+            }),
+        };
+        assert!(tool.requires_approval());
+    }
+
+    #[test]
+    fn test_requires_approval_without_destructive_hint() {
+        let tool = McpTool {
+            name: "read_file".to_string(),
+            description: "Reads a file".to_string(),
+            input_schema: default_input_schema(),
+            annotations: Some(McpToolAnnotations {
+                destructive_hint: false,
+                read_only_hint: true,
+                ..Default::default()
+            }),
+        };
+        assert!(!tool.requires_approval());
+    }
+
+    #[test]
+    fn test_requires_approval_no_annotations() {
+        let tool = McpTool {
+            name: "ping".to_string(),
+            description: "Ping".to_string(),
+            input_schema: default_input_schema(),
+            annotations: None,
+        };
+        assert!(!tool.requires_approval());
+    }
+
+    #[test]
+    fn test_mcp_tool_annotations_defaults() {
+        let annotations = McpToolAnnotations::default();
+        assert!(!annotations.destructive_hint);
+        assert!(!annotations.side_effects_hint);
+        assert!(!annotations.read_only_hint);
+        assert!(annotations.execution_time_hint.is_none());
+    }
+
+    #[test]
+    fn test_execution_time_hint_serde() {
+        // Fast
+        let json = serde_json::json!("fast");
+        let hint: ExecutionTimeHint = serde_json::from_value(json).expect("deserialize fast");
+        assert_eq!(hint, ExecutionTimeHint::Fast);
+        let serialized = serde_json::to_value(hint).expect("serialize fast");
+        assert_eq!(serialized, "fast");
+
+        // Medium
+        let json = serde_json::json!("medium");
+        let hint: ExecutionTimeHint = serde_json::from_value(json).expect("deserialize medium");
+        assert_eq!(hint, ExecutionTimeHint::Medium);
+        let serialized = serde_json::to_value(hint).expect("serialize medium");
+        assert_eq!(serialized, "medium");
+
+        // Slow
+        let json = serde_json::json!("slow");
+        let hint: ExecutionTimeHint = serde_json::from_value(json).expect("deserialize slow");
+        assert_eq!(hint, ExecutionTimeHint::Slow);
+        let serialized = serde_json::to_value(hint).expect("serialize slow");
+        assert_eq!(serialized, "slow");
+    }
+
+    #[test]
+    fn test_notification_serializes_without_id_field() {
+        // JSON-RPC 2.0 spec: notifications MUST NOT have an "id" field.
+        let notif = McpRequest::initialized_notification();
+        let json = serde_json::to_value(&notif).expect("serialize notification");
+        assert!(
+            json.get("id").is_none(),
+            "notifications must not contain an 'id' field per JSON-RPC 2.0 spec"
+        );
+        assert_eq!(json.get("method").unwrap(), "notifications/initialized");
+    }
+
+    #[test]
+    fn test_response_with_string_id() {
+        // Some MCP servers return id as a string instead of a number.
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "42",
+            "result": {}
+        });
+        let resp: McpResponse = serde_json::from_value(json).expect("deserialize string id");
+        assert_eq!(resp.id, Some(42));
+    }
+
+    #[test]
+    fn test_response_with_null_id() {
+        // JSON-RPC error responses may have a null id.
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": { "code": -32700, "message": "Parse error" }
+        });
+        let resp: McpResponse = serde_json::from_value(json).expect("deserialize null id");
+        assert_eq!(resp.id, None);
+    }
+
+    #[test]
+    fn test_response_with_non_numeric_string_id() {
+        // Some servers send non-numeric string ids — these should parse as None.
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "not-a-number",
+            "result": {}
+        });
+        let resp: McpResponse =
+            serde_json::from_value(json).expect("deserialize non-numeric string id");
+        assert_eq!(resp.id, None);
     }
 
     #[test]
