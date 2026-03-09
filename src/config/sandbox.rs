@@ -281,6 +281,8 @@ mod tests {
             image: "custom-worker:v2".to_string(),
             auto_pull_image: false,
             extra_allowed_domains: vec!["example.com".to_string()],
+            reaper_interval_secs: 300,
+            orphan_threshold_secs: 600,
         };
         assert!(!cfg.enabled);
         assert_eq!(cfg.policy, "full_access");
@@ -303,6 +305,8 @@ mod tests {
             image: "test:latest".to_string(),
             auto_pull_image: false,
             extra_allowed_domains: vec!["custom.example.com".to_string()],
+            reaper_interval_secs: 300,
+            orphan_threshold_secs: 600,
         };
         let sc = mode.to_sandbox_config();
         assert!(sc.enabled);
