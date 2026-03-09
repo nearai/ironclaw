@@ -276,19 +276,36 @@ pub async fn jobs_cancel_handler(
         })));
     }
 
-    // Fall back to agent job cancellation via DB status update.
+    // Fall back to agent job cancellation: stop the worker via the scheduler
+    // (which updates the in-memory ContextManager AND aborts the task handle),
+    // then persist the status to the DB as a fallback.
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_job(job_id).await
     {
         if job.state.is_active() {
-            store
-                .update_job_status(
-                    job_id,
-                    crate::context::JobState::Cancelled,
-                    Some("Cancelled by user"),
-                )
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            // Try to stop via scheduler first (stops the actual worker).
+            let stopped_via_scheduler = if let Some(ref slot) = state.scheduler {
+                let guard = slot.read().await;
+                if let Some(ref scheduler) = *guard {
+                    scheduler.stop(job_id).await.is_ok()
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            // If scheduler wasn't available, fall back to DB-only update.
+            if !stopped_via_scheduler {
+                store
+                    .update_job_status(
+                        job_id,
+                        crate::context::JobState::Cancelled,
+                        Some("Cancelled by user"),
+                    )
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            }
         }
         return Ok(Json(serde_json::json!({
             "status": "cancelled",
