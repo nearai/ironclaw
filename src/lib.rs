@@ -72,6 +72,7 @@ pub mod tracing_fmt;
 pub mod transcription;
 pub mod tunnel;
 pub mod util;
+pub mod webhooks;
 pub mod worker;
 pub mod workspace;
 

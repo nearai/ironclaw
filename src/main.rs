@@ -24,6 +24,7 @@ use ironclaw::{
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
+    webhooks::{self, ToolWebhookState},
 };
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -271,8 +272,24 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Shared routine engine slot for gateway + generic webhook ingress.
+    let shared_routine_engine_slot: ironclaw::channels::web::server::RoutineEngineSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
+
     // Collect webhook route fragments; a single WebhookServer hosts them all.
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
+
+    webhook_routes.push(webhooks::routes(ToolWebhookState {
+        tools: Arc::clone(&components.tools),
+        routine_engine: Arc::clone(&shared_routine_engine_slot),
+        user_id: config
+            .channels
+            .gateway
+            .as_ref()
+            .map(|g| g.user_id.clone())
+            .unwrap_or_else(|| "default".to_string()),
+        secrets_store: components.secrets_store.clone(),
+    }));
 
     // Load WASM channels and register their webhook routes.
     if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
@@ -425,7 +442,6 @@ async fn async_main() -> anyhow::Result<()> {
     let mut sse_sender: Option<
         tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
     > = None;
-    let mut routine_engine_slot: Option<ironclaw::channels::web::server::RoutineEngineSlot> = None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw =
             GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
@@ -449,6 +465,7 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_job_manager(Arc::clone(jm));
         }
         gw = gw.with_scheduler(scheduler_slot.clone());
+        gw = gw.with_routine_engine_slot(Arc::clone(&shared_routine_engine_slot));
         if let Some(ref sr) = components.skill_registry {
             gw = gw.with_skill_registry(Arc::clone(sr));
         }
@@ -483,8 +500,6 @@ async fn async_main() -> anyhow::Result<()> {
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
         sse_sender = Some(gw.state().sse.sender());
-        routine_engine_slot = Some(Arc::clone(&gw.state().routine_engine));
-
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
     }
@@ -683,9 +698,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Give the agent the routine engine slot so it can expose the engine to the gateway.
-    if let Some(slot) = routine_engine_slot {
-        agent.set_routine_engine_slot(slot);
-    }
+    agent.set_routine_engine_slot(shared_routine_engine_slot);
 
     // Prepare SIGHUP handler for hot-reloading HTTP webhook config
     // Broadcast channel for clean shutdown of background tasks

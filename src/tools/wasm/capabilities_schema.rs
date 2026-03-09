@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::secrets::{CredentialLocation, CredentialMapping};
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WorkspaceCapability,
+    ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
 };
 
 /// Root schema for a capabilities JSON file.
@@ -64,6 +64,10 @@ pub struct CapabilitiesFile {
     /// Workspace file read access.
     #[serde(default)]
     pub workspace: Option<WorkspaceCapabilitySchema>,
+
+    /// Tool webhook authentication/signature configuration.
+    #[serde(default)]
+    pub webhook: Option<WebhookCapabilitySchema>,
 
     /// Authentication setup instructions.
     /// Used by `ironclaw config` to guide users through auth setup.
@@ -107,6 +111,7 @@ impl CapabilitiesFile {
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
             self.workspace = self.workspace.or(inner.workspace);
+            self.webhook = self.webhook.or(inner.webhook);
             self.auth = self.auth.or(inner.auth);
             self.setup = self.setup.or(inner.setup);
         }
@@ -196,6 +201,10 @@ impl CapabilitiesFile {
                 allowed_prefixes: workspace.allowed_prefixes.clone(),
                 reader: None, // Injected at runtime
             });
+        }
+
+        if let Some(webhook) = &self.webhook {
+            caps.webhook = Some(webhook.to_webhook_capability());
         }
 
         caps
@@ -417,6 +426,50 @@ pub struct WorkspaceCapabilitySchema {
     /// Allowed path prefixes (e.g., ["context/", "daily/"]).
     #[serde(default)]
     pub allowed_prefixes: Vec<String>,
+}
+
+/// Webhook capability schema for tools.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WebhookCapabilitySchema {
+    /// HTTP header name for secret validation.
+    #[serde(default)]
+    pub secret_header: Option<String>,
+    /// Secret name in secrets store for shared-secret validation.
+    #[serde(default)]
+    pub secret_name: Option<String>,
+    /// Secret name in secrets store containing Ed25519 public key.
+    #[serde(default)]
+    pub signature_key_secret_name: Option<String>,
+    /// Secret name in secrets store for HMAC-SHA256 signing.
+    #[serde(default)]
+    pub hmac_secret_name: Option<String>,
+    /// Signature header for HMAC verification.
+    #[serde(default)]
+    pub hmac_signature_header: Option<String>,
+    /// Optional timestamp header for Slack-style v0 verification.
+    #[serde(default)]
+    pub hmac_timestamp_header: Option<String>,
+    /// Optional signature prefix for body-only HMAC mode (default sha256=).
+    #[serde(default)]
+    pub hmac_prefix: Option<String>,
+    /// Optional tolerance (seconds) for timestamped HMAC validation.
+    #[serde(default)]
+    pub hmac_timestamp_tolerance_secs: Option<i64>,
+}
+
+impl WebhookCapabilitySchema {
+    fn to_webhook_capability(&self) -> WebhookCapability {
+        WebhookCapability {
+            secret_header: self.secret_header.clone(),
+            secret_name: self.secret_name.clone(),
+            signature_key_secret_name: self.signature_key_secret_name.clone(),
+            hmac_secret_name: self.hmac_secret_name.clone(),
+            hmac_signature_header: self.hmac_signature_header.clone(),
+            hmac_timestamp_header: self.hmac_timestamp_header.clone(),
+            hmac_prefix: self.hmac_prefix.clone(),
+            hmac_timestamp_tolerance_secs: self.hmac_timestamp_tolerance_secs,
+        }
+    }
 }
 
 /// Authentication setup schema.
@@ -767,6 +820,28 @@ mod tests {
         let caps = CapabilitiesFile::from_json(json).unwrap();
         let workspace = caps.workspace.unwrap();
         assert_eq!(workspace.allowed_prefixes, vec!["context/", "daily/"]);
+    }
+
+    #[test]
+    fn test_parse_webhook_capability() {
+        let json = r#"{
+            "webhook": {
+                "hmac_secret_name": "github_webhook_secret",
+                "hmac_signature_header": "x-hub-signature-256",
+                "hmac_prefix": "sha256="
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let webhook = caps.webhook.unwrap();
+        assert_eq!(
+            webhook.hmac_secret_name.as_deref(),
+            Some("github_webhook_secret")
+        );
+        assert_eq!(
+            webhook.hmac_signature_header.as_deref(),
+            Some("x-hub-signature-256")
+        );
     }
 
     #[test]

@@ -106,6 +106,34 @@ pub fn verify_slack_signature(
         .into()
 }
 
+/// Verify raw-body HMAC-SHA256 signature with a configurable prefix.
+///
+/// Computes `HMAC-SHA256(secret, body)` and compares against
+/// `prefix + hex_digest` in constant time.
+pub fn verify_hmac_sha256_prefixed(
+    secret: &str,
+    body: &[u8],
+    signature_header: &str,
+    prefix: &str,
+) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use subtle::ConstantTimeEq;
+
+    let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+    let computed = mac.finalize().into_bytes();
+    let computed_hex = hex::encode(computed);
+    let expected = format!("{prefix}{computed_hex}");
+    expected
+        .as_bytes()
+        .ct_eq(signature_header.as_bytes())
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +524,24 @@ mod tests {
             ),
             "Tampered signature should fail"
         );
+    }
+
+    #[test]
+    fn test_hmac_sha256_prefixed_valid() {
+        let secret = "github-secret";
+        let body = br#"{"action":"opened"}"#;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac key");
+        mac.update(body);
+        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        assert!(verify_hmac_sha256_prefixed(secret, body, &sig, "sha256="));
+        assert!(!verify_hmac_sha256_prefixed(
+            secret,
+            body,
+            "sha256=deadbeef",
+            "sha256="
+        ));
     }
 
     #[test]
