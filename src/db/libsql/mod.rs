@@ -435,6 +435,24 @@ mod tests {
         assert_eq!(timeout, 5000);
     }
 
+    /// Regression test: save_job must persist user_id and get_job must return it.
+    #[tokio::test]
+    async fn test_save_job_persists_user_id() {
+        use crate::context::JobContext;
+        use crate::db::JobStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_user_id.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let ctx = JobContext::with_user("test-user-42", "Test Job", "A test job");
+        backend.save_job(&ctx).await.unwrap();
+
+        let loaded = backend.get_job(ctx.job_id).await.unwrap().unwrap();
+        assert_eq!(loaded.user_id, "test-user-42");
+    }
+
     #[tokio::test]
     async fn test_concurrent_writes_succeed() {
         // Use a temp file so connections share state (in-memory DBs are connection-local)
