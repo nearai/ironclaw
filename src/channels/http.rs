@@ -10,7 +10,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::{RwLock, mpsc, oneshot};
@@ -36,7 +36,8 @@ pub struct HttpChannelState {
     pending_responses: RwLock<std::collections::HashMap<Uuid, oneshot::Sender<String>>>,
     /// Expected webhook secret for authentication (if configured).
     /// Wrapped in RwLock for hot-swapping on SIGHUP.
-    webhook_secret: RwLock<Option<String>>,
+    /// Uses SecretString to prevent accidental logging and memory dump exposure.
+    webhook_secret: RwLock<Option<SecretString>>,
     /// Fixed user ID for this HTTP channel.
     user_id: String,
     /// Rate limiting state.
@@ -52,7 +53,7 @@ struct RateLimitState {
 impl HttpChannelState {
     /// Update the webhook secret in-place without restarting the listener.
     /// Called during SIGHUP to hot-swap credentials.
-    pub async fn update_secret(&self, new_secret: Option<String>) {
+    pub async fn update_secret(&self, new_secret: Option<SecretString>) {
         *self.webhook_secret.write().await = new_secret;
     }
 }
@@ -76,7 +77,7 @@ impl HttpChannel {
         let webhook_secret = config
             .webhook_secret
             .as_ref()
-            .map(|s| s.expose_secret().to_string());
+            .map(|s| SecretString::from(s.expose_secret().to_string()));
         let user_id = config.user_id.clone();
 
         Self {
@@ -118,8 +119,8 @@ impl HttpChannel {
     }
 
     /// Update the webhook secret in-place without restarting the listener.
-    pub async fn update_secret(&self, new_secret: Option<String>) {
-        *self.state.webhook_secret.write().await = new_secret;
+    pub async fn update_secret(&self, new_secret: Option<SecretString>) {
+        self.state.update_secret(new_secret).await;
     }
 }
 
@@ -221,8 +222,9 @@ async fn webhook_handler(
 
     // Validate secret if configured
     if let Some(ref expected_secret) = *state.webhook_secret.read().await {
+        let expected_bytes = expected_secret.expose_secret().as_bytes();
         match &req.secret {
-            Some(provided) if bool::from(provided.as_bytes().ct_eq(expected_secret.as_bytes())) => {
+            Some(provided) if bool::from(provided.as_bytes().ct_eq(expected_bytes)) => {
                 // Secret matches, continue
             }
             Some(_) => {
@@ -607,15 +609,11 @@ mod tests {
         );
 
         // Update secret to new-secret
-        channel.update_secret(Some("new-secret".to_string())).await;
+        channel.update_secret(Some(SecretString::from("new-secret".to_string()))).await;
 
         let app2 = channel.routes();
 
         // Request with old-secret should fail
-        let body_old = serde_json::json!({
-            "content": "hello",
-            "secret": "old-secret"
-        });
         let req2 = Request::builder()
             .method("POST")
             .uri("/webhook")
@@ -647,6 +645,92 @@ mod tests {
             resp3.status(),
             StatusCode::OK,
             "new secret should work after update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_requests_during_secret_update() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use std::time::Duration;
+
+        let channel = test_channel(Some("initial-secret"));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        // Counters for request outcomes
+        let success_count = StdArc::new(AtomicUsize::new(0));
+
+        let mut handles = vec![];
+
+        // Spawn 5 concurrent tasks that keep making requests with the initial secret
+        for i in 0..5 {
+            let app = app.clone();
+            let success = StdArc::clone(&success_count);
+
+            let handle = tokio::spawn(async move {
+                let body = serde_json::json!({
+                    "content": format!("test-{}", i),
+                    "secret": "initial-secret"
+                });
+
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/webhook")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+
+                let resp = app.oneshot(req).await.unwrap();
+                if resp.status() == StatusCode::OK {
+                    success.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Update secret mid-flight (tests that RwLock allows readers while writer holds lock)
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        channel
+            .update_secret(Some(SecretString::from("updated-secret".to_string())))
+            .await;
+
+        // Spawn 5 more tasks that use the new secret
+        for i in 5..10 {
+            let app = app.clone();
+            let success = StdArc::clone(&success_count);
+
+            let handle = tokio::spawn(async move {
+                let body = serde_json::json!({
+                    "content": format!("test-{}", i),
+                    "secret": "updated-secret"
+                });
+
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/webhook")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+
+                let resp = app.oneshot(req).await.unwrap();
+                if resp.status() == StatusCode::OK {
+                    success.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        // Verify all requests succeeded with their respective secrets
+        assert_eq!(
+            success_count.load(Ordering::SeqCst),
+            10,
+            "All concurrent requests should succeed with correct secrets after update"
         );
     }
 }

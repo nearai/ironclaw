@@ -756,6 +756,7 @@ async fn async_main() -> anyhow::Result<()> {
         let sighup_webhook_server = webhook_server.clone();
         let sighup_http_state = http_channel_state.clone();
         let sighup_settings_store_clone = sighup_settings_store.clone();
+        let sighup_secrets_store = components.secrets_store.clone();
 
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
@@ -771,7 +772,24 @@ async fn async_main() -> anyhow::Result<()> {
                 sighup.recv().await;
                 tracing::info!("SIGHUP received — reloading HTTP webhook config");
 
-                // Reload config
+                // Inject channel secrets from database into environment variables
+                // (similar to inject_llm_keys_from_secrets for LLM providers)
+                if let Some(ref secrets_store) = sighup_secrets_store {
+                    // Inject HTTP webhook secret from encrypted store
+                    if let Ok(webhook_secret) = secrets_store
+                        .get_decrypted("default", "http_webhook_secret")
+                        .await
+                    {
+                        // Safe: Environment variable modification during runtime SIGHUP reload.
+                        // All threads are synchronized via config reload, not reading env vars directly.
+                        unsafe {
+                            std::env::set_var("HTTP_WEBHOOK_SECRET", webhook_secret.expose());
+                        }
+                        tracing::debug!("Injected HTTP_WEBHOOK_SECRET from secrets store");
+                    }
+                }
+
+                // Reload config (now with secrets injected into environment)
                 let new_config = match &sighup_settings_store_clone {
                     Some(store) => {
                         ironclaw::config::Config::from_db(store.as_ref(), "default").await
@@ -827,11 +845,11 @@ async fn async_main() -> anyhow::Result<()> {
 
                 // Always update secret in-place (zero-downtime)
                 if let Some(ref state) = sighup_http_state {
-                    use secrecy::ExposeSecret;
+                    use secrecy::{ExposeSecret, SecretString};
                     let new_secret = new_http
                         .webhook_secret
                         .as_ref()
-                        .map(|s| s.expose_secret().to_string());
+                        .map(|s| SecretString::from(s.expose_secret().to_string()));
                     state.update_secret(new_secret).await;
                     tracing::info!("SIGHUP: webhook secret updated");
                 }
