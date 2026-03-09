@@ -297,6 +297,7 @@ mod tests {
             image: "custom-worker:v2".to_string(),
             auto_pull_image: false,
             extra_allowed_domains: vec!["example.com".to_string()],
+            allow_full_access: false,
         };
         assert!(!cfg.enabled);
         assert_eq!(cfg.policy, "full_access");
@@ -319,6 +320,7 @@ mod tests {
             image: "test:latest".to_string(),
             auto_pull_image: false,
             extra_allowed_domains: vec!["custom.example.com".to_string()],
+            allow_full_access: false,
         };
         let sc = mode.to_sandbox_config();
         assert!(sc.enabled);
@@ -472,11 +474,6 @@ mod tests {
             );
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn test_full_access_downgraded_without_allow() {
