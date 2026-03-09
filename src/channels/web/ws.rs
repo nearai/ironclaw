@@ -267,10 +267,19 @@ async fn handle_client_message(
                             });
                     }
                     Err(e) => {
+                        let msg = format!("Auth failed: {}", e);
+                        if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
+                            state.sse.broadcast(
+                                crate::channels::web::types::SseEvent::AuthRequired {
+                                    extension_name: extension_name.clone(),
+                                    instructions: Some(msg.clone()),
+                                    auth_url: None,
+                                    setup_url: None,
+                                },
+                            );
+                        }
                         let _ = direct_tx
-                            .send(WsServerMessage::Error {
-                                message: format!("Auth failed: {}", e),
-                            })
+                            .send(WsServerMessage::Error { message: msg })
                             .await;
                     }
                 }

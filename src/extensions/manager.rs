@@ -3547,6 +3547,9 @@ impl ExtensionManager {
                         url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
                     let url =
                         endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
+                    // SSRF defense: block private IPs, localhost, cloud metadata endpoints
+                    crate::tools::builtin::skill_tools::validate_fetch_url(&url)
+                        .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
                     let resp = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(10))
                         .build()
@@ -3554,11 +3557,9 @@ impl ExtensionManager {
                         .get(&url)
                         .send()
                         .await
+                        // Transport errors are infrastructure failures, not token issues
                         .map_err(|e| {
-                            ExtensionError::ValidationFailed(format!(
-                                "Failed to validate token: {}",
-                                e
-                            ))
+                            ExtensionError::Other(format!("Token validation request failed: {}", e))
                         })?;
                     if !resp.status().is_success() {
                         return Err(ExtensionError::ValidationFailed(format!(
@@ -3765,12 +3766,33 @@ impl ExtensionManager {
                 let cap_file =
                     crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
                         .map_err(|e| ExtensionError::Other(e.to_string()))?;
-                cap_file
-                    .setup
-                    .required_secrets
-                    .iter()
-                    .find(|s| !s.optional)
-                    .map(|s| s.name.clone())
+                // Pick the first *missing* non-optional secret so re-configure
+                // of a second secret works for multi-secret channels.
+                let mut target = None;
+                for s in &cap_file.setup.required_secrets {
+                    if s.optional {
+                        continue;
+                    }
+                    if !self
+                        .secrets
+                        .exists(&self.user_id, &s.name)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        target = Some(s.name.clone());
+                        break;
+                    }
+                }
+                // Fall back to first non-optional if all exist (overwrite)
+                target
+                    .or_else(|| {
+                        cap_file
+                            .setup
+                            .required_secrets
+                            .iter()
+                            .find(|s| !s.optional)
+                            .map(|s| s.name.clone())
+                    })
                     .ok_or_else(|| {
                         ExtensionError::Other(format!("Channel '{}' has no required secrets", name))
                     })?
@@ -3779,21 +3801,45 @@ impl ExtensionManager {
                 let cap = self.load_tool_capabilities(name).await.ok_or_else(|| {
                     ExtensionError::Other(format!("Capabilities not found for '{}'", name))
                 })?;
-                cap.auth
-                    .as_ref()
-                    .map(|a| a.secret_name.clone())
-                    .or_else(|| {
-                        cap.setup
-                            .as_ref()
-                            .and_then(|s| s.required_secrets.first())
-                            .map(|s| s.name.clone())
-                    })
-                    .ok_or_else(|| {
-                        ExtensionError::Other(format!(
-                            "Tool '{}' has no auth or setup secrets",
-                            name
-                        ))
-                    })?
+                // Prefer auth secret, then first missing setup secret
+                if let Some(ref auth) = cap.auth {
+                    if !self
+                        .secrets
+                        .exists(&self.user_id, &auth.secret_name)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        auth.secret_name.clone()
+                    } else if let Some(ref setup) = cap.setup {
+                        // Auth secret exists, find first missing setup secret
+                        let mut found = None;
+                        for s in &setup.required_secrets {
+                            if !self
+                                .secrets
+                                .exists(&self.user_id, &s.name)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                found = Some(s.name.clone());
+                                break;
+                            }
+                        }
+                        found.unwrap_or_else(|| auth.secret_name.clone())
+                    } else {
+                        auth.secret_name.clone()
+                    }
+                } else {
+                    cap.setup
+                        .as_ref()
+                        .and_then(|s| s.required_secrets.first())
+                        .map(|s| s.name.clone())
+                        .ok_or_else(|| {
+                            ExtensionError::Other(format!(
+                                "Tool '{}' has no auth or setup secrets",
+                                name
+                            ))
+                        })?
+                }
             }
             ExtensionKind::McpServer => {
                 let server = self
