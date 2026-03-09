@@ -12,7 +12,6 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         components: rustfmt
     - name: Check formatting
       run: cargo fmt --all -- --check
@@ -36,11 +35,36 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         components: clippy
     - uses: Swatinem/rust-cache@v2
       with:
         key: clippy-${{ matrix.name }}
+    - name: Check lints
+      run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
+
+  clippy-windows:
+    name: Clippy Windows (${{ matrix.name }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all-features
+            flags: "--all-features"
+          - name: default
+            flags: ""
+          - name: libsql-only
+            flags: "--no-default-features --features libsql"
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: clippy-windows-${{ matrix.name }}
     - name: Check lints
       run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
 
@@ -49,10 +73,10 @@ jobs:
     name: Code Style (fmt + clippy)
     runs-on: ubuntu-latest
     if: always()
-    needs: [format, clippy]
+    needs: [format, clippy, clippy-windows]
     steps:
       - run: |
-          if [[ "${{ needs.format.result }}" != "success" || "${{ needs.clippy.result }}" != "success" ]]; then
+          if [[ "${{ needs.format.result }}" != "success" || "${{ needs.clippy.result }}" != "success" || "${{ needs.clippy-windows.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi

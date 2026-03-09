@@ -457,12 +457,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_returns_error_on_network_failure() {
-        // Point at an invalid URL to trigger a network error
-        let catalog = SkillCatalog::with_url("http://127.0.0.1:1");
+        // Use RFC 5737 TEST-NET-1 (192.0.2.0/24) for reliable failure even behind proxies.
+        let catalog = SkillCatalog::with_url("http://192.0.2.1:9999");
         let outcome = catalog.search("test").await;
         assert!(outcome.results.is_empty());
         assert!(outcome.error.is_some());
-        assert!(outcome.error.unwrap().contains("Registry unreachable"));
+        let error = outcome.error.unwrap();
+        assert!(
+            error.contains("Registry unreachable")
+                || error.contains("connect")
+                || error.contains("502")
+                || error.contains("503")
+                || error.contains("504"),
+            "Expected connection or gateway error, got: {error}",
+        );
     }
 
     #[tokio::test]

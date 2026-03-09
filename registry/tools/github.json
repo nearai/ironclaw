@@ -2,7 +2,8 @@
   "name": "github",
   "display_name": "GitHub",
   "kind": "tool",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "GitHub integration for issues, PRs, repos, and code search",
   "keywords": [
     "git",
@@ -19,7 +20,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/github-wasm32-wasip2.tar.gz",
-      "sha256": "d1305ad85a3722a1cfa7dbc8449ebb6c277083d887c513e6e4dd84814637dbcd"
+      "sha256": "6fcd32719a4ff15641a4b50fff8984686550f0c491dce60518f4126857d0c544"
     }
   },
   "auth_summary": {

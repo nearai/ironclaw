@@ -422,10 +422,103 @@ pub enum MigrationError {
     Io(String),
 }
 
+// ── PID Lock ──────────────────────────────────────────────────────────────
+
+/// Path to the PID lock file: `~/.ironclaw/ironclaw.pid`.
+pub fn pid_lock_path() -> PathBuf {
+    ironclaw_base_dir().join("ironclaw.pid")
+}
+
+/// A PID-based lock that prevents multiple IronClaw instances from running
+/// simultaneously.
+///
+/// Uses `fs4::try_lock_exclusive()` for atomic locking (no TOCTOU race),
+/// then writes the current PID into the locked file for diagnostics.
+/// The OS-level lock is held for the lifetime of this struct and
+/// automatically released on drop (along with the PID file cleanup).
+#[derive(Debug)]
+pub struct PidLock {
+    path: PathBuf,
+    /// Held open to maintain the OS-level exclusive lock.
+    _file: std::fs::File,
+}
+
+/// Errors from PID lock acquisition.
+#[derive(Debug, thiserror::Error)]
+pub enum PidLockError {
+    #[error("Another IronClaw instance is already running (PID {pid})")]
+    AlreadyRunning { pid: u32 },
+    #[error("Failed to acquire PID lock: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl PidLock {
+    /// Try to acquire the PID lock.
+    ///
+    /// Uses an exclusive file lock (`flock`/`LockFileEx`) so that two
+    /// concurrent processes cannot both acquire the lock — no TOCTOU race.
+    /// If the lock file exists but the holding process is gone (stale),
+    /// the lock is reclaimed automatically by the OS.
+    pub fn acquire() -> Result<Self, PidLockError> {
+        Self::acquire_at(pid_lock_path())
+    }
+
+    /// Acquire at a specific path (for testing).
+    fn acquire_at(path: PathBuf) -> Result<Self, PidLockError> {
+        use fs4::FileExt;
+        use std::fs::OpenOptions;
+        use std::io::Write;
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Open (or create) the lock file
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+
+        // Try non-blocking exclusive lock — if another process holds it,
+        // this fails immediately instead of blocking.
+        if let Err(e) = file.try_lock_exclusive() {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                // Lock held by another process — read its PID for the error message
+                let pid = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(0);
+                return Err(PidLockError::AlreadyRunning { pid });
+            }
+            // Other errors (permissions, unsupported filesystem, etc.)
+            return Err(PidLockError::Io(e));
+        }
+
+        // We hold the exclusive lock — write our PID
+        file.set_len(0)?; // truncate
+        write!(file, "{}", std::process::id())?;
+
+        Ok(PidLock { path, _file: file })
+    }
+}
+
+impl Drop for PidLock {
+    fn drop(&mut self) {
+        // Remove the PID file; the OS-level lock is released when _file is dropped.
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::sync::Mutex;
+    use std::thread;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
@@ -993,5 +1086,163 @@ INJECTED="pwned"#;
             // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
         }
+    }
+
+    // ── PID Lock tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_pid_lock_acquire_and_drop() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // Acquire lock
+        let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
+        assert!(pid_path.exists());
+
+        // PID file should contain our PID
+        let contents = std::fs::read_to_string(&pid_path).unwrap();
+        assert_eq!(contents.trim().parse::<u32>().unwrap(), std::process::id());
+
+        // Drop should remove the file
+        drop(lock);
+        assert!(!pid_path.exists());
+    }
+
+    #[test]
+    fn test_pid_lock_rejects_second_acquire() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // First lock succeeds
+        let _lock1 = PidLock::acquire_at(pid_path.clone()).unwrap();
+
+        // Second acquire on same file must fail (exclusive flock held)
+        let result = PidLock::acquire_at(pid_path.clone());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PidLockError::AlreadyRunning { pid } => {
+                assert_eq!(pid, std::process::id());
+            }
+            other => panic!("expected AlreadyRunning, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn test_pid_lock_reclaims_after_drop() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // Acquire and release
+        let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
+        drop(lock);
+
+        // Should succeed — OS lock was released on drop
+        let lock2 = PidLock::acquire_at(pid_path).unwrap();
+        drop(lock2);
+    }
+
+    #[test]
+    fn test_pid_lock_reclaims_stale_file_without_flock() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // Write a stale PID file manually (no flock held)
+        std::fs::write(&pid_path, "4294967294").unwrap();
+
+        // Should succeed because no OS lock is held on the file
+        let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
+        let contents = std::fs::read_to_string(&pid_path).unwrap();
+        assert_eq!(contents.trim().parse::<u32>().unwrap(), std::process::id());
+        drop(lock);
+    }
+
+    #[test]
+    fn test_pid_lock_handles_corrupt_pid_file() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        // Write garbage (no flock held)
+        std::fs::write(&pid_path, "not-a-number").unwrap();
+
+        // Should succeed — no OS lock held, file is reclaimed
+        let lock = PidLock::acquire_at(pid_path).unwrap();
+        drop(lock);
+    }
+
+    #[test]
+    fn test_pid_lock_creates_parent_dirs() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("nested").join("deep").join("ironclaw.pid");
+
+        let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
+        assert!(pid_path.exists());
+        drop(lock);
+    }
+
+    #[test]
+    fn test_pid_lock_child_helper_holds_lock() {
+        if std::env::var("IRONCLAW_PID_LOCK_CHILD").ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let pid_path = PathBuf::from(
+            std::env::var("IRONCLAW_PID_LOCK_PATH").expect("IRONCLAW_PID_LOCK_PATH missing"),
+        );
+        let hold_ms = std::env::var("IRONCLAW_PID_LOCK_HOLD_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(3000);
+
+        let _lock = PidLock::acquire_at(pid_path).expect("child failed to acquire pid lock");
+        thread::sleep(Duration::from_millis(hold_ms));
+    }
+
+    #[test]
+    fn test_pid_lock_rejects_lock_held_by_other_process() {
+        let dir = tempdir().unwrap();
+        let pid_path = dir.path().join("ironclaw.pid");
+
+        let current_exe = std::env::current_exe().unwrap();
+        let mut child = Command::new(current_exe)
+            .args([
+                "--exact",
+                "bootstrap::tests::test_pid_lock_child_helper_holds_lock",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("IRONCLAW_PID_LOCK_CHILD", "1")
+            .env("IRONCLAW_PID_LOCK_PATH", pid_path.display().to_string())
+            .env("IRONCLAW_PID_LOCK_HOLD_MS", "3000")
+            .spawn()
+            .unwrap();
+
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            if pid_path.exists() {
+                break;
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("child exited before acquiring lock: {}", status);
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            pid_path.exists(),
+            "child did not create lock file in time: {}",
+            pid_path.display()
+        );
+
+        let result = PidLock::acquire_at(pid_path.clone());
+        match result.unwrap_err() {
+            PidLockError::AlreadyRunning { .. } => {}
+            other => panic!("expected AlreadyRunning, got: {}", other),
+        }
+
+        let status = child.wait().unwrap();
+        assert!(status.success(), "child process failed: {}", status);
+
+        // After the child exits, lock should be released and reacquirable.
+        let lock = PidLock::acquire_at(pid_path).unwrap();
+        drop(lock);
     }
 }

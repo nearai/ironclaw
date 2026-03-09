@@ -29,8 +29,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
+use crate::db::Database;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
-use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
 
@@ -47,6 +47,12 @@ pub struct HeartbeatConfig {
     pub notify_user_id: Option<String>,
     /// Channel to notify on heartbeat findings.
     pub notify_channel: Option<String>,
+    /// Hour (0-23) when quiet hours start.
+    pub quiet_hours_start: Option<u32>,
+    /// Hour (0-23) when quiet hours end.
+    pub quiet_hours_end: Option<u32>,
+    /// Timezone for quiet hours evaluation (IANA name).
+    pub timezone: Option<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -57,6 +63,9 @@ impl Default for HeartbeatConfig {
             max_failures: 3,
             notify_user_id: None,
             notify_channel: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            timezone: None,
         }
     }
 }
@@ -72,6 +81,26 @@ impl HeartbeatConfig {
     pub fn disabled(mut self) -> Self {
         self.enabled = false;
         self
+    }
+
+    /// Check whether the current time falls within configured quiet hours.
+    pub fn is_quiet_hours(&self) -> bool {
+        use chrono::Timelike;
+        let (Some(start), Some(end)) = (self.quiet_hours_start, self.quiet_hours_end) else {
+            return false;
+        };
+        let tz = self
+            .timezone
+            .as_deref()
+            .and_then(crate::timezone::parse_timezone)
+            .unwrap_or(chrono_tz::UTC);
+        let now_hour = crate::timezone::now_in_tz(tz).hour();
+        if start <= end {
+            now_hour >= start && now_hour < end
+        } else {
+            // Wraps midnight, e.g. 22..06
+            now_hour >= start || now_hour < end
+        }
     }
 
     /// Set the notification target.
@@ -101,8 +130,8 @@ pub struct HeartbeatRunner {
     hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
+    store: Option<Arc<dyn Database>>,
     consecutive_failures: u32,
 }
 
@@ -113,15 +142,14 @@ impl HeartbeatRunner {
         hygiene_config: HygieneConfig,
         workspace: Arc<Workspace>,
         llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
     ) -> Self {
         Self {
             config,
             hygiene_config,
             workspace,
             llm,
-            safety,
             response_tx: None,
+            store: None,
             consecutive_failures: 0,
         }
     }
@@ -129,6 +157,12 @@ impl HeartbeatRunner {
     /// Set the response channel for notifications.
     pub fn with_response_channel(mut self, tx: mpsc::Sender<OutgoingResponse>) -> Self {
         self.response_tx = Some(tx);
+        self
+    }
+
+    /// Set the database store for persistent heartbeat conversations.
+    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+        self.store = Some(store);
         self
     }
 
@@ -153,6 +187,12 @@ impl HeartbeatRunner {
         loop {
             interval.tick().await;
 
+            // Skip during quiet hours
+            if self.config.is_quiet_hours() {
+                tracing::debug!("Heartbeat skipped: quiet hours");
+                continue;
+            }
+
             // Run memory hygiene in the background so it never delays the
             // heartbeat checklist. Failures are logged inside run_if_due.
             let hygiene_workspace = Arc::clone(&self.workspace);
@@ -164,6 +204,7 @@ impl HeartbeatRunner {
                 if report.had_work() {
                     tracing::info!(
                         daily_logs_deleted = report.daily_logs_deleted,
+                        conversation_docs_deleted = report.conversation_docs_deleted,
                         "heartbeat: memory hygiene deleted stale documents"
                     );
                 }
@@ -262,7 +303,7 @@ impl HeartbeatRunner {
             .with_max_tokens(max_tokens)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let reasoning = Reasoning::new(self.llm.clone());
         let (content, _usage) = match reasoning.complete(request).await {
             Ok(r) => r,
             Err(e) => return HeartbeatResult::Failed(format!("LLM call failed: {}", e)),
@@ -291,9 +332,32 @@ impl HeartbeatRunner {
             return;
         };
 
+        let user_id = self.config.notify_user_id.as_deref().unwrap_or("default");
+
+        // Persist to heartbeat conversation and get thread_id
+        let thread_id = if let Some(ref store) = self.store {
+            match store.get_or_create_heartbeat_conversation(user_id).await {
+                Ok(conv_id) => {
+                    if let Err(e) = store
+                        .add_conversation_message(conv_id, "assistant", message)
+                        .await
+                    {
+                        tracing::error!("Failed to persist heartbeat message: {}", e);
+                    }
+                    Some(conv_id.to_string())
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get heartbeat conversation: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let response = OutgoingResponse {
             content: format!("🔔 *Heartbeat Alert*\n\n{}", message),
-            thread_id: None,
+            thread_id,
             attachments: Vec::new(),
             metadata: serde_json::json!({
                 "source": "heartbeat",
@@ -353,12 +417,15 @@ pub fn spawn_heartbeat(
     hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
+    store: Option<Arc<dyn Database>>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety);
+    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
+    }
+    if let Some(s) = store {
+        runner = runner.with_store(s);
     }
 
     tokio::spawn(async move {
@@ -493,5 +560,99 @@ mod tests {
     fn test_effectively_empty_comment_plus_real_content() {
         let content = "<!-- comment -->\nActual task here";
         assert!(!is_effectively_empty(content));
+    }
+
+    // ==================== quiet hours ====================
+
+    #[test]
+    fn test_quiet_hours_inside() {
+        use chrono::{Timelike, Utc};
+
+        let now_utc = Utc::now();
+        let hour = now_utc.hour();
+        let start = hour;
+        let end = (hour + 1) % 24;
+
+        let config = HeartbeatConfig {
+            quiet_hours_start: Some(start),
+            quiet_hours_end: Some(end),
+            timezone: Some("UTC".to_string()),
+            ..HeartbeatConfig::default()
+        };
+        // Current UTC hour is inside [start, end) by construction
+        assert!(config.is_quiet_hours());
+    }
+
+    #[test]
+    fn test_quiet_hours_outside() {
+        use chrono::{Timelike, Utc};
+
+        let now_utc = Utc::now();
+        let hour = now_utc.hour();
+        let start = (hour + 1) % 24;
+        let end = (hour + 2) % 24;
+
+        let config = HeartbeatConfig {
+            quiet_hours_start: Some(start),
+            quiet_hours_end: Some(end),
+            timezone: Some("UTC".to_string()),
+            ..HeartbeatConfig::default()
+        };
+        // Current UTC hour is outside [start, end) by construction
+        assert!(!config.is_quiet_hours());
+    }
+
+    #[test]
+    fn test_quiet_hours_wraparound_excludes_now() {
+        use chrono::{Timelike, Utc};
+
+        let now_utc = Utc::now();
+        let hour = now_utc.hour();
+        // Window covers all hours except the current one
+        let start = (hour + 1) % 24;
+        let end = hour;
+
+        let config = HeartbeatConfig {
+            quiet_hours_start: Some(start),
+            quiet_hours_end: Some(end),
+            timezone: Some("UTC".to_string()),
+            ..HeartbeatConfig::default()
+        };
+        assert!(!config.is_quiet_hours());
+    }
+
+    #[test]
+    fn test_quiet_hours_none_configured() {
+        let config = HeartbeatConfig::default();
+        assert!(!config.is_quiet_hours());
+    }
+
+    #[test]
+    fn test_quiet_hours_same_start_end() {
+        let config = HeartbeatConfig {
+            quiet_hours_start: Some(10),
+            quiet_hours_end: Some(10),
+            timezone: Some("UTC".to_string()),
+            ..HeartbeatConfig::default()
+        };
+        // start == end means zero-width window, should be false
+        assert!(!config.is_quiet_hours());
+    }
+
+    #[test]
+    fn test_spawn_heartbeat_accepts_store_param() {
+        // Regression: spawn_heartbeat must accept an optional Database store
+        // for persisting heartbeat notifications to a dedicated conversation.
+        // Compile-time check: the 7th parameter is `Option<Arc<dyn Database>>`.
+        #[allow(clippy::type_complexity)]
+        let _fn_ptr: fn(
+            HeartbeatConfig,
+            HygieneConfig,
+            Arc<crate::workspace::Workspace>,
+            Arc<dyn crate::llm::LlmProvider>,
+            Option<tokio::sync::mpsc::Sender<crate::channels::OutgoingResponse>>,
+            Option<Arc<dyn crate::db::Database>>,
+        ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;
+        let _ = _fn_ptr;
     }
 }

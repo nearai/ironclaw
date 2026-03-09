@@ -10,9 +10,9 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::channels::IncomingMessage;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::error::RoutineError;
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -133,56 +133,27 @@ pub async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    // Clone the Arc out of the lock to avoid holding the RwLock across .await.
+    let engine = {
+        let guard = state.routine_engine.read().await;
+        guard.as_ref().cloned().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Routine engine not available".to_string(),
+        ))?
+    };
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
-    let routine = store
-        .get_routine(routine_id)
+    let run_id = engine
+        .fire_manual(routine_id, Some(&state.user_id))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    if routine.user_id != state.user_id {
-        return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
-    }
-
-    // Send the routine prompt through the message pipeline as a manual trigger.
-    let prompt = match &routine.action {
-        crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
-        crate::agent::routine::RoutineAction::FullJob {
-            title, description, ..
-        } => format!("{}: {}", title, description),
-    };
-
-    let content = format!("[routine:{}] {}", routine.name, prompt);
-    let thread_id = format!(
-        "routine-{}-{}",
-        routine_id,
-        chrono::Utc::now().timestamp_millis()
-    );
-    let msg = IncomingMessage::new("gateway", &state.user_id, content).with_thread(thread_id);
-
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
-
-    tx.send(msg).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
-        )
-    })?;
+        .map_err(|e| (routine_error_status(&e), e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",
         "routine_id": routine_id,
+        "run_id": run_id,
     })))
 }
 
@@ -293,7 +264,7 @@ pub async fn routines_runs_handler(
 /// Convert a Routine to the trimmed RoutineInfo for list display.
 fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
     let (trigger_type, trigger_summary) = match &r.trigger {
-        crate::agent::routine::Trigger::Cron { schedule } => {
+        crate::agent::routine::Trigger::Cron { schedule, .. } => {
             ("cron".to_string(), format!("cron: {}", schedule))
         }
         crate::agent::routine::Trigger::Event {
@@ -335,5 +306,15 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
         run_count: r.run_count,
         consecutive_failures: r.consecutive_failures,
         status: status.to_string(),
+    }
+}
+
+/// Map `RoutineError` variants to appropriate HTTP status codes.
+fn routine_error_status(err: &RoutineError) -> StatusCode {
+    match err {
+        RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
+        RoutineError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
+        RoutineError::Disabled { .. } | RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }

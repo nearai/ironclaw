@@ -21,7 +21,7 @@ use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
 use crate::skills::catalog::SkillCatalog;
 use crate::tools::ToolRegistry;
-use crate::tools::mcp::McpSessionManager;
+use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingProvider, Workspace};
@@ -41,6 +41,7 @@ pub struct AppComponents {
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub mcp_session_manager: Arc<McpSessionManager>,
+    pub mcp_process_manager: Arc<McpProcessManager>,
     pub wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
     pub log_broadcaster: Arc<LogBroadcaster>,
     pub context_manager: Arc<ContextManager>,
@@ -244,11 +245,31 @@ impl AppBuilder {
         let master_key = match self.config.secrets.master_key() {
             Some(k) => k,
             None => {
+                // No secrets DB available, but we can still load tokens from
+                // OS credential stores (e.g., Anthropic OAuth via Claude Code's
+                // macOS Keychain / Linux ~/.claude/.credentials.json).
+                crate::config::inject_os_credentials();
+
                 // Consume unused handles
                 #[cfg(feature = "libsql")]
                 {
                     self.libsql_db.take();
                 }
+
+                // Re-resolve only the LLM config with OS credentials.
+                let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
+                    self.db.as_ref().map(|db| db.as_ref() as _);
+                let toml_path = self.toml_path.as_deref();
+                if let Err(e) = self
+                    .config
+                    .re_resolve_llm(store, "default", toml_path)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to re-resolve LLM config after OS credential injection: {e}"
+                    );
+                }
+
                 return Ok(());
             }
         };
@@ -291,18 +312,16 @@ impl AppBuilder {
             // Inject LLM API keys from encrypted storage
             crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), "default").await;
 
-            // Re-resolve config with newly available keys
-            if let Some(ref db) = self.db {
-                let toml_path = self.toml_path.as_deref();
-                match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
-                    Ok(refreshed) => {
-                        self.config = refreshed;
-                        tracing::debug!("LlmConfig re-resolved after secret injection");
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to re-resolve config after secret injection: {}", e);
-                    }
-                }
+            // Re-resolve only the LLM config with newly available keys.
+            let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
+                self.db.as_ref().map(|db| db.as_ref() as _);
+            let toml_path = self.toml_path.as_deref();
+            if let Err(e) = self
+                .config
+                .re_resolve_llm(store, "default", toml_path)
+                .await
+            {
+                tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
             }
         }
 
@@ -315,7 +334,7 @@ impl AppBuilder {
     /// Delegates to `build_provider_chain` which applies all decorators
     /// (retry, smart routing, failover, circuit breaker, response cache).
     #[allow(clippy::type_complexity)]
-    pub fn init_llm(
+    pub async fn init_llm(
         &self,
     ) -> Result<
         (
@@ -326,7 +345,7 @@ impl AppBuilder {
         anyhow::Error,
     > {
         let (llm, cheap_llm, recording_handle) =
-            crate::llm::build_provider_chain(&self.config.llm, self.session.clone())?;
+            crate::llm::build_provider_chain(&self.config.llm, self.session.clone()).await?;
         Ok((llm, cheap_llm, recording_handle))
     }
 
@@ -368,21 +387,6 @@ impl AppBuilder {
             .embeddings
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
-        // Warn if libSQL backend is used with non-1536 embedding dimension.
-        if self.config.database.backend == crate::config::DatabaseBackend::LibSql
-            && self.config.embeddings.enabled
-            && self.config.embeddings.dimension != 1536
-        {
-            tracing::warn!(
-                configured_dimension = self.config.embeddings.dimension,
-                "Embedding dimension {} is not 1536. The libSQL schema uses \
-                 F32_BLOB(1536) which requires exactly 1536 dimensions. \
-                 Embedding storage will fail. Use PostgreSQL or set \
-                 EMBEDDING_DIMENSION=1536.",
-                self.config.embeddings.dimension
-            );
-        }
-
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
             let mut ws = Workspace::new_with_db("default", db.clone());
@@ -396,16 +400,55 @@ impl AppBuilder {
             None
         };
 
+        // Register image/vision tools if we have a workspace and LLM API credentials
+        if workspace.is_some() {
+            let (api_base, api_key_opt) = if let Some(ref provider) = self.config.llm.provider {
+                (
+                    provider.base_url.clone(),
+                    provider.api_key.as_ref().map(|s| {
+                        use secrecy::ExposeSecret;
+                        s.expose_secret().to_string()
+                    }),
+                )
+            } else {
+                (
+                    self.config.llm.nearai.base_url.clone(),
+                    self.config.llm.nearai.api_key.as_ref().map(|s| {
+                        use secrecy::ExposeSecret;
+                        s.expose_secret().to_string()
+                    }),
+                )
+            };
+
+            if let Some(api_key) = api_key_opt {
+                // Check for image generation models
+                let model_name = self
+                    .config
+                    .llm
+                    .provider
+                    .as_ref()
+                    .map(|p| p.model.clone())
+                    .unwrap_or_else(|| self.config.llm.nearai.model.clone());
+                let models = vec![model_name.clone()];
+                let gen_model = crate::llm::image_models::suggest_image_model(&models)
+                    .unwrap_or("flux-1.1-pro")
+                    .to_string();
+                tools.register_image_tools(api_base.clone(), api_key.clone(), gen_model, None);
+
+                // Check for vision models
+                let vision_model = crate::llm::vision_models::suggest_vision_model(&models)
+                    .unwrap_or(&model_name)
+                    .to_string();
+                tools.register_vision_tools(api_base, api_key, vision_model, None);
+            }
+        }
+
         // Register builder tool if enabled
         if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
             tools
-                .register_builder_tool(
-                    llm.clone(),
-                    safety.clone(),
-                    Some(self.config.builder.to_builder_config()),
-                )
+                .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
             tracing::info!("Builder mode enabled");
         }
@@ -421,6 +464,7 @@ impl AppBuilder {
     ) -> Result<
         (
             Arc<McpSessionManager>,
+            Arc<McpProcessManager>,
             Option<Arc<WasmToolRuntime>>,
             Option<Arc<ExtensionManager>>,
             Vec<crate::extensions::RegistryEntry>,
@@ -428,10 +472,13 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::tools::mcp::{McpClient, config::load_mcp_servers_from_db, is_authenticated};
+        use crate::tools::mcp::{
+            McpClient, McpTransport, config::load_mcp_servers_from_db, is_authenticated,
+        };
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
+        let mcp_process_manager = Arc::new(McpProcessManager::new());
 
         // Create WASM tool runtime eagerly so extensions installed after startup
         // (e.g. via the web UI) can still be activated. The tools directory is only
@@ -507,97 +554,175 @@ impl AppBuilder {
             let db = self.db.clone();
             let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
+            let pm = Arc::clone(&mcp_process_manager);
             async move {
-                if let Some(ref secrets) = secrets_store {
-                    let servers_result = if let Some(ref d) = db {
-                        load_mcp_servers_from_db(d.as_ref(), "default").await
-                    } else {
-                        crate::tools::mcp::config::load_mcp_servers().await
-                    };
-                    match servers_result {
-                        Ok(servers) => {
-                            let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
-                            if !enabled.is_empty() {
-                                tracing::info!(
-                                    "Loading {} configured MCP server(s)...",
-                                    enabled.len()
-                                );
-                            }
+                let servers_result = if let Some(ref d) = db {
+                    load_mcp_servers_from_db(d.as_ref(), "default").await
+                } else {
+                    crate::tools::mcp::config::load_mcp_servers().await
+                };
+                match servers_result {
+                    Ok(servers) => {
+                        let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
+                        if !enabled.is_empty() {
+                            tracing::info!("Loading {} configured MCP server(s)...", enabled.len());
+                        }
 
-                            let mut join_set = tokio::task::JoinSet::new();
-                            for server in enabled {
-                                let mcp_sm = Arc::clone(&mcp_sm);
-                                let secrets = Arc::clone(secrets);
-                                let tools = Arc::clone(&tools);
+                        let mut join_set = tokio::task::JoinSet::new();
+                        for server in enabled {
+                            let mcp_sm = Arc::clone(&mcp_sm);
+                            let secrets = secrets_store.clone();
+                            let tools = Arc::clone(&tools);
+                            let pm = Arc::clone(&pm);
 
-                                join_set.spawn(async move {
-                                    let server_name = server.name.clone();
-                                    let has_tokens =
-                                        is_authenticated(&server, &secrets, "default").await;
+                            join_set.spawn(async move {
+                                let server_name = server.name.clone();
 
-                                    let client = if has_tokens || server.requires_auth() {
-                                        McpClient::new_authenticated(
-                                            server, mcp_sm, secrets, "default",
-                                        )
-                                    } else {
-                                        McpClient::new_with_name(&server_name, &server.url)
-                                    };
-
-                                    match client.list_tools().await {
-                                        Ok(mcp_tools) => {
-                                            let tool_count = mcp_tools.len();
-                                            match client.create_tools().await {
-                                                Ok(tool_impls) => {
-                                                    for tool in tool_impls {
-                                                        tools.register(tool).await;
-                                                    }
-                                                    tracing::info!(
-                                                        "Loaded {} tools from MCP server '{}'",
-                                                        tool_count,
-                                                        server_name
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "Failed to create tools from MCP server '{}': {}",
-                                                        server_name,
-                                                        e
-                                                    );
-                                                }
+                                let client: McpClient = match server.effective_transport() {
+                                    crate::tools::mcp::config::EffectiveTransport::Stdio {
+                                        command,
+                                        args,
+                                        env,
+                                    } => {
+                                        match pm
+                                            .spawn_stdio(
+                                                &server_name,
+                                                command,
+                                                args.to_vec(),
+                                                env.clone(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(transport) => McpClient::new_with_transport(
+                                                &server_name,
+                                                transport as Arc<dyn McpTransport>,
+                                                None,
+                                                secrets,
+                                                "default",
+                                                Some(server),
+                                            ),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to spawn stdio MCP server '{}': {}",
+                                                    server_name,
+                                                    e
+                                                );
+                                                return;
                                             }
                                         }
-                                        Err(e) => {
-                                            let err_str = e.to_string();
-                                            if err_str.contains("401")
-                                                || err_str.contains("authentication")
-                                            {
+                                    }
+                                    #[cfg(unix)]
+                                    crate::tools::mcp::config::EffectiveTransport::Unix {
+                                        socket_path,
+                                    } => {
+                                        match crate::tools::mcp::unix_transport::UnixMcpTransport::connect(
+                                            &server_name,
+                                            socket_path,
+                                        )
+                                        .await
+                                        {
+                                            Ok(transport) => McpClient::new_with_transport(
+                                                &server_name,
+                                                Arc::new(transport) as Arc<dyn McpTransport>,
+                                                None,
+                                                secrets,
+                                                "default",
+                                                Some(server),
+                                            ),
+                                            Err(e) => {
                                                 tracing::warn!(
-                                                    "MCP server '{}' requires authentication. \
-                                                     Run: ironclaw mcp auth {}",
+                                                    "Failed to connect to Unix MCP server '{}': {}",
                                                     server_name,
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    #[cfg(not(unix))]
+                                    crate::tools::mcp::config::EffectiveTransport::Unix { .. } => {
+                                        tracing::warn!(
+                                            "Unix socket transport is not supported on this platform (server '{}')",
+                                            server_name
+                                        );
+                                        return;
+                                    }
+                                    crate::tools::mcp::config::EffectiveTransport::Http => {
+                                        if let Some(ref secrets) = secrets {
+                                            let has_tokens =
+                                                is_authenticated(&server, secrets, "default")
+                                                    .await;
+
+                                            if has_tokens || server.requires_auth() {
+                                                McpClient::new_authenticated(
+                                                    server,
+                                                    Arc::clone(&mcp_sm),
+                                                    Arc::clone(secrets),
+                                                    "default",
+                                                )
+                                            } else {
+                                                McpClient::new_with_config(server)
+                                            }
+                                        } else {
+                                            McpClient::new_with_config(server)
+                                        }
+                                    }
+                                };
+
+                                match client.list_tools().await {
+                                    Ok(mcp_tools) => {
+                                        let tool_count = mcp_tools.len();
+                                        match client.create_tools().await {
+                                            Ok(tool_impls) => {
+                                                for tool in tool_impls {
+                                                    tools.register(tool).await;
+                                                }
+                                                tracing::info!(
+                                                    "Loaded {} tools from MCP server '{}'",
+                                                    tool_count,
                                                     server_name
                                                 );
-                                            } else {
+                                            }
+                                            Err(e) => {
                                                 tracing::warn!(
-                                                    "Failed to connect to MCP server '{}': {}",
+                                                    "Failed to create tools from MCP server '{}': {}",
                                                     server_name,
                                                     e
                                                 );
                                             }
                                         }
                                     }
-                                });
-                            }
-
-                            while let Some(result) = join_set.join_next().await {
-                                if let Err(e) = result {
-                                    tracing::warn!("MCP server loading task panicked: {}", e);
+                                    Err(e) => {
+                                        let err_str = e.to_string();
+                                        if err_str.contains("401")
+                                            || err_str.contains("authentication")
+                                        {
+                                            tracing::warn!(
+                                                "MCP server '{}' requires authentication. \
+                                                 Run: ironclaw mcp auth {}",
+                                                server_name,
+                                                server_name
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "Failed to connect to MCP server '{}': {}",
+                                                server_name,
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
+                            });
+                        }
+
+                        while let Some(result) = join_set.join_next().await {
+                            if let Err(e) = result {
+                                tracing::warn!("MCP server loading task panicked: {}", e);
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!("No MCP servers configured ({})", e);
-                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("No MCP servers configured ({})", e);
                     }
                 }
             }
@@ -668,6 +793,7 @@ impl AppBuilder {
 
         Ok((
             mcp_session_manager,
+            mcp_process_manager,
             wasm_tool_runtime,
             extension_manager,
             catalog_entries,
@@ -680,10 +806,21 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
+        // Post-init validation: if a non-nearai backend was selected but
+        // credentials were never resolved (deferred resolution found no keys),
+        // fail early with a clear error instead of a confusing runtime failure.
+        if self.config.llm.backend != "nearai" && self.config.llm.provider.is_none() {
+            let backend = &self.config.llm.backend;
+            anyhow::bail!(
+                "LLM_BACKEND={backend} is configured but no credentials were found. \
+                 Set the appropriate API key environment variable or run the setup wizard."
+            );
+        }
+
         let (llm, cheap_llm, recording_handle) = if let Some(llm) = self.llm_override.take() {
             (llm, None, None)
         } else {
-            self.init_llm()?
+            self.init_llm().await?
         };
         let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
 
@@ -692,6 +829,7 @@ impl AppBuilder {
 
         let (
             mcp_session_manager,
+            mcp_process_manager,
             wasm_tool_runtime,
             extension_manager,
             catalog_entries,
@@ -789,6 +927,7 @@ impl AppBuilder {
             workspace,
             extension_manager,
             mcp_session_manager,
+            mcp_process_manager,
             wasm_tool_runtime,
             log_broadcaster: self.log_broadcaster,
             context_manager,

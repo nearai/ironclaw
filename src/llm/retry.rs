@@ -109,6 +109,14 @@ impl LlmProvider for RetryProvider {
         self.inner.cost_per_token()
     }
 
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let mut last_error: Option<LlmError> = None;
 

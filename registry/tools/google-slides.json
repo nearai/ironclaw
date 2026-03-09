@@ -2,7 +2,8 @@
   "name": "google-slides",
   "display_name": "Google Slides",
   "kind": "tool",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Create and edit Google Slides presentations",
   "keywords": [
     "presentations",
@@ -17,7 +18,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/google-slides-wasm32-wasip2.tar.gz",
-      "sha256": "68365b764f2366142d1f5388189ab1bd7f826f4ac6540547efc6750bde1591d3"
+      "sha256": "7110b8565340c888e51f99e9c013bf4de8f8a7f7b33bace00eb8fc47831ff20b"
     }
   },
   "auth_summary": {

@@ -241,6 +241,9 @@ impl Store {
                     tool_output_stash: std::sync::Arc::new(tokio::sync::RwLock::new(
                         std::collections::HashMap::new(),
                     )),
+                    // TODO(#661): persist user_timezone in agent_jobs table so
+                    // background/routine jobs retain the session's timezone context.
+                    user_timezone: "UTC".to_string(),
                 }))
             }
             None => Ok(None),
@@ -1377,6 +1380,8 @@ pub struct ConversationSummary {
     pub last_activity: DateTime<Utc>,
     /// Thread type extracted from metadata (e.g. "assistant", "thread").
     pub thread_type: Option<String>,
+    /// Channel that owns this conversation (e.g. "gateway", "telegram", "routine").
+    pub channel: String,
 }
 
 /// A single message in a conversation.
@@ -1429,6 +1434,7 @@ impl Store {
                     c.started_at,
                     c.last_activity,
                     c.metadata,
+                    c.channel,
                     (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS message_count,
                     (SELECT LEFT(m2.content, 100)
                      FROM conversation_messages m2
@@ -1453,16 +1459,179 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let sql_title: Option<String> = r.get("title");
+                let title = sql_title.or_else(|| {
+                    metadata
+                        .get("routine_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
                 ConversationSummary {
                     id: r.get("id"),
-                    title: r.get("title"),
+                    title,
                     message_count: r.get("message_count"),
                     started_at: r.get("started_at"),
                     last_activity: r.get("last_activity"),
                     thread_type,
+                    channel: r.get("channel"),
                 }
             })
             .collect())
+    }
+
+    /// List conversations across all channels with a title derived from the first user message.
+    pub async fn list_conversations_all_channels(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT
+                    c.id,
+                    c.started_at,
+                    c.last_activity,
+                    c.metadata,
+                    c.channel,
+                    (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS message_count,
+                    (SELECT LEFT(m2.content, 100)
+                     FROM conversation_messages m2
+                     WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                     ORDER BY m2.created_at ASC
+                     LIMIT 1
+                    ) AS title
+                FROM conversations c
+                WHERE c.user_id = $1
+                ORDER BY c.last_activity DESC
+                LIMIT $2
+                "#,
+                &[&user_id, &limit],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let metadata: serde_json::Value = r.get("metadata");
+                let thread_type = metadata
+                    .get("thread_type")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                // For routine/heartbeat threads, derive title from metadata
+                // since they may have no user messages.
+                let sql_title: Option<String> = r.get("title");
+                let title = sql_title.or_else(|| {
+                    metadata
+                        .get("routine_name")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
+                ConversationSummary {
+                    id: r.get("id"),
+                    title,
+                    message_count: r.get("message_count"),
+                    started_at: r.get("started_at"),
+                    last_activity: r.get("last_activity"),
+                    thread_type,
+                    channel: r.get("channel"),
+                }
+            })
+            .collect())
+    }
+
+    /// Get or create a persistent conversation for a routine.
+    ///
+    /// Looks for a conversation where `metadata->>'routine_id' = routine_id`.
+    /// Creates one if it doesn't exist. Uses INSERT ON CONFLICT to avoid
+    /// TOCTOU races under concurrent routine executions.
+    pub async fn get_or_create_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        routine_name: &str,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let rid = routine_id.to_string();
+
+        // Attempt insert first; the partial unique index
+        // uq_conv_routine(user_id, (metadata->>'routine_id')) prevents duplicates.
+        let new_id = Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "thread_type": "routine",
+            "routine_id": routine_id.to_string(),
+            "routine_name": routine_name,
+        });
+        conn.execute(
+            r#"
+            INSERT INTO conversations (id, channel, user_id, metadata)
+            VALUES ($1, 'routine', $2, $3)
+            ON CONFLICT (user_id, (metadata->>'routine_id'))
+                WHERE metadata->>'routine_id' IS NOT NULL
+                DO NOTHING
+            "#,
+            &[&new_id, &user_id, &metadata],
+        )
+        .await?;
+
+        // Select back — always returns the winner.
+        let row = conn
+            .query_one(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND metadata->>'routine_id' = $2
+                LIMIT 1
+                "#,
+                &[&user_id, &rid],
+            )
+            .await?;
+
+        Ok(row.get("id"))
+    }
+
+    /// Get or create the singleton heartbeat conversation for a user.
+    ///
+    /// Looks for a conversation where `metadata->>'thread_type' = 'heartbeat'`.
+    /// Creates one if it doesn't exist. Uses INSERT ON CONFLICT to avoid
+    /// TOCTOU races under concurrent heartbeat sends.
+    pub async fn get_or_create_heartbeat_conversation(
+        &self,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+
+        // Attempt insert; the partial unique index
+        // uq_conv_heartbeat(user_id) prevents duplicates.
+        let new_id = Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "thread_type": "heartbeat",
+        });
+        conn.execute(
+            r#"
+            INSERT INTO conversations (id, channel, user_id, metadata)
+            VALUES ($1, 'heartbeat', $2, $3)
+            ON CONFLICT (user_id)
+                WHERE metadata->>'thread_type' = 'heartbeat'
+                DO NOTHING
+            "#,
+            &[&new_id, &user_id, &metadata],
+        )
+        .await?;
+
+        // Select back — always returns the winner.
+        let row = conn
+            .query_one(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND metadata->>'thread_type' = 'heartbeat'
+                LIMIT 1
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(row.get("id"))
     }
 
     /// Get or create the singleton "assistant" conversation for a user+channel.
@@ -1926,5 +2095,42 @@ impl Store {
             .await?;
         let count: i64 = row.get("cnt");
         Ok(count > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_conversation_summary_has_channel_field() {
+        // Regression: ConversationSummary must include a `channel` field
+        // so the gateway can distinguish thread origins.
+        let summary = ConversationSummary {
+            id: Uuid::nil(),
+            title: Some("Hello".to_string()),
+            message_count: 1,
+            started_at: Utc::now(),
+            last_activity: Utc::now(),
+            thread_type: Some("thread".to_string()),
+            channel: "telegram".to_string(),
+        };
+        assert_eq!(summary.channel, "telegram");
+    }
+
+    #[test]
+    fn test_conversation_summary_channel_various_values() {
+        for ch in ["gateway", "routine", "heartbeat", "telegram", "signal"] {
+            let summary = ConversationSummary {
+                id: Uuid::nil(),
+                title: None,
+                message_count: 0,
+                started_at: Utc::now(),
+                last_activity: Utc::now(),
+                thread_type: None,
+                channel: ch.to_string(),
+            };
+            assert_eq!(summary.channel, ch);
+        }
     }
 }

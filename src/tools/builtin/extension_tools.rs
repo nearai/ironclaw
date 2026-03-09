@@ -496,6 +496,123 @@ impl Tool for ToolRemoveTool {
     }
 }
 
+// ── tool_upgrade ─────────────────────────────────────────────────────
+
+pub struct ToolUpgradeTool {
+    manager: Arc<ExtensionManager>,
+}
+
+impl ToolUpgradeTool {
+    pub fn new(manager: Arc<ExtensionManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for ToolUpgradeTool {
+    fn name(&self) -> &str {
+        "tool_upgrade"
+    }
+
+    fn description(&self) -> &str {
+        "Upgrade installed WASM extensions (channels and tools) to match the current \
+         host WIT version. If name is omitted, checks and upgrades all installed WASM \
+         extensions. Authentication and secrets are preserved."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Extension name to upgrade (omit to upgrade all)"
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let name = params.get("name").and_then(|v| v.as_str());
+
+        let result = self
+            .manager
+            .upgrade(name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        let output = serde_json::to_value(&result)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
+
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+// ── extension_info ────────────────────────────────────────────────────
+
+pub struct ExtensionInfoTool {
+    manager: Arc<ExtensionManager>,
+}
+
+impl ExtensionInfoTool {
+    pub fn new(manager: Arc<ExtensionManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for ExtensionInfoTool {
+    fn name(&self) -> &str {
+        "extension_info"
+    }
+
+    fn description(&self) -> &str {
+        "Show detailed information about an installed extension, including version \
+         and WIT version compatibility."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Extension name to get info about"
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let name = require_str(&params, "name")?;
+
+        let info = self
+            .manager
+            .extension_info(name)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        Ok(ToolOutput::success(info, start.elapsed()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +705,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_tool_upgrade_schema() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = ToolUpgradeTool {
+            manager: test_manager_stub(),
+        };
+        assert_eq!(tool.name(), "tool_upgrade");
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+        let schema = tool.parameters_schema();
+        // name is optional (omit to upgrade all)
+        assert!(schema["properties"].get("name").is_some());
+        assert!(
+            schema.get("required").is_none(),
+            "tool_upgrade should have no required params"
+        );
+    }
+
+    #[test]
+    fn test_extension_info_schema() {
+        let tool = ExtensionInfoTool {
+            manager: test_manager_stub(),
+        };
+        assert_eq!(tool.name(), "extension_info");
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"].get("name").is_some());
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("name")));
+    }
+
     /// Create a stub manager for schema tests (these don't call execute).
     fn test_manager_stub() -> Arc<ExtensionManager> {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
@@ -604,8 +753,8 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             None,
             None,
-            std::path::PathBuf::from("/tmp/ironclaw-test-tools"),
-            std::path::PathBuf::from("/tmp/ironclaw-test-channels"),
+            std::env::temp_dir().join("ironclaw-test-tools"),
+            std::env::temp_dir().join("ironclaw-test-channels"),
             None,
             "test".to_string(),
             None,

@@ -308,6 +308,13 @@ impl TraceLlm {
     // -- internal helpers ---------------------------------------------------
 
     /// Advance the step index and return the current step, or an error if exhausted.
+    ///
+    /// Before returning, applies template substitution on tool_call arguments:
+    /// `{{call_id.json_path}}` is replaced with the value extracted from the
+    /// tool result message whose `tool_call_id` matches `call_id`. The
+    /// `json_path` is a dot-separated path into the JSON content of that tool
+    /// result (e.g., `{{call_cj_1.job_id}}` extracts `.job_id` from the result
+    /// of tool call `call_cj_1`).
     fn next_step(&self, messages: &[ChatMessage]) -> Result<TraceStep, LlmError> {
         // Capture the request messages.
         self.captured_requests
@@ -316,7 +323,7 @@ impl TraceLlm {
             .push(messages.to_vec());
 
         let idx = self.index.fetch_add(1, Ordering::Relaxed);
-        let step = self
+        let mut step = self
             .steps
             .get(idx)
             .ok_or_else(|| LlmError::RequestFailed {
@@ -332,6 +339,19 @@ impl TraceLlm {
         // Soft-validate request hints.
         if let Some(ref hint) = step.request_hint {
             self.validate_hint(hint, messages);
+        }
+
+        // Apply template substitution on tool_call arguments.
+        if let TraceResponse::ToolCalls {
+            ref mut tool_calls, ..
+        } = step.response
+        {
+            let vars = Self::extract_tool_result_vars(messages);
+            if !vars.is_empty() {
+                for tc in tool_calls.iter_mut() {
+                    Self::substitute_templates(&mut tc.arguments, &vars);
+                }
+            }
         }
 
         Ok(step)
@@ -365,6 +385,121 @@ impl TraceLlm {
             );
         }
     }
+
+    /// Build a map of `"call_id.json_path" -> resolved_value` from tool result
+    /// messages in the conversation. Each `Role::Tool` message with a
+    /// `tool_call_id` has its content parsed as JSON; all top-level
+    /// string/number/bool values are indexed so that `{{call_id.key}}` can be
+    /// resolved.
+    ///
+    /// Tool results may be wrapped in `<tool_output>` XML tags by the safety
+    /// layer, so we strip those before parsing.
+    fn extract_tool_result_vars(
+        messages: &[ChatMessage],
+    ) -> std::collections::HashMap<String, String> {
+        let mut vars = std::collections::HashMap::new();
+        for msg in messages {
+            if msg.role != Role::Tool {
+                continue;
+            }
+            let call_id = match &msg.tool_call_id {
+                Some(id) => id,
+                None => continue,
+            };
+            // Strip <tool_output ...>...</tool_output> wrapper if present.
+            let content = Self::unwrap_tool_output(&msg.content);
+            // Try parsing the content as JSON.
+            let json: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(obj) = json.as_object() {
+                for (key, val) in obj {
+                    let str_val = match val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        _ => continue,
+                    };
+                    vars.insert(format!("{call_id}.{key}"), str_val);
+                }
+            }
+        }
+        vars
+    }
+
+    /// Strip `<tool_output name="..." sanitized="...">...\n</tool_output>`
+    /// wrapper and unescape XML entities from safety-layer output.
+    fn unwrap_tool_output(content: &str) -> std::borrow::Cow<'_, str> {
+        let trimmed = content.trim();
+        if let Some(rest) = trimmed.strip_prefix("<tool_output")
+            && let Some(tag_end) = rest.find('>')
+        {
+            let inner = &rest[tag_end + 1..];
+            if let Some(close) = inner.rfind("</tool_output>") {
+                let body = inner[..close].trim();
+                // Reverse XML escaping applied by safety layer.
+                if body.contains("&amp;") || body.contains("&lt;") || body.contains("&gt;") {
+                    return std::borrow::Cow::Owned(
+                        body.replace("&amp;", "&")
+                            .replace("&lt;", "<")
+                            .replace("&gt;", ">"),
+                    );
+                }
+                return std::borrow::Cow::Borrowed(body);
+            }
+        }
+        std::borrow::Cow::Borrowed(content)
+    }
+
+    /// Walk a JSON value and replace any string matching `{{call_id.path}}`
+    /// with the resolved value from the vars map. Operates in-place.
+    fn substitute_templates(
+        value: &mut serde_json::Value,
+        vars: &std::collections::HashMap<String, String>,
+    ) {
+        match value {
+            serde_json::Value::String(s) => {
+                // Full-value replacement: if the entire string is `{{...}}`,
+                // replace the whole value (preserving type if possible).
+                if s.starts_with("{{") && s.ends_with("}}") && s.matches("{{").count() == 1 {
+                    let key = s[2..s.len() - 2].trim();
+                    if let Some(resolved) = vars.get(key) {
+                        *s = resolved.clone();
+                        return;
+                    }
+                }
+                // Inline replacement: replace all `{{...}}` occurrences within the string.
+                let mut result = s.clone();
+                while let Some(start) = result.find("{{") {
+                    if let Some(end) = result[start..].find("}}") {
+                        let end = start + end + 2;
+                        let key = result[start + 2..end - 2].trim();
+                        if let Some(resolved) = vars.get(key) {
+                            result = format!("{}{}{}", &result[..start], resolved, &result[end..]);
+                        } else {
+                            // Unresolved template — leave as-is and stop to avoid infinite loop.
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                *s = result;
+            }
+            serde_json::Value::Object(map) => {
+                for val in map.values_mut() {
+                    Self::substitute_templates(val, vars);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for val in arr.iter_mut() {
+                    Self::substitute_templates(val, vars);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[async_trait]
@@ -378,30 +513,41 @@ impl LlmProvider for TraceLlm {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let step = self.next_step(&request.messages)?;
-        match step.response {
-            TraceResponse::Text {
-                content,
-                input_tokens,
-                output_tokens,
-            } => Ok(CompletionResponse {
-                content,
-                input_tokens,
-                output_tokens,
-                finish_reason: FinishReason::Stop,
-            }),
-            TraceResponse::ToolCalls { .. } => Err(LlmError::RequestFailed {
-                provider: self.model_name.clone(),
-                reason: "TraceLlm::complete() called but current step is a tool_calls response; \
-                         use complete_with_tools() instead"
-                    .to_string(),
-            }),
-            TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {
-                provider: self.model_name.clone(),
-                reason: "TraceLlm::complete() encountered a user_input step; \
-                         these should have been filtered out during construction"
-                    .to_string(),
-            }),
+        // complete() is called when Reasoning has force_text=true (no tools
+        // available). Skip any remaining ToolCalls steps in the trace and
+        // return the next Text step, since in real usage the LLM would
+        // produce text when no tools are offered.
+        loop {
+            let step = self.next_step(&request.messages)?;
+            match step.response {
+                TraceResponse::Text {
+                    content,
+                    input_tokens,
+                    output_tokens,
+                } => {
+                    return Ok(CompletionResponse {
+                        content,
+                        input_tokens,
+                        output_tokens,
+                        finish_reason: FinishReason::Stop,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    });
+                }
+                TraceResponse::ToolCalls { .. } => {
+                    // Skip tool_calls steps — complete() is called in
+                    // force_text mode so the LLM can't use tools anyway.
+                    continue;
+                }
+                TraceResponse::UserInput { .. } => {
+                    return Err(LlmError::RequestFailed {
+                        provider: self.model_name.clone(),
+                        reason: "TraceLlm::complete() encountered a user_input step; \
+                                 these should have been filtered out during construction"
+                            .to_string(),
+                    });
+                }
+            }
         }
     }
 
@@ -421,6 +567,8 @@ impl LlmProvider for TraceLlm {
                 input_tokens,
                 output_tokens,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -441,6 +589,8 @@ impl LlmProvider for TraceLlm {
                     input_tokens,
                     output_tokens,
                     finish_reason: FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 })
             }
             TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {

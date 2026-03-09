@@ -57,6 +57,10 @@ pub type PromptQueue = Arc<
     >,
 >;
 
+/// Slot for the routine engine, filled at runtime after the agent starts.
+pub type RoutineEngineSlot =
+    Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>;
+
 /// Simple sliding-window rate limiter.
 ///
 /// Tracks the number of requests in the current window. Resets when the window expires.
@@ -165,6 +169,8 @@ pub struct GatewayState {
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
     /// Cost guard for token/cost tracking.
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
+    /// Routine engine slot for manual routine triggering (filled at runtime).
+    pub routine_engine: RoutineEngineSlot,
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
 }
@@ -345,7 +351,7 @@ pub async fn start_server(
         .merge(statics)
         .merge(projects)
         .merge(protected)
-        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB max request body
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -602,8 +608,59 @@ async fn oauth_callback_handler(
 
 // --- Chat handlers ---
 
+/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
+pub(crate) fn images_to_attachments(
+    images: &[ImageData],
+) -> Vec<crate::channels::IncomingAttachment> {
+    use base64::Engine;
+    images
+        .iter()
+        .enumerate()
+        .filter_map(|(i, img)| {
+            if !img.media_type.starts_with("image/") {
+                tracing::warn!(
+                    "Skipping image {i}: invalid media type '{}' (must start with 'image/')",
+                    img.media_type
+                );
+                return None;
+            }
+            let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("Skipping image {i}: invalid base64 data: {e}");
+                    return None;
+                }
+            };
+            Some(crate::channels::IncomingAttachment {
+                id: format!("web-image-{i}"),
+                kind: crate::channels::AttachmentKind::Image,
+                mime_type: img.media_type.clone(),
+                filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
+}
+
+/// Map MIME type to file extension.
+fn mime_to_ext(mime: &str) -> &str {
+    match mime {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "jpg",
+    }
+}
+
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     tracing::debug!(
@@ -620,17 +677,32 @@ async fn chat_send_handler(
     }
 
     let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
+    // Prefer timezone from JSON body, fall back to X-Timezone header
+    let tz = req
+        .timezone
+        .as_deref()
+        .or_else(|| headers.get("X-Timezone").and_then(|v| v.to_str().ok()));
+    if let Some(tz) = tz {
+        msg = msg.with_timezone(tz);
+    }
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
         msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
     }
 
+    // Convert uploaded images to IncomingAttachments
+    if !req.images.is_empty() {
+        let attachments = images_to_attachments(&req.images);
+        msg = msg.with_attachments(attachments);
+    }
+
     let msg_id = msg.id;
     tracing::debug!(
-        "[chat_send_handler] Created message id={}, content={:?}",
+        "[chat_send_handler] Created message id={}, content={:?}, images={}",
         msg_id,
-        req.content
+        req.content,
+        req.images.len()
     );
 
     let tx_guard = state.msg_tx.read().await;
@@ -1037,7 +1109,7 @@ async fn chat_threads_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-            .list_conversations_with_preview(&state.user_id, "gateway", 50)
+            .list_conversations_all_channels(&state.user_id, 50)
             .await
         {
             let mut assistant_thread = None;
@@ -1052,6 +1124,7 @@ async fn chat_threads_handler(
                     updated_at: s.last_activity.to_rfc3339(),
                     title: s.title.clone(),
                     thread_type: s.thread_type.clone(),
+                    channel: Some(s.channel.clone()),
                 };
 
                 if s.id == assistant_id {
@@ -1071,6 +1144,7 @@ async fn chat_threads_handler(
                     updated_at: chrono::Utc::now().to_rfc3339(),
                     title: None,
                     thread_type: Some("assistant".to_string()),
+                    channel: Some("gateway".to_string()),
                 });
             }
 
@@ -1083,9 +1157,10 @@ async fn chat_threads_handler(
     }
 
     // Fallback: in-memory only (no assistant thread without DB)
-    let threads: Vec<ThreadInfo> = sess
-        .threads
-        .values()
+    let mut sorted_threads: Vec<_> = sess.threads.values().collect();
+    sorted_threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let threads: Vec<ThreadInfo> = sorted_threads
+        .into_iter()
         .map(|t| ThreadInfo {
             id: t.id,
             state: format!("{:?}", t.state),
@@ -1094,6 +1169,7 @@ async fn chat_threads_handler(
             updated_at: t.updated_at.to_rfc3339(),
             title: None,
             thread_type: None,
+            channel: Some("gateway".to_string()),
         })
         .collect();
 
@@ -1113,38 +1189,39 @@ async fn chat_new_thread_handler(
     ))?;
 
     let session = session_manager.get_or_create_session(&state.user_id).await;
-    let mut sess = session.lock().await;
-    let thread = sess.create_thread();
-    let thread_id = thread.id;
-    let info = ThreadInfo {
-        id: thread.id,
-        state: format!("{:?}", thread.state),
-        turn_count: thread.turns.len(),
-        created_at: thread.created_at.to_rfc3339(),
-        updated_at: thread.updated_at.to_rfc3339(),
-        title: None,
-        thread_type: Some("thread".to_string()),
+    let (thread_id, info) = {
+        let mut sess = session.lock().await;
+        let thread = sess.create_thread();
+        let id = thread.id;
+        let info = ThreadInfo {
+            id: thread.id,
+            state: format!("{:?}", thread.state),
+            turn_count: thread.turns.len(),
+            created_at: thread.created_at.to_rfc3339(),
+            updated_at: thread.updated_at.to_rfc3339(),
+            title: None,
+            thread_type: Some("thread".to_string()),
+            channel: Some("gateway".to_string()),
+        };
+        (id, info)
     };
 
-    // Persist the empty conversation row with thread_type metadata
+    // Persist the empty conversation row with thread_type metadata synchronously
+    // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
-        let store = Arc::clone(store);
-        let user_id = state.user_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store
-                .ensure_conversation(thread_id, "gateway", &user_id, None)
-                .await
-            {
-                tracing::warn!("Failed to persist new thread: {}", e);
-            }
-            let metadata_val = serde_json::json!("thread");
-            if let Err(e) = store
-                .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
-                .await
-            {
-                tracing::warn!("Failed to set thread_type metadata: {}", e);
-            }
-        });
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", &state.user_id, None)
+            .await
+        {
+            tracing::warn!("Failed to persist new thread: {}", e);
+        }
+        let metadata_val = serde_json::json!("thread");
+        if let Err(e) = store
+            .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
+            .await
+        {
+            tracing::warn!("Failed to set thread_type metadata: {}", e);
+        }
     }
 
     Ok(Json(info))
@@ -1438,6 +1515,7 @@ async fn extensions_list_handler(
                 has_auth: ext.has_auth,
                 activation_status,
                 activation_error: ext.activation_error,
+                version: ext.version,
             }
         })
         .collect();
@@ -1731,6 +1809,7 @@ async fn extensions_registry_handler(
                 kind: kind_str,
                 description: e.description.clone(),
                 keywords: e.keywords.clone(),
+                version: e.version.clone(),
             }
         })
         .collect();
@@ -1963,47 +2042,35 @@ async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    let engine = {
+        let guard = state.routine_engine.read().await;
+        guard.as_ref().cloned().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Routine engine not available".to_string(),
+        ))?
+    };
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
-    let routine = store
-        .get_routine(routine_id)
+    let run_id = engine
+        .fire_manual(routine_id, Some(&state.user_id))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    // Send the routine prompt through the message pipeline as a manual trigger.
-    let prompt = match &routine.action {
-        crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
-        crate::agent::routine::RoutineAction::FullJob {
-            title, description, ..
-        } => format!("{}: {}", title, description),
-    };
-
-    let content = format!("[routine:{}] {}", routine.name, prompt);
-    let msg = IncomingMessage::new("gateway", &state.user_id, content);
-
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
-
-    tx.send(msg).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
-        )
-    })?;
+        .map_err(|e| {
+            let status = match &e {
+                crate::error::RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
+                crate::error::RoutineError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
+                crate::error::RoutineError::Disabled { .. }
+                | crate::error::RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",
         "routine_id": routine_id,
+        "run_id": run_id,
     })))
 }
 
@@ -2114,7 +2181,7 @@ async fn routines_runs_handler(
 /// Convert a Routine to the trimmed RoutineInfo for list display.
 fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
     let (trigger_type, trigger_summary) = match &r.trigger {
-        crate::agent::routine::Trigger::Cron { schedule } => {
+        crate::agent::routine::Trigger::Cron { schedule, .. } => {
             ("cron".to_string(), format!("cron: {}", schedule))
         }
         crate::agent::routine::Trigger::Event {
@@ -2319,6 +2386,7 @@ async fn gateway_status_handler(
         .unwrap_or(false);
 
     Json(GatewayStatusResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
         sse_connections,
         ws_connections,
         total_connections: sse_connections + ws_connections,
@@ -2340,6 +2408,7 @@ struct ModelUsageEntry {
 
 #[derive(serde::Serialize)]
 struct GatewayStatusResponse {
+    version: String,
     sse_connections: u64,
     ws_connections: u64,
     total_connections: u64,
@@ -2459,6 +2528,7 @@ mod tests {
             chat_rate_limiter: RateLimiter::new(30, 60),
             registry_entries: vec![],
             cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
         })
     }
@@ -2616,7 +2686,9 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
-            created_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
+            created_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(600))
+                .expect("System uptime is too low to run expired flow test"),
         };
 
         ext_mgr
@@ -2723,7 +2795,9 @@ mod tests {
             sse_sender: None,
             gateway_token: None,
             // Expired — handler will reject after lookup (no network I/O)
-            created_at: std::time::Instant::now() - std::time::Duration::from_secs(600),
+            created_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(600))
+                .expect("System uptime is too low to run expired flow test"),
         };
 
         ext_mgr

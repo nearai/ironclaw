@@ -18,7 +18,7 @@ use crate::error::{Error, JobError};
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
-use crate::tools::ToolRegistry;
+use crate::tools::{ApprovalContext, ToolRegistry};
 
 /// Message to send to a worker.
 #[derive(Debug)]
@@ -56,6 +56,8 @@ pub struct Scheduler {
     hooks: Arc<HookRegistry>,
     /// SSE broadcast sender for live job event streaming.
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
+    /// HTTP interceptor for trace recording/replay (propagated to workers).
+    http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -82,6 +84,7 @@ impl Scheduler {
             store,
             hooks,
             sse_tx: None,
+            http_interceptor: None,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -90,6 +93,14 @@ impl Scheduler {
     /// Set the SSE broadcast sender for live job event streaming.
     pub fn set_sse_sender(&mut self, tx: tokio::sync::broadcast::Sender<SseEvent>) {
         self.sse_tx = Some(tx);
+    }
+
+    /// Set the HTTP interceptor for trace recording/replay.
+    pub fn set_http_interceptor(
+        &mut self,
+        interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
+    ) {
+        self.http_interceptor = Some(interceptor);
     }
 
     /// Create, persist, and schedule a job in one shot.
@@ -108,6 +119,41 @@ impl Scheduler {
         title: &str,
         description: &str,
         metadata: Option<serde_json::Value>,
+    ) -> Result<Uuid, JobError> {
+        self.dispatch_job_inner(user_id, title, description, metadata, None)
+            .await
+    }
+
+    /// Dispatch a job with an explicit approval context for autonomous execution.
+    ///
+    /// Same as `dispatch_job`, but the worker will use the given `ApprovalContext`
+    /// to determine which tools are pre-approved (instead of blocking all non-`Never` tools).
+    pub async fn dispatch_job_with_context(
+        &self,
+        user_id: &str,
+        title: &str,
+        description: &str,
+        metadata: Option<serde_json::Value>,
+        approval_context: ApprovalContext,
+    ) -> Result<Uuid, JobError> {
+        self.dispatch_job_inner(
+            user_id,
+            title,
+            description,
+            metadata,
+            Some(approval_context),
+        )
+        .await
+    }
+
+    /// Shared implementation for `dispatch_job` and `dispatch_job_with_context`.
+    async fn dispatch_job_inner(
+        &self,
+        user_id: &str,
+        title: &str,
+        description: &str,
+        metadata: Option<serde_json::Value>,
+        approval_context: Option<ApprovalContext>,
     ) -> Result<Uuid, JobError> {
         let job_id = self
             .context_manager
@@ -132,12 +178,21 @@ impl Scheduler {
             })?;
         }
 
-        self.schedule(job_id).await?;
+        self.schedule_with_context(job_id, approval_context).await?;
         Ok(job_id)
     }
 
     /// Schedule a job for execution.
     pub async fn schedule(&self, job_id: Uuid) -> Result<(), JobError> {
+        self.schedule_with_context(job_id, None).await
+    }
+
+    /// Schedule a job with an optional approval context.
+    async fn schedule_with_context(
+        &self,
+        job_id: Uuid,
+        approval_context: Option<ApprovalContext>,
+    ) -> Result<(), JobError> {
         // Hold write lock for the entire check-insert sequence to prevent
         // TOCTOU races where two concurrent calls both pass the checks.
         {
@@ -181,6 +236,8 @@ impl Scheduler {
                 timeout: self.config.job_timeout,
                 use_planning: self.config.use_planning,
                 sse_tx: self.sse_tx.clone(),
+                approval_context,
+                http_interceptor: self.http_interceptor.clone(),
             };
             let worker = Worker::new(job_id, deps);
 
@@ -257,11 +314,14 @@ impl Scheduler {
                 let context_manager = self.context_manager.clone();
                 let safety = self.safety.clone();
 
+                // TODO: propagate parent job's ApprovalContext here when subtasks
+                // are used in autonomous/routine paths (currently only used in tests).
                 tokio::spawn(async move {
                     let result = Self::execute_tool_task(
                         tools,
                         context_manager,
                         safety,
+                        None,
                         tool_parent_id,
                         &tool_name,
                         params,
@@ -390,6 +450,7 @@ impl Scheduler {
         tools: Arc<ToolRegistry>,
         context_manager: Arc<ContextManager>,
         safety: Arc<SafetyLayer>,
+        approval_context: Option<ApprovalContext>,
         job_id: Uuid,
         tool_name: &str,
         params: serde_json::Value,
@@ -413,7 +474,10 @@ impl Scheduler {
             .into());
         }
 
-        if tool.requires_approval(&params).is_required() {
+        let requirement = tool.requires_approval(&params);
+        let blocked =
+            ApprovalContext::is_blocked_or_default(&approval_context, tool_name, requirement);
+        if blocked {
             return Err(crate::error::ToolError::AuthRequired {
                 name: tool_name.to_string(),
             }
@@ -617,6 +681,11 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::config::SafetyConfig;
+    use crate::safety::SafetyLayer;
+    use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+
     #[test]
     fn test_scheduler_creation() {
         // Would need to mock dependencies for proper testing
@@ -626,5 +695,203 @@ mod tests {
     async fn test_spawn_batch_empty() {
         // This test would need mock dependencies.
         // For now just verify the empty case doesn't panic.
+    }
+
+    /// A tool that returns `UnlessAutoApproved`.
+    struct SoftApprovalTool;
+
+    #[async_trait::async_trait]
+    impl Tool for SoftApprovalTool {
+        fn name(&self) -> &str {
+            "soft_gate"
+        }
+        fn description(&self) -> &str {
+            "needs soft approval"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text(
+                "soft_ok",
+                std::time::Instant::now().elapsed(),
+            ))
+        }
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::UnlessAutoApproved
+        }
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+    }
+
+    /// A tool that returns `Always`.
+    struct HardApprovalTool;
+
+    #[async_trait::async_trait]
+    impl Tool for HardApprovalTool {
+        fn name(&self) -> &str {
+            "hard_gate"
+        }
+        fn description(&self) -> &str {
+            "needs hard approval"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text(
+                "hard_ok",
+                std::time::Instant::now().elapsed(),
+            ))
+        }
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::Always
+        }
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+    }
+
+    async fn setup_tools_and_job() -> (
+        Arc<ToolRegistry>,
+        Arc<ContextManager>,
+        Arc<SafetyLayer>,
+        Uuid,
+    ) {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(SoftApprovalTool)).await;
+        registry.register(Arc::new(HardApprovalTool)).await;
+
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = cm.create_job("test", "approval test").await.unwrap();
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+
+        (Arc::new(registry), cm, safety, job_id)
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_task_blocks_without_context() {
+        let (tools, cm, safety, job_id) = setup_tools_and_job().await;
+
+        // Without approval context, UnlessAutoApproved is blocked
+        let result = Scheduler::execute_tool_task(
+            tools.clone(),
+            cm.clone(),
+            safety.clone(),
+            None,
+            job_id,
+            "soft_gate",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "soft_gate should be blocked without context"
+        );
+
+        // Always is also blocked
+        let result = Scheduler::execute_tool_task(
+            tools,
+            cm,
+            safety,
+            None,
+            job_id,
+            "hard_gate",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "hard_gate should be blocked without context"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_task_autonomous_unblocks_soft() {
+        let (tools, cm, safety, job_id) = setup_tools_and_job().await;
+
+        // Autonomous context auto-approves UnlessAutoApproved
+        let result = Scheduler::execute_tool_task(
+            tools.clone(),
+            cm.clone(),
+            safety.clone(),
+            Some(ApprovalContext::autonomous()),
+            job_id,
+            "soft_gate",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "soft_gate should pass with autonomous context"
+        );
+
+        // But still blocks Always
+        let result = Scheduler::execute_tool_task(
+            tools,
+            cm,
+            safety,
+            Some(ApprovalContext::autonomous()),
+            job_id,
+            "hard_gate",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "hard_gate should still be blocked without explicit permission"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_task_autonomous_with_permissions() {
+        let (tools, cm, safety, job_id) = setup_tools_and_job().await;
+
+        // Autonomous context with explicit permission for hard_gate
+        let ctx = ApprovalContext::autonomous_with_tools(["hard_gate".to_string()]);
+
+        let result = Scheduler::execute_tool_task(
+            tools.clone(),
+            cm.clone(),
+            safety.clone(),
+            Some(ctx.clone()),
+            job_id,
+            "soft_gate",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(result.is_ok(), "soft_gate should pass");
+
+        let result = Scheduler::execute_tool_task(
+            tools,
+            cm,
+            safety,
+            Some(ctx),
+            job_id,
+            "hard_gate",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "hard_gate should pass with explicit permission"
+        );
     }
 }
