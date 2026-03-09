@@ -431,8 +431,7 @@ impl Tool for HttpTool {
             self.secrets_store.as_ref(),
         ) {
             let cred_host = parsed_url.host_str().unwrap_or("");
-            let matched: Vec<crate::secrets::CredentialMapping> =
-                registry.find_for_host(cred_host);
+            let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(cred_host);
             for mapping in &matched {
                 match store
                     .get_decrypted(&ctx.user_id, &mapping.secret_name)
@@ -506,9 +505,7 @@ impl Tool for HttpTool {
                 let hop_addrs = validate_and_resolve_url(&parsed_url).await?;
                 let hop_host = parsed_url
                     .host_str()
-                    .ok_or_else(|| {
-                        ToolError::InvalidParameters("URL missing host".into())
-                    })?
+                    .ok_or_else(|| ToolError::InvalidParameters("URL missing host".into()))?
                     .to_string();
                 let hop_client = build_pinned_client(
                     &hop_host,
@@ -1172,7 +1169,10 @@ mod tests {
 
     #[test]
     fn test_build_pinned_client_succeeds() {
-        let addrs = vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443)];
+        let addrs = vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            443,
+        )];
         let client = build_pinned_client(
             "example.com",
             &addrs,
