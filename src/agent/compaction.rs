@@ -103,27 +103,26 @@ impl ContextCompactor {
         // Generate summary
         let summary = self.generate_summary(&to_summarize).await?;
 
-        // Write to workspace if available
-        let summary_written = if let Some(ws) = workspace {
+        // Write to workspace if available.
+        // If archival fails, preserve turns to avoid context loss.
+        let (summary_written, turns_removed) = if let Some(ws) = workspace {
             match self.write_summary_to_workspace(ws, &summary).await {
-                Ok(()) => true,
+                Ok(()) => {
+                    thread.truncate_turns(keep_recent);
+                    (true, turns_to_remove)
+                }
                 Err(e) => {
-                    tracing::warn!(
-                        "Compaction summary write failed (turns will still be truncated): {}",
-                        e
-                    );
-                    false
+                    tracing::warn!("Compaction summary write failed (turns preserved): {}", e);
+                    (false, 0)
                 }
             }
         } else {
-            false
+            thread.truncate_turns(keep_recent);
+            (false, turns_to_remove)
         };
 
-        // Truncate thread
-        thread.truncate_turns(keep_recent);
-
         Ok(CompactionPartial {
-            turns_removed: turns_to_remove,
+            turns_removed,
             summary_written,
             summary: Some(summary),
         })
@@ -165,23 +164,20 @@ impl ContextCompactor {
         // Format turns for storage
         let content = format_turns_for_storage(old_turns);
 
-        // Write to workspace
-        let written = match self.write_context_to_workspace(ws, &content).await {
-            Ok(()) => true,
+        // Write to workspace. If archival fails, preserve turns.
+        let (written, turns_removed) = match self.write_context_to_workspace(ws, &content).await {
+            Ok(()) => {
+                thread.truncate_turns(keep_recent);
+                (true, turns_to_remove)
+            }
             Err(e) => {
-                tracing::warn!(
-                    "Compaction context write failed (turns will still be truncated): {}",
-                    e
-                );
-                false
+                tracing::warn!("Compaction context write failed (turns preserved): {}", e);
+                (false, 0)
             }
         };
 
-        // Truncate
-        thread.truncate_turns(keep_recent);
-
         Ok(CompactionPartial {
-            turns_removed: turns_to_remove,
+            turns_removed,
             summary_written: written,
             summary: None,
         })
@@ -360,6 +356,19 @@ mod tests {
             thread.complete_turn(format!("resp-{}", i));
         }
         thread
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn make_unmigrated_workspace() -> crate::workspace::Workspace {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+
+        // Intentionally skip migrations so workspace append operations fail.
+        let backend = LibSqlBackend::new_memory()
+            .await
+            .expect("should create in-memory libsql backend");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        crate::workspace::Workspace::new_with_db("compaction-test", db)
     }
 
     // ------------------------------------------------------------------
@@ -560,6 +569,43 @@ mod tests {
         assert_eq!(llm.calls(), 0);
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_compact_with_summary_preserves_turns_when_workspace_write_fails() {
+        let llm = Arc::new(StubLlm::new("summary"));
+        let compactor = make_compactor(llm.clone());
+        let mut thread = make_thread(8);
+        let original_inputs: Vec<String> =
+            thread.turns.iter().map(|t| t.user_input.clone()).collect();
+        let workspace = make_unmigrated_workspace().await;
+
+        let result = compactor
+            .compact(
+                &mut thread,
+                CompactionStrategy::Summarize { keep_recent: 3 },
+                Some(&workspace),
+            )
+            .await
+            .expect("compact should succeed even when workspace write fails");
+
+        // On archival failure, no turns should be removed.
+        assert_eq!(thread.turns.len(), 8);
+        assert_eq!(
+            thread
+                .turns
+                .iter()
+                .map(|t| t.user_input.as_str())
+                .collect::<Vec<_>>(),
+            original_inputs
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(result.turns_removed, 0);
+        assert!(!result.summary_written);
+        assert_eq!(llm.calls(), 1);
+    }
+
     // ------------------------------------------------------------------
     // 7. compact_to_workspace without workspace falls back to truncation
     // ------------------------------------------------------------------
@@ -606,6 +652,43 @@ mod tests {
         // 4 turns < 5 (fallback keep_recent), so no truncation
         assert_eq!(thread.turns.len(), 4);
         assert_eq!(result.turns_removed, 0);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_compact_to_workspace_preserves_turns_when_workspace_write_fails() {
+        let llm = Arc::new(StubLlm::new("unused"));
+        let compactor = make_compactor(llm.clone());
+        let mut thread = make_thread(20);
+        let original_inputs: Vec<String> =
+            thread.turns.iter().map(|t| t.user_input.clone()).collect();
+        let workspace = make_unmigrated_workspace().await;
+
+        let result = compactor
+            .compact(
+                &mut thread,
+                CompactionStrategy::MoveToWorkspace,
+                Some(&workspace),
+            )
+            .await
+            .expect("compact should succeed even when workspace write fails");
+
+        // On archival failure, no turns should be removed.
+        assert_eq!(thread.turns.len(), 20);
+        assert_eq!(
+            thread
+                .turns
+                .iter()
+                .map(|t| t.user_input.as_str())
+                .collect::<Vec<_>>(),
+            original_inputs
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(result.turns_removed, 0);
+        assert!(!result.summary_written);
+        assert_eq!(llm.calls(), 0);
     }
 
     // ------------------------------------------------------------------
