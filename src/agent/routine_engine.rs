@@ -28,6 +28,7 @@ use crate::config::RoutineConfig;
 use crate::db::Database;
 use crate::error::RoutineError;
 use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
+use crate::tools::ApprovalContext;
 use crate::workspace::Workspace;
 
 /// The routine execution engine.
@@ -169,7 +170,7 @@ impl RoutineEngine {
                 continue;
             }
 
-            let detail = if let Trigger::Cron { ref schedule } = routine.trigger {
+            let detail = if let Trigger::Cron { ref schedule, .. } = routine.trigger {
                 Some(schedule.clone())
             } else {
                 None
@@ -180,7 +181,14 @@ impl RoutineEngine {
     }
 
     /// Fire a routine manually (from tool call or CLI).
-    pub async fn fire_manual(&self, routine_id: Uuid) -> Result<Uuid, RoutineError> {
+    ///
+    /// Bypasses cooldown checks (those only apply to cron/event triggers).
+    /// Still enforces enabled check and concurrent run limit.
+    pub async fn fire_manual(
+        &self,
+        routine_id: Uuid,
+        user_id: Option<&str>,
+    ) -> Result<Uuid, RoutineError> {
         let routine = self
             .store
             .get_routine(routine_id)
@@ -189,6 +197,13 @@ impl RoutineEngine {
                 reason: e.to_string(),
             })?
             .ok_or(RoutineError::NotFound { id: routine_id })?;
+
+        // Enforce ownership when a user_id is provided (gateway calls).
+        if let Some(uid) = user_id
+            && routine.user_id != uid
+        {
+            return Err(RoutineError::NotAuthorized { id: routine_id });
+        }
 
         if !routine.enabled {
             return Err(RoutineError::Disabled {
@@ -327,7 +342,19 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             title,
             description,
             max_iterations,
-        } => execute_full_job(&ctx, &routine, &run, title, description, *max_iterations).await,
+            tool_permissions,
+        } => {
+            execute_full_job(
+                &ctx,
+                &routine,
+                &run,
+                title,
+                description,
+                *max_iterations,
+                tool_permissions,
+            )
+            .await
+        }
     };
 
     // Decrement running count
@@ -353,8 +380,12 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
 
     // Update routine runtime state
     let now = Utc::now();
-    let next_fire = if let Trigger::Cron { ref schedule } = routine.trigger {
-        next_cron_fire(schedule).unwrap_or(None)
+    let next_fire = if let Trigger::Cron {
+        ref schedule,
+        ref timezone,
+    } = routine.trigger
+    {
+        next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None)
     } else {
         None
     };
@@ -380,6 +411,39 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
     }
 
+    // Persist routine result to its dedicated conversation thread
+    let thread_id = match ctx
+        .store
+        .get_or_create_routine_conversation(routine.id, &routine.name, &routine.user_id)
+        .await
+    {
+        Ok(conv_id) => {
+            tracing::debug!(
+                routine = %routine.name,
+                routine_id = %routine.id,
+                conversation_id = %conv_id,
+                "Resolved routine conversation thread"
+            );
+            // Record the run result as a conversation message
+            let msg = match (&summary, status) {
+                (Some(s), _) => format!("[{}] {}: {}", run.trigger_type, status, s),
+                (None, _) => format!("[{}] {}", run.trigger_type, status),
+            };
+            if let Err(e) = ctx
+                .store
+                .add_conversation_message(conv_id, "assistant", &msg)
+                .await
+            {
+                tracing::error!(routine = %routine.name, "Failed to persist routine message: {}", e);
+            }
+            Some(conv_id.to_string())
+        }
+        Err(e) => {
+            tracing::error!(routine = %routine.name, "Failed to get routine conversation: {}", e);
+            None
+        }
+    };
+
     // Send notifications based on config
     send_notification(
         &ctx.notify_tx,
@@ -387,6 +451,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         &routine.name,
         status,
         summary.as_deref(),
+        thread_id.as_deref(),
     )
     .await;
 }
@@ -418,6 +483,7 @@ async fn execute_full_job(
     title: &str,
     description: &str,
     max_iterations: u32,
+    tool_permissions: &[String],
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let scheduler = ctx
         .scheduler
@@ -426,10 +492,26 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let metadata = serde_json::json!({ "max_iterations": max_iterations });
+    let mut metadata = serde_json::json!({ "max_iterations": max_iterations });
+    // Carry the routine's notify config in job metadata so the message tool
+    // can resolve channel/target per-job without global state mutation.
+    if let Some(channel) = &routine.notify.channel {
+        metadata["notify_channel"] = serde_json::json!(channel);
+    }
+    metadata["notify_user"] = serde_json::json!(&routine.notify.user);
+
+    // Build approval context: UnlessAutoApproved tools are auto-approved for routines;
+    // Always tools require explicit listing in tool_permissions.
+    let approval_context = ApprovalContext::autonomous_with_tools(tool_permissions.iter().cloned());
 
     let job_id = scheduler
-        .dispatch_job(&routine.user_id, title, description, Some(metadata))
+        .dispatch_job_with_context(
+            &routine.user_id,
+            title,
+            description,
+            Some(metadata),
+            approval_context,
+        )
         .await
         .map_err(|e| RoutineError::JobDispatchFailed {
             reason: format!("failed to dispatch job: {e}"),
@@ -573,6 +655,7 @@ async fn send_notification(
     routine_name: &str,
     status: RunStatus,
     summary: Option<&str>,
+    thread_id: Option<&str>,
 ) {
     let should_notify = match status {
         RunStatus::Ok => notify.on_success,
@@ -599,7 +682,7 @@ async fn send_notification(
 
     let response = OutgoingResponse {
         content: message,
-        thread_id: None,
+        thread_id: thread_id.map(String::from),
         attachments: Vec::new(),
         metadata: serde_json::json!({
             "source": "routine",

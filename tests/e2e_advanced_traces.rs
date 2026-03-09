@@ -252,7 +252,123 @@ mod advanced {
     }
 
     // -----------------------------------------------------------------------
-    // 6. Prompt injection resilience
+    // 6. Routine news digest (end-to-end: create, fire, verify message)
+    //
+    // Exercises the full routine execution stack:
+    //   routine_create → routine_fire → RoutineEngine::fire_manual →
+    //   Scheduler::dispatch_job_with_context → Worker (autonomous) →
+    //   http + memory_write + message (broadcast to test channel)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_news_digest() {
+        use ironclaw::llm::recording::{HttpExchange, HttpExchangeRequest, HttpExchangeResponse};
+
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/routine_news_digest.json")).unwrap();
+
+        // Mock HTTP response for the news API call made by the routine worker.
+        let http_exchanges = vec![HttpExchange {
+            request: HttpExchangeRequest {
+                method: "GET".to_string(),
+                url: "https://news-api.example.com/v1/tech/headlines".to_string(),
+                headers: Vec::new(),
+                body: None,
+            },
+            response: HttpExchangeResponse {
+                status: 200,
+                headers: vec![(
+                    "content-type".to_string(),
+                    "application/json".to_string(),
+                )],
+                body: serde_json::json!({
+                    "headlines": [
+                        {"title": "Rust 2026 Edition", "summary": "async closures, generator syntax"},
+                        {"title": "WASM Component Model 1.0", "summary": "cross-language interop"},
+                        {"title": "NEAR AI Agent Framework", "summary": "on-chain identity"}
+                    ]
+                })
+                .to_string(),
+            },
+        }];
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_routines()
+            .with_http_exchanges(http_exchanges)
+            .build()
+            .await;
+
+        // Turn 1: Create the routine (manual trigger, full_job, message+http pre-authorized).
+        rig.send_message(
+            "Set up a morning tech news routine with manual trigger \
+             and full_job mode. Pre-authorize the message and http tools.",
+        )
+        .await;
+        let r1 = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(!r1.is_empty(), "Turn 1: no response");
+        let t1 = r1[0].content.to_lowercase();
+        assert!(
+            t1.contains("routine") || t1.contains("created"),
+            "Turn 1: expected routine/created, got: {t1}"
+        );
+
+        // Turn 2: Fire the routine. This dispatches a full_job through the scheduler.
+        // The routine worker runs autonomously and consumes TraceLlm steps for
+        // http, memory_write, and message tool calls. The http tool uses the
+        // ReplayingHttpInterceptor to return the mock news API response.
+        rig.send_message("Fire it now.").await;
+
+        // Wait for:
+        //   - response 2: main conversation reply ("fired the routine")
+        //   - response 3: message tool broadcast from routine worker ("Tech News Digest: ...")
+        // The routine worker runs asynchronously, so we wait for 3 total responses.
+        let responses = rig.wait_for_responses(3, Duration::from_secs(15)).await;
+
+        // Find the main conversation reply (from turn 2) by content, since
+        // the routine worker runs asynchronously and may interleave messages.
+        let fire_reply = responses.iter().find(|r| {
+            let c = r.content.to_lowercase();
+            c.contains("fired") || c.contains("running")
+        });
+        assert!(
+            fire_reply.is_some(),
+            "Turn 2: expected fired/running, got: {:?}",
+            responses.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+
+        // The routine worker runs autonomously: http → memory_write → message.
+        // The message tool broadcasts to the test channel, proving the full
+        // chain executed successfully (including ApprovalContext allowing the
+        // http and message tools in autonomous mode).
+        let message_broadcast = responses.iter().find(|r| {
+            r.content.contains("Tech News Digest")
+                || r.content.contains("Rust 2026")
+                || r.content.contains("WASM Component Model")
+        });
+        assert!(
+            message_broadcast.is_some(),
+            "Routine worker should have broadcast a message. Got: {:?}",
+            responses.iter().map(|r| &r.content).collect::<Vec<_>>()
+        );
+
+        // Verify main conversation tools were called.
+        let started = rig.tool_calls_started();
+        for tool in &["routine_create", "routine_fire"] {
+            assert!(
+                started.iter().any(|s| s == *tool),
+                "{tool} not called: {started:?}"
+            );
+        }
+
+        // Main conversation tools should have succeeded.
+        let completed = rig.tool_calls_completed();
+        crate::support::assertions::assert_all_tools_succeeded(&completed);
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Prompt injection resilience
     // -----------------------------------------------------------------------
 
     #[tokio::test]

@@ -41,6 +41,14 @@ use crate::tools::wasm::{
 /// Root schema for a capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilitiesFile {
+    /// Extension version (semver).
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// WIT interface version this extension was compiled against (semver).
+    #[serde(default)]
+    pub wit_version: Option<String>,
+
     /// HTTP request capability.
     #[serde(default)]
     pub http: Option<HttpCapabilitySchema>,

@@ -99,7 +99,7 @@
         <span id="sse-status">Connected</span>
         <div class="gateway-popover" id="gateway-popover"></div>
       </div>
-      <button class="restart-btn" id="restart-btn" onclick="triggerRestart()" title="Gracefully restart the process">
+      <button class="restart-btn" id="restart-btn" onclick="triggerRestart()" title="Gracefully restart the process" style="display: none;">
         <svg id="restart-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M23 4v6h-6"></path>
           <path d="M1 20v-6h6"></path>
@@ -113,12 +113,12 @@
     <div class="tab-panel active" id="tab-chat">
       <div class="thread-sidebar" id="thread-sidebar">
         <div class="thread-sidebar-header">
-          <span>Threads</span>
           <button class="thread-new-btn" onclick="createNewThread()" title="New thread (Ctrl/Cmd+N)">+</button>
+          <div class="spacer"></div>
           <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" title="Toggle sidebar">&laquo;</button>
         </div>
         <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
-          <span class="assistant-label">Assistant</span>
+          <span class="assistant-label" id="assistant-label">Assistant</span>
           <span class="assistant-meta" id="assistant-meta"></span>
         </div>
         <div class="threads-section-header">
@@ -130,7 +130,10 @@
         <div class="chat-messages" id="chat-messages"></div>
         <div id="slash-autocomplete" class="slash-autocomplete" style="display:none"></div>
         <div class="chat-input">
+          <div id="image-preview-strip" class="image-preview-strip"></div>
           <textarea id="chat-input" placeholder="Message or / for commands..." rows="1"></textarea>
+          <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
+          <button id="attach-btn" class="attach-btn" title="Attach images" aria-label="Attach images">&#x1F4CE;</button>
           <button id="send-btn" onclick="sendMessage()">Send</button>
         </div>
       </div>

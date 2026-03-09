@@ -2,7 +2,8 @@
   "name": "google-sheets",
   "display_name": "Google Sheets",
   "kind": "tool",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Read and write Google Sheets spreadsheet data",
   "keywords": [
     "spreadsheets",
@@ -18,7 +19,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/google-sheets-wasm32-wasip2.tar.gz",
-      "sha256": "77c966f0e18faa2b43361ad8abe90144d53b163272e96d2ed5106f480e698d64"
+      "sha256": "c4f6b1e8c5126ac2c8a4b98e4283a3afa32223d2488fc3c3a609758c0c9beb90"
     }
   },
   "auth_summary": {

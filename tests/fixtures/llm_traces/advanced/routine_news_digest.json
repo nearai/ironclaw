@@ -1,0 +1,140 @@
+{
+  "model_name": "advanced-routine-news-digest",
+  "expects": {
+    "tools_used": ["routine_create", "routine_fire", "http", "memory_write", "message"],
+    "all_tools_succeeded": true,
+    "min_responses": 2
+  },
+  "turns": [
+    {
+      "user_input": "Set up a morning tech news routine with manual trigger and full_job mode. Pre-authorize the message and http tools.",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "routine" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_routine_1",
+                "name": "routine_create",
+                "arguments": {
+                  "name": "morning-tech-news",
+                  "description": "Fetch tech news via HTTP, write digest to memory, send summary",
+                  "trigger_type": "manual",
+                  "prompt": "Fetch the latest tech news from the API, write a digest to workspace memory, then send a summary message to the user.",
+                  "action_type": "full_job",
+                  "tool_permissions": ["message", "http"],
+                  "cooldown_secs": 60,
+                  "notify_channel": "test",
+                  "notify_user": "default"
+                }
+              }
+            ],
+            "input_tokens": 120,
+            "output_tokens": 60
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Created the **morning-tech-news** routine with manual trigger and full_job mode. The `message` and `http` tools are pre-authorized.",
+            "input_tokens": 200,
+            "output_tokens": 50
+          }
+        }
+      ]
+    },
+    {
+      "user_input": "Fire it now.",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "Fire" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_fire_1",
+                "name": "routine_fire",
+                "arguments": {
+                  "name": "morning-tech-news"
+                }
+              }
+            ],
+            "input_tokens": 250,
+            "output_tokens": 30
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Fired the **morning-tech-news** routine. The job is running now.",
+            "input_tokens": 300,
+            "output_tokens": 40
+          }
+        },
+        {
+          "_comment": "Steps below are consumed by the routine worker (spawned async by routine_fire). The worker hits the same TraceLlm sequentially.",
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_rw_http",
+                "name": "http",
+                "arguments": {
+                  "method": "GET",
+                  "url": "https://news-api.example.com/v1/tech/headlines"
+                }
+              }
+            ],
+            "input_tokens": 100,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_rw_mw",
+                "name": "memory_write",
+                "arguments": {
+                  "content": "# Tech News Digest - 2026-03-05\n\n1. **Rust 2026 Edition** - async closures, generator syntax\n2. **WASM Component Model 1.0** - cross-language interop\n3. **NEAR AI Agent Framework** - on-chain identity",
+                  "target": "routines/morning-tech-news/digest-2026-03-05.md",
+                  "append": false
+                }
+              }
+            ],
+            "input_tokens": 150,
+            "output_tokens": 50
+          }
+        },
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_rw_msg",
+                "name": "message",
+                "arguments": {
+                  "content": "Tech News Digest:\n- Rust 2026 Edition released\n- WASM Component Model 1.0 finalized\n- NEAR AI Agent Framework launched",
+                  "channel": "test",
+                  "target": "default"
+                }
+              }
+            ],
+            "input_tokens": 200,
+            "output_tokens": 30
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Done. Digest written and summary sent.",
+            "input_tokens": 250,
+            "output_tokens": 20
+          }
+        }
+      ]
+    }
+  ]
+}

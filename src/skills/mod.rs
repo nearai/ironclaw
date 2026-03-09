@@ -98,6 +98,10 @@ pub struct ActivationCriteria {
     /// Capped at `MAX_KEYWORDS_PER_SKILL` during loading.
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// Keywords that veto this skill — if any match, score is 0 regardless of
+    /// keyword/pattern matches. Prevents cross-skill interference.
+    #[serde(default)]
+    pub exclude_keywords: Vec<String>,
     /// Regex patterns for more complex matching.
     /// Capped at `MAX_PATTERNS_PER_SKILL` during loading.
     #[serde(default)]
@@ -118,6 +122,9 @@ impl ActivationCriteria {
     pub fn enforce_limits(&mut self) {
         self.keywords.retain(|k| k.len() >= MIN_KEYWORD_TAG_LENGTH);
         self.keywords.truncate(MAX_KEYWORDS_PER_SKILL);
+        self.exclude_keywords
+            .retain(|k| k.len() >= MIN_KEYWORD_TAG_LENGTH);
+        self.exclude_keywords.truncate(MAX_KEYWORDS_PER_SKILL);
         self.patterns.truncate(MAX_PATTERNS_PER_SKILL);
         self.tags.retain(|t| t.len() >= MIN_KEYWORD_TAG_LENGTH);
         self.tags.truncate(MAX_TAGS_PER_SKILL);
@@ -199,6 +206,9 @@ pub struct LoadedSkill {
     /// Pre-computed lowercased keywords for scoring (avoids per-message allocation).
     /// Derived from `manifest.activation.keywords` at load time — do not mutate independently.
     pub lowercased_keywords: Vec<String>,
+    /// Pre-computed lowercased exclude keywords for veto scoring.
+    /// Derived from `manifest.activation.exclude_keywords` at load time.
+    pub lowercased_exclude_keywords: Vec<String>,
     /// Pre-computed lowercased tags for scoring (avoids per-message allocation).
     /// Derived from `manifest.activation.tags` at load time — do not mutate independently.
     pub lowercased_tags: Vec<String>,
@@ -384,6 +394,74 @@ mod tests {
     }
 
     #[test]
+    fn test_activation_criteria_enforce_limits() {
+        // Build criteria that exceed all limits:
+        // - 25 keywords (5 over the 20 cap), including some short ones
+        // - 8 patterns (3 over the 5 cap)
+        // - 15 tags (5 over the 10 cap), including some short ones
+        let mut keywords: Vec<String> = vec!["a".into(), "bb".into()]; // short, should be filtered
+        keywords.extend((0..25).map(|i| format!("keyword{}", i)));
+
+        let patterns: Vec<String> = (0..8).map(|i| format!("pattern{}", i)).collect();
+
+        let mut tags: Vec<String> = vec!["x".into(), "ab".into()]; // short, should be filtered
+        tags.extend((0..15).map(|i| format!("tag{}", i)));
+
+        let mut criteria = ActivationCriteria {
+            keywords,
+            patterns,
+            tags,
+            ..Default::default()
+        };
+
+        criteria.enforce_limits();
+
+        // Short keywords (<3 chars) filtered, then truncated to 20
+        assert!(
+            !criteria
+                .keywords
+                .iter()
+                .any(|k| k.len() < MIN_KEYWORD_TAG_LENGTH),
+            "keywords shorter than {} chars should be filtered out",
+            MIN_KEYWORD_TAG_LENGTH
+        );
+        assert_eq!(
+            criteria.keywords.len(),
+            MAX_KEYWORDS_PER_SKILL,
+            "keywords should be capped at {}",
+            MAX_KEYWORDS_PER_SKILL
+        );
+
+        // Patterns truncated to 5 (no length filter on patterns)
+        assert_eq!(
+            criteria.patterns.len(),
+            MAX_PATTERNS_PER_SKILL,
+            "patterns should be capped at {}",
+            MAX_PATTERNS_PER_SKILL
+        );
+        // Verify the retained patterns are the first 5
+        for i in 0..MAX_PATTERNS_PER_SKILL {
+            assert_eq!(criteria.patterns[i], format!("pattern{}", i));
+        }
+
+        // Short tags (<3 chars) filtered, then truncated to 10
+        assert!(
+            !criteria
+                .tags
+                .iter()
+                .any(|t| t.len() < MIN_KEYWORD_TAG_LENGTH),
+            "tags shorter than {} chars should be filtered out",
+            MIN_KEYWORD_TAG_LENGTH
+        );
+        assert_eq!(
+            criteria.tags.len(),
+            MAX_TAGS_PER_SKILL,
+            "tags should be capped at {}",
+            MAX_TAGS_PER_SKILL
+        );
+    }
+
+    #[test]
     fn test_compile_patterns() {
         let patterns = vec![
             r"(?i)\bwrite\b".to_string(),
@@ -445,6 +523,7 @@ metadata:
             content_hash: "sha256:000".to_string(),
             compiled_patterns: vec![],
             lowercased_keywords: vec![],
+            lowercased_exclude_keywords: vec![],
             lowercased_tags: vec![],
         };
         assert_eq!(skill.name(), "test");

@@ -24,6 +24,13 @@ pub mod types;
 pub(crate) mod util;
 pub mod ws;
 
+/// Test helpers for gateway integration tests.
+///
+/// Always compiled (not behind `#[cfg(test)]`) so that integration tests in
+/// `tests/` -- which import this crate as a regular dependency -- can use
+/// [`TestGatewayBuilder`](test_helpers::TestGatewayBuilder).
+pub mod test_helpers;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -92,6 +99,7 @@ impl GatewayChannel {
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
         });
 
@@ -127,6 +135,7 @@ impl GatewayChannel {
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
+            routine_engine: Arc::clone(&self.state.routine_engine),
             startup_time: self.state.startup_time,
         };
         mutate(&mut new_state);
@@ -274,7 +283,15 @@ impl Channel for GatewayChannel {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let thread_id = msg.thread_id.clone().unwrap_or_default();
+        let thread_id = match &msg.thread_id {
+            Some(tid) => tid.clone(),
+            None => {
+                tracing::warn!(
+                    "Gateway respond with no thread_id — skipping (clients would drop it)"
+                );
+                return Ok(());
+            }
+        };
 
         self.state.sse.broadcast(SseEvent::Response {
             content: response.content,
@@ -369,6 +386,11 @@ impl Channel for GatewayChannel {
                 success,
                 message,
             },
+            StatusUpdate::ImageGenerated { data_url, path } => SseEvent::ImageGenerated {
+                data_url,
+                path,
+                thread_id,
+            },
         };
 
         self.state.sse.broadcast(event);
@@ -380,9 +402,18 @@ impl Channel for GatewayChannel {
         _user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let thread_id = match response.thread_id {
+            Some(tid) => tid,
+            None => {
+                tracing::warn!(
+                    "Gateway broadcast with no thread_id — skipping (clients would drop it)"
+                );
+                return Ok(());
+            }
+        };
         self.state.sse.broadcast(SseEvent::Response {
             content: response.content,
-            thread_id: String::new(),
+            thread_id,
         });
         Ok(())
     }

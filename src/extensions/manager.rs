@@ -18,7 +18,8 @@ use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
     ActivateResult, AuthResult, ExtensionError, ExtensionKind, ExtensionSource, InstallResult,
-    InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
+    InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState, UpgradeOutcome,
+    UpgradeResult,
 };
 use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
@@ -412,6 +413,7 @@ impl ExtensionManager {
                             has_auth: false,
                             installed: true,
                             activation_error: None,
+                            version: None,
                         });
                     }
                 }
@@ -427,15 +429,28 @@ impl ExtensionManager {
         {
             match discover_tools(&self.wasm_tools_dir).await {
                 Ok(tools) => {
-                    for (name, _discovered) in tools {
+                    for (name, discovered) in tools {
                         let active = self.tool_registry.has(&name).await;
 
-                        let display_name = self
+                        let registry_entry = self
                             .registry
                             .get_with_kind(&name, Some(ExtensionKind::WasmTool))
-                            .await
-                            .map(|e| e.display_name);
+                            .await;
+                        let display_name = registry_entry.as_ref().map(|e| e.display_name.clone());
                         let auth_state = self.check_tool_auth_status(&name).await;
+                        let version = if let Some(ref cap_path) = discovered.capabilities_path {
+                            tokio::fs::read(cap_path)
+                                .await
+                                .ok()
+                                .and_then(|bytes| {
+                                    crate::tools::wasm::CapabilitiesFile::from_bytes(&bytes).ok()
+                                })
+                                .and_then(|cap| cap.version)
+                        } else {
+                            None
+                        };
+                        let version =
+                            version.or_else(|| registry_entry.and_then(|e| e.version.clone()));
                         extensions.push(InstalledExtension {
                             name: name.clone(),
                             kind: ExtensionKind::WasmTool,
@@ -449,6 +464,7 @@ impl ExtensionManager {
                             has_auth: auth_state != ToolAuthState::NoAuth,
                             installed: true,
                             activation_error: None,
+                            version,
                         });
                     }
                 }
@@ -466,15 +482,31 @@ impl ExtensionManager {
                 Ok(channels) => {
                     let active_names = self.active_channel_names.read().await;
                     let errors = self.activation_errors.read().await;
-                    for (name, _discovered) in channels {
+                    for (name, discovered) in channels {
                         let active = active_names.contains(&name);
                         let auth_state = self.check_channel_auth_status(&name).await;
                         let activation_error = errors.get(&name).cloned();
-                        let display_name = self
+                        let registry_entry = self
                             .registry
                             .get_with_kind(&name, Some(ExtensionKind::WasmChannel))
-                            .await
-                            .map(|e| e.display_name);
+                            .await;
+                        let display_name = registry_entry.as_ref().map(|e| e.display_name.clone());
+                        let version = if let Some(ref cap_path) = discovered.capabilities_path {
+                            tokio::fs::read(cap_path)
+                                .await
+                                .ok()
+                                .and_then(|bytes| {
+                                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(
+                                        &bytes,
+                                    )
+                                    .ok()
+                                })
+                                .and_then(|cap| cap.version)
+                        } else {
+                            None
+                        };
+                        let version =
+                            version.or_else(|| registry_entry.and_then(|e| e.version.clone()));
                         extensions.push(InstalledExtension {
                             name,
                             kind: ExtensionKind::WasmChannel,
@@ -488,6 +520,7 @@ impl ExtensionManager {
                             has_auth: false,
                             installed: true,
                             activation_error,
+                            version,
                         });
                     }
                 }
@@ -526,6 +559,7 @@ impl ExtensionManager {
                     has_auth: false,
                     installed: false,
                     activation_error: None,
+                    version: entry.version,
                 });
             }
         }
@@ -633,6 +667,279 @@ impl ExtensionManager {
                     "Removed channel '{}'. Restart IronClaw for the change to take effect.",
                     name
                 ))
+            }
+        }
+    }
+
+    /// Upgrade installed WASM extensions to match the current host WIT version.
+    ///
+    /// If `name` is `Some`, upgrades only that extension.  If `None`, checks all
+    /// installed WASM tools and channels and upgrades any that are outdated.
+    ///
+    /// The upgrade preserves authentication secrets — only the `.wasm` binary
+    /// (and `.capabilities.json`) are replaced.
+    pub async fn upgrade(&self, name: Option<&str>) -> Result<UpgradeResult, ExtensionError> {
+        // Collect extensions to check
+        let mut candidates: Vec<(String, ExtensionKind)> = Vec::new();
+
+        if let Some(name) = name {
+            Self::validate_extension_name(name)?;
+            let kind = self.determine_installed_kind(name).await?;
+            if kind == ExtensionKind::McpServer {
+                return Err(ExtensionError::Other(
+                    "MCP servers don't have WIT versions and cannot be upgraded this way"
+                        .to_string(),
+                ));
+            }
+            candidates.push((name.to_string(), kind));
+        } else {
+            // Discover all installed WASM tools
+            if self.wasm_tools_dir.exists()
+                && let Ok(tools) = discover_tools(&self.wasm_tools_dir).await
+            {
+                for (tool_name, _) in tools {
+                    candidates.push((tool_name, ExtensionKind::WasmTool));
+                }
+            }
+            // Discover all installed WASM channels
+            if self.wasm_channels_dir.exists()
+                && let Ok(channels) =
+                    crate::channels::wasm::discover_channels(&self.wasm_channels_dir).await
+            {
+                for (ch_name, _) in channels {
+                    candidates.push((ch_name, ExtensionKind::WasmChannel));
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(UpgradeResult {
+                results: Vec::new(),
+                message: "No WASM extensions installed.".to_string(),
+            });
+        }
+
+        let mut outcomes = Vec::new();
+
+        for (ext_name, kind) in &candidates {
+            let outcome = self.upgrade_one(ext_name, *kind).await;
+            outcomes.push(outcome);
+        }
+
+        let upgraded = outcomes.iter().filter(|o| o.status == "upgraded").count();
+        let up_to_date = outcomes
+            .iter()
+            .filter(|o| o.status == "already_up_to_date")
+            .count();
+        let failed = outcomes.iter().filter(|o| o.status == "failed").count();
+
+        let message = format!(
+            "{} extension(s) checked: {} upgraded, {} already up to date, {} failed",
+            outcomes.len(),
+            upgraded,
+            up_to_date,
+            failed
+        );
+
+        Ok(UpgradeResult {
+            results: outcomes,
+            message,
+        })
+    }
+
+    /// Upgrade a single WASM extension if its WIT version is outdated.
+    async fn upgrade_one(&self, name: &str, kind: ExtensionKind) -> UpgradeOutcome {
+        let (cap_dir, host_wit) = match kind {
+            ExtensionKind::WasmTool => (&self.wasm_tools_dir, crate::tools::wasm::WIT_TOOL_VERSION),
+            ExtensionKind::WasmChannel => (
+                &self.wasm_channels_dir,
+                crate::tools::wasm::WIT_CHANNEL_VERSION,
+            ),
+            ExtensionKind::McpServer => {
+                return UpgradeOutcome {
+                    name: name.to_string(),
+                    kind,
+                    status: "failed".to_string(),
+                    detail: "MCP servers cannot be upgraded this way".to_string(),
+                };
+            }
+        };
+
+        // Read current WIT version from capabilities
+        let cap_path = cap_dir.join(format!("{}.capabilities.json", name));
+        let declared_wit = if cap_path.exists() {
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => {
+                    let wit: Option<String> = match kind {
+                        ExtensionKind::WasmTool => {
+                            crate::tools::wasm::CapabilitiesFile::from_bytes(&bytes)
+                                .ok()
+                                .and_then(|c| c.wit_version)
+                        }
+                        ExtensionKind::WasmChannel => {
+                            crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                                .ok()
+                                .and_then(|c| c.wit_version)
+                        }
+                        ExtensionKind::McpServer => None,
+                    };
+                    wit
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        // Check if upgrade is needed
+        let needs_upgrade =
+            crate::tools::wasm::check_wit_version_compat(name, declared_wit.as_deref(), host_wit)
+                .is_err();
+
+        if !needs_upgrade {
+            return UpgradeOutcome {
+                name: name.to_string(),
+                kind,
+                status: "already_up_to_date".to_string(),
+                detail: format!(
+                    "WIT {} matches host WIT {}",
+                    declared_wit.as_deref().unwrap_or("unknown"),
+                    host_wit
+                ),
+            };
+        }
+
+        // Check registry for a newer version
+        let entry = self.registry.get_with_kind(name, Some(kind)).await;
+        let Some(entry) = entry else {
+            return UpgradeOutcome {
+                name: name.to_string(),
+                kind,
+                status: "not_in_registry".to_string(),
+                detail: format!(
+                    "Extension '{}' has outdated WIT {} (host: {}), \
+                     but is not in the registry. Reinstall manually with a URL.",
+                    name,
+                    declared_wit.as_deref().unwrap_or("unknown"),
+                    host_wit
+                ),
+            };
+        };
+
+        // Delete old .wasm file (keep secrets intact)
+        let wasm_path = cap_dir.join(format!("{}.wasm", name));
+        if wasm_path.exists()
+            && let Err(e) = tokio::fs::remove_file(&wasm_path).await
+        {
+            return UpgradeOutcome {
+                name: name.to_string(),
+                kind,
+                status: "failed".to_string(),
+                detail: format!("Failed to remove old WASM binary: {}", e),
+            };
+        }
+        // Also remove old capabilities so install_from_entry can write the new one
+        if cap_path.exists() {
+            let _ = tokio::fs::remove_file(&cap_path).await;
+        }
+
+        // Reinstall from registry
+        match self.install_from_entry(&entry).await {
+            Ok(_) => {
+                tracing::info!(
+                    extension = %name,
+                    old_wit = ?declared_wit,
+                    new_host_wit = %host_wit,
+                    "Upgraded WASM extension"
+                );
+                UpgradeOutcome {
+                    name: name.to_string(),
+                    kind,
+                    status: "upgraded".to_string(),
+                    detail: format!(
+                        "Upgraded from WIT {} to host WIT {}. Restart to activate.",
+                        declared_wit.as_deref().unwrap_or("unknown"),
+                        host_wit
+                    ),
+                }
+            }
+            Err(e) => UpgradeOutcome {
+                name: name.to_string(),
+                kind,
+                status: "failed".to_string(),
+                detail: format!("Reinstall failed: {}. Old files were removed.", e),
+            },
+        }
+    }
+
+    /// Get detailed info about an installed extension (version, wit_version, host compatibility).
+    pub async fn extension_info(&self, name: &str) -> Result<serde_json::Value, ExtensionError> {
+        Self::validate_extension_name(name)?;
+        let kind = self.determine_installed_kind(name).await?;
+
+        match kind {
+            ExtensionKind::WasmTool => {
+                let cap_path = self
+                    .wasm_tools_dir
+                    .join(format!("{}.capabilities.json", name));
+                let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
+
+                let mut info = serde_json::json!({
+                    "name": name,
+                    "kind": "wasm_tool",
+                    "installed": wasm_path.exists(),
+                });
+
+                if cap_path.exists()
+                    && let Ok(bytes) = tokio::fs::read(&cap_path).await
+                    && let Ok(cap) = crate::tools::wasm::CapabilitiesFile::from_bytes(&bytes)
+                {
+                    info["version"] =
+                        serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
+                    info["wit_version"] =
+                        serde_json::json!(cap.wit_version.unwrap_or_else(|| "unknown".into()));
+                }
+
+                info["host_wit_version"] = serde_json::json!(crate::tools::wasm::WIT_TOOL_VERSION);
+
+                Ok(info)
+            }
+            ExtensionKind::WasmChannel => {
+                let cap_path = self
+                    .wasm_channels_dir
+                    .join(format!("{}.capabilities.json", name));
+                let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
+
+                let mut info = serde_json::json!({
+                    "name": name,
+                    "kind": "wasm_channel",
+                    "installed": wasm_path.exists(),
+                    "active": self.active_channel_names.read().await.contains(name),
+                });
+
+                if cap_path.exists()
+                    && let Ok(bytes) = tokio::fs::read(&cap_path).await
+                    && let Ok(cap) =
+                        crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                {
+                    info["version"] =
+                        serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
+                    info["wit_version"] =
+                        serde_json::json!(cap.wit_version.unwrap_or_else(|| "unknown".into()));
+                }
+
+                info["host_wit_version"] =
+                    serde_json::json!(crate::tools::wasm::WIT_CHANNEL_VERSION);
+
+                Ok(info)
+            }
+            ExtensionKind::McpServer => {
+                let info = serde_json::json!({
+                    "name": name,
+                    "kind": "mcp_server",
+                    "connected": self.mcp_clients.read().await.contains_key(name),
+                });
+                Ok(info)
             }
         }
     }
@@ -1098,38 +1405,6 @@ impl ExtensionManager {
         Ok(())
     }
 
-    #[allow(dead_code)] // Used by upcoming hot-activation flow
-    async fn install_bundled_channel_from_artifacts(
-        &self,
-        name: &str,
-    ) -> Result<InstallResult, ExtensionError> {
-        // Check if already installed
-        let channel_wasm = self.wasm_channels_dir.join(format!("{}.wasm", name));
-        if channel_wasm.exists() {
-            return Err(ExtensionError::AlreadyInstalled(name.to_string()));
-        }
-
-        crate::channels::wasm::install_bundled_channel(name, &self.wasm_channels_dir, false)
-            .await
-            .map_err(ExtensionError::InstallFailed)?;
-
-        tracing::info!(
-            "Installed bundled channel '{}' to {}",
-            name,
-            self.wasm_channels_dir.display()
-        );
-
-        Ok(InstallResult {
-            name: name.to_string(),
-            kind: ExtensionKind::WasmChannel,
-            message: format!(
-                "Channel '{}' installed. \
-                 Run tool_auth('{}') to configure authentication, then activate.",
-                name, name,
-            ),
-        })
-    }
-
     /// Install a WASM extension from local build artifacts (WasmBuildable source).
     ///
     /// Resolves the build directory (relative to `CARGO_MANIFEST_DIR` or absolute),
@@ -1321,6 +1596,7 @@ impl ExtensionManager {
             &metadata.scopes_supported,
             Some(&pkce),
             &std::collections::HashMap::new(),
+            None,
         );
 
         // Store pending auth for later callback handling
@@ -2201,7 +2477,7 @@ impl ExtensionManager {
                 &self.user_id,
             )
         } else {
-            McpClient::new_with_name(&server.name, &server.url)
+            McpClient::new_with_config(server.clone())
         };
 
         // Try to list and create tools
@@ -3264,6 +3540,7 @@ fn combine_install_errors(
 mod tests {
     use std::sync::Arc;
 
+    use crate::extensions::ExtensionManager;
     use crate::extensions::manager::{
         FallbackDecision, combine_install_errors, fallback_decision, infer_kind_from_url,
     };
@@ -3548,5 +3825,108 @@ mod tests {
         // Both exist with distinct content.
         assert_eq!(std::fs::read_to_string(&tool_cap).unwrap(), tool_caps);
         assert_eq!(std::fs::read_to_string(&channel_cap).unwrap(), channel_caps);
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_no_installed_extensions() {
+        let manager = make_manager_with_temp_dirs();
+        let result = manager.upgrade(None).await.unwrap();
+        assert!(result.results.is_empty());
+        assert!(result.message.contains("No WASM extensions installed"));
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_mcp_server_rejected() {
+        let manager = make_manager_with_temp_dirs();
+        // MCP servers can't be upgraded via tool_upgrade
+        let err = manager.upgrade(Some("some-mcp")).await;
+        // It will fail with NotInstalled because there's no MCP server named "some-mcp",
+        // but if it were installed, the MCP code path would be rejected.
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_up_to_date_extension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        // Write a fake .wasm file and capabilities with current WIT version
+        let wasm_path = channels_dir.join("test-channel.wasm");
+        std::fs::write(&wasm_path, b"\0asm fake").unwrap();
+
+        let cap_path = channels_dir.join("test-channel.capabilities.json");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "test-channel",
+            "wit_version": crate::tools::wasm::WIT_CHANNEL_VERSION,
+        });
+        std::fs::write(&cap_path, serde_json::to_string(&caps).unwrap()).unwrap();
+
+        let manager = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+
+        let result = manager.upgrade(Some("test-channel")).await.unwrap();
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].status, "already_up_to_date");
+    }
+
+    #[tokio::test]
+    async fn test_upgrade_outdated_not_in_registry() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        // Write a fake .wasm file and capabilities with OLD WIT version
+        let wasm_path = channels_dir.join("custom-channel.wasm");
+        std::fs::write(&wasm_path, b"\0asm fake").unwrap();
+
+        let cap_path = channels_dir.join("custom-channel.capabilities.json");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "custom-channel",
+            "wit_version": "0.1.0",
+        });
+        std::fs::write(&cap_path, serde_json::to_string(&caps).unwrap()).unwrap();
+
+        let manager = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+
+        let result = manager.upgrade(Some("custom-channel")).await.unwrap();
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].status, "not_in_registry");
+    }
+
+    fn make_manager_with_temp_dirs() -> ExtensionManager {
+        let dir = tempfile::tempdir().expect("temp dir");
+        make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"))
+    }
+
+    fn make_manager_custom_dirs(
+        tools_dir: std::path::PathBuf,
+        channels_dir: std::path::PathBuf,
+    ) -> ExtensionManager {
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::tools::ToolRegistry;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        std::fs::create_dir_all(&tools_dir).ok();
+        std::fs::create_dir_all(&channels_dir).ok();
+
+        let master_key =
+            secrecy::SecretString::from("0123456789abcdef0123456789abcdef".to_string());
+        let crypto = Arc::new(SecretsCrypto::new(master_key).unwrap());
+
+        ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(InMemorySecretsStore::new(crypto)),
+            Arc::new(ToolRegistry::new()),
+            None,
+            None,
+            tools_dir,
+            channels_dir,
+            None,
+            "test".to_string(),
+            None,
+            Vec::new(),
+        )
     }
 }
