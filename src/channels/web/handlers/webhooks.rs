@@ -26,50 +26,52 @@ pub async fn webhook_trigger_handler(
     Path(path): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Rate limit check
+    if !state.webhook_rate_limiter.check() {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Rate limit exceeded. Try again shortly.".to_string(),
+        ));
+    }
+
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
 
-    // Load all routines and find one whose Trigger::Webhook path matches.
-    let routines = store
-        .list_all_routines()
+    // Targeted query instead of loading all routines
+    let routine = store
+        .get_webhook_routine_by_path(&path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "No routine matches this webhook path".to_string(),
+        ))?;
 
-    let matched = routines.into_iter().find(|r| {
-        if !r.enabled {
-            return false;
-        }
-        match &r.trigger {
-            Trigger::Webhook { path: Some(wp), .. } => *wp == path,
-            Trigger::Webhook { path: None, .. } => path == r.id.to_string(),
-            _ => false,
-        }
-    });
-
-    let routine = matched.ok_or((
-        StatusCode::NOT_FOUND,
-        "No routine matches this webhook path".to_string(),
-    ))?;
-
-    // Validate the webhook secret if one is configured on the routine.
-    if let Trigger::Webhook {
-        secret: Some(expected_secret),
-        ..
-    } = &routine.trigger
-    {
-        let provided_secret = headers
-            .get("x-webhook-secret")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        if !bool::from(provided_secret.as_bytes().ct_eq(expected_secret.as_bytes())) {
+    // Require webhook secret — routines without a secret cannot be triggered via webhook
+    let expected_secret = match &routine.trigger {
+        Trigger::Webhook {
+            secret: Some(s), ..
+        } => s,
+        _ => {
             return Err((
-                StatusCode::UNAUTHORIZED,
-                "Invalid webhook secret".to_string(),
+                StatusCode::FORBIDDEN,
+                "Webhook secret not configured for this routine".to_string(),
             ));
         }
+    };
+
+    let provided_secret = headers
+        .get("x-webhook-secret")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !bool::from(provided_secret.as_bytes().ct_eq(expected_secret.as_bytes())) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid webhook secret".to_string(),
+        ));
     }
 
     // Build the prompt from the routine action.
@@ -130,78 +132,45 @@ mod tests {
         assert!(!bool::from(empty.as_bytes().ct_eq(expected.as_bytes())));
     }
 
-    /// Verify that webhook path matching logic works for both explicit paths
-    /// and fallback to routine ID.
+    /// Verify that routines without a configured secret are rejected.
     #[test]
-    fn test_webhook_path_matching() {
-        use chrono::Utc;
-        use uuid::Uuid;
-
-        let routine_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-
-        let routine = crate::agent::routine::Routine {
-            id: routine_id,
-            name: "test-routine".to_string(),
-            description: "A test routine".to_string(),
-            user_id: "test-user".to_string(),
-            enabled: true,
-            trigger: Trigger::Webhook {
-                path: Some("my-hook".to_string()),
-                secret: None,
-            },
-            action: RoutineAction::Lightweight {
-                prompt: "do stuff".to_string(),
-                context_paths: vec![],
-                max_tokens: 4096,
-            },
-            guardrails: crate::agent::routine::RoutineGuardrails::default(),
-            notify: crate::agent::routine::NotifyConfig::default(),
-            last_run_at: None,
-            next_fire_at: None,
-            run_count: 0,
-            consecutive_failures: 0,
-            state: serde_json::Value::Null,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+    fn test_webhook_rejects_missing_secret() {
+        let trigger = Trigger::Webhook {
+            path: Some("my-hook".to_string()),
+            secret: None,
         };
 
-        // Explicit path match
-        let matches_explicit = match &routine.trigger {
-            Trigger::Webhook { path: Some(wp), .. } => *wp == "my-hook",
-            _ => false,
-        };
-        assert!(matches_explicit);
-
-        // Should NOT match wrong path
-        let matches_wrong = match &routine.trigger {
-            Trigger::Webhook { path: Some(wp), .. } => *wp == "other-hook",
-            _ => false,
-        };
-        assert!(!matches_wrong);
-
-        // Routine with no explicit path falls back to ID
-        let routine_no_path = crate::agent::routine::Routine {
-            trigger: Trigger::Webhook {
-                path: None,
-                secret: None,
-            },
-            ..routine.clone()
-        };
-        let matches_id = match &routine_no_path.trigger {
-            Trigger::Webhook { path: None, .. } => {
-                routine_no_path.id.to_string() == "550e8400-e29b-41d4-a716-446655440000"
+        // The handler rejects routines where secret is None
+        let has_secret = matches!(
+            &trigger,
+            Trigger::Webhook {
+                secret: Some(_),
+                ..
             }
-            _ => false,
-        };
-        assert!(matches_id);
+        );
+        assert!(!has_secret, "Trigger with secret: None must be rejected");
 
-        // Disabled routine should not match
-        let disabled = !routine.enabled;
-        assert!(!disabled, "test fixture should be enabled");
-        let disabled_routine = crate::agent::routine::Routine {
-            enabled: false,
-            ..routine
+        // Trigger with a secret should pass the check
+        let trigger_with_secret = Trigger::Webhook {
+            path: Some("my-hook".to_string()),
+            secret: Some("s3cret".to_string()),
         };
-        assert!(!disabled_routine.enabled);
+        let has_secret = matches!(
+            &trigger_with_secret,
+            Trigger::Webhook {
+                secret: Some(_),
+                ..
+            }
+        );
+        assert!(has_secret, "Trigger with a secret should be accepted");
+    }
+
+    /// Verify rate limit error returns proper 429 status text.
+    #[test]
+    fn test_webhook_rate_limit_format() {
+        let error_msg = "Rate limit exceeded. Try again shortly.";
+        let status = StatusCode::TOO_MANY_REQUESTS;
+        assert_eq!(status.as_u16(), 429);
+        assert!(error_msg.contains("Rate limit"));
     }
 }

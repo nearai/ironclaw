@@ -291,6 +291,17 @@ impl Tool for RoutineCreateTool {
                     filters,
                 }
             }
+            "webhook" => {
+                let path = params
+                    .get("webhook_path")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let secret = params
+                    .get("webhook_secret")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                Trigger::Webhook { path, secret }
+            }
             "manual" => Trigger::Manual,
             other => {
                 return Err(ToolError::InvalidParameters(format!(

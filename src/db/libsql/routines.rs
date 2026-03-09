@@ -476,4 +476,32 @@ impl RoutineStore for LibSqlBackend {
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
     }
+
+    async fn get_webhook_routine_by_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<Routine>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'webhook' \
+                     AND (json_extract(trigger_config, '$.path') = ?1 \
+                     OR (json_extract(trigger_config, '$.path') IS NULL AND CAST(id AS TEXT) = ?1))",
+                    ROUTINE_COLUMNS
+                ),
+                params![path],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(Some(row_to_routine_libsql(&row)?)),
+            None => Ok(None),
+        }
+    }
 }
