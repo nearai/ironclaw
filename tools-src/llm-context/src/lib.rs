@@ -154,16 +154,17 @@ struct PoiMapEntry {
 
 /// Validate the input parameters against the schema.
 fn validate_params(params: &LlmContextParams) -> Result<(), String> {
-    if params.query.is_empty() {
+    let trimmed = params.query.trim();
+    if trimmed.is_empty() {
         return Err("'query' must not be empty or only whitespace".into());
     }
-    if params.query.len() > MAX_QUERY_LEN {
+    if trimmed.chars().count() > MAX_QUERY_LEN {
         return Err(format!(
             "'query' exceeds maximum length of {} characters",
             MAX_QUERY_LEN
         ));
     }
-    let word_count = params.query.split_whitespace().count();
+    let word_count = trimmed.split_whitespace().count();
     if word_count > MAX_QUERY_WORDS {
         return Err(format!(
             "'query' exceeds maximum of {} words (got {})",
@@ -228,10 +229,8 @@ fn validate_params(params: &LlmContextParams) -> Result<(), String> {
 
 /// Entry point: parse, validate, call API, format output.
 fn execute_inner(params: &str) -> Result<String, String> {
-    let mut params: LlmContextParams =
+    let params: LlmContextParams =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {e}"))?;
-
-    params.query = params.query.trim().to_string();
 
     validate_params(&params)?;
     preflight_check()?;
@@ -254,11 +253,10 @@ fn preflight_check() -> Result<(), String> {
     Ok(())
 }
 
-/// Call the Brave LLM Context API with retry on transient errors.
+/// Call the Brave LLM Context API with retry on transient server errors.
 ///
-/// NOTE: Retries are immediate (no backoff) because the WASM sandbox does not expose a
-/// sleep primitive. For 429 responses this is suboptimal; if the host ever provides a
-/// `sleep` import, add exponential backoff here.
+/// Retries on 5xx errors only. 429 (rate limit) is not retried since the WASM
+/// sandbox has no sleep primitive and immediate retry would just hit the limit again.
 fn call_brave_api(params: &LlmContextParams) -> Result<String, String> {
     let request_body = build_request_body(params)?;
     let headers = build_request_headers(params);
@@ -280,7 +278,7 @@ fn call_brave_api(params: &LlmContextParams) -> Result<String, String> {
             break resp;
         }
 
-        if attempt < MAX_RETRIES && (resp.status == 429 || resp.status >= 500) {
+        if attempt < MAX_RETRIES && resp.status >= 500 {
             near::agent::host::log(
                 near::agent::host::LogLevel::Warn,
                 &format!(
@@ -407,7 +405,7 @@ fn build_request_body(params: &LlmContextParams) -> Result<Vec<u8>, String> {
     let mut body = serde_json::Map::new();
     body.insert(
         "q".to_string(),
-        serde_json::Value::String(params.query.clone()),
+        serde_json::Value::String(params.query.trim().to_string()),
     );
 
     // Insert number fields
