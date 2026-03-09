@@ -686,11 +686,20 @@ impl Agent {
                                 let is_image_sentinel = if let Ok(ref output) = tool_result
                                     && matches!(tc.name.as_str(), "image_generate" | "image_edit")
                                 {
-                                    if let Ok(sentinel) = serde_json::from_str::<serde_json::Value>(output)
-                                        && sentinel.get("type").and_then(|v| v.as_str()) == Some("image_generated")
+                                    if let Ok(sentinel) =
+                                        serde_json::from_str::<serde_json::Value>(output)
+                                        && sentinel.get("type").and_then(|v| v.as_str())
+                                            == Some("image_generated")
                                     {
-                                        let data_url = sentinel.get("data").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                                        let path = sentinel.get("path").and_then(|v| v.as_str()).map(String::from);
+                                        let data_url = sentinel
+                                            .get("data")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        let path = sentinel
+                                            .get("path")
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from);
                                         let _ = self
                                             .channels
                                             .send_status(

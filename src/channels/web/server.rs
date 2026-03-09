@@ -609,7 +609,9 @@ async fn oauth_callback_handler(
 // --- Chat handlers ---
 
 /// Convert web gateway `ImageData` to `IncomingAttachment` objects.
-pub(crate) fn images_to_attachments(images: &[ImageData]) -> Vec<crate::channels::IncomingAttachment> {
+pub(crate) fn images_to_attachments(
+    images: &[ImageData],
+) -> Vec<crate::channels::IncomingAttachment> {
     use base64::Engine;
     images
         .iter()

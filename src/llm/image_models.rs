@@ -23,7 +23,14 @@ pub fn is_image_generation_model(model: &str) -> bool {
 ///
 /// Priority: FLUX > DALL-E > Stable Diffusion > others.
 pub fn suggest_image_model(models: &[String]) -> Option<&str> {
-    let priorities: &[&str] = &["flux", "dall-e", "dalle", "stable-diffusion", "sdxl", "imagen"];
+    let priorities: &[&str] = &[
+        "flux",
+        "dall-e",
+        "dalle",
+        "stable-diffusion",
+        "sdxl",
+        "imagen",
+    ];
     for priority in priorities {
         if let Some(model) = models.iter().find(|m| m.to_lowercase().contains(priority)) {
             return Some(model);
@@ -45,7 +52,9 @@ mod tests {
 
     #[test]
     fn detects_flux_models() {
-        assert!(is_image_generation_model("black-forest-labs/FLUX.1-schnell"));
+        assert!(is_image_generation_model(
+            "black-forest-labs/FLUX.1-schnell"
+        ));
         assert!(is_image_generation_model("flux-pro"));
     }
 

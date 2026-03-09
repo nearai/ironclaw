@@ -56,13 +56,13 @@ impl ImageEditTool {
             PathBuf::from(image_path)
         };
 
-        let canonical = resolved.canonicalize().map_err(|e| {
-            ToolError::ExecutionFailed(format!("Image path not found: {e}"))
-        })?;
+        let canonical = resolved
+            .canonicalize()
+            .map_err(|e| ToolError::ExecutionFailed(format!("Image path not found: {e}")))?;
 
-        tokio::fs::read(&canonical).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to read image file: {e}"))
-        })
+        tokio::fs::read(&canonical)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read image file: {e}")))
     }
 }
 
@@ -113,18 +113,14 @@ impl Tool for ImageEditTool {
             .get("prompt")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ToolError::InvalidParameters(
-                    "Missing required 'prompt' parameter".to_string(),
-                )
+                ToolError::InvalidParameters("Missing required 'prompt' parameter".to_string())
             })?;
 
         let image_path = params
             .get("image_path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ToolError::InvalidParameters(
-                    "Missing required 'image_path' parameter".to_string(),
-                )
+                ToolError::InvalidParameters("Missing required 'image_path' parameter".to_string())
             })?;
 
         if prompt.len() > 4000 {
@@ -157,9 +153,7 @@ impl Tool for ImageEditTool {
                 "image",
                 reqwest::multipart::Part::bytes(image_bytes)
                     .mime_str(media_type)
-                    .map_err(|e| {
-                        ToolError::ExecutionFailed(format!("Invalid media type: {e}"))
-                    })?
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Invalid media type: {e}")))?
                     .file_name("image"),
             );
 
@@ -170,9 +164,7 @@ impl Tool for ImageEditTool {
             .multipart(form)
             .send()
             .await
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Image edit request failed: {e}"))
-            })?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Image edit request failed: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -192,20 +184,15 @@ impl Tool for ImageEditTool {
             )));
         }
 
-        let resp: serde_json::Value =
-            response.json().await.map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to parse image edit response: {e}"
-                ))
-            })?;
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to parse image edit response: {e}"))
+        })?;
 
         let edited_data = resp
             .pointer("/data/0/b64_json")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ToolError::ExecutionFailed(
-                    "No image data in edit response".to_string(),
-                )
+                ToolError::ExecutionFailed("No image data in edit response".to_string())
             })?;
 
         let sentinel = serde_json::json!({
@@ -251,9 +238,7 @@ impl ImageEditTool {
             .send()
             .await
             .map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "Fallback image generation failed: {e}"
-                ))
+                ToolError::ExecutionFailed(format!("Fallback image generation failed: {e}"))
             })?;
 
         if !response.status().is_success() {
@@ -264,20 +249,15 @@ impl ImageEditTool {
             )));
         }
 
-        let resp: serde_json::Value =
-            response.json().await.map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to parse fallback response: {e}"
-                ))
-            })?;
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to parse fallback response: {e}"))
+        })?;
 
         let image_data = resp
             .pointer("/data/0/b64_json")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ToolError::ExecutionFailed(
-                    "No image data in fallback response".to_string(),
-                )
+                ToolError::ExecutionFailed("No image data in fallback response".to_string())
             })?;
 
         let sentinel = serde_json::json!({

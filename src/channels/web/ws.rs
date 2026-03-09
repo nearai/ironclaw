@@ -172,8 +172,7 @@ async fn handle_client_message(
 
             // Convert uploaded images to IncomingAttachments
             if !images.is_empty() {
-                let attachments =
-                    crate::channels::web::server::images_to_attachments(&images);
+                let attachments = crate::channels::web::server::images_to_attachments(&images);
                 incoming = incoming.with_attachments(attachments);
             }
 

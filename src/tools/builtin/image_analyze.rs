@@ -60,13 +60,13 @@ impl ImageAnalyzeTool {
             PathBuf::from(image_path)
         };
 
-        let canonical = resolved.canonicalize().map_err(|e| {
-            ToolError::ExecutionFailed(format!("Image path not found: {e}"))
-        })?;
+        let canonical = resolved
+            .canonicalize()
+            .map_err(|e| ToolError::ExecutionFailed(format!("Image path not found: {e}")))?;
 
-        tokio::fs::read(&canonical).await.map_err(|e| {
-            ToolError::ExecutionFailed(format!("Failed to read image file: {e}"))
-        })
+        tokio::fs::read(&canonical)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read image file: {e}")))
     }
 }
 
@@ -117,9 +117,7 @@ impl Tool for ImageAnalyzeTool {
             .get("image_path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                ToolError::InvalidParameters(
-                    "Missing required 'image_path' parameter".to_string(),
-                )
+                ToolError::InvalidParameters("Missing required 'image_path' parameter".to_string())
             })?;
 
         let question = params
@@ -172,9 +170,7 @@ impl Tool for ImageAnalyzeTool {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Vision API request failed: {e}"))
-            })?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Vision API request failed: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -184,12 +180,9 @@ impl Tool for ImageAnalyzeTool {
             )));
         }
 
-        let resp: serde_json::Value =
-            response.json().await.map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to parse vision API response: {e}"
-                ))
-            })?;
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to parse vision API response: {e}"))
+        })?;
 
         let analysis = resp
             .pointer("/choices/0/message/content")

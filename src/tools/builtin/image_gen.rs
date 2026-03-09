@@ -105,9 +105,9 @@ impl Tool for ImageGenerateTool {
         let prompt = params
             .get("prompt")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters(
-                "Missing required 'prompt' parameter".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                ToolError::InvalidParameters("Missing required 'prompt' parameter".to_string())
+            })?;
 
         if prompt.len() > 4000 {
             return Err(ToolError::InvalidParameters(
@@ -122,12 +122,16 @@ impl Tool for ImageGenerateTool {
 
         // Validate size
         if !["1024x1024", "1792x1024", "1024x1792"].contains(&size) {
-            return Err(ToolError::InvalidParameters(
-                format!("Invalid size '{}'. Must be 1024x1024, 1792x1024, or 1024x1792", size),
-            ));
+            return Err(ToolError::InvalidParameters(format!(
+                "Invalid size '{}'. Must be 1024x1024, 1792x1024, or 1024x1792",
+                size
+            )));
         }
 
-        let url = format!("{}/v1/images/generations", self.api_base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/images/generations",
+            self.api_base_url.trim_end_matches('/')
+        );
 
         let request_body = ImageGenRequest {
             model: self.model.clone(),
@@ -144,30 +148,27 @@ impl Tool for ImageGenerateTool {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| ToolError::ExecutionFailed(
-                format!("Image generation request failed: {e}"),
-            ))?;
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("Image generation request failed: {e}"))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(ToolError::ExecutionFailed(
-                format!("Image generation API returned {status}: {body}"),
-            ));
+            return Err(ToolError::ExecutionFailed(format!(
+                "Image generation API returned {status}: {body}"
+            )));
         }
 
-        let gen_response: ImageGenResponse =
-            response.json().await.map_err(|e| ToolError::ExecutionFailed(
-                format!("Failed to parse image generation response: {e}"),
-            ))?;
+        let gen_response: ImageGenResponse = response.json().await.map_err(|e| {
+            ToolError::ExecutionFailed(format!("Failed to parse image generation response: {e}"))
+        })?;
 
         let image_data = gen_response
             .data
             .first()
             .and_then(|d| d.b64_json.as_deref())
-            .ok_or_else(|| ToolError::ExecutionFailed(
-                "No image data in response".to_string(),
-            ))?;
+            .ok_or_else(|| ToolError::ExecutionFailed("No image data in response".to_string()))?;
 
         // Return sentinel JSON for image display
         let sentinel = serde_json::json!({
@@ -225,7 +226,10 @@ mod tests {
         );
         let ctx = JobContext::default();
         let result = tool
-            .execute(serde_json::json!({"prompt": "a cat", "size": "999x999"}), &ctx)
+            .execute(
+                serde_json::json!({"prompt": "a cat", "size": "999x999"}),
+                &ctx,
+            )
             .await;
         assert!(result.is_err());
     }
