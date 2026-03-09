@@ -1689,7 +1689,7 @@ mod tests {
         manager
             .update_context(job_id, |ctx| {
                 ctx.metadata = serde_json::json!({ "fallback_deliverable": fallback.clone() });
-                Ok(())
+                Ok::<(), String>(())
             })
             .await
             .unwrap()

@@ -345,16 +345,20 @@ mod tests {
     fn test_action_record_succeed_sets_fields() {
         let action = ActionRecord::new(0, "tool", serde_json::json!({}));
         let action = action.succeed(
-            Some("raw output here".into()),
+            Some("sanitized output".into()),
             serde_json::json!({"clean": true}),
             Duration::from_secs(7),
         );
 
         assert!(action.success);
-        assert_eq!(action.output_raw.as_deref(), Some("raw output here"));
+        // output_raw is the JSON value pretty-printed
+        let expected_raw =
+            serde_json::to_string_pretty(&serde_json::json!({"clean": true})).unwrap();
+        assert_eq!(action.output_raw.as_deref(), Some(expected_raw.as_str()));
+        // output_sanitized wraps the string in a JSON string value
         assert_eq!(
             action.output_sanitized,
-            Some(serde_json::json!({"clean": true}))
+            Some(serde_json::json!("sanitized output"))
         );
         assert_eq!(action.duration, Duration::from_secs(7));
     }
