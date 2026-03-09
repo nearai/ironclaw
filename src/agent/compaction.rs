@@ -665,7 +665,11 @@ mod tests {
         let workspace = make_unmigrated_workspace().await;
 
         let result = compactor
-            .compact(&mut thread, CompactionStrategy::MoveToWorkspace, Some(&workspace))
+            .compact(
+                &mut thread,
+                CompactionStrategy::MoveToWorkspace,
+                Some(&workspace),
+            )
             .await
             .expect("compact should succeed even when workspace write fails");
 
