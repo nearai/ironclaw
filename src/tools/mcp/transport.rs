@@ -97,7 +97,7 @@ pub fn spawn_jsonrpc_reader<R: AsyncBufRead + Unpin + Send + 'static>(
                 }
             };
 
-            let id = response.id;
+            let id = response.id.unwrap_or(0);
             let mut map = pending.lock().await;
             if let Some(tx) = map.remove(&id) {
                 // Ignore send error — the receiver may have been dropped (timeout).
@@ -123,7 +123,7 @@ mod tests {
     async fn test_write_jsonrpc_line_serializes_and_flushes() {
         let request = McpRequest {
             jsonrpc: "2.0".into(),
-            id: 1,
+            id: Some(1),
             method: "test/method".into(),
             params: None,
         };
@@ -146,7 +146,7 @@ mod tests {
     async fn test_spawn_jsonrpc_reader_dispatches_response() {
         let response = McpResponse {
             jsonrpc: "2.0".into(),
-            id: 42,
+            id: Some(42),
             result: Some(serde_json::json!({"tools": []})),
             error: None,
         };
@@ -165,7 +165,7 @@ mod tests {
         let handle = spawn_jsonrpc_reader(reader, pending.clone(), "test".into());
 
         let resp = rx.await.expect("should receive response");
-        assert_eq!(resp.id, 42);
+        assert_eq!(resp.id, Some(42));
         assert!(resp.result.is_some());
 
         handle.await.expect("reader task should finish");
@@ -189,7 +189,7 @@ mod tests {
         let resp = rx
             .await
             .expect("should receive response despite earlier invalid line");
-        assert_eq!(resp.id, 7);
+        assert_eq!(resp.id, Some(7));
 
         handle.await.expect("reader task should finish");
     }
