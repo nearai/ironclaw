@@ -4,6 +4,9 @@
 .env.*
 !.env.example
 
+# macOS
+.DS_Store
+
 # Claude Code worktrees and lock files
 .claude/worktrees/
 .claude/scheduled_tasks.lock
@@ -11,6 +14,9 @@
 # Sidecar tool data
 .sidecar/
 .todos/
+
+# Cursor IDE
+.cursor/
 
 target/
 
