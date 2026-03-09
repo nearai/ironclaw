@@ -2429,6 +2429,13 @@ struct GatewayStatusResponse {
     model_usage: Option<Vec<ModelUsageEntry>>,
 }
 
+/// Static HTTP client for webhook proxy (reuses connection pool).
+static PROXY_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn get_proxy_client() -> &'static reqwest::Client {
+    PROXY_CLIENT.get_or_init(|| reqwest::Client::new())
+}
+
 // --- Webhook proxy ---
 
 /// Reverse proxy handler for /webhook/* requests.
@@ -2455,6 +2462,13 @@ async fn webhook_proxy_handler(
     };
 
     let path = path.0;
+
+    // Prevent path traversal attacks (e.g., "../admin")
+    if path.contains("..") {
+        tracing::warn!("Blocked path traversal attempt: {}", path);
+        return (StatusCode::BAD_REQUEST, "Invalid path").into_response();
+    }
+
     let method = req.method().clone();
     let uri = format!("http://{}/webhook/{}", webhook_addr, path);
 
@@ -2497,9 +2511,8 @@ async fn webhook_proxy_handler(
 
     *builder.body_mut() = Some(body_bytes.into());
 
-    // Send the proxied request
-    let client = reqwest::Client::new();
-    let response = match client.execute(builder).await {
+    // Send the proxied request using shared client for connection reuse
+    let response = match get_proxy_client().execute(builder).await {
         Ok(resp) => resp,
         Err(e) => {
             tracing::error!("Webhook proxy request failed: {}", e);
@@ -2533,10 +2546,17 @@ async fn webhook_proxy_handler(
         }
     };
 
-    resp_builder
-        .body(Body::from(body_bytes))
-        .unwrap()
-        .into_response()
+    match resp_builder.body(Body::from(body_bytes)) {
+        Ok(response) => response.into_response(),
+        Err(e) => {
+            tracing::error!("Failed to build webhook proxy response: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to construct proxy response",
+            )
+                .into_response()
+        }
+    }
 }
 
 // --- Tests ---
@@ -2989,16 +3009,9 @@ mod tests {
         (addr, handle)
     }
 
-    #[tokio::test]
-    async fn test_webhook_proxy_forwards_to_webhook_server() {
-        use axum::body::Body;
-        use tower::ServiceExt;
-
-        // Start a mock webhook server
-        let (webhook_addr, _handle) = start_mock_webhook_server().await;
-
-        // Create gateway state with webhook proxy configured
-        let state = Arc::new(GatewayState {
+    /// Helper to create a minimal gateway state for webhook proxy tests.
+    fn test_webhook_gateway_state(webhook_proxy_addr: Option<SocketAddr>) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: SseManager::new(),
             workspace: None,
@@ -3022,8 +3035,20 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
-            webhook_proxy_addr: Some(webhook_addr),
-        });
+            webhook_proxy_addr,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_webhook_proxy_forwards_to_webhook_server() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        // Start a mock webhook server
+        let (webhook_addr, _handle) = start_mock_webhook_server().await;
+
+        // Create gateway state with webhook proxy configured
+        let state = test_webhook_gateway_state(Some(webhook_addr));
 
         let app = Router::new()
             .route("/webhook/{*path}", post(webhook_proxy_handler))
@@ -3055,32 +3080,7 @@ mod tests {
         use tower::ServiceExt;
 
         // Create gateway state WITHOUT webhook proxy configured
-        let state = Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: SseManager::new(),
-            workspace: None,
-            session_manager: None,
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: None,
-            tool_registry: None,
-            store: None,
-            job_manager: None,
-            prompt_queue: None,
-            user_id: "test".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: None,
-            llm_provider: None,
-            skill_registry: None,
-            skill_catalog: None,
-            scheduler: None,
-            chat_rate_limiter: RateLimiter::new(30, 60),
-            registry_entries: vec![],
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            webhook_proxy_addr: None, // Not configured
-        });
+        let state = test_webhook_gateway_state(None);
 
         let app = Router::new()
             .route("/webhook/{*path}", post(webhook_proxy_handler))
@@ -3106,32 +3106,7 @@ mod tests {
 
         let (webhook_addr, _handle) = start_mock_webhook_server().await;
 
-        let state = Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: SseManager::new(),
-            workspace: None,
-            session_manager: None,
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: None,
-            tool_registry: None,
-            store: None,
-            job_manager: None,
-            prompt_queue: None,
-            user_id: "test".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: None,
-            llm_provider: None,
-            skill_registry: None,
-            skill_catalog: None,
-            scheduler: None,
-            chat_rate_limiter: RateLimiter::new(30, 60),
-            registry_entries: vec![],
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            webhook_proxy_addr: Some(webhook_addr),
-        });
+        let state = test_webhook_gateway_state(Some(webhook_addr));
 
         let app = Router::new()
             .route("/webhook/{*path}", post(webhook_proxy_handler))
