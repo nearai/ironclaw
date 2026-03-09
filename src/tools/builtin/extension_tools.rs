@@ -717,7 +717,10 @@ mod tests {
             ("empty name", serde_json::json!({"name": ""})),
             ("slack", serde_json::json!({"name": "slack"})),
             ("github-cli", serde_json::json!({"name": "github-cli"})),
-            ("with extra fields", serde_json::json!({"name": "tool", "extra": "field"})),
+            (
+                "with extra fields",
+                serde_json::json!({"name": "tool", "extra": "field"}),
+            ),
         ];
 
         for (case_name, params) in test_cases {

@@ -852,9 +852,15 @@ mod tests {
         let test_cases = vec![
             ("no params", serde_json::json!({})),
             ("empty name", serde_json::json!({"name": ""})),
-            ("deployment skill", serde_json::json!({"name": "deployment"})),
+            (
+                "deployment skill",
+                serde_json::json!({"name": "deployment"}),
+            ),
             ("custom skill", serde_json::json!({"name": "custom-skill"})),
-            ("with extra fields", serde_json::json!({"name": "skill", "extra": "field"})),
+            (
+                "with extra fields",
+                serde_json::json!({"name": "skill", "extra": "field"}),
+            ),
         ];
 
         for (case_name, params) in test_cases {

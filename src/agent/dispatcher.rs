@@ -1274,16 +1274,17 @@ mod tests {
 
         // Manually auto-approve tool_remove in this session
         session.auto_approve_tool(tool_name);
-        assert!(session.is_tool_auto_approved(tool_name), "tool should be auto-approved");
+        assert!(
+            session.is_tool_auto_approved(tool_name),
+            "tool should be auto-approved"
+        );
 
         // However, ApprovalRequirement::Always should always require approval
         // This is verified by the dispatcher logic: Always => true (ignores session state)
         let always_req = ApprovalRequirement::Always;
         let requires_approval = match always_req {
             ApprovalRequirement::Never => false,
-            ApprovalRequirement::UnlessAutoApproved => {
-                !session.is_tool_auto_approved(tool_name)
-            }
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(tool_name),
             ApprovalRequirement::Always => true,
         };
 
@@ -1308,20 +1309,19 @@ mod tests {
         let unless_req = ApprovalRequirement::UnlessAutoApproved;
         let unless_needs = match unless_req {
             ApprovalRequirement::Never => false,
-            ApprovalRequirement::UnlessAutoApproved => {
-                !session.is_tool_auto_approved(tool_name)
-            }
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(tool_name),
             ApprovalRequirement::Always => true,
         };
-        assert!(!unless_needs, "UnlessAutoApproved should not need approval when auto-approved");
+        assert!(
+            !unless_needs,
+            "UnlessAutoApproved should not need approval when auto-approved"
+        );
 
         // Always → always requires approval
         let always_req = ApprovalRequirement::Always;
         let always_needs = match always_req {
             ApprovalRequirement::Never => false,
-            ApprovalRequirement::UnlessAutoApproved => {
-                !session.is_tool_auto_approved(tool_name)
-            }
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(tool_name),
             ApprovalRequirement::Always => true,
         };
         assert!(
@@ -1336,19 +1336,18 @@ mod tests {
         // UnlessAutoApproved → requires approval
         let unless_needs = match unless_req {
             ApprovalRequirement::Never => false,
-            ApprovalRequirement::UnlessAutoApproved => {
-                !session.is_tool_auto_approved(new_tool)
-            }
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(new_tool),
             ApprovalRequirement::Always => true,
         };
-        assert!(unless_needs, "UnlessAutoApproved should need approval when not auto-approved");
+        assert!(
+            unless_needs,
+            "UnlessAutoApproved should need approval when not auto-approved"
+        );
 
         // Always → always requires approval
         let always_needs = match always_req {
             ApprovalRequirement::Never => false,
-            ApprovalRequirement::UnlessAutoApproved => {
-                !session.is_tool_auto_approved(new_tool)
-            }
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(new_tool),
             ApprovalRequirement::Always => true,
         };
         assert!(always_needs, "Always must always require approval");
