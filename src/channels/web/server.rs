@@ -617,6 +617,13 @@ pub(crate) fn images_to_attachments(
         .iter()
         .enumerate()
         .filter_map(|(i, img)| {
+            if !img.media_type.starts_with("image/") {
+                tracing::warn!(
+                    "Skipping image {i}: invalid media type '{}' (must start with 'image/')",
+                    img.media_type
+                );
+                return None;
+            }
             let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
                 Ok(d) => d,
                 Err(e) => {

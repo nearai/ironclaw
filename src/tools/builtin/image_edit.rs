@@ -143,7 +143,7 @@ impl Tool for ImageEditTool {
             .part(
                 "image",
                 reqwest::multipart::Part::bytes(image_bytes)
-                    .mime_str(media_type)
+                    .mime_str(&media_type)
                     .map_err(|e| ToolError::ExecutionFailed(format!("Invalid media type: {e}")))?
                     .file_name("image"),
             );

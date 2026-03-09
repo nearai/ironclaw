@@ -498,6 +498,7 @@ function renderImagePreviews() {
     const preview = document.createElement('img');
     preview.className = 'image-preview';
     preview.src = img.dataUrl;
+    preview.alt = 'Attached image';
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'image-preview-remove';
@@ -568,6 +569,7 @@ function addGeneratedImage(dataUrl, path) {
   const img = document.createElement('img');
   img.className = 'generated-image';
   img.src = dataUrl;
+  img.alt = 'Generated image';
 
   card.appendChild(img);
 

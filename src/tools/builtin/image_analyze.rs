@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(media_type_from_path("photo.jpeg"), "image/jpeg");
         assert_eq!(media_type_from_path("photo.gif"), "image/gif");
         assert_eq!(media_type_from_path("photo.webp"), "image/webp");
-        assert_eq!(media_type_from_path("photo.bmp"), "image/jpeg");
+        assert_eq!(media_type_from_path("photo.bmp"), "image/bmp");
         assert_eq!(media_type_from_path("photo.svg"), "image/svg+xml");
     }
 
