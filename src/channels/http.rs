@@ -20,7 +20,9 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse};
+use crate::channels::{
+    AttachmentKind, Channel, IncomingAttachment, IncomingMessage, MessageStream, OutgoingResponse,
+};
 use crate::config::HttpConfig;
 use crate::error::ChannelError;
 
@@ -51,8 +53,9 @@ struct RateLimitState {
     request_count: u32,
 }
 
-/// Maximum JSON body size for webhook requests (64 KB).
-const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Maximum JSON body size for webhook requests (15 MB, to support base64 image attachments
+/// with ~33% overhead from base64 encoding).
+const MAX_BODY_BYTES: usize = 15 * 1024 * 1024;
 
 /// Maximum number of pending wait-for-response requests.
 const MAX_PENDING_RESPONSES: usize = 100;
@@ -121,7 +124,33 @@ struct WebhookRequest {
     /// Whether to wait for a synchronous response.
     #[serde(default)]
     wait_for_response: bool,
+    /// Optional file attachments (base64-encoded).
+    #[serde(default)]
+    attachments: Vec<AttachmentData>,
 }
+
+/// A file attachment in a webhook request.
+#[derive(Debug, Deserialize)]
+struct AttachmentData {
+    /// MIME type (e.g. "image/png", "application/pdf").
+    mime_type: String,
+    /// Optional filename.
+    #[serde(default)]
+    filename: Option<String>,
+    /// Base64-encoded file data.
+    #[serde(default)]
+    data_base64: Option<String>,
+    /// URL to fetch the file from (not downloaded server-side for SSRF prevention).
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// Maximum size per attachment (5 MB decoded).
+const MAX_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
+/// Maximum total attachment size (10 MB decoded).
+const MAX_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+/// Maximum number of attachments per request.
+const MAX_ATTACHMENTS: usize = 5;
 
 #[derive(Debug, Serialize)]
 struct WebhookResponse {
@@ -378,17 +407,110 @@ async fn process_authenticated_request(
 
     let wait_for_response = req.wait_for_response;
 
-    let msg = IncomingMessage::new("http", &state.user_id, &req.content).with_metadata(
+    // Validate and decode attachments
+    let attachments = if !req.attachments.is_empty() {
+        if req.attachments.len() > MAX_ATTACHMENTS {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(WebhookResponse {
+                    message_id: Uuid::nil(),
+                    status: "error".to_string(),
+                    response: Some(format!("Too many attachments (max {})", MAX_ATTACHMENTS)),
+                }),
+            )
+                .into_response();
+        }
+
+        let mut decoded_attachments = Vec::new();
+        let mut total_bytes: usize = 0;
+        for att in &req.attachments {
+            if let Some(ref b64) = att.data_base64 {
+                use base64::Engine;
+                let data = match base64::engine::general_purpose::STANDARD.decode(b64) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(WebhookResponse {
+                                message_id: Uuid::nil(),
+                                status: "error".to_string(),
+                                response: Some("Invalid base64 in attachment".to_string()),
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+                if data.len() > MAX_ATTACHMENT_BYTES {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(WebhookResponse {
+                            message_id: Uuid::nil(),
+                            status: "error".to_string(),
+                            response: Some(format!(
+                                "Attachment too large (max {} bytes)",
+                                MAX_ATTACHMENT_BYTES
+                            )),
+                        }),
+                    )
+                        .into_response();
+                }
+                total_bytes += data.len();
+                if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(WebhookResponse {
+                            message_id: Uuid::nil(),
+                            status: "error".to_string(),
+                            response: Some("Total attachment size exceeds limit".to_string()),
+                        }),
+                    )
+                        .into_response();
+                }
+                decoded_attachments.push(IncomingAttachment {
+                    id: Uuid::new_v4().to_string(),
+                    kind: AttachmentKind::from_mime_type(&att.mime_type),
+                    mime_type: att.mime_type.clone(),
+                    filename: att.filename.clone(),
+                    size_bytes: Some(data.len() as u64),
+                    source_url: None,
+                    storage_key: None,
+                    extracted_text: None,
+                    data,
+                    duration_secs: None,
+                });
+            } else if let Some(ref url) = att.url {
+                // URL-only attachment: set source_url but don't download (SSRF prevention)
+                decoded_attachments.push(IncomingAttachment {
+                    id: Uuid::new_v4().to_string(),
+                    kind: AttachmentKind::from_mime_type(&att.mime_type),
+                    mime_type: att.mime_type.clone(),
+                    filename: att.filename.clone(),
+                    size_bytes: None,
+                    source_url: Some(url.clone()),
+                    storage_key: None,
+                    extracted_text: None,
+                    data: Vec::new(),
+                    duration_secs: None,
+                });
+            }
+        }
+        decoded_attachments
+    } else {
+        Vec::new()
+    };
+
+    let mut msg = IncomingMessage::new("http", &state.user_id, &req.content).with_metadata(
         serde_json::json!({
             "wait_for_response": req.wait_for_response,
         }),
     );
 
+    if !attachments.is_empty() {
+        msg = msg.with_attachments(attachments);
+    }
+
     if let Some(thread_id) = &req.thread_id {
-        let msg = msg.with_thread(thread_id);
-        return process_message(state, msg, wait_for_response)
-            .await
-            .into_response();
+        msg = msg.with_thread(thread_id);
     }
 
     process_message(state, msg, wait_for_response)

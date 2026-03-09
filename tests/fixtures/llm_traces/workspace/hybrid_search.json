@@ -1,0 +1,54 @@
+{
+  "model_name": "test-hybrid-search",
+  "expects": {
+    "tools_used": [
+      "memory_write",
+      "memory_search"
+    ],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mw_hybrid",
+            "name": "memory_write",
+            "arguments": {
+              "content": "# Machine Learning Pipeline\n\nOur ML pipeline uses PyTorch for model training and ONNX for inference. Feature engineering is done with Pandas and the feature store uses Feast. Model versioning is handled by MLflow with experiment tracking. The training infrastructure runs on GPU-enabled Kubernetes pods.",
+              "target": "context/ml-pipeline.md"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 35
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ms_hybrid",
+            "name": "memory_search",
+            "arguments": {
+              "query": "deep learning model training infrastructure"
+            }
+          }
+        ],
+        "input_tokens": 200,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "The hybrid search found the ML pipeline document. Even though the exact phrase 'deep learning' isn't in the document, the semantic similarity between 'deep learning model training' and 'PyTorch model training' helped surface the relevant content.",
+        "input_tokens": 300,
+        "output_tokens": 35
+      }
+    }
+  ]
+}

@@ -589,8 +589,20 @@ impl WasmToolWrapper {
         Self::add_host_functions(&mut linker)?;
 
         // Instantiate using the generated bindings
-        let instance = SandboxedTool::instantiate(&mut store, &component, &linker)
-            .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+        let instance =
+            SandboxedTool::instantiate(&mut store, &component, &linker).map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("near:agent") || msg.contains("import") {
+                    WasmError::InstantiationFailed(format!(
+                        "{msg}. This usually means the extension was compiled against \
+                         a different WIT version than the host supports. \
+                         Rebuild the extension against the current WIT (host: {}).",
+                        crate::tools::wasm::WIT_TOOL_VERSION
+                    ))
+                } else {
+                    WasmError::InstantiationFailed(msg)
+                }
+            })?;
 
         // Coerce string-encoded values to their schema-declared types.
         // LLMs frequently pass numeric values as strings (e.g. "5" instead of 5).

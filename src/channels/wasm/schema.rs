@@ -51,6 +51,14 @@ use crate::tools::wasm::{CapabilitiesFile as ToolCapabilitiesFile, RateLimitSche
 /// Root schema for a channel capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChannelCapabilitiesFile {
+    /// Extension version (semver).
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// WIT interface version this channel was compiled against (semver).
+    #[serde(default)]
+    pub wit_version: Option<String>,
+
     /// File type, must be "channel".
     #[serde(default = "default_type")]
     pub r#type: String,
