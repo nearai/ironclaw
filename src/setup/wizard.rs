@@ -992,7 +992,10 @@ impl SetupWizard {
         let session = if let Some(ref s) = self.session_manager {
             Arc::clone(s)
         } else {
-            let config = SessionConfig::default();
+            let config = SessionConfig {
+                session_path: crate::config::llm::default_session_path(),
+                ..SessionConfig::default()
+            };
             Arc::new(SessionManager::new(config))
         };
 

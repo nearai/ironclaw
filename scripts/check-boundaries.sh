@@ -226,21 +226,31 @@ echo
 
 echo "--- Check 6: LLM module isolation ---"
 
-results=$(grep -rn 'use crate::' src/llm/ \
+# Match any `crate::` reference (use-imports AND inline paths) that isn't
+# crate::llm or crate::testing.  Filter out comments.
+results=$(grep -rn 'crate::' src/llm/ \
     --include='*.rs' \
-    | grep -v 'use crate::llm' \
-    | grep -v 'use crate::testing' \
+    | grep -v 'crate::llm' \
+    | grep -v 'crate::testing' \
     | grep -v '^\s*//' \
-    | grep -v '//.*use crate::' \
+    | grep -v '//.*crate::' \
     || true)
 
 if [ -n "$results" ]; then
-    echo "VIOLATION: src/llm/ imports from outside crate::llm:"
+    count=$(echo "$results" | wc -l | tr -d ' ')
+    echo "WARNING: src/llm/ has $count reference(s) to modules outside crate::llm:"
     echo "$results"
     echo
-    count=$(echo "$results" | wc -l | tr -d ' ')
-    echo "($count occurrence(s) -- src/llm/ must be self-contained)"
-    violations=$((violations + 1))
+    echo "(These are pre-existing; fix them before extracting the crate.)"
+    echo "(New 'use crate::' imports are hard violations — see below.)"
+    echo
+    # Hard-fail only on new `use crate::` imports (easy to avoid in new code).
+    use_imports=$(echo "$results" | grep '^[^:]*:.*use crate::' || true)
+    if [ -n "$use_imports" ]; then
+        echo "HARD VIOLATION: new 'use crate::' imports in src/llm/:"
+        echo "$use_imports"
+        violations=$((violations + 1))
+    fi
 else
     echo "OK"
 fi
