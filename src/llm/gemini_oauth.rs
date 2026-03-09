@@ -684,7 +684,7 @@ impl GeminiOauthProvider {
         Self::model_uses_cloud_code_api(&self.config.model)
     }
 
-    fn model_uses_cloud_code_api(model: &str) -> bool {
+    pub fn model_uses_cloud_code_api(model: &str) -> bool {
         let model = model.to_ascii_lowercase();
         if let Some(rest) = model.strip_prefix("gemini-") {
             let major: u32 = rest
