@@ -561,9 +561,7 @@ async fn init_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sy
 
     let crypto = Arc::new(SecretsCrypto::new(master_key.clone())?);
 
-    crate::db::create_secrets_store(&config.database, crypto)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))
+    Ok(crate::db::create_secrets_store(&config.database, crypto).await?)
 }
 
 /// Configure authentication for a tool.

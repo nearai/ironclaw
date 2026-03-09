@@ -1613,11 +1613,23 @@ impl SetupWizard {
 
         // Create backend-appropriate secrets store.
         // Use runtime dispatch based on the user's selected backend.
+        // Default to whichever backend is compiled in. When only libsql is
+        // available, we must not default to "postgres" or we'd skip store creation.
+        let default_backend = {
+            #[cfg(feature = "postgres")]
+            {
+                "postgres"
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                "libsql"
+            }
+        };
         let selected_backend = self
             .settings
             .database_backend
             .as_deref()
-            .unwrap_or("postgres");
+            .unwrap_or(default_backend);
 
         match selected_backend {
             #[cfg(feature = "libsql")]

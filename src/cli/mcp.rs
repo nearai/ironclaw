@@ -638,9 +638,7 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
 
     let crypto = Arc::new(SecretsCrypto::new(master_key.clone())?);
 
-    crate::db::create_secrets_store(&config.database, crypto)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))
+    Ok(crate::db::create_secrets_store(&config.database, crypto).await?)
 }
 
 #[cfg(test)]
