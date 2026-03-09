@@ -9,6 +9,7 @@
 
 mod anthropic_oauth;
 pub mod circuit_breaker;
+pub mod codex_auth;
 pub mod codex_chatgpt;
 pub mod costs;
 pub mod failover;

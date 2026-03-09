@@ -334,8 +334,8 @@ impl LlmConfig {
         let codex_creds = if parse_optional_env("LLM_USE_CODEX_AUTH", false)? {
             let path = optional_env("CODEX_AUTH_PATH")?
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(crate::codex_auth::default_codex_auth_path);
-            crate::codex_auth::load_codex_credentials(&path)
+                .unwrap_or_else(crate::llm::codex_auth::default_codex_auth_path);
+            crate::llm::codex_auth::load_codex_credentials(&path)
         } else {
             None
         };

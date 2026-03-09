@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use crate::codex_auth;
+use super::codex_auth;
 use crate::error::LlmError;
 
 use super::provider::{
