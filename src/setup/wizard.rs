@@ -1612,48 +1612,38 @@ impl SetupWizard {
         };
 
         // Create backend-appropriate secrets store.
-        // Respect the user's selected backend when both features are compiled,
-        // so we don't accidentally use a postgres pool from DATABASE_URL when
-        // libsql was chosen (or vice versa).
+        // Use runtime dispatch based on the user's selected backend.
         let selected_backend = self
             .settings
             .database_backend
             .as_deref()
             .unwrap_or("postgres");
 
-        #[cfg(all(feature = "libsql", feature = "postgres"))]
-        {
-            if selected_backend == "libsql" {
+        match selected_backend {
+            #[cfg(feature = "libsql")]
+            "libsql" | "turso" | "sqlite" => {
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
+                // Fallback to postgres if libsql store creation returned None
+                #[cfg(feature = "postgres")]
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
-            } else {
+            }
+            #[cfg(feature = "postgres")]
+            _ => {
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
+                // Fallback to libsql if postgres store creation returned None
+                #[cfg(feature = "libsql")]
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
             }
-        }
-
-        #[cfg(all(feature = "postgres", not(feature = "libsql")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
-        }
-
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
+            #[cfg(not(feature = "postgres"))]
+            _ => {}
         }
 
         Err(SetupError::Config(

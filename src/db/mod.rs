@@ -524,7 +524,10 @@ mod tests {
         let crypto = Arc::new(crate::secrets::SecretsCrypto::new(master_key).unwrap());
 
         let store = create_secrets_store(&config, crypto).await;
-        assert!(store.is_ok(), "create_secrets_store should succeed for libsql backend");
+        assert!(
+            store.is_ok(),
+            "create_secrets_store should succeed for libsql backend"
+        );
 
         // Verify basic operation works
         let store = store.unwrap();
