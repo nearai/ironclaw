@@ -129,22 +129,16 @@ fn create_codex_chatgpt_from_registry(
     tracing::info!(
         configured_model = %config.model,
         base_url = %config.base_url,
-        "Using Codex ChatGPT provider (Responses API) — auto-detecting model"
+        "Using Codex ChatGPT provider (Responses API) — model detection deferred to first call"
     );
 
-    // Run the async model auto-detection synchronously.
-    // This is safe because build_provider_chain runs on a multi-threaded tokio runtime.
-    let provider = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(
-            codex_chatgpt::CodexChatGptProvider::with_auto_model(
-                &config.base_url,
-                &api_key,
-                &config.model,
-                config.refresh_token.clone(),
-                config.auth_path.clone(),
-            ),
-        )
-    });
+    let provider = codex_chatgpt::CodexChatGptProvider::with_lazy_model(
+        &config.base_url,
+        &api_key,
+        &config.model,
+        config.refresh_token.clone(),
+        config.auth_path.clone(),
+    );
 
     Ok(Arc::new(provider))
 }

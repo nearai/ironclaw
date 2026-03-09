@@ -34,7 +34,10 @@ pub struct CodexChatGptProvider {
     client: Client,
     base_url: String,
     api_key: RwLock<String>,
-    model: String,
+    /// User-configured model name (or empty/"default" for auto-detect).
+    configured_model: String,
+    /// Lazily resolved model name (populated on first LLM call).
+    resolved_model: tokio::sync::OnceCell<String>,
     /// OAuth refresh token for automatic 401 retry.
     refresh_token: Option<String>,
     /// Path to auth.json for persisting refreshed tokens.
@@ -47,79 +50,95 @@ impl CodexChatGptProvider {
             client: Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: RwLock::new(api_key.to_string()),
-            model: model.to_string(),
+            configured_model: model.to_string(),
+            resolved_model: tokio::sync::OnceCell::const_new(),
             refresh_token: None,
             auth_path: None,
         }
     }
 
-    /// Create a provider, resolving the model to use.
+    /// Create a provider with lazy model detection.
     ///
-    /// **Model selection priority:**
+    /// The model is **not** resolved during construction. Instead, it is
+    /// resolved on the first LLM call via [`resolve_model`], avoiding the
+    /// need for `block_in_place` / `block_on` during provider setup.
+    ///
+    /// **Model selection priority** (applied at resolution time):
     /// 1. If `configured_model` is non-empty, validate it against the
     ///    `/models` endpoint. If it isn't in the supported list, log a
     ///    warning with available models and fall back to the top model.
     /// 2. If `configured_model` is empty (or a generic placeholder like
     ///    "default"), auto-detect the highest-priority model from the API.
-    ///
-    /// A single `reqwest::Client` is created and reused for both the model
-    /// discovery request and all subsequent LLM calls.
-    pub async fn with_auto_model(
+    pub fn with_lazy_model(
         base_url: &str,
         api_key: &str,
         configured_model: &str,
         refresh_token: Option<String>,
         auth_path: Option<PathBuf>,
     ) -> Self {
-        let base = base_url.trim_end_matches('/');
-        let client = Client::new();
-
         tracing::warn!(
             "Codex ChatGPT provider uses a private, undocumented API \
              (chatgpt.com/backend-api/codex). This may violate OpenAI's \
              Terms of Service and could break without notice."
         );
 
-        let available = Self::fetch_available_models(&client, base, api_key).await;
-
-        let model = if !configured_model.is_empty() && configured_model != "default" {
-            // User explicitly configured a model — validate it
-            if available.is_empty() {
-                // Could not reach the /models endpoint; trust the user's choice
-                tracing::warn!(
-                    "Could not fetch model list; using configured model '{configured_model}'"
-                );
-                configured_model.to_string()
-            } else if available.iter().any(|m| m == configured_model) {
-                tracing::info!(model = %configured_model, "Codex ChatGPT: using configured model");
-                configured_model.to_string()
-            } else {
-                tracing::warn!(
-                    configured = %configured_model,
-                    available = ?available,
-                    "Configured model not found in supported list, falling back to top model"
-                );
-                available.into_iter().next().unwrap_or_else(|| configured_model.to_string())
-            }
-        } else {
-            // No user preference — auto-detect
-            if let Some(top) = available.into_iter().next() {
-                tracing::info!(model = %top, "Codex ChatGPT: auto-detected model");
-                top
-            } else {
-                tracing::warn!("Could not auto-detect model, using fallback '{configured_model}'");
-                configured_model.to_string()
-            }
-        };
-
         Self {
-            client,
-            base_url: base.to_string(),
+            client: Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
             api_key: RwLock::new(api_key.to_string()),
-            model,
+            configured_model: configured_model.to_string(),
+            resolved_model: tokio::sync::OnceCell::const_new(),
             refresh_token,
             auth_path,
         }
+    }
+
+    /// Resolve the model to use, lazily on first call.
+    ///
+    /// Uses `OnceCell` so the `/models` fetch happens at most once.
+    async fn resolve_model(&self) -> &str {
+        self.resolved_model
+            .get_or_init(|| async {
+                let api_key = self.api_key.read().await.clone();
+                let available =
+                    Self::fetch_available_models(&self.client, &self.base_url, &api_key).await;
+
+                let configured = &self.configured_model;
+                if !configured.is_empty() && configured != "default" {
+                    // User explicitly configured a model — validate it
+                    if available.is_empty() {
+                        tracing::warn!(
+                            "Could not fetch model list; using configured model '{configured}'"
+                        );
+                        return configured.clone();
+                    }
+                    if available.iter().any(|m| m == configured) {
+                        tracing::info!(model = %configured, "Codex ChatGPT: using configured model");
+                        return configured.clone();
+                    }
+                    tracing::warn!(
+                        configured = %configured,
+                        available = ?available,
+                        "Configured model not found in supported list, falling back to top model"
+                    );
+                    available
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| configured.clone())
+                } else {
+                    // No user preference — auto-detect
+                    if let Some(top) = available.into_iter().next() {
+                        tracing::info!(model = %top, "Codex ChatGPT: auto-detected model");
+                        top
+                    } else {
+                        tracing::warn!(
+                            "Could not auto-detect model, using fallback '{configured}'"
+                        );
+                        configured.clone()
+                    }
+                }
+            })
+            .await
     }
 
     /// Query `/models?client_version=1.0.0` and return the list of available
@@ -156,6 +175,7 @@ impl CodexChatGptProvider {
     /// Convert IronClaw messages to Responses API request JSON.
     fn build_request_body(
         &self,
+        model: &str,
         messages: &[ChatMessage],
         tools: &[ToolDefinition],
         tool_choice: Option<&str>,
@@ -189,7 +209,7 @@ impl CodexChatGptProvider {
             .collect();
 
         let mut body = json!({
-            "model": self.model,
+            "model": model,
             "instructions": instructions,
             "input": input,
             "stream": true,
@@ -526,7 +546,11 @@ struct PendingToolCall {
 #[async_trait]
 impl LlmProvider for CodexChatGptProvider {
     fn model_name(&self) -> &str {
-        &self.model
+        // Return resolved model if available, otherwise the configured name.
+        self.resolved_model
+            .get()
+            .map(|s| s.as_str())
+            .unwrap_or(&self.configured_model)
     }
 
     fn cost_per_token(&self) -> (Decimal, Decimal) {
@@ -535,7 +559,8 @@ impl LlmProvider for CodexChatGptProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let body = self.build_request_body(&request.messages, &[], None);
+        let model = self.resolve_model().await;
+        let body = self.build_request_body(model, &request.messages, &[], None);
         let result = self.send_request(body).await?;
 
         Ok(CompletionResponse {
@@ -552,7 +577,9 @@ impl LlmProvider for CodexChatGptProvider {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        let model = self.resolve_model().await;
         let body = self.build_request_body(
+            model,
             &request.messages,
             &request.tools,
             request.tool_choice.as_deref(),
@@ -656,7 +683,7 @@ mod tests {
             ChatMessage::system("You are helpful."),
             ChatMessage::user("hello"),
         ];
-        let body = provider.build_request_body(&messages, &[], None);
+        let body = provider.build_request_body("gpt-4o", &messages, &[], None);
         assert_eq!(body["instructions"], "You are helpful.");
         // input should only contain the user message, not the system message
         assert_eq!(body["input"].as_array().unwrap().len(), 1);
