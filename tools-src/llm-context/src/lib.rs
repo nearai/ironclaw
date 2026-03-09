@@ -309,6 +309,26 @@ fn format_output(query: &str, response: BraveLlmContextResponse) -> Result<Strin
         .and_then(|g| g.generic.as_deref())
         .unwrap_or_default();
 
+    let poi = grounding.as_ref().and_then(|g| g.poi.as_ref());
+    let map = grounding
+        .as_ref()
+        .and_then(|g| g.map.as_deref())
+        .unwrap_or_default();
+
+    // Count snippets from typed data before creating JSON for better performance and type safety.
+    let generic_snippet_count: usize = generic
+        .iter()
+        .map(|e| e.snippets.as_deref().unwrap_or_default().len())
+        .sum();
+    let poi_snippet_count: usize = poi
+        .map(|p| p.snippets.as_deref().unwrap_or_default().len())
+        .unwrap_or(0);
+    let map_snippet_count: usize = map
+        .iter()
+        .map(|e| e.snippets.as_deref().unwrap_or_default().len())
+        .sum();
+    let snippet_count = generic_snippet_count + poi_snippet_count + map_snippet_count;
+
     let entries: Vec<serde_json::Value> = generic
         .iter()
         .filter_map(|e| {
@@ -319,22 +339,12 @@ fn format_output(query: &str, response: BraveLlmContextResponse) -> Result<Strin
         })
         .collect();
 
-    let poi_output = grounding
-        .as_ref()
-        .and_then(|g| g.poi.as_ref())
-        .map(|e| poi_map_entry_to_json(e, &sources));
+    let poi_output = poi.map(|e| poi_map_entry_to_json(e, &sources));
 
-    let map_output: Vec<serde_json::Value> = grounding
-        .as_ref()
-        .and_then(|g| g.map.as_ref())
-        .map(|m| {
-            m.iter()
-                .map(|e| poi_map_entry_to_json(e, &sources))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let snippet_count = count_snippets(&entries, poi_output.as_ref(), &map_output);
+    let map_output: Vec<serde_json::Value> = map
+        .iter()
+        .map(|e| poi_map_entry_to_json(e, &sources))
+        .collect();
 
     let mut output = serde_json::json!({
         "query": query,
@@ -352,28 +362,6 @@ fn format_output(query: &str, response: BraveLlmContextResponse) -> Result<Strin
     }
 
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
-}
-
-fn count_snippets(
-    entries: &[serde_json::Value],
-    poi: Option<&serde_json::Value>,
-    map: &[serde_json::Value],
-) -> usize {
-    let entry_snippets: usize = entries
-        .iter()
-        .filter_map(|e| e.get("snippets").and_then(|s| s.as_array()))
-        .map(|a| a.len())
-        .sum();
-    let poi_snippets: usize = poi
-        .and_then(|o| o.get("snippets").and_then(|s| s.as_array()))
-        .map(|a| a.len())
-        .unwrap_or(0);
-    let map_snippets: usize = map
-        .iter()
-        .filter_map(|e| e.get("snippets").and_then(|s| s.as_array()))
-        .map(|a| a.len())
-        .sum();
-    entry_snippets + poi_snippets + map_snippets
 }
 
 /// Build the POST request body as JSON. Clamps numeric fields to API min/max; only includes
@@ -1269,42 +1257,6 @@ mod tests {
         assert_eq!(parsed["snippet_count"].as_u64(), Some(3));
         assert_eq!(parsed["poi"]["name"].as_str(), Some("Coffee Shop"));
         assert_eq!(parsed["map"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn test_count_snippets() {
-        let entries = vec![
-            serde_json::json!({"snippets": ["a", "b"]}),
-            serde_json::json!({"snippets": ["c"]}),
-        ];
-        let poi = Some(serde_json::json!({"snippets": ["d"]}));
-        let map = vec![serde_json::json!({"snippets": ["e", "f"]})];
-        assert_eq!(count_snippets(&entries, poi.as_ref(), &map), 6);
-
-        assert_eq!(count_snippets(&[], None, &[]), 0);
-    }
-
-    #[test]
-    fn test_count_snippets_missing_snippets_field() {
-        let entries = vec![
-            serde_json::json!({"url": "https://example.com"}),
-            serde_json::json!({"snippets": ["a"]}),
-        ];
-        assert_eq!(count_snippets(&entries, None, &[]), 1);
-    }
-
-    #[test]
-    fn test_count_snippets_poi_only() {
-        let poi = Some(serde_json::json!({"snippets": ["x", "y", "z"]}));
-        assert_eq!(count_snippets(&[], poi.as_ref(), &[]), 3);
-    }
-
-    #[test]
-    fn test_count_snippets_empty_snippet_arrays() {
-        let entries = vec![serde_json::json!({"snippets": []})];
-        let poi = Some(serde_json::json!({"snippets": []}));
-        let map = vec![serde_json::json!({"snippets": []})];
-        assert_eq!(count_snippets(&entries, poi.as_ref(), &map), 0);
     }
 
     #[test]
