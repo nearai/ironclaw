@@ -706,42 +706,28 @@ mod tests {
     }
 
     #[test]
-    fn tool_remove_always_requires_approval() {
+    fn tool_remove_always_requires_approval_regardless_of_params() {
         use crate::tools::tool::ApprovalRequirement;
         let tool = ToolRemoveTool {
             manager: test_manager_stub(),
         };
-        // Test with multiple different tool names — all must require approval
-        for name in &["slack", "echo", "github-cli", "my-custom-tool"] {
-            let params = serde_json::json!({"name": name});
+
+        let test_cases = vec![
+            ("no params", serde_json::json!({})),
+            ("empty name", serde_json::json!({"name": ""})),
+            ("slack", serde_json::json!({"name": "slack"})),
+            ("github-cli", serde_json::json!({"name": "github-cli"})),
+            ("with extra fields", serde_json::json!({"name": "tool", "extra": "field"})),
+        ];
+
+        for (case_name, params) in test_cases {
             assert_eq!(
                 tool.requires_approval(&params),
                 ApprovalRequirement::Always,
-                "tool_remove must always require approval for {} regardless of auto-approve state",
-                name
+                "tool_remove must always require approval for case: {}",
+                case_name
             );
         }
-    }
-
-    #[test]
-    fn tool_remove_approval_not_affected_by_params() {
-        use crate::tools::tool::ApprovalRequirement;
-        let tool = ToolRemoveTool {
-            manager: test_manager_stub(),
-        };
-        // Approval requirement should not change based on parameters
-        assert_eq!(
-            tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::Always
-        );
-        assert_eq!(
-            tool.requires_approval(&serde_json::json!({"name": ""})),
-            ApprovalRequirement::Always
-        );
-        assert_eq!(
-            tool.requires_approval(&serde_json::json!({"name": "tool", "extra": "field"})),
-            ApprovalRequirement::Always
-        );
     }
 
     #[test]

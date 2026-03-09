@@ -845,38 +845,26 @@ mod tests {
     }
 
     #[test]
-    fn skill_remove_always_requires_approval() {
+    fn skill_remove_always_requires_approval_regardless_of_params() {
         use crate::tools::tool::ApprovalRequirement;
         let tool = SkillRemoveTool::new(test_registry());
-        // Test with multiple different skill names — all must require approval
-        for name in &["deployment", "web-ui-test", "custom-skill", "my-skill"] {
-            let params = serde_json::json!({"name": name});
+
+        let test_cases = vec![
+            ("no params", serde_json::json!({})),
+            ("empty name", serde_json::json!({"name": ""})),
+            ("deployment skill", serde_json::json!({"name": "deployment"})),
+            ("custom skill", serde_json::json!({"name": "custom-skill"})),
+            ("with extra fields", serde_json::json!({"name": "skill", "extra": "field"})),
+        ];
+
+        for (case_name, params) in test_cases {
             assert_eq!(
                 tool.requires_approval(&params),
                 ApprovalRequirement::Always,
-                "skill_remove must always require approval for {} regardless of auto-approve state",
-                name
+                "skill_remove must always require approval for case: {}",
+                case_name
             );
         }
-    }
-
-    #[test]
-    fn skill_remove_approval_not_affected_by_params() {
-        use crate::tools::tool::ApprovalRequirement;
-        let tool = SkillRemoveTool::new(test_registry());
-        // Approval requirement should not change based on parameters
-        assert_eq!(
-            tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::Always
-        );
-        assert_eq!(
-            tool.requires_approval(&serde_json::json!({"name": ""})),
-            ApprovalRequirement::Always
-        );
-        assert_eq!(
-            tool.requires_approval(&serde_json::json!({"name": "skill", "extra": "field"})),
-            ApprovalRequirement::Always
-        );
     }
 
     #[test]
