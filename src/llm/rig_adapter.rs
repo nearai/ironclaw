@@ -23,8 +23,8 @@ use serde_json::Value as JsonValue;
 
 use std::collections::HashSet;
 
-use crate::llm::error::LlmError;
 use crate::llm::costs;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,

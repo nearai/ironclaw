@@ -299,12 +299,12 @@ impl SessionManager {
         }
 
         // OAuth paths: bind the callback listener now
-        let listener = oauth_helpers::bind_callback_listener()
-            .await
-            .map_err(|e| LlmError::SessionRenewalFailed {
+        let listener = oauth_helpers::bind_callback_listener().await.map_err(|e| {
+            LlmError::SessionRenewalFailed {
                 provider: "nearai".to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         let (auth_provider, auth_url) = match choice.trim() {
             "2" => {
