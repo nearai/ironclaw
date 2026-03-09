@@ -22,6 +22,9 @@ mod rig_adapter;
 pub mod session;
 pub mod smart_routing;
 
+pub mod image_models;
+pub mod vision_models;
+
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai_chat::{ModelInfo, NearAiChatProvider};

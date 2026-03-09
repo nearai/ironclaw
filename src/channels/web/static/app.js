@@ -18,6 +18,7 @@ let unreadThreads = new Map(); // thread_id -> unread count
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
+let stagedImages = [];
 
 // --- Slash Commands ---
 
@@ -389,6 +390,12 @@ function connectSSE() {
     if (currentTab === 'extensions') loadExtensions();
   });
 
+  eventSource.addEventListener('image_generated', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    addGeneratedImage(data.data_url, data.path);
+  });
+
   eventSource.addEventListener('error', (e) => {
     if (e.data) {
       const data = JSON.parse(e.data);
@@ -446,16 +453,23 @@ function sendMessage() {
     return;
   }
   const content = input.value.trim();
-  if (!content) return;
+  if (!content && stagedImages.length === 0) return;
 
-  addMessage('user', content);
+  addMessage('user', content || '(images attached)');
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
 
+  const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+  if (stagedImages.length > 0) {
+    body.images = stagedImages.map(img => ({ media_type: img.media_type, data: img.data }));
+    stagedImages = [];
+    renderImagePreviews();
+  }
+
   apiFetch('/api/chat/send', {
     method: 'POST',
-    body: { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    body: body,
   }).catch((err) => {
     addMessage('system', 'Failed to send: ' + err.message);
   });
@@ -470,6 +484,104 @@ function enableChatInput() {
     input.placeholder = 'Message or / for commands...';
   }
   if (btn) btn.disabled = false;
+}
+
+// --- Image Upload ---
+
+function renderImagePreviews() {
+  const strip = document.getElementById('image-preview-strip');
+  strip.innerHTML = '';
+  stagedImages.forEach((img, idx) => {
+    const container = document.createElement('div');
+    container.className = 'image-preview-container';
+
+    const preview = document.createElement('img');
+    preview.className = 'image-preview';
+    preview.src = img.dataUrl;
+    preview.alt = 'Attached image';
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'image-preview-remove';
+    removeBtn.textContent = '\u00d7';
+    removeBtn.addEventListener('click', () => {
+      stagedImages.splice(idx, 1);
+      renderImagePreviews();
+    });
+
+    container.appendChild(preview);
+    container.appendChild(removeBtn);
+    strip.appendChild(container);
+  });
+}
+
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per image
+const MAX_STAGED_IMAGES = 5;
+
+function handleImageFiles(files) {
+  Array.from(files).forEach(file => {
+    if (!file.type.startsWith('image/')) return;
+    if (file.size > MAX_IMAGE_SIZE_BYTES) {
+      alert(`Image "${file.name}" exceeds 5 MB limit (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      return;
+    }
+    if (stagedImages.length >= MAX_STAGED_IMAGES) {
+      alert(`Maximum ${MAX_STAGED_IMAGES} images allowed per message`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const dataUrl = e.target.result;
+      const commaIdx = dataUrl.indexOf(',');
+      const meta = dataUrl.substring(0, commaIdx); // e.g. "data:image/png;base64"
+      const base64 = dataUrl.substring(commaIdx + 1);
+      const mediaType = meta.replace('data:', '').replace(';base64', '');
+      stagedImages.push({ media_type: mediaType, data: base64, dataUrl: dataUrl });
+      renderImagePreviews();
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+document.getElementById('attach-btn').addEventListener('click', () => {
+  document.getElementById('image-file-input').click();
+});
+
+document.getElementById('image-file-input').addEventListener('change', (e) => {
+  handleImageFiles(e.target.files);
+  e.target.value = '';
+});
+
+document.getElementById('chat-input').addEventListener('paste', (e) => {
+  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
+      const file = items[i].getAsFile();
+      if (file) handleImageFiles([file]);
+    }
+  }
+});
+
+function addGeneratedImage(dataUrl, path) {
+  const container = document.getElementById('chat-messages');
+  const card = document.createElement('div');
+  card.className = 'generated-image-card';
+
+  const img = document.createElement('img');
+  img.className = 'generated-image';
+  img.src = dataUrl;
+  img.alt = 'Generated image';
+
+  card.appendChild(img);
+
+  if (path) {
+    const pathLabel = document.createElement('div');
+    pathLabel.className = 'generated-image-path';
+    pathLabel.textContent = path;
+    card.appendChild(pathLabel);
+  }
+
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
 }
 
 // --- Slash Autocomplete ---

@@ -71,6 +71,9 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "message",
     "web_fetch",
     "restart",
+    "image_generate",
+    "image_edit",
+    "image_analyze",
 ];
 
 /// Registry of available tools.
@@ -473,6 +476,52 @@ impl ToolRegistry {
         if let Some(tool) = self.message_tool.read().await.as_ref() {
             tool.set_context(channel, target).await;
         }
+    }
+
+    /// Register image generation and editing tools.
+    ///
+    /// These tools allow the LLM to generate and edit images using cloud APIs.
+    /// Requires an API base URL, API key, and model name for the image generation backend.
+    pub fn register_image_tools(
+        &self,
+        api_base_url: String,
+        api_key: String,
+        gen_model: String,
+        base_dir: Option<std::path::PathBuf>,
+    ) {
+        use crate::tools::builtin::{ImageEditTool, ImageGenerateTool};
+        self.register_sync(Arc::new(ImageGenerateTool::new(
+            api_base_url.clone(),
+            api_key.clone(),
+            gen_model.clone(),
+        )));
+        self.register_sync(Arc::new(ImageEditTool::new(
+            api_base_url,
+            api_key,
+            gen_model,
+            base_dir,
+        )));
+        tracing::info!("Registered 2 image tools (generate, edit)");
+    }
+
+    /// Register vision/image analysis tools.
+    ///
+    /// These tools allow the LLM to analyze images using a vision-capable model.
+    pub fn register_vision_tools(
+        &self,
+        api_base_url: String,
+        api_key: String,
+        vision_model: String,
+        base_dir: Option<std::path::PathBuf>,
+    ) {
+        use crate::tools::builtin::ImageAnalyzeTool;
+        self.register_sync(Arc::new(ImageAnalyzeTool::new(
+            api_base_url,
+            api_key,
+            vision_model,
+            base_dir,
+        )));
+        tracing::info!("Registered 1 vision tool (analyze)");
     }
 
     /// Register the software builder tool.
