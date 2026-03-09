@@ -571,22 +571,29 @@ mod trace_llm_tests {
     }
 
     #[tokio::test]
-    async fn complete_errors_on_tool_calls_step() {
+    async fn complete_skips_tool_calls_step() {
+        // complete() is called in force_text mode where tools aren't available.
+        // When the trace has a ToolCalls step followed by a Text step, complete()
+        // should skip the ToolCalls and return the Text response.
         let trace = LlmTrace::single_turn(
             "test-model",
             "hi",
-            vec![tool_calls_step(vec![simple_tool_call("echo")], 10, 5)],
+            vec![
+                tool_calls_step(vec![simple_tool_call("echo")], 10, 5),
+                text_step("skipped past tools", 20, 8),
+            ],
         );
         let llm = TraceLlm::from_trace(trace);
 
-        let result = llm.complete(make_completion_request("hi")).await;
+        let resp = llm
+            .complete(make_completion_request("hi"))
+            .await
+            .expect("complete() should skip ToolCalls and return the Text step");
 
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("tool_calls"),
-            "Expected 'tool_calls' in error: {err_msg}"
-        );
+        assert_eq!(resp.content, "skipped past tools");
+        assert_eq!(resp.input_tokens, 20);
+        assert_eq!(resp.output_tokens, 8);
+        assert_eq!(resp.finish_reason, FinishReason::Stop);
     }
 
     #[tokio::test]

@@ -386,6 +386,11 @@ impl Channel for GatewayChannel {
                 success,
                 message,
             },
+            StatusUpdate::ImageGenerated { data_url, path } => SseEvent::ImageGenerated {
+                data_url,
+                path,
+                thread_id,
+            },
         };
 
         self.state.sse.broadcast(event);
