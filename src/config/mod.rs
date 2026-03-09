@@ -37,7 +37,7 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsq
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
-pub use self::llm::{CacheRetention, LlmConfig, NearAiConfig, RegistryProviderConfig};
+pub use self::llm::default_session_path;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
@@ -46,6 +46,10 @@ pub use self::skills::SkillsConfig;
 pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
+pub use crate::llm::config::{
+    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
+    RegistryProviderConfig,
+};
 pub use crate::llm::session::SessionConfig;
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
@@ -254,6 +258,32 @@ impl Config {
                 tracing::warn!("Failed to load default config file: {}", e);
             }
         }
+        Ok(())
+    }
+
+    /// Re-resolve only the LLM config after credential injection.
+    ///
+    /// Called by `AppBuilder::init_secrets()` after injecting API keys into
+    /// the env overlay. Only rebuilds `self.llm` — all other config fields
+    /// are unaffected, preserving values from the initial config load (or
+    /// from `Config::for_testing()` in test mode).
+    pub async fn re_resolve_llm(
+        &mut self,
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<(), ConfigError> {
+        let settings = if let Some(store) = store {
+            let mut s = match store.get_all_settings(user_id).await {
+                Ok(map) => Settings::from_db_map(&map),
+                Err(_) => Settings::default(),
+            };
+            Self::apply_toml_overlay(&mut s, toml_path)?;
+            s
+        } else {
+            Settings::default()
+        };
+        self.llm = LlmConfig::resolve(&settings)?;
         Ok(())
     }
 

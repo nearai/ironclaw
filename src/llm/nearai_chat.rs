@@ -16,8 +16,8 @@ use rust_decimal::prelude::MathematicalOps;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
-use crate::config::NearAiConfig;
-use crate::error::LlmError;
+use crate::llm::config::NearAiConfig;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -58,17 +58,28 @@ impl NearAiChatProvider {
     /// By default this enables tool-message flattening for compatibility with
     /// providers that reject `role: "tool"` messages.
     pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Result<Self, LlmError> {
-        Self::new_with_flatten(config, session, true)
+        Self::new_with_options(config, session, true, 120)
     }
 
-    /// Create a chat completions provider with configurable tool-message flattening.
-    pub fn new_with_flatten(
+    /// Create a new provider with a custom request timeout.
+    pub fn new_with_timeout(
+        config: NearAiConfig,
+        session: Arc<SessionManager>,
+        request_timeout_secs: u64,
+    ) -> Result<Self, LlmError> {
+        Self::new_with_options(config, session, true, request_timeout_secs)
+    }
+
+    /// Create a chat completions provider with configurable tool-message flattening
+    /// and request timeout.
+    pub fn new_with_options(
         config: NearAiConfig,
         session: Arc<SessionManager>,
         flatten_tool_messages: bool,
+        request_timeout_secs: u64,
     ) -> Result<Self, LlmError> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(request_timeout_secs))
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),

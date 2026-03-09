@@ -242,6 +242,16 @@ mod tests {
             "create_job should return a job_id: {:?}",
             create_result.1
         );
+        assert!(
+            create_result.1.contains("in_progress"),
+            "create_job should dispatch through the scheduler, not stay pending: {:?}",
+            create_result.1
+        );
+        assert!(
+            !create_result.1.contains("scheduler unavailable"),
+            "create_job should not fall back to the unscheduled path: {:?}",
+            create_result.1
+        );
         let status_result = results
             .iter()
             .find(|(n, _)| n == "job_status")

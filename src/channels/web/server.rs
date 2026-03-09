@@ -351,7 +351,7 @@ pub async fn start_server(
         .merge(statics)
         .merge(projects)
         .merge(protected)
-        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB max request body
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -608,8 +608,59 @@ async fn oauth_callback_handler(
 
 // --- Chat handlers ---
 
+/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
+pub(crate) fn images_to_attachments(
+    images: &[ImageData],
+) -> Vec<crate::channels::IncomingAttachment> {
+    use base64::Engine;
+    images
+        .iter()
+        .enumerate()
+        .filter_map(|(i, img)| {
+            if !img.media_type.starts_with("image/") {
+                tracing::warn!(
+                    "Skipping image {i}: invalid media type '{}' (must start with 'image/')",
+                    img.media_type
+                );
+                return None;
+            }
+            let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("Skipping image {i}: invalid base64 data: {e}");
+                    return None;
+                }
+            };
+            Some(crate::channels::IncomingAttachment {
+                id: format!("web-image-{i}"),
+                kind: crate::channels::AttachmentKind::Image,
+                mime_type: img.media_type.clone(),
+                filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
+}
+
+/// Map MIME type to file extension.
+fn mime_to_ext(mime: &str) -> &str {
+    match mime {
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "jpg",
+    }
+}
+
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     tracing::debug!(
@@ -626,17 +677,32 @@ async fn chat_send_handler(
     }
 
     let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
+    // Prefer timezone from JSON body, fall back to X-Timezone header
+    let tz = req
+        .timezone
+        .as_deref()
+        .or_else(|| headers.get("X-Timezone").and_then(|v| v.to_str().ok()));
+    if let Some(tz) = tz {
+        msg = msg.with_timezone(tz);
+    }
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
         msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
     }
 
+    // Convert uploaded images to IncomingAttachments
+    if !req.images.is_empty() {
+        let attachments = images_to_attachments(&req.images);
+        msg = msg.with_attachments(attachments);
+    }
+
     let msg_id = msg.id;
     tracing::debug!(
-        "[chat_send_handler] Created message id={}, content={:?}",
+        "[chat_send_handler] Created message id={}, content={:?}, images={}",
         msg_id,
-        req.content
+        req.content,
+        req.images.len()
     );
 
     let tx_guard = state.msg_tx.read().await;
@@ -2117,7 +2183,7 @@ async fn routines_runs_handler(
 /// Convert a Routine to the trimmed RoutineInfo for list display.
 fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
     let (trigger_type, trigger_summary) = match &r.trigger {
-        crate::agent::routine::Trigger::Cron { schedule } => {
+        crate::agent::routine::Trigger::Cron { schedule, .. } => {
             ("cron".to_string(), format!("cron: {}", schedule))
         }
         crate::agent::routine::Trigger::Event {

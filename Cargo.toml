@@ -73,6 +73,8 @@ toml = "0.8"
 # Core types
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 rust_decimal_macros = "1"
 
@@ -140,6 +142,11 @@ subtle = "2"  # Constant-time comparisons for token validation
 # Multi-provider LLM support
 rig-core = "0.30"
 
+# AWS Bedrock (native Converse API, opt-in via --features bedrock)
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-smithy-types = { version = "1", optional = true }
+
 # Docker sandbox
 bollard = "0.18"
 
@@ -201,6 +208,7 @@ postgres = [
 libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 
 [[test]]
 name = "html_to_markdown"

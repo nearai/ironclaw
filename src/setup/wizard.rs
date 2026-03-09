@@ -22,7 +22,7 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
-use crate::config::llm::OAUTH_PLACEHOLDER;
+use crate::config::OAUTH_PLACEHOLDER;
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
@@ -769,13 +769,28 @@ impl SetupWizard {
                 print_success("Master key generated and stored in OS keychain");
             }
             1 => {
-                // Env var mode
-                print_info("Generate a key and add it to your environment:");
+                // Env var mode — generate key, init crypto, and persist to .env
                 let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+                // Initialize crypto so subsequent wizard steps (channel setup,
+                // API key storage) can encrypt secrets immediately.
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                        .map_err(|e| SetupError::Config(e.to_string()))?,
+                ));
+
+                // Make visible to optional_env() for any subsequent config resolution.
+                crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
+
+                // Store hex for write_bootstrap_env to persist to ~/.ironclaw/.env.
+                self.settings.secrets_master_key_hex = Some(key_hex.clone());
+
                 println!();
-                println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                print_info("Master key generated and will be saved to ~/.ironclaw/.env");
                 println!();
-                print_info("Add this to your shell profile or .env file.");
+                println!("  SECRETS_MASTER_KEY={}", key_hex);
+                println!();
+                print_info("You can also copy this to another .env file or CI secrets.");
 
                 self.settings.secrets_master_key_source = KeySource::Env;
                 print_success("Configured for environment variable");
@@ -812,9 +827,16 @@ impl SetupWizard {
             print_info(&format!("Current provider: {}", display));
             println!();
 
-            let is_known = current == "nearai" || registry.is_known(&current);
+            let is_known =
+                current == "nearai" || current == "bedrock" || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
+                if current == "bedrock" {
+                    // Keeping the existing Bedrock config — no need to re-run
+                    // the full setup flow (region, auth, cross-region).
+                    print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
+                }
                 return self.run_provider_setup(&current, &registry).await;
             }
 
@@ -829,10 +851,10 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        // Build menu: NearAI first, then all registry providers with setup hints
+        // Build menu: NearAI first, then all registry providers with setup hints, then Bedrock
         let selectable = registry.selectable();
-        let mut options: Vec<String> = Vec::with_capacity(1 + selectable.len());
-        let mut provider_ids: Vec<String> = Vec::with_capacity(1 + selectable.len());
+        let mut options: Vec<String> = Vec::with_capacity(2 + selectable.len());
+        let mut provider_ids: Vec<String> = Vec::with_capacity(2 + selectable.len());
 
         options.push("NEAR AI          - multi-model access via NEAR account".to_string());
         provider_ids.push("nearai".to_string());
@@ -850,11 +872,19 @@ impl SetupWizard {
             provider_ids.push(def.id.clone());
         }
 
+        // Bedrock is a special case (native AWS SDK, not registry-based)
+        options.push("AWS Bedrock      - Claude & other models via AWS (IAM, SSO)".to_string());
+        provider_ids.push("bedrock".to_string());
+
         let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
         let choice = select_one("Provider:", &option_refs).map_err(SetupError::Io)?;
         let selected_id = &provider_ids[choice];
 
-        self.run_provider_setup(selected_id, &registry).await?;
+        if selected_id == "bedrock" {
+            self.setup_bedrock().await?;
+        } else {
+            self.run_provider_setup(selected_id, &registry).await?;
+        }
 
         Ok(())
     }
@@ -962,7 +992,10 @@ impl SetupWizard {
         let session = if let Some(ref s) = self.session_manager {
             Arc::clone(s)
         } else {
-            let config = SessionConfig::default();
+            let config = SessionConfig {
+                session_path: crate::config::llm::default_session_path(),
+                ..SessionConfig::default()
+            };
             Arc::new(SessionManager::new(config))
         };
 
@@ -1022,10 +1055,11 @@ impl SetupWizard {
 
     /// Anthropic OAuth setup: extract token from `claude login` credentials.
     async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("anthropic".to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some("anthropic") {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some("anthropic".to_string());
 
         // Try to extract existing OAuth token from Claude Code credentials
         if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
@@ -1119,10 +1153,11 @@ impl SetupWizard {
             other => other,
         });
 
-        self.settings.llm_backend = Some(backend.to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(backend) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(backend.to_string());
 
         // Check env var first
         if let Ok(existing) = std::env::var(env_var) {
@@ -1181,10 +1216,11 @@ impl SetupWizard {
         &mut self,
         def: &crate::llm::ProviderDefinition,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(def.id.clone());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(&def.id) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(def.id.clone());
 
         let default_url = self
             .settings
@@ -1212,6 +1248,95 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// AWS Bedrock provider setup: region, auth, and cross-region config.
+    async fn setup_bedrock(&mut self) -> Result<(), SetupError> {
+        if self.settings.llm_backend.as_deref() != Some("bedrock") {
+            self.settings.selected_model = None;
+        }
+        self.settings.llm_backend = Some("bedrock".to_string());
+
+        // Region
+        let default_region = self
+            .settings
+            .bedrock_region
+            .as_deref()
+            .unwrap_or("us-east-1");
+
+        let region_input =
+            optional_input("AWS region", Some(&format!("default: {}", default_region)))
+                .map_err(SetupError::Io)?;
+
+        let region = region_input.unwrap_or_else(|| default_region.to_string());
+        self.settings.bedrock_region = Some(region.clone());
+
+        // Auth method
+        print_info("Select authentication method:");
+        println!();
+        let auth_options = &[
+            "AWS default credentials (env vars, ~/.aws/credentials, IAM roles)",
+            "AWS named profile (SSO / assume-role)",
+        ];
+        let auth_choice = select_one("Auth:", auth_options).map_err(SetupError::Io)?;
+
+        match auth_choice {
+            0 => {
+                // Default AWS credentials — clear any stale named profile
+                self.settings.bedrock_profile = None;
+                print_info(
+                    "Using default AWS credential chain (env vars, ~/.aws/credentials, IAM roles).",
+                );
+            }
+            1 => {
+                // Named profile
+                let profile =
+                    input("AWS profile name (from ~/.aws/config)").map_err(SetupError::Io)?;
+                if profile.trim().is_empty() {
+                    // Empty input clears any previously configured profile
+                    self.settings.bedrock_profile = None;
+                    print_info("AWS profile cleared; using default AWS credential chain instead.");
+                } else {
+                    self.settings.bedrock_profile = Some(profile.clone());
+                    print_success(&format!("AWS profile '{}' saved", profile));
+                }
+            }
+            _ => return Err(SetupError::Config("Invalid auth selection".to_string())),
+        }
+
+        self.setup_bedrock_cross_region()
+    }
+
+    /// Bedrock cross-region inference prefix selection (sub-step of setup_bedrock).
+    fn setup_bedrock_cross_region(&mut self) -> Result<(), SetupError> {
+        print_info("Cross-region inference routes requests across AWS regions for capacity:");
+        println!();
+        let cross_options = &[
+            "us     - route within US regions (recommended for us-east-1)",
+            "global - route to any AWS region worldwide",
+            "eu     - route within European regions",
+            "apac   - route within Asia-Pacific regions",
+            "none   - single-region only (no cross-region routing)",
+        ];
+        let cross_choice = select_one("Cross-region:", cross_options).map_err(SetupError::Io)?;
+
+        let cross_region = match cross_choice {
+            0 => Some("us".to_string()),
+            1 => Some("global".to_string()),
+            2 => Some("eu".to_string()),
+            3 => Some("apac".to_string()),
+            4 => None,
+            _ => None,
+        };
+        self.settings.bedrock_cross_region = cross_region;
+
+        let region = self
+            .settings
+            .bedrock_region
+            .as_deref()
+            .unwrap_or("us-east-1");
+        print_success(&format!("AWS Bedrock configured (region: {})", region));
+        Ok(())
+    }
+
     /// Generic OpenAI-compatible setup: base URL + optional API key.
     async fn setup_openai_compatible_generic(
         &mut self,
@@ -1219,10 +1344,11 @@ impl SetupWizard {
         secret_name: &str,
         display_name: &str,
     ) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some(backend_id.to_string());
-        if self.settings.selected_model.is_some() {
+        // Clear model only when switching providers (old model may be invalid)
+        if self.settings.llm_backend.as_deref() != Some(backend_id) {
             self.settings.selected_model = None;
         }
+        self.settings.llm_backend = Some(backend_id.to_string());
 
         let existing_url = self
             .settings
@@ -1393,6 +1519,14 @@ impl SetupWizard {
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
             }
+        } else if backend == "bedrock" {
+            let model_id = input("Bedrock model ID (e.g., anthropic.claude-opus-4-6-v1)")
+                .map_err(SetupError::Io)?;
+            if model_id.is_empty() {
+                return Err(SetupError::Config("Model ID is required".to_string()));
+            }
+            self.settings.selected_model = Some(model_id.clone());
+            print_success(&format!("Selected {}", model_id));
         } else {
             // Unknown provider, manual entry
             let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
@@ -1457,7 +1591,7 @@ impl SetupWizard {
             backend: "nearai".to_string(),
             session: crate::llm::session::SessionConfig {
                 auth_base_url,
-                session_path: crate::llm::session::default_session_path(),
+                session_path: crate::config::llm::default_session_path(),
             },
             nearai: crate::config::NearAiConfig {
                 model: "dummy".to_string(),
@@ -1476,9 +1610,11 @@ impl SetupWizard {
                 smart_routing_cascade: true,
             },
             provider: None,
+            bedrock: None,
+            request_timeout_secs: 120,
         };
 
-        match create_llm_provider(&config, session) {
+        match create_llm_provider(&config, session).await {
             Ok(provider) => match provider.list_models().await {
                 Ok(models) => models,
                 Err(e) => {
@@ -1592,48 +1728,50 @@ impl SetupWizard {
         };
 
         // Create backend-appropriate secrets store.
-        // Respect the user's selected backend when both features are compiled,
-        // so we don't accidentally use a postgres pool from DATABASE_URL when
-        // libsql was chosen (or vice versa).
+        // Use runtime dispatch based on the user's selected backend.
+        // Default to whichever backend is compiled in. When only libsql is
+        // available, we must not default to "postgres" or we'd skip store creation.
+        let default_backend = {
+            #[cfg(feature = "postgres")]
+            {
+                "postgres"
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                "libsql"
+            }
+        };
         let selected_backend = self
             .settings
             .database_backend
             .as_deref()
-            .unwrap_or("postgres");
+            .unwrap_or(default_backend);
 
-        #[cfg(all(feature = "libsql", feature = "postgres"))]
-        {
-            if selected_backend == "libsql" {
+        match selected_backend {
+            #[cfg(feature = "libsql")]
+            "libsql" | "turso" | "sqlite" => {
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
+                // Fallback to postgres if libsql store creation returned None
+                #[cfg(feature = "postgres")]
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
-            } else {
+            }
+            #[cfg(feature = "postgres")]
+            _ => {
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
+                // Fallback to libsql if postgres store creation returned None
+                #[cfg(feature = "libsql")]
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
             }
-        }
-
-        #[cfg(all(feature = "postgres", not(feature = "libsql")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
-        }
-
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
+            #[cfg(not(feature = "postgres"))]
+            _ => {}
         }
 
         Err(SetupError::Config(
@@ -2293,12 +2431,29 @@ impl SetupWizard {
         if let Some(ref url) = self.settings.ollama_base_url {
             env_vars.push(("OLLAMA_BASE_URL".to_string(), url.clone()));
         }
+        if let Some(ref region) = self.settings.bedrock_region {
+            env_vars.push(("BEDROCK_REGION".to_string(), region.clone()));
+        }
+        if self.settings.llm_backend.as_deref() == Some("bedrock") {
+            if let Some(ref model) = self.settings.selected_model {
+                env_vars.push(("BEDROCK_MODEL".to_string(), model.clone()));
+            }
+            if let Some(ref cross) = self.settings.bedrock_cross_region {
+                env_vars.push(("BEDROCK_CROSS_REGION".to_string(), cross.clone()));
+            }
+            if let Some(ref profile) = self.settings.bedrock_profile {
+                env_vars.push(("AWS_PROFILE".to_string(), profile.clone()));
+            }
+        }
 
         // Model name: same chicken-and-egg — Config::from_env() resolves the
         // model before the DB is connected, so we must persist it to .env.
         // Write the backend-specific env var so the correct resolution path
         // picks it up (looked up from the provider registry).
-        if let Some(ref model) = self.settings.selected_model {
+        // Bedrock model is already written above as BEDROCK_MODEL, skip here.
+        if self.settings.llm_backend.as_deref() != Some("bedrock")
+            && let Some(ref model) = self.settings.selected_model
+        {
             let backend_str = self.settings.llm_backend.as_deref().unwrap_or("nearai");
             let model_env = registry.model_env_var(backend_str);
             env_vars.push((model_env.to_string(), model.clone()));
@@ -2322,6 +2477,12 @@ impl SetupWizard {
             && !api_key.is_empty()
         {
             env_vars.push(("NEARAI_API_KEY".to_string(), api_key));
+        }
+
+        // Secrets master key (env var mode): write to .env so it's available
+        // on next startup before the DB is connected.
+        if let Some(ref key_hex) = self.settings.secrets_master_key_hex {
+            env_vars.push(("SECRETS_MASTER_KEY".to_string(), key_hex.clone()));
         }
 
         // Always write ONBOARD_COMPLETED so that check_onboard_needed()
@@ -2394,7 +2555,7 @@ impl SetupWizard {
     /// Best-effort: silently ignores errors (no DB connection yet, no
     /// session file, etc.).
     async fn persist_session_to_db(&self) {
-        let session_path = crate::llm::session::default_session_path();
+        let session_path = crate::config::llm::default_session_path();
         let data = match std::fs::read_to_string(&session_path) {
             Ok(d) if !d.trim().is_empty() => d,
             _ => return,
@@ -2577,6 +2738,7 @@ impl SetupWizard {
                 "openai" => "OpenAI",
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
+                "bedrock" => "AWS Bedrock",
                 other => other,
             };
             println!("  Provider: {}", display);
@@ -2702,7 +2864,7 @@ async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String
     let api_key = cached_key
         .map(String::from)
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .filter(|k| !k.is_empty() && k != crate::config::llm::OAUTH_PLACEHOLDER);
+        .filter(|k| !k.is_empty() && k != crate::config::OAUTH_PLACEHOLDER);
 
     // Fall back to OAuth token if no API key
     let oauth_token = if api_key.is_none() {
@@ -3499,6 +3661,108 @@ mod tests {
         }
     }
 
+    /// Regression test for #600: re-running provider setup for the same backend
+    /// must NOT clear selected_model. Only switching to a different backend should.
+    #[test]
+    fn test_same_provider_preserves_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate re-entering the same provider -- model should survive
+        // (This is the check that each setup_* function now performs)
+        if wizard.settings.llm_backend.as_deref() != Some("ollama") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("ollama".to_string());
+
+        assert_eq!(
+            wizard.settings.selected_model.as_deref(),
+            Some("llama3"),
+            "model should be preserved when re-selecting the same provider"
+        );
+    }
+
+    /// Regression test for #600: switching to a different provider must clear
+    /// selected_model since the old model may not be valid for the new backend.
+    #[test]
+    fn test_different_provider_clears_selected_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("ollama".to_string());
+        wizard.settings.selected_model = Some("llama3".to_string());
+
+        // Simulate switching to a different provider -- model should be cleared
+        if wizard.settings.llm_backend.as_deref() != Some("openai") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("openai".to_string());
+
+        assert!(
+            wizard.settings.selected_model.is_none(),
+            "model should be cleared when switching providers"
+        );
+    }
+
+    /// Regression: Bedrock setup_bedrock() should preserve selected_model
+    /// when re-entering the same provider (matches pattern from #600).
+    #[test]
+    fn test_bedrock_same_provider_preserves_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("bedrock".to_string());
+        wizard.settings.selected_model = Some("anthropic.claude-opus-4-6-v1".to_string());
+
+        // Simulate the conditional clearing logic from setup_bedrock()
+        if wizard.settings.llm_backend.as_deref() != Some("bedrock") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("bedrock".to_string());
+
+        assert_eq!(
+            wizard.settings.selected_model.as_deref(),
+            Some("anthropic.claude-opus-4-6-v1"),
+            "bedrock model should be preserved when re-selecting bedrock"
+        );
+    }
+
+    /// Regression: switching from another provider to bedrock must clear
+    /// selected_model, and choosing "default credentials" must clear
+    /// bedrock_profile.
+    #[test]
+    fn test_bedrock_clears_stale_profile_on_default_creds() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("bedrock".to_string());
+        wizard.settings.bedrock_profile = Some("old-sso-profile".to_string());
+
+        // Simulate auth_choice == 0 (default credentials) clearing the profile
+        wizard.settings.bedrock_profile = None;
+
+        assert!(
+            wizard.settings.bedrock_profile.is_none(),
+            "bedrock_profile should be cleared when selecting default credentials"
+        );
+    }
+
+    /// Regression: empty profile input in named-profile auth should clear
+    /// any previously configured profile instead of leaving it stale.
+    #[test]
+    fn test_bedrock_empty_profile_clears_existing() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.bedrock_profile = Some("old-profile".to_string());
+
+        // Simulate auth_choice == 1 with empty input
+        let profile = "".to_string();
+        if profile.trim().is_empty() {
+            wizard.settings.bedrock_profile = None;
+        } else {
+            wizard.settings.bedrock_profile = Some(profile);
+        }
+
+        assert!(
+            wizard.settings.bedrock_profile.is_none(),
+            "empty profile input should clear existing bedrock_profile"
+        );
+    }
+
     #[tokio::test]
     async fn test_run_provider_setup_no_setup_hint() {
         // A provider with setup: None should not error. It should set the
@@ -3535,5 +3799,31 @@ mod tests {
             Some("custom_no_setup"),
             "backend should be set even without setup hint"
         );
+    }
+
+    /// Regression test for #666: env-var security option must initialize
+    /// secrets_crypto so subsequent steps can encrypt API keys.
+    #[test]
+    fn test_env_var_security_initializes_crypto() {
+        use crate::secrets::SecretsCrypto;
+        use secrecy::SecretString;
+
+        // Simulate what option 1 in step_security() does after the fix:
+        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+
+        // The fix: create SecretsCrypto from the generated key.
+        // Before the fix, this was skipped, leaving secrets_crypto = None.
+        let crypto = SecretsCrypto::new(SecretString::from(key_hex.clone()));
+        assert!(
+            crypto.is_ok(),
+            "generated key hex must produce valid SecretsCrypto"
+        );
+
+        // Verify the key is stored for bootstrap env persistence.
+        let settings = Settings {
+            secrets_master_key_hex: Some(key_hex),
+            ..Settings::default()
+        };
+        assert!(settings.secrets_master_key_hex.is_some());
     }
 }

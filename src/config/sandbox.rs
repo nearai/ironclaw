@@ -20,6 +20,10 @@ pub struct SandboxModeConfig {
     pub auto_pull_image: bool,
     /// Additional domains to allow through the network proxy.
     pub extra_allowed_domains: Vec<String>,
+    /// How often the reaper scans for orphaned containers (seconds). Default: 300 (5 min).
+    pub reaper_interval_secs: u64,
+    /// Containers older than this with no active job are reaped (seconds). Default: 600 (10 min).
+    pub orphan_threshold_secs: u64,
 }
 
 impl Default for SandboxModeConfig {
@@ -33,6 +37,8 @@ impl Default for SandboxModeConfig {
             image: "ironclaw-worker:latest".to_string(),
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
+            reaper_interval_secs: 300,
+            orphan_threshold_secs: 600,
         }
     }
 }
@@ -43,6 +49,24 @@ impl SandboxModeConfig {
             .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())
             .unwrap_or_default();
 
+        let reaper_interval_secs: u64 = parse_optional_env("SANDBOX_REAPER_INTERVAL_SECS", 300)?;
+        let orphan_threshold_secs: u64 = parse_optional_env("SANDBOX_ORPHAN_THRESHOLD_SECS", 600)?;
+
+        // Validate that reaper timings are non-zero to prevent tokio::time::interval panics
+        if reaper_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                key: "SANDBOX_REAPER_INTERVAL_SECS".to_string(),
+                message: "must be greater than 0".to_string(),
+            });
+        }
+
+        if orphan_threshold_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                key: "SANDBOX_ORPHAN_THRESHOLD_SECS".to_string(),
+                message: "must be greater than 0".to_string(),
+            });
+        }
+
         Ok(Self {
             enabled: parse_bool_env("SANDBOX_ENABLED", true)?,
             policy: parse_string_env("SANDBOX_POLICY", "readonly")?,
@@ -52,6 +76,8 @@ impl SandboxModeConfig {
             image: parse_string_env("SANDBOX_IMAGE", "ironclaw-worker:latest")?,
             auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", true)?,
             extra_allowed_domains: extra_domains,
+            reaper_interval_secs,
+            orphan_threshold_secs,
         })
     }
 
@@ -273,6 +299,8 @@ mod tests {
             image: "custom-worker:v2".to_string(),
             auto_pull_image: false,
             extra_allowed_domains: vec!["example.com".to_string()],
+            reaper_interval_secs: 300,
+            orphan_threshold_secs: 600,
         };
         assert!(!cfg.enabled);
         assert_eq!(cfg.policy, "full_access");
@@ -295,6 +323,8 @@ mod tests {
             image: "test:latest".to_string(),
             auto_pull_image: false,
             extra_allowed_domains: vec!["custom.example.com".to_string()],
+            reaper_interval_secs: 300,
+            orphan_threshold_secs: 600,
         };
         let sc = mode.to_sandbox_config();
         assert!(sc.enabled);

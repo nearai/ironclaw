@@ -3,6 +3,10 @@
 use crate::channels::web::types::{ToolCallInfo, TurnInfo};
 
 /// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
+///
+/// If the input is wrapped in `<tool_output …>…</tool_output>` and truncation
+/// removes the closing tag, the tag is re-appended so downstream XML parsers
+/// never see an unclosed element.
 pub fn truncate_preview(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
@@ -12,7 +16,14 @@ pub fn truncate_preview(s: &str, max_bytes: usize) -> String {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...", &s[..end])
+    let mut result = format!("{}...", &s[..end]);
+
+    // Re-close <tool_output> if truncation cut through the closing tag.
+    if s.starts_with("<tool_output") && !result.ends_with("</tool_output>") {
+        result.push_str("\n</tool_output>");
+    }
+
+    result
 }
 
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
@@ -160,6 +171,33 @@ mod tests {
     #[test]
     fn test_truncate_preview_zero_max_bytes() {
         assert_eq!(truncate_preview("hello", 0), "...");
+    }
+
+    #[test]
+    fn test_truncate_preview_closes_tool_output_tag() {
+        let s = "<tool_output name=\"search\" sanitized=\"true\">\nSome very long content here\n</tool_output>";
+        // Truncate so it cuts before the closing tag
+        let result = truncate_preview(s, 60);
+        assert!(result.ends_with("</tool_output>"));
+        assert!(result.contains("..."));
+    }
+
+    #[test]
+    fn test_truncate_preview_no_extra_close_when_intact() {
+        let s = "<tool_output name=\"echo\" sanitized=\"false\">\nshort\n</tool_output>";
+        // The string is short enough not to be truncated
+        let result = truncate_preview(s, 500);
+        assert_eq!(result, s);
+        // Should not have a duplicate closing tag
+        assert_eq!(result.matches("</tool_output>").count(), 1);
+    }
+
+    #[test]
+    fn test_truncate_preview_non_xml_unaffected() {
+        let s = "Just a plain long string that gets truncated";
+        let result = truncate_preview(s, 10);
+        assert_eq!(result, "Just a pla...");
+        assert!(!result.contains("</tool_output>"));
     }
 
     // ---- build_turns_from_db_messages tests ----

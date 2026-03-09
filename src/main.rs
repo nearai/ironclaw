@@ -1,6 +1,7 @@
 //! IronClaw - Main entry point.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -25,8 +26,8 @@ use ironclaw::{
     hooks::bootstrap_hooks,
     llm::create_session_manager,
     orchestrator::{
-        ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
-        api::OrchestratorState,
+        ContainerJobConfig, ContainerJobManager, OrchestratorApi, ReaperConfig, SandboxReaper,
+        TokenStore, api::OrchestratorState,
     },
     pairing::PairingStore,
     secrets::SecretsStore,
@@ -75,7 +76,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
-            return run_mcp_command(mcp_cmd.clone()).await;
+            return run_mcp_command(*mcp_cmd.clone()).await;
         }
         Some(Command::Memory(mem_cmd)) => {
             init_cli_tracing();
@@ -145,6 +146,24 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // ── PID lock (prevent multiple instances) ────────────────────────
+    let _pid_lock = match ironclaw::bootstrap::PidLock::acquire() {
+        Ok(lock) => Some(lock),
+        Err(ironclaw::bootstrap::PidLockError::AlreadyRunning { pid }) => {
+            anyhow::bail!(
+                "Another IronClaw instance is already running (PID {}). \
+                 If this is incorrect, remove the stale PID file: {}",
+                pid,
+                ironclaw::bootstrap::pid_lock_path().display()
+            );
+        }
+        Err(e) => {
+            eprintln!("Warning: Could not acquire PID lock: {}", e);
+            eprintln!("Continuing without PID lock protection.");
+            None
+        }
+    };
+
     // ── Agent startup ──────────────────────────────────────────────────
 
     // Enhanced first-run detection
@@ -166,13 +185,12 @@ async fn async_main() -> anyhow::Result<()> {
     let config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
-            eprintln!("Configuration error: Missing required setting '{}'", key);
-            eprintln!("  {}", hint);
-            eprintln!();
-            eprintln!(
-                "Run 'ironclaw onboard' to configure, or set the required environment variables."
+            anyhow::bail!(
+                "Configuration error: Missing required setting '{}'. {}. \
+                 Run 'ironclaw onboard' to configure, or set the required environment variables.",
+                key,
+                hint
             );
-            std::process::exit(1);
         }
         Err(e) => return Err(e.into()),
     };
@@ -659,6 +677,9 @@ async fn async_main() -> anyhow::Result<()> {
         .recording_handle
         .as_ref()
         .map(|r| r.http_interceptor());
+    // Clone context_manager for the reaper before it's moved into Agent::new()
+    let reaper_context_manager = Arc::clone(&components.context_manager);
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -697,6 +718,23 @@ async fn async_main() -> anyhow::Result<()> {
     // Fill the scheduler slot now that Agent (and its Scheduler) exist.
     *scheduler_slot.write().await = Some(agent.scheduler());
 
+    // Spawn sandbox reaper for orphaned container cleanup
+    if let Some(ref jm) = container_job_manager {
+        let reaper_jm = Arc::clone(jm);
+        let reaper_config = ReaperConfig {
+            scan_interval: Duration::from_secs(config.sandbox.reaper_interval_secs),
+            orphan_threshold: Duration::from_secs(config.sandbox.orphan_threshold_secs),
+            ..ReaperConfig::default()
+        };
+        let reaper_ctx = Arc::clone(&reaper_context_manager);
+        tokio::spawn(async move {
+            match SandboxReaper::new(reaper_jm, reaper_ctx, reaper_config).await {
+                Ok(reaper) => reaper.run().await,
+                Err(e) => tracing::error!("Sandbox reaper failed to initialize: {}", e),
+            }
+        });
+    }
+
     // Give the agent the routine engine slot so it can expose the engine to the gateway.
     if let Some(slot) = routine_engine_slot {
         agent.set_routine_engine_slot(slot);
@@ -705,6 +743,9 @@ async fn async_main() -> anyhow::Result<()> {
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+
+    // Shut down all stdio MCP server child processes.
+    components.mcp_process_manager.shutdown_all().await;
 
     // Flush LLM trace recording if enabled
     if let Some(ref recorder) = components.recording_handle
@@ -1111,7 +1152,7 @@ fn check_onboard_needed() -> Option<&'static str> {
     }
 
     if std::env::var("NEARAI_API_KEY").is_err() {
-        let session_path = ironclaw::llm::session::default_session_path();
+        let session_path = ironclaw::config::default_session_path();
         if !session_path.exists() {
             return Some("First run");
         }
