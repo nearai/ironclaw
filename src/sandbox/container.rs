@@ -144,8 +144,15 @@ impl ContainerRunner {
     ///
     /// This is used when the image is not available from a registry and needs
     /// to be built locally from source.
+    ///
+    /// # Security
+    ///
+    /// The `dockerfile_path` MUST point to a trusted Dockerfile. Docker builds
+    /// execute arbitrary `RUN` commands from the Dockerfile, which is a code
+    /// execution vector. Callers must ensure the path is not user-controlled
+    /// and points to a known, safe Dockerfile (e.g., bundled with the application).
     pub async fn build_image(&self, dockerfile_path: &Path) -> Result<()> {
-        use std::process::Command;
+        use tokio::process::Command;
 
         let dockerfile_str = dockerfile_path.to_string_lossy();
 
@@ -174,6 +181,7 @@ impl ContainerRunner {
             .arg(".")
             .current_dir(context_dir)
             .output()
+            .await
             .map_err(|e| SandboxError::ContainerCreationFailed {
                 reason: format!("failed to run docker build: {}", e),
             })?;

@@ -2982,15 +2982,15 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Ensure the ironclaw-worker Docker image exists, building it if necessary.
+    /// Ensure the sandbox worker Docker image exists, building it if necessary.
     async fn ensure_worker_image(&mut self) -> Result<(), SetupError> {
         use crate::sandbox::container::{ContainerRunner, connect_docker};
 
-        let image_name = "ironclaw-worker:latest";
+        let image_name = self.settings.sandbox.image.clone();
         let docker = connect_docker()
             .await
             .map_err(|e| SetupError::Auth(e.to_string()))?;
-        let runner = ContainerRunner::new(docker, image_name.to_string(), 0);
+        let runner = ContainerRunner::new(docker, image_name.clone(), 0);
 
         if runner.image_exists().await {
             print_success(&format!("Worker image '{}' found.", image_name));
@@ -3046,7 +3046,10 @@ impl SetupWizard {
             None => {
                 print_info("No Dockerfile.worker found in current directory.");
                 print_info("To use Docker sandbox, build the worker image manually:");
-                print_info("  docker build -f Dockerfile.worker -t ironclaw-worker:latest .");
+                print_info(&format!(
+                    "  docker build -f Dockerfile.worker -t {} .",
+                    image_name
+                ));
                 print_info("or clone the IronClaw repository and build from source.");
             }
         }
