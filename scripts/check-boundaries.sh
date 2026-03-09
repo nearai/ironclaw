@@ -210,6 +210,43 @@ fi
 echo
 
 # --------------------------------------------------------------------------
+# Check 6: LLM module isolation — no imports from other crate modules
+# --------------------------------------------------------------------------
+# src/llm/ should only import from:
+#   - crate::llm (self-references)
+#   - external crates (no crate:: prefix)
+# It must NOT import from crate::agent, crate::tools, crate::channels,
+# crate::safety, crate::config, crate::bootstrap, crate::cli, crate::db,
+# crate::workspace, crate::worker, crate::orchestrator, crate::skills,
+# crate::hooks, crate::setup, crate::context, etc.
+#
+# Test-only imports (crate::testing) are excluded since they don't affect
+# the runtime dependency graph and won't exist in the extracted crate.
+# --------------------------------------------------------------------------
+
+echo "--- Check 6: LLM module isolation ---"
+
+results=$(grep -rn 'use crate::' src/llm/ \
+    --include='*.rs' \
+    | grep -v 'use crate::llm' \
+    | grep -v 'use crate::testing' \
+    | grep -v '^\s*//' \
+    | grep -v '//.*use crate::' \
+    || true)
+
+if [ -n "$results" ]; then
+    echo "VIOLATION: src/llm/ imports from outside crate::llm:"
+    echo "$results"
+    echo
+    count=$(echo "$results" | wc -l | tr -d ' ')
+    echo "($count occurrence(s) -- src/llm/ must be self-contained)"
+    violations=$((violations + 1))
+else
+    echo "OK"
+fi
+echo
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 

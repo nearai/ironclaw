@@ -21,7 +21,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role,
     ToolCompletionRequest, ToolCompletionResponse,

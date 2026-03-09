@@ -12,9 +12,12 @@ mod anthropic_oauth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
 pub mod circuit_breaker;
+pub mod config;
 pub mod costs;
+pub mod error;
 pub mod failover;
 mod nearai_chat;
+pub mod oauth_helpers;
 mod provider;
 mod reasoning;
 pub mod recording;
@@ -28,6 +31,10 @@ pub mod smart_routing;
 pub mod image_models;
 pub mod vision_models;
 
+pub use config::{
+    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
+    RegistryProviderConfig,
+};
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai_chat::{ModelInfo, NearAiChatProvider};
@@ -45,6 +52,7 @@ pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
+pub use error::LlmError;
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 
@@ -53,8 +61,8 @@ use std::sync::Arc;
 use rig::client::CompletionClient;
 use secrecy::ExposeSecret;
 
-use crate::config::{LlmConfig, NearAiConfig, RegistryProviderConfig};
-use crate::error::LlmError;
+// LlmConfig, NearAiConfig, RegistryProviderConfig, and LlmError are
+// re-exported via `pub use` above from config and error submodules.
 
 /// Create an LLM provider based on configuration.
 ///
@@ -232,7 +240,7 @@ fn create_anthropic_from_registry(
     let api_key_is_placeholder = config
         .api_key
         .as_ref()
-        .is_some_and(|k| k.expose_secret() == crate::config::llm::OAUTH_PLACEHOLDER);
+        .is_some_and(|k| k.expose_secret() == crate::llm::config::OAUTH_PLACEHOLDER);
     if config.oauth_token.is_some() && (config.api_key.is_none() || api_key_is_placeholder) {
         tracing::info!(
             provider = %config.provider_id,
@@ -244,8 +252,7 @@ fn create_anthropic_from_registry(
         return Ok(Arc::new(provider));
     }
 
-    use crate::config::CacheRetention;
-    use crate::config::helpers::optional_env;
+    use crate::llm::config::CacheRetention;
     use rig::providers::anthropic;
 
     let api_key = config
@@ -269,21 +276,7 @@ fn create_anthropic_from_registry(
         reason: format!("Failed to create Anthropic client: {e}"),
     })?;
 
-    // Resolve prompt cache retention from env (default: Short).
-    // Injects top-level cache_control via additional_params for Anthropic
-    // automatic caching (the API auto-places the breakpoint at the last
-    // cacheable block).
-    let cache_retention: CacheRetention = optional_env("ANTHROPIC_CACHE_RETENTION")
-        .ok()
-        .flatten()
-        .and_then(|val| match val.parse::<CacheRetention>() {
-            Ok(r) => Some(r),
-            Err(e) => {
-                tracing::warn!("Invalid ANTHROPIC_CACHE_RETENTION: {e}; defaulting to short");
-                None
-            }
-        })
-        .unwrap_or_default();
+    let cache_retention = config.cache_retention;
 
     let model = client.completion_model(&config.model);
 
@@ -531,7 +524,7 @@ pub async fn build_provider_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::NearAiConfig;
+    use crate::llm::config::NearAiConfig;
 
     fn test_nearai_config() -> NearAiConfig {
         NearAiConfig {

@@ -37,8 +37,9 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsq
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
-pub use self::llm::{
-    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, RegistryProviderConfig,
+pub use crate::llm::config::{
+    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
+    RegistryProviderConfig,
 };
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
@@ -48,6 +49,7 @@ pub use self::skills::SkillsConfig;
 pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
+pub use self::llm::default_session_path;
 pub use crate::llm::session::SessionConfig;
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).

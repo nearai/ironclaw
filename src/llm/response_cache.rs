@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -307,7 +307,7 @@ mod tests {
     use rust_decimal::Decimal;
     use tracing_test::traced_test;
 
-    use crate::error::LlmError;
+    use crate::llm::error::LlmError;
     use crate::llm::provider::{
         ChatMessage, CompletionResponse, FinishReason, ToolCompletionRequest,
         ToolCompletionResponse,

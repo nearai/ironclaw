@@ -16,8 +16,8 @@ use rust_decimal::prelude::MathematicalOps;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
-use crate::config::NearAiConfig;
-use crate::error::LlmError;
+use crate::llm::config::NearAiConfig;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,

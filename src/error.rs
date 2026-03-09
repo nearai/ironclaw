@@ -138,45 +138,8 @@ pub enum ChannelError {
     HealthCheckFailed { name: String },
 }
 
-/// LLM provider errors.
-#[derive(Debug, thiserror::Error)]
-pub enum LlmError {
-    #[error("Provider {provider} request failed: {reason}")]
-    RequestFailed { provider: String, reason: String },
-
-    #[error("Provider {provider} rate limited, retry after {retry_after:?}")]
-    RateLimited {
-        provider: String,
-        retry_after: Option<Duration>,
-    },
-
-    #[error("Invalid response from {provider}: {reason}")]
-    InvalidResponse { provider: String, reason: String },
-
-    #[error("Context length exceeded: {used} tokens used, {limit} allowed")]
-    ContextLengthExceeded { used: usize, limit: usize },
-
-    #[error("Model {model} not available on provider {provider}")]
-    ModelNotAvailable { provider: String, model: String },
-
-    #[error("Authentication failed for provider {provider}")]
-    AuthFailed { provider: String },
-
-    #[error("Session expired for provider {provider}")]
-    SessionExpired { provider: String },
-
-    #[error("Session renewal failed for provider {provider}: {reason}")]
-    SessionRenewalFailed { provider: String, reason: String },
-
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-}
+// LlmError lives in src/llm/error.rs; re-exported here for backward compatibility.
+pub use crate::llm::error::LlmError;
 
 /// Tool execution errors.
 #[derive(Debug, thiserror::Error)]
@@ -484,24 +447,6 @@ mod tests {
             msg.contains("invalid token"),
             "Should mention reason: {msg}"
         );
-    }
-
-    #[test]
-    fn llm_error_display() {
-        let err = LlmError::ContextLengthExceeded {
-            used: 100_000,
-            limit: 50_000,
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("100000"), "Should mention used tokens: {msg}");
-        assert!(msg.contains("50000"), "Should mention limit: {msg}");
-
-        let err = LlmError::RateLimited {
-            provider: "openai".to_string(),
-            retry_after: Some(Duration::from_secs(30)),
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("openai"), "Should mention provider: {msg}");
     }
 
     #[test]

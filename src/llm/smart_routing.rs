@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use rust_decimal::Decimal;
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role, ToolCompletionRequest,
     ToolCompletionResponse,
