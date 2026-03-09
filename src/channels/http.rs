@@ -29,13 +29,14 @@ pub struct HttpChannel {
     state: Arc<HttpChannelState>,
 }
 
-struct HttpChannelState {
+pub struct HttpChannelState {
     /// Sender for incoming messages.
     tx: RwLock<Option<mpsc::Sender<IncomingMessage>>>,
     /// Pending responses keyed by message ID.
     pending_responses: RwLock<std::collections::HashMap<Uuid, oneshot::Sender<String>>>,
     /// Expected webhook secret for authentication (if configured).
-    webhook_secret: Option<String>,
+    /// Wrapped in RwLock for hot-swapping on SIGHUP.
+    webhook_secret: RwLock<Option<String>>,
     /// Fixed user ID for this HTTP channel.
     user_id: String,
     /// Rate limiting state.
@@ -46,6 +47,14 @@ struct HttpChannelState {
 struct RateLimitState {
     window_start: std::time::Instant,
     request_count: u32,
+}
+
+impl HttpChannelState {
+    /// Update the webhook secret in-place without restarting the listener.
+    /// Called during SIGHUP to hot-swap credentials.
+    pub async fn update_secret(&self, new_secret: Option<String>) {
+        *self.webhook_secret.write().await = new_secret;
+    }
 }
 
 /// Maximum JSON body size for webhook requests (15 MB, to support base64 image attachments
@@ -75,7 +84,7 @@ impl HttpChannel {
             state: Arc::new(HttpChannelState {
                 tx: RwLock::new(None),
                 pending_responses: RwLock::new(std::collections::HashMap::new()),
-                webhook_secret,
+                webhook_secret: RwLock::new(webhook_secret),
                 user_id,
                 rate_limit: tokio::sync::Mutex::new(RateLimitState {
                     window_start: std::time::Instant::now(),
@@ -101,6 +110,16 @@ impl HttpChannel {
     /// Return the configured host and port for this channel.
     pub fn addr(&self) -> (&str, u16) {
         (&self.config.host, self.config.port)
+    }
+
+    /// Return a shared handle to the channel state for out-of-band updates.
+    pub fn shared_state(&self) -> Arc<HttpChannelState> {
+        Arc::clone(&self.state)
+    }
+
+    /// Update the webhook secret in-place without restarting the listener.
+    pub async fn update_secret(&self, new_secret: Option<String>) {
+        *self.state.webhook_secret.write().await = new_secret;
     }
 }
 
@@ -201,7 +220,7 @@ async fn webhook_handler(
     });
 
     // Validate secret if configured
-    if let Some(ref expected_secret) = state.webhook_secret {
+    if let Some(ref expected_secret) = *state.webhook_secret.read().await {
         match &req.secret {
             Some(provided) if bool::from(provided.as_bytes().ct_eq(expected_secret.as_bytes())) => {
                 // Secret matches, continue
@@ -428,7 +447,7 @@ impl Channel for HttpChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        if self.state.webhook_secret.is_none() {
+        if self.state.webhook_secret.read().await.is_none() {
             return Err(ChannelError::StartupFailed {
                 name: "http".to_string(),
                 reason: "HTTP webhook secret is required (set HTTP_WEBHOOK_SECRET)".to_string(),
@@ -561,5 +580,73 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_update_secret_hot_swap() {
+        let channel = test_channel(Some("old-secret"));
+        let _stream = channel.start().await.unwrap();
+        let app1 = channel.routes();
+
+        // Request with old-secret should succeed
+        let body_old = serde_json::json!({
+            "content": "hello",
+            "secret": "old-secret"
+        });
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_old).unwrap()))
+            .unwrap();
+        let resp1 = app1.oneshot(req1).await.unwrap();
+        assert_eq!(
+            resp1.status(),
+            StatusCode::OK,
+            "old secret should work initially"
+        );
+
+        // Update secret to new-secret
+        channel.update_secret(Some("new-secret".to_string())).await;
+
+        let app2 = channel.routes();
+
+        // Request with old-secret should fail
+        let body_old = serde_json::json!({
+            "content": "hello",
+            "secret": "old-secret"
+        });
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_old).unwrap()))
+            .unwrap();
+        let resp2 = app2.oneshot(req2).await.unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::UNAUTHORIZED,
+            "old secret should fail after update"
+        );
+
+        let app3 = channel.routes();
+
+        // Request with new-secret should succeed
+        let body_new = serde_json::json!({
+            "content": "hello",
+            "secret": "new-secret"
+        });
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_new).unwrap()))
+            .unwrap();
+        let resp3 = app3.oneshot(req3).await.unwrap();
+        assert_eq!(
+            resp3.status(),
+            StatusCode::OK,
+            "new secret should work after update"
+        );
     }
 }

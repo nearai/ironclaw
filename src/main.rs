@@ -401,10 +401,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Add HTTP channel if configured and not CLI-only mode.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
+    let mut http_channel_state: Option<Arc<ironclaw::channels::HttpChannelState>> = None;
     if !cli.cli_only
         && let Some(ref http_config) = config.channels.http
     {
         let http_channel = HttpChannel::new(http_config.clone());
+        http_channel_state = Some(http_channel.shared_state());
         webhook_routes.push(http_channel.routes());
         let (host, port) = http_channel.addr();
         webhook_server_addr = Some(
@@ -422,7 +424,9 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Start the unified webhook server if any routes were registered.
-    let mut webhook_server = if !webhook_routes.is_empty() {
+    let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
+        .is_empty()
+    {
         let addr =
             webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
         if addr.ip().is_unspecified() {
@@ -437,7 +441,7 @@ async fn async_main() -> anyhow::Result<()> {
             server.add_routes(routes);
         }
         server.start().await?;
-        Some(server)
+        Some(Arc::new(tokio::sync::Mutex::new(server)))
     } else {
         None
     };
@@ -680,6 +684,12 @@ async fn async_main() -> anyhow::Result<()> {
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
 
+    // Capture db reference for SIGHUP handler before it's moved into AgentDeps
+    let sighup_settings_store: Option<Arc<dyn ironclaw::db::SettingsStore>> = components
+        .db
+        .as_ref()
+        .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -740,6 +750,95 @@ async fn async_main() -> anyhow::Result<()> {
         agent.set_routine_engine_slot(slot);
     }
 
+    // Prepare SIGHUP handler for hot-reloading HTTP webhook config
+    #[cfg(unix)]
+    {
+        let sighup_webhook_server = webhook_server.clone();
+        let sighup_http_state = http_channel_state.clone();
+        let sighup_settings_store_clone = sighup_settings_store.clone();
+
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sighup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to register SIGHUP handler: {}", e);
+                    return;
+                }
+            };
+
+            loop {
+                sighup.recv().await;
+                tracing::info!("SIGHUP received — reloading HTTP webhook config");
+
+                // Reload config
+                let new_config = match &sighup_settings_store_clone {
+                    Some(store) => {
+                        ironclaw::config::Config::from_db(store.as_ref(), "default").await
+                    }
+                    None => ironclaw::config::Config::from_env().await,
+                };
+
+                let new_config = match new_config {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("SIGHUP config reload failed: {}", e);
+                        continue;
+                    }
+                };
+
+                let new_http = match new_config.channels.http {
+                    Some(c) => c,
+                    None => {
+                        tracing::warn!("SIGHUP: HTTP channel no longer configured, skipping");
+                        continue;
+                    }
+                };
+
+                // Compute new socket addr
+                let new_addr: std::net::SocketAddr =
+                    match format!("{}:{}", new_http.host, new_http.port).parse() {
+                        Ok(a) => a,
+                        Err(e) => {
+                            tracing::error!("SIGHUP: invalid addr in config: {}", e);
+                            continue;
+                        }
+                    };
+
+                // Restart listener if addr changed
+                if let Some(ref ws_arc) = sighup_webhook_server {
+                    let mut ws = ws_arc.lock().await;
+                    let old_addr = ws.current_addr();
+                    if old_addr != new_addr {
+                        tracing::info!(
+                            "SIGHUP: HTTP addr {} -> {}, restarting listener",
+                            old_addr,
+                            new_addr
+                        );
+                        if let Err(e) = ws.restart_with_addr(new_addr).await {
+                            tracing::error!("SIGHUP: listener restart failed: {}", e);
+                        } else {
+                            tracing::info!("SIGHUP: webhook server restarted on {}", new_addr);
+                        }
+                    } else {
+                        tracing::debug!("SIGHUP: addr unchanged ({})", old_addr);
+                    }
+                }
+
+                // Always update secret in-place (zero-downtime)
+                if let Some(ref state) = sighup_http_state {
+                    use secrecy::ExposeSecret;
+                    let new_secret = new_http
+                        .webhook_secret
+                        .as_ref()
+                        .map(|s| s.expose_secret().to_string());
+                    state.update_secret(new_secret).await;
+                    tracing::info!("SIGHUP: webhook secret updated");
+                }
+            }
+        });
+    }
+
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
@@ -754,8 +853,8 @@ async fn async_main() -> anyhow::Result<()> {
         tracing::warn!("Failed to write LLM trace: {}", e);
     }
 
-    if let Some(ref mut server) = webhook_server {
-        server.shutdown().await;
+    if let Some(ref ws_arc) = webhook_server {
+        ws_arc.lock().await.shutdown().await;
     }
 
     if let Some(tunnel) = active_tunnel {
