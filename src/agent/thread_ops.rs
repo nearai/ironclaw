@@ -929,8 +929,12 @@ impl Agent {
                     let needs_approval = match tool.requires_approval(&tc.arguments) {
                         ApprovalRequirement::Never => false,
                         ApprovalRequirement::UnlessAutoApproved => {
-                            let sess = session.lock().await;
-                            !sess.is_tool_auto_approved(&tc.name)
+                            if self.config.auto_approve_tools {
+                                false
+                            } else {
+                                let sess = session.lock().await;
+                                !sess.is_tool_auto_approved(&tc.name)
+                            }
                         }
                         ApprovalRequirement::Always => true,
                     };
