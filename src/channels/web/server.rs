@@ -2433,7 +2433,7 @@ struct GatewayStatusResponse {
 static PROXY_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
 
 fn get_proxy_client() -> &'static reqwest::Client {
-    PROXY_CLIENT.get_or_init(|| reqwest::Client::new())
+    PROXY_CLIENT.get_or_init(reqwest::Client::new)
 }
 
 // --- Webhook proxy ---
@@ -2530,11 +2530,10 @@ async fn webhook_proxy_handler(
 
     // Copy response headers
     for (name, value) in response.headers() {
-        if let Ok(name) = axum::http::HeaderName::try_from(name.as_str()) {
-            if let Ok(value) = axum::http::HeaderValue::try_from(value.as_bytes()) {
+        if let Ok(name) = axum::http::HeaderName::try_from(name.as_str())
+            && let Ok(value) = axum::http::HeaderValue::try_from(value.as_bytes()) {
                 resp_builder = resp_builder.header(name, value);
             }
-        }
     }
 
     // Forward response body
