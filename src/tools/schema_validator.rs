@@ -661,7 +661,11 @@ mod tests {
                     "properties": {
                         "source": { "type": "string", "description": "Event source" },
                         "event_type": { "type": "string", "description": "Event type" },
-                        "payload": { "type": "object", "description": "Event payload" },
+                        "payload": {
+                            "type": "object",
+                            "description": "Event payload",
+                            "properties": {}
+                        },
                         "user_id": { "type": "string", "description": "Optional target user id" }
                     },
                     "required": ["source", "event_type"]

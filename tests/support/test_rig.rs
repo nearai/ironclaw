@@ -312,7 +312,23 @@ impl TestRig {
                 .collect();
             let started = self.tool_calls_started();
             let completed = self.tool_calls_completed();
-            let results = self.tool_results();
+            let mut results = self.tool_results();
+            for status in self.channel.captured_status_events() {
+                if let ironclaw::channels::StatusUpdate::ToolCompleted {
+                    name,
+                    success: false,
+                    error,
+                    parameters,
+                } = status
+                {
+                    let detail = format!(
+                        "error={}; params={}",
+                        error.unwrap_or_else(|| "unknown".to_string()),
+                        parameters.unwrap_or_else(|| "{}".to_string())
+                    );
+                    results.push((name, detail));
+                }
+            }
             verify_expects(
                 &trace.expects,
                 &all_response_strings,
@@ -339,7 +355,23 @@ impl TestRig {
         let response_strings: Vec<String> = responses.iter().map(|r| r.content.clone()).collect();
         let started = self.tool_calls_started();
         let completed = self.tool_calls_completed();
-        let results = self.tool_results();
+        let mut results = self.tool_results();
+        for status in self.channel.captured_status_events() {
+            if let ironclaw::channels::StatusUpdate::ToolCompleted {
+                name,
+                success: false,
+                error,
+                parameters,
+            } = status
+            {
+                let detail = format!(
+                    "error={}; params={}",
+                    error.unwrap_or_else(|| "unknown".to_string()),
+                    parameters.unwrap_or_else(|| "{}".to_string())
+                );
+                results.push((name, detail));
+            }
+        }
         verify_expects(
             &trace.expects,
             &response_strings,
@@ -394,7 +426,7 @@ impl TestRigBuilder {
             llm: None,
             max_tool_iterations: 10,
             injection_check: false,
-            auto_approve_tools: None,
+            auto_approve_tools: Some(true),
             enable_skills: false,
             enable_routines: false,
             http_exchanges: Vec::new(),
@@ -567,9 +599,18 @@ impl TestRigBuilder {
             .await
             .expect("AppBuilder::build_all() failed in test rig");
 
+        // AppBuilder may re-resolve config from env/TOML and override test defaults.
+        // Force test-rig agent flags to the requested deterministic values.
+        components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
+        components.config.agent.allow_local_tools = true;
+
         // 6. Register job tools, routine tools, and extra tools.
         {
             use ironclaw::context::ContextManager;
+
+            // Ensure filesystem/shell dev tools are always available in the
+            // test rig, even if upstream builder flags/config disable local tools.
+            components.tools.register_dev_tools();
 
             let ctx_mgr = Arc::new(ContextManager::new(
                 components.config.agent.max_parallel_jobs,
