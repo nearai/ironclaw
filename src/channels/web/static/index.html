@@ -20,16 +20,16 @@
   <div id="auth-screen">
     <div class="auth-card-login">
       <div class="auth-brand">
-        <h1>IronClaw</h1>
-        <p class="auth-tagline">Secure AI Assistant</p>
+        <h1 data-i18n="auth.title">IronClaw</h1>
+        <p class="auth-tagline" data-i18n="auth.tagline">Secure AI Assistant</p>
       </div>
       <div class="auth-form">
-        <label for="token-input">Gateway Token</label>
-        <input type="password" id="token-input" placeholder="Paste your auth token" autofocus>
-        <button onclick="authenticate()">Connect</button>
+        <label for="token-input" data-i18n="auth.tokenLabel">Gateway Token</label>
+        <input type="password" id="token-input" data-i18n-placeholder="auth.tokenPlaceholder" placeholder="Paste your auth token" autofocus>
+        <button onclick="authenticate()" data-i18n="auth.connect">Connect</button>
       </div>
       <div id="auth-error"></div>
-      <p class="auth-hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
+      <p class="auth-hint" data-i18n="auth.hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
     </div>
   </div>
 
@@ -38,21 +38,21 @@
     <div class="restart-modal-overlay" onclick="cancelRestart()"></div>
     <div class="restart-modal-content">
       <div class="restart-modal-header">
-        <h2>Restart IronClaw Instance</h2>
+        <h2 data-i18n="restart.title">Restart IronClaw Instance</h2>
         <button class="restart-modal-close" onclick="cancelRestart()" title="Close">×</button>
       </div>
       <div class="restart-modal-body">
-        <p class="restart-modal-description">
+        <p class="restart-modal-description" data-i18n="restart.description">
           Are you sure you want to restart the IronClaw instance? This will gracefully restart the process.
         </p>
         <div class="restart-modal-warning">
-          <span class="restart-modal-warning-icon">⚠️</span>
-          <p>Any in-progress jobs may be interrupted. The restart will complete within a few seconds.</p>
+          <span class="restart-modal-warning-icon">&#9888;&#65039;</span>
+          <p data-i18n="restart.warning">Any in-progress jobs may be interrupted. The restart will complete within a few seconds.</p>
         </div>
       </div>
       <div class="restart-modal-footer">
-        <button class="restart-modal-btn cancel" onclick="cancelRestart()">Cancel</button>
-        <button class="restart-modal-btn confirm" onclick="confirmRestart()">Confirm Restart</button>
+        <button class="restart-modal-btn cancel" onclick="cancelRestart()" data-i18n="restart.cancel">Cancel</button>
+        <button class="restart-modal-btn confirm" onclick="confirmRestart()" data-i18n="restart.confirmRestart">Confirm Restart</button>
       </div>
     </div>
   </div>
@@ -63,13 +63,13 @@
     <div class="restart-loader-content">
       <div class="restart-spinner"></div>
       <div class="restart-loader-text">
-        <p class="restart-title">Restarting IronClaw</p>
-        <p class="restart-subtitle">Please wait while the process restarts...</p>
+        <p class="restart-title" data-i18n="restart.restarting">Restarting IronClaw</p>
+        <p class="restart-subtitle" data-i18n="restart.pleaseWait">Please wait while the process restarts...</p>
       </div>
       <div class="restart-progress-bar">
         <div class="restart-progress-fill"></div>
       </div>
-      <p class="restart-modal-info">
+      <p class="restart-modal-info" data-i18n="restart.checkLogs">
         Check the Logs tab for details after the restart completes.
       </p>
     </div>
@@ -79,24 +79,35 @@
   <div id="app">
     <!-- Tab Bar -->
     <div class="tab-bar">
-      <button class="active" data-tab="chat">Chat</button>
-      <button data-tab="memory">Memory</button>
-      <button data-tab="jobs">Jobs</button>
-      <button data-tab="routines">Routines</button>
-      <button data-tab="extensions">Extensions</button>
-      <button data-tab="skills">Skills</button>
+      <button class="active" data-tab="chat" data-i18n="tabs.chat">Chat</button>
+      <button data-tab="memory" data-i18n="tabs.memory">Memory</button>
+      <button data-tab="jobs" data-i18n="tabs.jobs">Jobs</button>
+      <button data-tab="routines" data-i18n="tabs.routines">Routines</button>
+      <button data-tab="extensions" data-i18n="tabs.extensions">Extensions</button>
+      <button data-tab="skills" data-i18n="tabs.skills">Skills</button>
       <div class="spacer"></div>
-      <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
+      <div class="lang-switcher" id="lang-switcher">
+        <button class="lang-switcher-btn" id="lang-switcher-btn" onclick="toggleLangMenu(event)" aria-haspopup="true" aria-expanded="false">
+          <span id="lang-switcher-label">EN</span>
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><path d="M5 7L1 3h8z"/></svg>
+        </button>
+        <ul class="lang-menu" id="lang-menu" role="menu">
+          <li role="menuitem" data-lang="en"  onclick="switchLanguage('en')">English</li>
+          <li role="menuitem" data-lang="zh"  onclick="switchLanguage('zh')">简体中文</li>
+          <li role="menuitem" data-lang="zh-TW" onclick="switchLanguage('zh-TW')">繁體中文</li>
+        </ul>
+      </div>
+      <button class="status-logs-btn" data-tab="logs" data-i18n="tabs.logs" title="Logs">Logs</button>
       <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
         </svg>
-        <span id="tee-shield-label">TEE Verified</span>
+        <span id="tee-shield-label" data-i18n="tee.verified">TEE Verified</span>
         <div class="tee-popover" id="tee-popover"></div>
       </div>
       <div class="status" id="gateway-status-trigger">
         <div class="dot" id="sse-dot"></div>
-        <span id="sse-status">Connected</span>
+        <span id="sse-status" data-i18n="status.connected">Connected</span>
         <div class="gateway-popover" id="gateway-popover"></div>
       </div>
       <button class="restart-btn" id="restart-btn" onclick="triggerRestart()" title="Gracefully restart the process">
@@ -105,7 +116,7 @@
           <path d="M1 20v-6h6"></path>
           <path d="M3.51 9a9 9 0 0114.85-3.36M20.49 15a9 9 0 01-14.85 3.36"></path>
         </svg>
-        <span>Restart</span>
+        <span data-i18n="restart.btn">Restart</span>
       </button>
     </div>
 
@@ -118,11 +129,11 @@
           <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" title="Toggle sidebar">&laquo;</button>
         </div>
         <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
-          <span class="assistant-label" id="assistant-label">Assistant</span>
+          <span class="assistant-label" id="assistant-label" data-i18n="chat.assistant">Assistant</span>
           <span class="assistant-meta" id="assistant-meta"></span>
         </div>
         <div class="threads-section-header">
-          <span>Conversations</span>
+          <span data-i18n="chat.conversations">Conversations</span>
         </div>
         <div class="thread-list" id="thread-list"></div>
       </div>
@@ -130,8 +141,8 @@
         <div class="chat-messages" id="chat-messages"></div>
         <div id="slash-autocomplete" class="slash-autocomplete" style="display:none"></div>
         <div class="chat-input">
-          <textarea id="chat-input" placeholder="Message or / for commands..." rows="1"></textarea>
-          <button id="send-btn" onclick="sendMessage()">Send</button>
+          <textarea id="chat-input" data-i18n-placeholder="chat.placeholder" placeholder="Message or / for commands..." rows="1"></textarea>
+          <button id="send-btn" onclick="sendMessage()" data-i18n="chat.send">Send</button>
         </div>
       </div>
     </div>
@@ -141,23 +152,23 @@
       <div class="memory-container">
         <div class="memory-sidebar">
           <div class="search-box">
-            <input type="text" id="memory-search" placeholder="Search memory...">
+            <input type="text" id="memory-search" data-i18n-placeholder="memory.search" placeholder="Search memory...">
           </div>
           <div class="memory-tree" id="memory-tree"></div>
         </div>
         <div class="memory-content">
           <div class="memory-breadcrumb" id="memory-breadcrumb">
             <span id="memory-breadcrumb-path">workspace /</span>
-            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" onclick="startMemoryEdit()">Edit</button>
+            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" onclick="startMemoryEdit()" data-i18n="memory.edit">Edit</button>
           </div>
           <div class="memory-viewer" id="memory-viewer">
-            <div class="empty">Select a file to view its contents</div>
+            <div class="empty" data-i18n="memory.selectFile">Select a file to view its contents</div>
           </div>
           <div class="memory-editor" id="memory-editor" style="display:none">
             <textarea id="memory-edit-textarea"></textarea>
             <div class="memory-editor-actions">
-              <button class="btn-save" onclick="saveMemoryEdit()">Save</button>
-              <button class="btn-cancel-edit" onclick="cancelMemoryEdit()">Cancel</button>
+              <button class="btn-save" onclick="saveMemoryEdit()" data-i18n="memory.save">Save</button>
+              <button class="btn-cancel-edit" onclick="cancelMemoryEdit()" data-i18n="memory.cancel">Cancel</button>
             </div>
           </div>
         </div>
@@ -171,17 +182,17 @@
         <table class="jobs-table" id="jobs-table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Title</th>
-              <th>Source</th>
-              <th>Status</th>
-              <th>Created</th>
-              <th>Actions</th>
+              <th data-i18n="jobs.id">ID</th>
+              <th data-i18n="jobs.title">Title</th>
+              <th data-i18n="jobs.source">Source</th>
+              <th data-i18n="jobs.status">Status</th>
+              <th data-i18n="jobs.created">Created</th>
+              <th data-i18n="jobs.actions">Actions</th>
             </tr>
           </thead>
           <tbody id="jobs-tbody"></tbody>
         </table>
-        <div class="empty-state" id="jobs-empty" style="display:none">No jobs found</div>
+        <div class="empty-state" id="jobs-empty" style="display:none" data-i18n="jobs.noJobs">No jobs found</div>
       </div>
     </div>
 
@@ -190,22 +201,22 @@
       <div class="logs-container">
         <div class="logs-toolbar">
           <select id="logs-server-level" onchange="setServerLogLevel(this.value)" title="Server-side log level (changes what the server emits)">
-            <option value="error">Server: ERROR</option>
-            <option value="warn">Server: WARN</option>
-            <option value="info" selected>Server: INFO</option>
-            <option value="debug">Server: DEBUG</option>
+            <option value="error" data-i18n="logs.serverError">Server: ERROR</option>
+            <option value="warn" data-i18n="logs.serverWarn">Server: WARN</option>
+            <option value="info" selected data-i18n="logs.serverInfo">Server: INFO</option>
+            <option value="debug" data-i18n="logs.serverDebug">Server: DEBUG</option>
           </select>
           <select id="logs-level-filter">
-            <option value="all">All Levels</option>
-            <option value="ERROR">Error</option>
-            <option value="WARN">Warn</option>
-            <option value="INFO">Info</option>
-            <option value="DEBUG">Debug</option>
+            <option value="all" data-i18n="logs.allLevels">All Levels</option>
+            <option value="ERROR" data-i18n="logs.error">Error</option>
+            <option value="WARN" data-i18n="logs.warn">Warn</option>
+            <option value="INFO" data-i18n="logs.info">Info</option>
+            <option value="DEBUG" data-i18n="logs.debug">Debug</option>
           </select>
-          <input type="text" id="logs-target-filter" placeholder="Filter by target...">
-          <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> Auto-scroll</label>
-          <button id="logs-pause-btn" onclick="toggleLogsPause()">Pause</button>
-          <button onclick="clearLogs()">Clear</button>
+          <input type="text" id="logs-target-filter" data-i18n-placeholder="logs.filterTarget" placeholder="Filter by target...">
+          <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> <span data-i18n="logs.autoscroll">Auto-scroll</span></label>
+          <button id="logs-pause-btn" onclick="toggleLogsPause()" data-i18n="logs.pause">Pause</button>
+          <button onclick="clearLogs()" data-i18n="logs.clear">Clear</button>
         </div>
         <div class="logs-output" id="logs-output"></div>
       </div>
@@ -218,19 +229,19 @@
         <table class="routines-table" id="routines-table">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Trigger</th>
-              <th>Action</th>
-              <th>Last Run</th>
-              <th>Next Run</th>
-              <th>Runs</th>
-              <th>Status</th>
-              <th>Actions</th>
+              <th data-i18n="routines.name">Name</th>
+              <th data-i18n="routines.trigger">Trigger</th>
+              <th data-i18n="routines.action">Action</th>
+              <th data-i18n="routines.lastRun">Last Run</th>
+              <th data-i18n="routines.nextRun">Next Run</th>
+              <th data-i18n="routines.runs">Runs</th>
+              <th data-i18n="routines.status">Status</th>
+              <th data-i18n="jobs.actions">Actions</th>
             </tr>
           </thead>
           <tbody id="routines-tbody"></tbody>
         </table>
-        <div class="empty-state" id="routines-empty" style="display:none">
+        <div class="empty-state" id="routines-empty" style="display:none" data-i18n="routines.noRoutines">
           No routines configured. Ask the assistant to create one.
         </div>
         <div class="routine-detail" id="routine-detail" style="display:none"></div>
@@ -241,44 +252,44 @@
     <div class="tab-panel" id="tab-extensions">
       <div class="extensions-container">
         <div class="extensions-section">
-          <h3>Installed Extensions</h3>
+          <h3 data-i18n="extensions.installed">Installed Extensions</h3>
           <div class="extensions-list" id="extensions-list">
-            <div class="empty-state">Loading extensions...</div>
+            <div class="empty-state" data-i18n="extensions.loadingExtensions">Loading extensions...</div>
           </div>
         </div>
         <div class="extensions-section" id="available-wasm-section">
-          <h3>Available WASM Extensions</h3>
+          <h3 data-i18n="extensions.available">Available WASM Extensions</h3>
           <div class="extensions-list" id="available-wasm-list">
-            <div class="empty-state">Loading...</div>
+            <div class="empty-state" data-i18n="common.loading">Loading...</div>
           </div>
         </div>
         <div class="extensions-section">
-          <h3>Install WASM Extension</h3>
+          <h3 data-i18n="extensions.installWasm">Install WASM Extension</h3>
           <div class="ext-install-form">
-            <input type="text" id="wasm-install-name" placeholder="Extension name">
-            <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
-            <button onclick="installWasmExtension()">Install</button>
+            <input type="text" id="wasm-install-name" data-i18n-placeholder="extensions.extensionName" placeholder="Extension name">
+            <input type="text" id="wasm-install-url" data-i18n-placeholder="extensions.bundleUrl" placeholder="URL to .tar.gz bundle">
+            <button onclick="installWasmExtension()" data-i18n="extensions.install">Install</button>
           </div>
         </div>
         <div class="extensions-section">
-          <h3>MCP Servers</h3>
+          <h3 data-i18n="extensions.mcpServers">MCP Servers</h3>
           <div class="extensions-list" id="mcp-servers-list">
-            <div class="empty-state">Loading...</div>
+            <div class="empty-state" data-i18n="common.loading">Loading...</div>
           </div>
-          <h4>Add Custom MCP Server</h4>
+          <h4 data-i18n="extensions.addCustomMcp">Add Custom MCP Server</h4>
           <div class="ext-install-form">
-            <input type="text" id="mcp-install-name" placeholder="Server name">
-            <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
-            <button onclick="addMcpServer()">Add</button>
+            <input type="text" id="mcp-install-name" data-i18n-placeholder="extensions.serverName" placeholder="Server name">
+            <input type="text" id="mcp-install-url" data-i18n-placeholder="extensions.mcpServerUrl" placeholder="MCP server URL (https://...)">
+            <button onclick="addMcpServer()" data-i18n="extensions.add">Add</button>
           </div>
         </div>
         <div class="extensions-section">
-          <h3>Registered Tools</h3>
+          <h3 data-i18n="extensions.tools">Registered Tools</h3>
           <table class="tools-table" id="tools-table">
-            <thead><tr><th>Name</th><th>Description</th></tr></thead>
+            <thead><tr><th data-i18n="extensions.name">Name</th><th data-i18n="extensions.description">Description</th></tr></thead>
             <tbody id="tools-tbody"></tbody>
           </table>
-          <div class="empty-state" id="tools-empty" style="display:none">No tools registered</div>
+          <div class="empty-state" id="tools-empty" style="display:none" data-i18n="extensions.noTools">No tools registered</div>
         </div>
       </div>
     </div>
@@ -287,25 +298,25 @@
     <div class="tab-panel" id="tab-skills">
       <div class="extensions-container">
         <div class="extensions-section">
-          <h3>Search ClawHub</h3>
+          <h3 data-i18n="skills.searchClawHub">Search ClawHub</h3>
           <div class="skill-search-box">
-            <input type="text" id="skill-search-input" placeholder="Search for skills...">
-            <button onclick="searchClawHub()">Search</button>
+            <input type="text" id="skill-search-input" data-i18n-placeholder="skills.searchPlaceholder" placeholder="Search for skills...">
+            <button onclick="searchClawHub()" data-i18n="skills.search">Search</button>
           </div>
           <div class="extensions-list" id="skill-search-results"></div>
         </div>
         <div class="extensions-section">
-          <h3>Installed Skills</h3>
+          <h3 data-i18n="skills.installed">Installed Skills</h3>
           <div class="extensions-list" id="skills-list">
-            <div class="empty-state">Loading skills...</div>
+            <div class="empty-state" data-i18n="extensions.loadingSkills">Loading skills...</div>
           </div>
         </div>
         <div class="extensions-section">
-          <h3>Install Skill by URL</h3>
+          <h3 data-i18n="skills.installByUrl">Install Skill by URL</h3>
           <div class="ext-install-form">
-            <input type="text" id="skill-install-name" placeholder="Skill name or slug">
-            <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
-            <button onclick="installSkillFromForm()">Install</button>
+            <input type="text" id="skill-install-name" data-i18n-placeholder="skills.skillName" placeholder="Skill name or slug">
+            <input type="text" id="skill-install-url" data-i18n-placeholder="skills.skillUrl" placeholder="HTTPS URL to SKILL.md (optional)">
+            <button onclick="installSkillFromForm()" data-i18n="extensions.install">Install</button>
           </div>
         </div>
       </div>
@@ -313,6 +324,7 @@
   </div>
 
   <div id="toasts"></div>
+  <script src="/i18n/index.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [CN-0.1.3] - 2026-03-08
+
+### Added
+
+- **Language switcher UI** — dropdown in the top tab bar (between Skills tab and Logs button) allowing users to switch between English, Simplified Chinese, and Traditional Chinese at runtime
+  - Persisted via `localStorage`; selection survives page refresh
+  - Active language highlighted in accent color; chevron animates on open/close
+  - Clicking outside the menu closes it automatically
+
+## [CN-0.1.2] - 2026-03-08
+
+### Added
+
+- **Traditional Chinese (zh-TW) locale** — complete translation of all 323 keys covering 17 UI modules
+  - Browser auto-detection: `zh-TW`, `zh-HK`, `zh-MO` tags map to Traditional Chinese; `zh-*` (other) maps to Simplified Chinese
+  - New static route `/i18n/locales/zh-TW.json` served by Rust web server (embedded at compile time)
+
+## [CN-0.1.1] - 2026-03-08
+
+### Fixed
+
+- **i18n engine** — use `replaceAll` instead of `replace` for placeholder substitution; previously only the first occurrence of a repeated placeholder (e.g. `{0} and {0}`) was replaced
+- **app.js** — wrap startup `autoAuth` IIFE inside `i18n.onReady()` to eliminate race condition where `i18n.t()` calls could fire before locale files finished loading
+- **app.js** — add `escapeJs()` utility; apply to all IDs/names concatenated into `onclick` attribute strings (jobs and routines rows) to prevent JS-injection via attacker-controlled IDs
+- **app.js** — replace `kindLabels` hardcoded map and unused `getKindLabel()` with `getExtKindLabel()` backed by i18n keys (`extensions.kindChannel/kindTool/kindMcp`)
+- **Locale files** — add `extensions.kindChannel`, `extensions.kindTool`, `extensions.kindMcp` keys to `en.json` and `zh.json`
+- **server.rs** — add missing static routes for `/i18n/index.js` and `/i18n/locales/{locale}.json` (embedded at compile time via `include_str!`)
+- **index.html** — set default `lang="en"`; i18n engine now detects browser language via `navigator.language`
+- **CHANGELOG** — rewrite CN-0.1.0 entry in English to match project convention
+- **FEATURE_PARITY.md** — correct i18n status from `✅` to `🚧` (Web UI only; TUI/CLI/backend strings pending)
+
+## [CN-0.1.0] - 2026-03-09
+
+### Added
+
+- **i18n engine** (`src/channels/web/static/i18n/index.js`)
+  - `i18n.t(key, replacements)` translation function with positional (`{0}`) and named (`{name}`) placeholder substitution
+  - Automatic DOM translation via `data-i18n`, `data-i18n-placeholder`, `data-i18n-title`, `data-i18n-html` attributes
+  - Language switching with `localStorage` persistence; defaults to browser language (`navigator.language`), falls back to `en`
+  - English fallback — missing translation keys automatically degrade to `en.json`
+  - Auto-initializes after DOM ready; exposes `i18n.onReady(cb)` for dependent modules
+
+- **Locale files** — 323 translation keys across 17 UI modules
+  - `en.json`: English source strings (complete)
+  - `zh.json`: Simplified Chinese translations (complete)
+  - Modules covered: auth, tabs, chat, memory, jobs, routines, extensions, skills, logs, approval, authCard, code, restart, status, tee, pairing, gateway, activity, stepper, thread, slashCommands, common
+
+- **index.html** — 89 `data-i18n` attribute annotations; i18n script loaded before `app.js`
+
+- **Rust web server** — added `/i18n/index.js` and `/i18n/locales/{locale}.json` static routes (embedded at compile time)
+
 ## [0.16.1](https://github.com/nearai/ironclaw/compare/v0.16.0...v0.16.1) - 2026-03-06
 
 ### Fixed

@@ -409,7 +409,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Debug/logs viewer | ✅ | ✅ | - | Real-time log streaming with level/target filters |
 | WebChat interface | ✅ | ✅ | - | Web gateway chat with SSE/WebSocket |
 | Canvas system (A2UI) | ✅ | ❌ | P3 | Agent-driven UI, improved asset resolution |
-| Control UI i18n | ✅ | ❌ | P3 | English, Chinese, Portuguese |
+| Control UI i18n | ✅ | 🚧 | P3 | Web UI: English + Simplified Chinese + Traditional Chinese + language switcher UI (CN-0.1.3); TUI/CLI/backend strings pending |
 | WebChat theme sync | ✅ | ❌ | P3 | Sync with system dark/light mode |
 | Partial output on abort | ✅ | ❌ | P2 | Preserve partial output when aborting |
 
@@ -565,7 +565,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Plugin registry
 - ❌ Streaming (block/tool/Z.AI tool_stream)
 - ❌ Memory: temporal decay, MMR re-ranking, query expansion
-- ❌ Control UI i18n
+- ❌ Control UI i18n → 🚧 (CN-0.1.3: Web UI English + Simplified Chinese + Traditional Chinese + language switcher complete; TUI/CLI/backend strings pending)
 - ❌ Stuck loop detection
 
 ---

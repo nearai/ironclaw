@@ -22,23 +22,23 @@ const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 // --- Slash Commands ---
 
 const SLASH_COMMANDS = [
-  { cmd: '/status',     desc: 'Show all jobs, or /status <id> for one job' },
-  { cmd: '/list',       desc: 'List all jobs' },
-  { cmd: '/cancel',     desc: '/cancel <job-id> — cancel a running job' },
-  { cmd: '/undo',       desc: 'Revert the last turn' },
-  { cmd: '/redo',       desc: 'Re-apply an undone turn' },
-  { cmd: '/compact',    desc: 'Compress the context window' },
-  { cmd: '/clear',      desc: 'Clear thread and start fresh' },
-  { cmd: '/interrupt',  desc: 'Stop the current turn' },
-  { cmd: '/heartbeat',  desc: 'Trigger manual heartbeat check' },
-  { cmd: '/summarize',  desc: 'Summarize the current thread' },
-  { cmd: '/suggest',    desc: 'Suggest next steps' },
-  { cmd: '/help',       desc: 'Show help' },
-  { cmd: '/version',    desc: 'Show version info' },
-  { cmd: '/tools',      desc: 'List available tools' },
-  { cmd: '/skills',     desc: 'List installed skills' },
-  { cmd: '/model',      desc: 'Show or switch the LLM model' },
-  { cmd: '/thread new', desc: 'Create a new conversation thread' },
+  { cmd: '/status',     descKey: 'slashCommands.status' },
+  { cmd: '/list',       descKey: 'slashCommands.list' },
+  { cmd: '/cancel',     descKey: 'slashCommands.cancel' },
+  { cmd: '/undo',       descKey: 'slashCommands.undo' },
+  { cmd: '/redo',       descKey: 'slashCommands.redo' },
+  { cmd: '/compact',    descKey: 'slashCommands.compact' },
+  { cmd: '/clear',      descKey: 'slashCommands.clear' },
+  { cmd: '/interrupt',  descKey: 'slashCommands.interrupt' },
+  { cmd: '/heartbeat',  descKey: 'slashCommands.heartbeat' },
+  { cmd: '/summarize',  descKey: 'slashCommands.summarize' },
+  { cmd: '/suggest',    descKey: 'slashCommands.suggest' },
+  { cmd: '/help',       descKey: 'slashCommands.help' },
+  { cmd: '/version',    descKey: 'slashCommands.version' },
+  { cmd: '/tools',      descKey: 'slashCommands.tools' },
+  { cmd: '/skills',     descKey: 'slashCommands.skills' },
+  { cmd: '/model',      descKey: 'slashCommands.model' },
+  { cmd: '/thread new', descKey: 'slashCommands.threadNew' },
 ];
 
 let _slashSelected = -1;
@@ -54,7 +54,7 @@ let _activityThinking = null;
 function authenticate() {
   token = document.getElementById('token-input').value.trim();
   if (!token) {
-    document.getElementById('auth-error').textContent = 'Token required';
+    document.getElementById('auth-error').textContent = i18n.t('auth.tokenRequired');
     return;
   }
 
@@ -88,7 +88,7 @@ function authenticate() {
       sessionStorage.removeItem('ironclaw_token');
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('app').style.display = 'none';
-      document.getElementById('auth-error').textContent = 'Invalid token';
+      document.getElementById('auth-error').textContent = i18n.t('auth.invalidToken');
     });
 }
 
@@ -96,8 +96,9 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
 
-// Auto-authenticate from URL param or saved session
-(function autoAuth() {
+// Auto-authenticate from URL param or saved session — runs after i18n is ready
+// so that any i18n.t() calls in authenticate() resolve correctly.
+i18n.onReady(function autoAuth() {
   const params = new URLSearchParams(window.location.search);
   const urlToken = params.get('token');
   if (urlToken) {
@@ -114,7 +115,7 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
     document.getElementById('app').style.display = 'flex';
     authenticate();
   }
-})();
+});
 
 // --- API helper ---
 
@@ -143,7 +144,7 @@ let restartEnabled = false; // Track if restart is available in this deployment
 
 function triggerRestart() {
   if (!currentThreadId) {
-    alert('Please start a conversation first');
+    alert(i18n.t('restart.pleaseStartConversation'));
     return;
   }
 
@@ -154,7 +155,7 @@ function triggerRestart() {
 
 function confirmRestart() {
   if (!currentThreadId) {
-    alert('Please start a conversation first');
+    alert(i18n.t('restart.pleaseStartConversation'));
     return;
   }
 
@@ -189,7 +190,7 @@ function confirmRestart() {
     })
     .catch((err) => {
       console.error('[confirmRestart] Restart request failed:', err);
-      addMessage('system', 'Restart failed: ' + err.message);
+      addMessage('system', i18n.t('restart.restartFailed', [err.message]));
       isRestarting = false;
       restartBtn.disabled = false;
       if (restartIcon) restartIcon.classList.remove('spinning');
@@ -250,7 +251,7 @@ function connectSSE() {
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
-    document.getElementById('sse-status').textContent = 'Connected';
+    document.getElementById('sse-status').textContent = i18n.t('status.connected');
 
     // If we were restarting, close the modal and reset button now that server is back
     if (isRestarting) {
@@ -272,7 +273,7 @@ function connectSSE() {
 
   eventSource.onerror = () => {
     document.getElementById('sse-dot').classList.add('disconnected');
-    document.getElementById('sse-status').textContent = 'Reconnecting...';
+    document.getElementById('sse-status').textContent = i18n.t('status.reconnecting');
   };
 
   eventSource.addEventListener('response', (e) => {
@@ -394,7 +395,7 @@ function connectSSE() {
       const data = JSON.parse(e.data);
       if (!isCurrentThread(data.thread_id)) return;
       finalizeActivityGroup();
-      addMessage('system', 'Error: ' + data.message);
+      addMessage('system', i18n.t('common.error', [data.message]));
       enableChatInput();
     }
   });
@@ -457,7 +458,7 @@ function sendMessage() {
     method: 'POST',
     body: { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
   }).catch((err) => {
-    addMessage('system', 'Failed to send: ' + err.message);
+    addMessage('system', i18n.t('chat.failedToSend', [err.message]));
   });
 }
 
@@ -467,7 +468,7 @@ function enableChatInput() {
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = false;
-    input.placeholder = 'Message or / for commands...';
+    input.placeholder = i18n.t('chat.placeholder');
   }
   if (btn) btn.disabled = false;
 }
@@ -489,7 +490,7 @@ function showSlashAutocomplete(matches) {
     cmdSpan.textContent = item.cmd;
     var descSpan = document.createElement('span');
     descSpan.className = 'slash-ac-desc';
-    descSpan.textContent = item.desc;
+    descSpan.textContent = item.descKey ? i18n.t(item.descKey) : (item.desc || '');
     row.appendChild(cmdSpan);
     row.appendChild(descSpan);
     row.addEventListener('mousedown', (e) => {
@@ -541,7 +542,7 @@ function sendApprovalAction(requestId, action) {
     method: 'POST',
     body: { request_id: requestId, action: action, thread_id: currentThreadId },
   }).catch((err) => {
-    addMessage('system', 'Failed to send approval: ' + err.message);
+    addMessage('system', i18n.t('approval.failedToSend', [err.message]));
   });
 
   // Disable buttons and show confirmation on the card
@@ -554,7 +555,7 @@ function sendApprovalAction(requestId, action) {
     const actions = card.querySelector('.approval-actions');
     const label = document.createElement('span');
     label.className = 'approval-resolved';
-    const labelText = action === 'approve' ? 'Approved' : action === 'always' ? 'Always approved' : 'Denied';
+    const labelText = action === 'approve' ? i18n.t('approval.approved') : action === 'always' ? i18n.t('approval.alwaysApproved') : i18n.t('approval.denied');
     label.textContent = labelText;
     actions.appendChild(label);
     // Remove the card after showing the confirmation briefly
@@ -575,7 +576,7 @@ function renderMarkdown(text) {
     // Sanitize HTML output to prevent XSS from tool output or LLM responses.
     html = sanitizeRenderedHtml(html);
     // Inject copy buttons into <pre> blocks
-    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" onclick="copyCodeBlock(this)">Copy</button>');
+    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" onclick="copyCodeBlock(this)">' + i18n.t('code.copy') + '</button>');
     return html;
   }
   return escapeHtml(text);
@@ -608,8 +609,8 @@ function copyCodeBlock(btn) {
   const code = pre.querySelector('code');
   const text = code ? code.textContent : pre.textContent;
   navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = 'Copied!';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    btn.textContent = i18n.t('code.copied');
+    setTimeout(() => { btn.textContent = i18n.t('code.copy'); }, 1500);
   });
 }
 
@@ -779,10 +780,10 @@ function completeToolCard(name, success, error, parameters) {
     if (output) {
       let detail = '';
       if (parameters) {
-        detail += 'Input:\n' + parameters + '\n\n';
+        detail += i18n.t('activity.input') + ':\n' + parameters + '\n\n';
       }
       if (error) {
-        detail += 'Error:\n' + error;
+        detail += i18n.t('activity.errorLabel') + ':\n' + error;
       }
       output.textContent = detail;
 
@@ -865,11 +866,11 @@ function finalizeActivityGroup() {
 
   // Build summary line
   const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
-  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+  const toolWord = toolCount === 1 ? i18n.t('activity.tool') : i18n.t('activity.tools');
   const summary = document.createElement('div');
   summary.className = 'activity-summary';
   summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
-    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
+    + '<span class="activity-summary-text">' + i18n.t('activity.usedTools', [toolCount, toolWord]) + '</span>'
     + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
 
   summary.addEventListener('click', () => {
@@ -896,7 +897,7 @@ function showApproval(data) {
 
   const header = document.createElement('div');
   header.className = 'approval-header';
-  header.textContent = 'Tool requires approval';
+  header.textContent = i18n.t('approval.requiresApproval');
   card.appendChild(header);
 
   const toolName = document.createElement('div');
@@ -914,7 +915,7 @@ function showApproval(data) {
   if (data.parameters) {
     const paramsToggle = document.createElement('button');
     paramsToggle.className = 'approval-params-toggle';
-    paramsToggle.textContent = 'Show parameters';
+    paramsToggle.textContent = i18n.t('approval.showParams');
     const paramsBlock = document.createElement('pre');
     paramsBlock.className = 'approval-params';
     paramsBlock.textContent = data.parameters;
@@ -922,7 +923,7 @@ function showApproval(data) {
     paramsToggle.addEventListener('click', () => {
       const visible = paramsBlock.style.display !== 'none';
       paramsBlock.style.display = visible ? 'none' : 'block';
-      paramsToggle.textContent = visible ? 'Show parameters' : 'Hide parameters';
+      paramsToggle.textContent = visible ? i18n.t('approval.showParams') : i18n.t('approval.hideParams');
     });
     card.appendChild(paramsToggle);
     card.appendChild(paramsBlock);
@@ -933,17 +934,17 @@ function showApproval(data) {
 
   const approveBtn = document.createElement('button');
   approveBtn.className = 'approve';
-  approveBtn.textContent = 'Approve';
+  approveBtn.textContent = i18n.t('approval.approve');
   approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
 
   const alwaysBtn = document.createElement('button');
   alwaysBtn.className = 'always';
-  alwaysBtn.textContent = 'Always';
+  alwaysBtn.textContent = i18n.t('approval.always');
   alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
 
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
-  denyBtn.textContent = 'Deny';
+  denyBtn.textContent = i18n.t('approval.deny');
   denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
 
   actions.appendChild(approveBtn);
@@ -970,7 +971,7 @@ function showJobCard(data) {
 
   const title = document.createElement('div');
   title.className = 'job-card-title';
-  title.textContent = data.title || 'Sandbox Job';
+  title.textContent = data.title || i18n.t('jobs.sandboxJob');
   info.appendChild(title);
 
   const id = document.createElement('div');
@@ -982,7 +983,7 @@ function showJobCard(data) {
 
   const viewBtn = document.createElement('button');
   viewBtn.className = 'job-card-view';
-  viewBtn.textContent = 'View Job';
+  viewBtn.textContent = i18n.t('jobs.viewJob');
   viewBtn.addEventListener('click', () => {
     switchTab('jobs');
     openJobDetail(data.job_id);
@@ -994,7 +995,7 @@ function showJobCard(data) {
     browseBtn.className = 'job-card-browse';
     browseBtn.href = data.browse_url;
     browseBtn.target = '_blank';
-    browseBtn.textContent = 'Browse';
+    browseBtn.textContent = i18n.t('jobs.browse');
     card.appendChild(browseBtn);
   }
 
@@ -1015,7 +1016,7 @@ function showAuthCard(data) {
 
   const header = document.createElement('div');
   header.className = 'auth-header';
-  header.textContent = 'Authentication required for ' + data.extension_name;
+  header.textContent = i18n.t('authCard.authRequired', [data.extension_name]);
   card.appendChild(header);
 
   if (data.instructions) {
@@ -1031,7 +1032,7 @@ function showAuthCard(data) {
   if (data.auth_url) {
     const oauthBtn = document.createElement('button');
     oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = 'Authenticate with ' + data.extension_name;
+    oauthBtn.textContent = i18n.t('authCard.authenticateWith', [data.extension_name]);
     oauthBtn.addEventListener('click', () => {
       openOAuthUrl(data.auth_url);
     });
@@ -1042,7 +1043,7 @@ function showAuthCard(data) {
     const setupLink = document.createElement('a');
     setupLink.href = data.setup_url;
     setupLink.target = '_blank';
-    setupLink.textContent = 'Get your token';
+    setupLink.textContent = i18n.t('authCard.getYourToken');
     links.appendChild(setupLink);
   }
 
@@ -1056,7 +1057,7 @@ function showAuthCard(data) {
 
   const tokenInput = document.createElement('input');
   tokenInput.type = 'password';
-  tokenInput.placeholder = data.instructions || 'Paste your API key or token';
+  tokenInput.placeholder = data.instructions || i18n.t('authCard.pasteApiKey');
   tokenInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
   });
@@ -1075,12 +1076,12 @@ function showAuthCard(data) {
 
   const submitBtn = document.createElement('button');
   submitBtn.className = 'auth-submit';
-  submitBtn.textContent = 'Submit';
+  submitBtn.textContent = i18n.t('authCard.submit');
   submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = i18n.t('authCard.cancel');
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
 
   actions.appendChild(submitBtn);
@@ -1118,7 +1119,7 @@ function submitAuthToken(extensionName, tokenValue) {
       showAuthCardError(extensionName, result.message);
     }
   }).catch((err) => {
-    showAuthCardError(extensionName, 'Failed: ' + err.message);
+    showAuthCardError(extensionName, i18n.t('authCard.failed', [err.message]));
   });
 }
 
@@ -1177,7 +1178,7 @@ function loadHistory(before) {
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
       if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
-        showActivityThinking('Processing...');
+        showActivityThinking(i18n.t('chat.processing'));
       }
       // Re-render pending approval card if the thread is awaiting approval
       if (data.pending_approval) {
@@ -1240,7 +1241,7 @@ function createToolCallsSummaryElement(toolCalls) {
 
   const header = document.createElement('div');
   header.className = 'tool-calls-header';
-  header.textContent = toolCalls.length + ' tool' + (toolCalls.length !== 1 ? 's' : '') + ' used';
+  header.textContent = i18n.t('activity.usedTools', [toolCalls.length, toolCalls.length !== 1 ? i18n.t('activity.tools') : i18n.t('activity.tool')]);
   div.appendChild(header);
 
   const list = document.createElement('div');
@@ -1293,10 +1294,10 @@ function removeScrollSpinner() {
 function threadTitle(thread) {
   if (thread.title) return thread.title;
   const ch = thread.channel || 'gateway';
-  if (thread.thread_type === 'heartbeat') return 'Heartbeat Alerts';
-  if (thread.thread_type === 'routine') return 'Routine';
+  if (thread.thread_type === 'heartbeat') return i18n.t('thread.heartbeatAlerts');
+  if (thread.thread_type === 'routine') return i18n.t('thread.routine');
   if (ch !== 'gateway') return ch.charAt(0).toUpperCase() + ch.slice(1);
-  if (thread.turn_count === 0) return 'New chat';
+  if (thread.turn_count === 0) return i18n.t('thread.newChat');
   return thread.id.substring(0, 8);
 }
 
@@ -1332,7 +1333,7 @@ function loadThreads() {
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
         const at = data.assistant_thread;
-        labelEl.textContent = 'Assistant';
+        labelEl.textContent = i18n.t('chat.assistant');
       }
       const meta = document.getElementById('assistant-meta');
       meta.textContent = relativeTime(data.assistant_thread.updated_at);
@@ -1404,7 +1405,7 @@ function disableChatInputReadOnly() {
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = true;
-    input.placeholder = 'Read-only thread (external channel)';
+    input.placeholder = i18n.t('chat.readOnly');
   }
   if (btn) btn.disabled = true;
 }
@@ -1437,7 +1438,7 @@ function createNewThread() {
     document.getElementById('chat-messages').innerHTML = '';
     loadThreads();
   }).catch((err) => {
-    showToast('Failed to create thread: ' + err.message, 'error');
+    showToast(i18n.t('chat.failedToCreateThread', [err.message]), 'error');
   });
 }
 
@@ -1504,7 +1505,7 @@ document.getElementById('chat-messages').addEventListener('scroll', function () 
     const spinner = document.createElement('div');
     spinner.id = 'scroll-load-spinner';
     spinner.className = 'scroll-load-spinner';
-    spinner.innerHTML = '<div class="spinner"></div> Loading older messages...';
+    spinner.innerHTML = '<div class="spinner"></div> ' + i18n.t('logs.loadingOlder');
     this.insertBefore(spinner, this.firstChild);
     loadHistory(oldestTimestamp);
   }
@@ -1584,7 +1585,7 @@ function renderTree() {
   const container = document.getElementById('memory-tree');
   container.innerHTML = '';
   if (!memoryTreeState || memoryTreeState.length === 0) {
-    container.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">No files in workspace</div>';
+    container.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">' + i18n.t('memory.noFiles') + '</div>';
     return;
   }
   renderNodes(memoryTreeState, container, 0);
@@ -1685,7 +1686,7 @@ function readMemoryFile(path) {
     }
   }).catch((err) => {
     currentMemoryContent = null;
-    document.getElementById('memory-viewer').innerHTML = '<div class="empty">Error: ' + escapeHtml(err.message) + '</div>';
+    document.getElementById('memory-viewer').innerHTML = '<div class="empty">' + i18n.t('memory.error', [escapeHtml(err.message)]) + '</div>';
   });
 }
 
@@ -1711,17 +1712,17 @@ function saveMemoryEdit() {
     method: 'POST',
     body: { path: currentMemoryPath, content: content },
   }).then(() => {
-    showToast('Saved ' + currentMemoryPath, 'success');
+    showToast(i18n.t('memory.saved', [currentMemoryPath]), 'success');
     cancelMemoryEdit();
     readMemoryFile(currentMemoryPath);
   }).catch((err) => {
-    showToast('Save failed: ' + err.message, 'error');
+    showToast(i18n.t('memory.saveFailed', [err.message]), 'error');
   });
 }
 
 function buildBreadcrumb(path) {
   const parts = path.split('/');
-  let html = '<a onclick="loadMemoryTree()">workspace</a>';
+  let html = '<a onclick="loadMemoryTree()">' + i18n.t('memory.workspace') + '</a>';
   let current = '';
   for (const part of parts) {
     current += (current ? '/' : '') + part;
@@ -1743,7 +1744,7 @@ function searchMemory(query) {
     const tree = document.getElementById('memory-tree');
     tree.innerHTML = '';
     if (data.results.length === 0) {
-      tree.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">No results</div>';
+      tree.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">' + i18n.t('memory.noResults') + '</div>';
       return;
     }
     for (const result of data.results) {
@@ -1865,7 +1866,7 @@ function prependLogEntry(entry) {
 function toggleLogsPause() {
   logsPaused = !logsPaused;
   const btn = document.getElementById('logs-pause-btn');
-  btn.textContent = logsPaused ? 'Resume' : 'Pause';
+  btn.textContent = logsPaused ? i18n.t('logs.resume') : i18n.t('logs.pause');
 
   if (!logsPaused) {
     // Flush buffer: oldest-first + prepend naturally puts newest at top
@@ -1877,7 +1878,7 @@ function toggleLogsPause() {
 }
 
 function clearLogs() {
-  if (!confirm('Clear all logs?')) return;
+  if (!confirm(i18n.t('logs.clearConfirm'))) return;
   document.getElementById('logs-output').innerHTML = '';
   logBuffer = [];
 }
@@ -1920,7 +1921,10 @@ function loadServerLogLevel() {
 
 // --- Extensions ---
 
-var kindLabels = { 'wasm_channel': 'Channel', 'wasm_tool': 'Tool', 'mcp_server': 'MCP' };
+function getExtKindLabel(kind) {
+  const map = { 'wasm_channel': 'extensions.kindChannel', 'wasm_tool': 'extensions.kindTool', 'mcp_server': 'extensions.kindMcp' };
+  return map[kind] ? i18n.t(map[kind]) : kind;
+}
 
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
@@ -1937,7 +1941,7 @@ function loadExtensions() {
   ]).then(([extData, toolData, registryData]) => {
     // Render installed extensions
     if (extData.extensions.length === 0) {
-      extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
+      extList.innerHTML = '<div class="empty-state">' + i18n.t('extensions.noExtensions') + '</div>';
     } else {
       extList.innerHTML = '';
       for (const ext of extData.extensions) {
@@ -1951,7 +1955,7 @@ function loadExtensions() {
 
     // Available WASM extensions
     if (wasmEntries.length === 0) {
-      wasmList.innerHTML = '<div class="empty-state">No additional WASM extensions available</div>';
+      wasmList.innerHTML = '<div class="empty-state">' + i18n.t('extensions.noWasm') + '</div>';
     } else {
       wasmList.innerHTML = '';
       for (const entry of wasmEntries) {
@@ -1961,7 +1965,7 @@ function loadExtensions() {
 
     // MCP servers (show both installed and uninstalled)
     if (mcpEntries.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+      mcpList.innerHTML = '<div class="empty-state">' + i18n.t('extensions.noMcpServers') + '</div>';
     } else {
       mcpList.innerHTML = '';
       for (const entry of mcpEntries) {
@@ -1997,7 +2001,7 @@ function renderAvailableExtensionCard(entry) {
 
   const kind = document.createElement('span');
   kind.className = 'ext-kind kind-' + entry.kind;
-  kind.textContent = kindLabels[entry.kind] || entry.kind;
+  kind.textContent = getExtKindLabel(entry.kind);
   header.appendChild(kind);
 
   if (entry.version) {
@@ -2026,19 +2030,19 @@ function renderAvailableExtensionCard(entry) {
 
   const installBtn = document.createElement('button');
   installBtn.className = 'btn-ext install';
-  installBtn.textContent = 'Install';
+  installBtn.textContent = i18n.t('extensions.install');
   installBtn.addEventListener('click', function() {
     installBtn.disabled = true;
-    installBtn.textContent = 'Installing...';
+    installBtn.textContent = i18n.t('extensions.installing');
     apiFetch('/api/extensions/install', {
       method: 'POST',
       body: { name: entry.name, kind: entry.kind },
     }).then(function(res) {
       if (res.success) {
-        showToast('Installed ' + entry.display_name, 'success');
+        showToast(i18n.t('extensions.installed_label') + ' ' + entry.display_name, 'success');
         // OAuth popup if auth started during install (builtin creds)
         if (res.auth_url) {
-          showToast('Opening authentication for ' + entry.display_name, 'info');
+          showToast(i18n.t('extensions.openingAuth', [entry.display_name]), 'info');
           openOAuthUrl(res.auth_url);
         }
         loadExtensions();
@@ -2047,11 +2051,11 @@ function renderAvailableExtensionCard(entry) {
           showConfigureModal(entry.name);
         }
       } else {
-        showToast('Install: ' + (res.message || 'unknown error'), 'error');
+        showToast(i18n.t('extensions.installError', [res.message || i18n.t('common.unknownError')]), 'error');
         loadExtensions();
       }
     }).catch(function(err) {
-      showToast('Install failed: ' + err.message, 'error');
+      showToast(i18n.t('extensions.installFailed', [err.message]), 'error');
       loadExtensions();
     });
   });
@@ -2075,13 +2079,13 @@ function renderMcpServerCard(entry, installedExt) {
 
   var kind = document.createElement('span');
   kind.className = 'ext-kind kind-mcp_server';
-  kind.textContent = kindLabels['mcp_server'] || 'mcp_server';
+  kind.textContent = getExtKindLabel('mcp_server');
   header.appendChild(kind);
 
   if (installedExt) {
     var authDot = document.createElement('span');
     authDot.className = 'ext-auth-dot ' + (installedExt.authenticated ? 'authed' : 'unauthed');
-    authDot.title = installedExt.authenticated ? 'Authenticated' : 'Not authenticated';
+    authDot.title = installedExt.authenticated ? i18n.t('extensions.authenticated') : i18n.t('extensions.notAuthenticated');
     header.appendChild(authDot);
   }
 
@@ -2099,39 +2103,39 @@ function renderMcpServerCard(entry, installedExt) {
     if (!installedExt.active) {
       var activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      activateBtn.textContent = i18n.t('extensions.activate');
       activateBtn.addEventListener('click', function() { activateExtension(installedExt.name); });
       actions.appendChild(activateBtn);
     } else {
       var activeLabel = document.createElement('span');
       activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
+      activeLabel.textContent = i18n.t('extensions.active');
       actions.appendChild(activeLabel);
     }
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
-    removeBtn.textContent = 'Remove';
+    removeBtn.textContent = i18n.t('extensions.remove');
     removeBtn.addEventListener('click', function() { removeExtension(installedExt.name); });
     actions.appendChild(removeBtn);
   } else {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
-    installBtn.textContent = 'Install';
+    installBtn.textContent = i18n.t('extensions.install');
     installBtn.addEventListener('click', function() {
       installBtn.disabled = true;
-      installBtn.textContent = 'Installing...';
+      installBtn.textContent = i18n.t('extensions.installing');
       apiFetch('/api/extensions/install', {
         method: 'POST',
         body: { name: entry.name, kind: entry.kind },
       }).then(function(res) {
         if (res.success) {
-          showToast('Installed ' + entry.display_name, 'success');
+          showToast(i18n.t('extensions.installed_label') + ' ' + entry.display_name, 'success');
         } else {
-          showToast('Install: ' + (res.message || 'unknown error'), 'error');
+          showToast(i18n.t('extensions.installError', [res.message || i18n.t('common.unknownError')]), 'error');
         }
         loadExtensions();
       }).catch(function(err) {
-        showToast('Install failed: ' + err.message, 'error');
+        showToast(i18n.t('extensions.installFailed', [err.message]), 'error');
         loadExtensions();
       });
     });
@@ -2145,7 +2149,7 @@ function renderMcpServerCard(entry, installedExt) {
 function createReconfigureButton(extName) {
   var btn = document.createElement('button');
   btn.className = 'btn-ext configure';
-  btn.textContent = 'Reconfigure';
+  btn.textContent = i18n.t('extensions.reconfigure');
   btn.addEventListener('click', function() { showConfigureModal(extName); });
   return btn;
 }
@@ -2164,7 +2168,7 @@ function renderExtensionCard(ext) {
 
   const kind = document.createElement('span');
   kind.className = 'ext-kind kind-' + ext.kind;
-  kind.textContent = kindLabels[ext.kind] || ext.kind;
+  kind.textContent = getExtKindLabel(ext.kind);
   header.appendChild(kind);
 
   if (ext.version) {
@@ -2178,7 +2182,7 @@ function renderExtensionCard(ext) {
   if (ext.kind !== 'wasm_channel') {
     const authDot = document.createElement('span');
     authDot.className = 'ext-auth-dot ' + (ext.authenticated ? 'authed' : 'unauthed');
-    authDot.title = ext.authenticated ? 'Authenticated' : 'Not authenticated';
+    authDot.title = ext.authenticated ? i18n.t('extensions.authenticated') : i18n.t('extensions.notAuthenticated');
     header.appendChild(authDot);
   }
 
@@ -2207,7 +2211,7 @@ function renderExtensionCard(ext) {
   if (ext.tools && ext.tools.length > 0) {
     const tools = document.createElement('div');
     tools.className = 'ext-tools';
-    tools.textContent = 'Tools: ' + ext.tools.join(', ');
+    tools.textContent = i18n.t('extensions.toolsPrefix', [ext.tools.join(', ')]);
     card.appendChild(tools);
   }
 
@@ -2229,13 +2233,13 @@ function renderExtensionCard(ext) {
     if (status === 'active') {
       var activeLabel = document.createElement('span');
       activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
+      activeLabel.textContent = i18n.t('extensions.active');
       actions.appendChild(activeLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'pairing') {
       var pairingLabel = document.createElement('span');
       pairingLabel.className = 'ext-pairing-label';
-      pairingLabel.textContent = 'Awaiting Pairing';
+      pairingLabel.textContent = i18n.t('extensions.awaitingPairing');
       actions.appendChild(pairingLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'failed') {
@@ -2244,7 +2248,7 @@ function renderExtensionCard(ext) {
       // installed or configured: show Setup button
       var setupBtn = document.createElement('button');
       setupBtn.className = 'btn-ext configure';
-      setupBtn.textContent = 'Setup';
+      setupBtn.textContent = i18n.t('extensions.setup');
       setupBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
       actions.appendChild(setupBtn);
     }
@@ -2252,14 +2256,14 @@ function renderExtensionCard(ext) {
     // WASM tools / MCP servers
     const activeLabel = document.createElement('span');
     activeLabel.className = 'ext-active-label';
-    activeLabel.textContent = ext.active ? 'Active' : 'Installed';
+    activeLabel.textContent = ext.active ? i18n.t('extensions.active') : i18n.t('extensions.installed_label');
     actions.appendChild(activeLabel);
 
     // MCP servers may be installed but inactive — show Activate button
     if (ext.kind === 'mcp_server' && !ext.active) {
       const activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      activateBtn.textContent = i18n.t('extensions.activate');
       activateBtn.addEventListener('click', () => activateExtension(ext.name));
       actions.appendChild(activateBtn);
     }
@@ -2271,7 +2275,7 @@ function renderExtensionCard(ext) {
     if (ext.needs_setup || (ext.has_auth && ext.authenticated)) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
-      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
+      configBtn.textContent = ext.authenticated ? i18n.t('extensions.reconfigure') : i18n.t('extensions.configure');
       configBtn.addEventListener('click', () => showConfigureModal(ext.name));
       actions.appendChild(configBtn);
     }
@@ -2279,7 +2283,7 @@ function renderExtensionCard(ext) {
 
   const removeBtn = document.createElement('button');
   removeBtn.className = 'btn-ext remove';
-  removeBtn.textContent = 'Remove';
+  removeBtn.textContent = i18n.t('extensions.remove');
   removeBtn.addEventListener('click', () => removeExtension(ext.name));
   actions.appendChild(removeBtn);
 
@@ -2303,7 +2307,7 @@ function activateExtension(name) {
       if (res.success) {
         // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
         if (res.auth_url) {
-          showToast('Opening authentication for ' + name, 'info');
+          showToast(i18n.t('extensions.openingAuth', [name]), 'info');
           openOAuthUrl(res.auth_url);
         }
         loadExtensions();
@@ -2311,42 +2315,42 @@ function activateExtension(name) {
       }
 
       if (res.auth_url) {
-        showToast('Opening authentication for ' + name, 'info');
+        showToast(i18n.t('extensions.openingAuth', [name]), 'info');
         openOAuthUrl(res.auth_url);
       } else if (res.awaiting_token) {
         showConfigureModal(name);
       } else {
-        showToast('Activate failed: ' + res.message, 'error');
+        showToast(i18n.t('extensions.activateFailed', [res.message]), 'error');
       }
       loadExtensions();
     })
-    .catch((err) => showToast('Activate failed: ' + err.message, 'error'));
+    .catch((err) => showToast(i18n.t('extensions.activateFailed', [err.message]), 'error'));
 }
 
 function removeExtension(name) {
-  if (!confirm('Remove extension "' + name + '"?')) return;
+  if (!confirm(i18n.t('extensions.removeConfirm', [name]))) return;
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
     .then((res) => {
       if (!res.success) {
-        showToast('Remove failed: ' + res.message, 'error');
+        showToast(i18n.t('extensions.removeFailed', [res.message]), 'error');
       } else {
-        showToast('Removed ' + name, 'success');
+        showToast(i18n.t('extensions.removed', [name]), 'success');
       }
       loadExtensions();
     })
-    .catch((err) => showToast('Remove failed: ' + err.message, 'error'));
+    .catch((err) => showToast(i18n.t('extensions.removeFailed', [err.message]), 'error'));
 }
 
 function showConfigureModal(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
       if (!setup.secrets || setup.secrets.length === 0) {
-        showToast('No configuration needed for ' + name, 'info');
+        showToast(i18n.t('extensions.noConfigNeeded', [name]), 'info');
         return;
       }
       renderConfigureModal(name, setup.secrets);
     })
-    .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
+    .catch((err) => showToast(i18n.t('extensions.failedToLoadSetup', [err.message]), 'error'));
 }
 
 function renderConfigureModal(name, secrets) {
@@ -2361,7 +2365,7 @@ function renderConfigureModal(name, secrets) {
   modal.className = 'configure-modal';
 
   const header = document.createElement('h3');
-  header.textContent = 'Configure ' + name;
+  header.textContent = i18n.t('extensions.configFor', [name]);
   modal.appendChild(header);
 
   const form = document.createElement('div');
@@ -2377,7 +2381,7 @@ function renderConfigureModal(name, secrets) {
     if (secret.optional) {
       const opt = document.createElement('span');
       opt.className = 'field-optional';
-      opt.textContent = ' (optional)';
+      opt.textContent = ' (' + i18n.t('extensions.optional') + ')';
       label.appendChild(opt);
     }
     field.appendChild(label);
@@ -2388,7 +2392,7 @@ function renderConfigureModal(name, secrets) {
     const input = document.createElement('input');
     input.type = 'password';
     input.name = secret.name;
-    input.placeholder = secret.provided ? '(already set — leave empty to keep)' : '';
+    input.placeholder = secret.provided ? i18n.t('extensions.alreadySet') : '';
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') submitConfigureModal(name, fields);
     });
@@ -2398,13 +2402,13 @@ function renderConfigureModal(name, secrets) {
       const badge = document.createElement('span');
       badge.className = 'field-provided';
       badge.textContent = '\u2713';
-      badge.title = 'Already configured';
+      badge.title = i18n.t('extensions.alreadyConfigured');
       inputRow.appendChild(badge);
     }
     if (secret.auto_generate && !secret.provided) {
       const hint = document.createElement('span');
       hint.className = 'field-autogen';
-      hint.textContent = 'Auto-generated if empty';
+      hint.textContent = i18n.t('extensions.autoGenerated');
       inputRow.appendChild(hint);
     }
 
@@ -2420,13 +2424,13 @@ function renderConfigureModal(name, secrets) {
 
   const submitBtn = document.createElement('button');
   submitBtn.className = 'btn-ext activate';
-  submitBtn.textContent = 'Save';
+  submitBtn.textContent = i18n.t('extensions.save');
   submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
   actions.appendChild(submitBtn);
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = i18n.t('common.cancel');
   cancelBtn.addEventListener('click', closeConfigureModal);
   actions.appendChild(cancelBtn);
 
@@ -2459,7 +2463,7 @@ function submitConfigureModal(name, fields) {
         if (res.auth_url) {
           // OAuth flow started — open consent popup. The auth_completed SSE will
           // not arrive immediately (it fires after OAuth callback), so show a toast now.
-          showToast('Opening OAuth authorization for ' + name, 'info');
+          showToast(i18n.t('extensions.openingOAuth', [name]), 'info');
           openOAuthUrl(res.auth_url);
           loadExtensions();
         }
@@ -2468,12 +2472,12 @@ function submitConfigureModal(name, fields) {
       } else {
         // Keep modal open so the user can correct their input and retry.
         btns.forEach(function(b) { b.disabled = false; });
-        showToast(res.message || 'Configuration failed', 'error');
+        showToast(res.message || i18n.t('extensions.configFailedMsg'), 'error');
       }
     })
     .catch((err) => {
       btns.forEach(function(b) { b.disabled = false; });
-      showToast('Configuration failed: ' + err.message, 'error');
+      showToast(i18n.t('extensions.configFailed', [err.message]), 'error');
     });
 }
 
@@ -2495,7 +2499,7 @@ function openOAuthUrl(url) {
     }
   } catch (e) {
     console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
-    showToast('Invalid OAuth URL returned by server', 'error');
+    showToast(i18n.t('extensions.invalidOAuthUrl'), 'error');
     return;
   }
   window.open(parsed.href, '_blank', 'width=600,height=700');
@@ -2511,7 +2515,7 @@ function loadPairingRequests(channel, container) {
 
       const heading = document.createElement('div');
       heading.className = 'pairing-heading';
-      heading.textContent = 'Pending pairing requests';
+      heading.textContent = i18n.t('pairing.pendingRequests');
       container.appendChild(heading);
 
       data.requests.forEach(req => {
@@ -2525,12 +2529,12 @@ function loadPairingRequests(channel, container) {
 
         const sender = document.createElement('span');
         sender.className = 'pairing-sender';
-        sender.textContent = 'from ' + req.sender_id;
+        sender.textContent = i18n.t('pairing.from', [req.sender_id]);
         row.appendChild(sender);
 
         const btn = document.createElement('button');
         btn.className = 'btn-ext activate';
-        btn.textContent = 'Approve';
+        btn.textContent = i18n.t('pairing.approve');
         btn.addEventListener('click', () => approvePairing(channel, req.code, container));
         row.appendChild(btn);
 
@@ -2546,12 +2550,12 @@ function approvePairing(channel, code, container) {
     body: { code },
   }).then(res => {
     if (res.success) {
-      showToast('Pairing approved', 'success');
+      showToast(i18n.t('pairing.approved'), 'success');
       loadExtensions();
     } else {
-      showToast(res.message || 'Approve failed', 'error');
+      showToast(res.message || i18n.t('pairing.approveFailed'), 'error');
     }
-  }).catch(err => showToast('Error: ' + err.message, 'error'));
+  }).catch(err => showToast(i18n.t('common.error', [err.message]), 'error'));
 }
 
 function startPairingPoll() {
@@ -2579,9 +2583,9 @@ function renderWasmChannelStepper(ext) {
   var status = ext.activation_status || 'installed';
 
   var steps = [
-    { label: 'Installed', key: 'installed' },
-    { label: 'Configured', key: 'configured' },
-    { label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' },
+    { label: i18n.t('stepper.installed'), key: 'installed' },
+    { label: i18n.t('stepper.configured'), key: 'configured' },
+    { label: status === 'pairing' ? i18n.t('stepper.awaitingPairing') : i18n.t('stepper.active'), key: 'active' },
   ];
 
   var reachedIdx;
@@ -2650,9 +2654,9 @@ function loadJobs() {
     container.innerHTML =
       '<div class="jobs-summary" id="jobs-summary"></div>'
       + '<table class="jobs-table" id="jobs-table"><thead><tr>'
-      + '<th>ID</th><th>Title</th><th>Status</th><th>Created</th><th>Actions</th>'
+      + '<th>' + i18n.t('jobs.id') + '</th><th>' + i18n.t('jobs.title') + '</th><th>' + i18n.t('jobs.status') + '</th><th>' + i18n.t('jobs.created') + '</th><th>' + i18n.t('jobs.actions') + '</th>'
       + '</tr></thead><tbody id="jobs-tbody"></tbody></table>'
-      + '<div class="empty-state" id="jobs-empty" style="display:none">No jobs found</div>';
+      + '<div class="empty-state" id="jobs-empty" style="display:none">' + i18n.t('jobs.noJobs') + '</div>';
   }
 
   Promise.all([
@@ -2666,11 +2670,11 @@ function loadJobs() {
 
 function renderJobsSummary(s) {
   document.getElementById('jobs-summary').innerHTML = ''
-    + summaryCard('Total', s.total, '')
-    + summaryCard('In Progress', s.in_progress, 'active')
-    + summaryCard('Completed', s.completed, 'completed')
-    + summaryCard('Failed', s.failed, 'failed')
-    + summaryCard('Stuck', s.stuck, 'stuck');
+    + summaryCard(i18n.t('jobs.total'), s.total, '')
+    + summaryCard(i18n.t('jobs.inProgress'), s.in_progress, 'active')
+    + summaryCard(i18n.t('jobs.completed'), s.completed, 'completed')
+    + summaryCard(i18n.t('jobs.failed'), s.failed, 'failed')
+    + summaryCard(i18n.t('jobs.stuck'), s.stuck, 'stuck');
 }
 
 function summaryCard(label, count, cls) {
@@ -2697,11 +2701,11 @@ function renderJobsList(jobs) {
 
     let actionBtns = '';
     if (job.state === 'pending' || job.state === 'in_progress') {
-      actionBtns = '<button class="btn-cancel" onclick="event.stopPropagation(); cancelJob(\'' + job.id + '\')">Cancel</button>';
+      actionBtns = '<button class="btn-cancel" onclick="event.stopPropagation(); cancelJob(\'' + escapeJs(job.id) + '\')">' + i18n.t('jobs.cancel') + '</button>';
     }
     // Retry is only shown in the detail view where can_restart is available.
 
-    return '<tr class="job-row" onclick="openJobDetail(\'' + job.id + '\')">'
+    return '<tr class="job-row" onclick="openJobDetail(\'' + escapeJs(job.id) + '\')">'
       + '<td title="' + escapeHtml(job.id) + '">' + shortId + '</td>'
       + '<td>' + escapeHtml(job.title) + '</td>'
       + '<td><span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span></td>'
@@ -2712,25 +2716,25 @@ function renderJobsList(jobs) {
 }
 
 function cancelJob(jobId) {
-  if (!confirm('Cancel this job?')) return;
+  if (!confirm(i18n.t('jobs.cancelConfirm'))) return;
   apiFetch('/api/jobs/' + jobId + '/cancel', { method: 'POST' })
     .then(() => {
-      showToast('Job cancelled', 'success');
+      showToast(i18n.t('jobs.cancelled'), 'success');
       if (currentJobId) openJobDetail(currentJobId);
       else loadJobs();
     })
     .catch((err) => {
-      showToast('Failed to cancel job: ' + err.message, 'error');
+      showToast(i18n.t('jobs.failedToCancel', [err.message]), 'error');
     });
 }
 
 function restartJob(jobId) {
   apiFetch('/api/jobs/' + jobId + '/restart', { method: 'POST' })
     .then((res) => {
-      showToast('Job restarted as ' + (res.new_job_id || '').substring(0, 8), 'success');
+      showToast(i18n.t('jobs.restartedAs', [(res.new_job_id || '').substring(0, 8)]), 'success');
     })
     .catch((err) => {
-      showToast('Failed to restart job: ' + err.message, 'error');
+      showToast(i18n.t('jobs.failedToRestart', [err.message]), 'error');
     })
     .finally(() => {
       loadJobs();
@@ -2743,7 +2747,7 @@ function openJobDetail(jobId) {
   apiFetch('/api/jobs/' + jobId).then((job) => {
     renderJobDetail(job);
   }).catch((err) => {
-    addMessage('system', 'Failed to load job: ' + err.message);
+    addMessage('system', i18n.t('jobs.failedToLoad', [err.message]));
     closeJobDetail();
   });
 }
@@ -2764,15 +2768,15 @@ function renderJobDetail(job) {
   const header = document.createElement('div');
   header.className = 'job-detail-header';
 
-  let headerHtml = '<button class="btn-back" onclick="closeJobDetail()">&larr; Back</button>'
+  let headerHtml = '<button class="btn-back" onclick="closeJobDetail()">&larr; ' + i18n.t('jobs.back') + '</button>'
     + '<h2>' + escapeHtml(job.title) + '</h2>'
     + '<span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span>';
 
   if ((job.state === 'failed' || job.state === 'interrupted') && job.can_restart === true) {
-    headerHtml += '<button class="btn-restart" onclick="restartJob(\'' + job.id + '\')">Retry</button>';
+    headerHtml += '<button class="btn-restart" onclick="restartJob(\'' + escapeJs(job.id) + '\')">' + i18n.t('jobs.retry') + '</button>';
   }
   if (job.browse_url) {
-    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">Browse Files</a>';
+    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">' + i18n.t('jobs.browseFiles') + '</a>';
   }
 
   header.innerHTML = headerHtml;
@@ -2826,13 +2830,13 @@ function renderJobOverview(container, job) {
   // Metadata grid
   const grid = document.createElement('div');
   grid.className = 'job-meta-grid';
-  grid.innerHTML = metaItem('Job ID', job.id)
-    + metaItem('State', job.state)
-    + metaItem('Created', formatDate(job.created_at))
-    + metaItem('Started', formatDate(job.started_at))
-    + metaItem('Completed', formatDate(job.completed_at))
-    + metaItem('Duration', formatDuration(job.elapsed_secs))
-    + (job.job_mode ? metaItem('Mode', job.job_mode) : '');
+  grid.innerHTML = metaItem(i18n.t('jobs.jobId'), job.id)
+    + metaItem(i18n.t('jobs.state'), job.state)
+    + metaItem(i18n.t('jobs.created'), formatDate(job.created_at))
+    + metaItem(i18n.t('jobs.started'), formatDate(job.started_at))
+    + metaItem(i18n.t('jobs.completedAt'), formatDate(job.completed_at))
+    + metaItem(i18n.t('jobs.duration'), formatDuration(job.elapsed_secs))
+    + (job.job_mode ? metaItem(i18n.t('jobs.mode'), job.job_mode) : '');
   container.appendChild(grid);
 
   // Description
@@ -2840,7 +2844,7 @@ function renderJobOverview(container, job) {
     const descSection = document.createElement('div');
     descSection.className = 'job-description';
     const descHeader = document.createElement('h3');
-    descHeader.textContent = 'Description';
+    descHeader.textContent = i18n.t('jobs.description');
     descSection.appendChild(descHeader);
     const descBody = document.createElement('div');
     descBody.className = 'job-description-body';
@@ -2854,7 +2858,7 @@ function renderJobOverview(container, job) {
     const timelineSection = document.createElement('div');
     timelineSection.className = 'job-timeline-section';
     const tlHeader = document.createElement('h3');
-    tlHeader.textContent = 'State Transitions';
+    tlHeader.textContent = i18n.t('jobs.stateTransitions');
     timelineSection.appendChild(tlHeader);
 
     const timeline = document.createElement('div');
@@ -2883,7 +2887,7 @@ function renderJobOverview(container, job) {
 function renderJobFiles(container, job) {
   container.innerHTML = '<div class="job-files">'
     + '<div class="job-files-sidebar"><div class="job-files-tree"></div></div>'
-    + '<div class="job-files-viewer"><div class="empty-state">Select a file to view</div></div>'
+    + '<div class="job-files-viewer"><div class="empty-state">' + i18n.t('jobs.selectFile') + '</div></div>'
     + '</div>';
 
   container._jobId = job ? job.id : null;
@@ -2901,7 +2905,7 @@ function renderJobFiles(container, job) {
   }).catch(() => {
     const treeContainer = document.querySelector('.job-files-tree');
     if (treeContainer) {
-      treeContainer.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">No project files</div>';
+      treeContainer.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">' + i18n.t('jobs.noProjectFiles') + '</div>';
     }
   });
 }
@@ -2911,7 +2915,7 @@ function renderJobFilesTree() {
   if (!treeContainer) return;
   treeContainer.innerHTML = '';
   if (!jobFilesTreeState || jobFilesTreeState.length === 0) {
-    treeContainer.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">No files in workspace</div>';
+    treeContainer.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">' + i18n.t('memory.noFiles') + '</div>';
     return;
   }
   renderJobFileNodes(jobFilesTreeState, treeContainer, 0);
@@ -3018,20 +3022,20 @@ function renderJobActivity(container, job) {
 
   let html = '<div class="activity-toolbar">'
     + '<select id="activity-type-filter">'
-    + '<option value="all">All Events</option>'
-    + '<option value="message">Messages</option>'
-    + '<option value="tool_use">Tool Calls</option>'
-    + '<option value="tool_result">Results</option>'
+    + '<option value="all">' + i18n.t('activity.allEvents') + '</option>'
+    + '<option value="message">' + i18n.t('activity.messages') + '</option>'
+    + '<option value="tool_use">' + i18n.t('activity.toolCalls') + '</option>'
+    + '<option value="tool_result">' + i18n.t('activity.results') + '</option>'
     + '</select>'
-    + '<label class="logs-checkbox"><input type="checkbox" id="activity-autoscroll" checked> Auto-scroll</label>'
+    + '<label class="logs-checkbox"><input type="checkbox" id="activity-autoscroll" checked> ' + i18n.t('activity.autoScroll') + '</label>'
     + '</div>'
     + '<div class="activity-terminal" id="activity-terminal"></div>';
 
   if (job && job.can_prompt === true) {
     html += '<div class="activity-input-bar" id="activity-input-bar">'
-      + '<input type="text" id="activity-prompt-input" placeholder="Send follow-up prompt..." />'
-      + '<button id="activity-send-btn">Send</button>'
-      + '<button id="activity-done-btn" title="Signal done">Done</button>'
+      + '<input type="text" id="activity-prompt-input" placeholder="' + i18n.t('activity.sendPrompt') + '" />'
+      + '<button id="activity-send-btn">' + i18n.t('activity.send') + '</button>'
+      + '<button id="activity-done-btn" title="' + i18n.t('activity.done') + '">' + i18n.t('activity.done') + '</button>'
       + '</div>';
   }
 
@@ -3166,12 +3170,12 @@ function sendJobPrompt(jobId, done) {
     if (input) input.value = '';
     if (done) {
       const bar = document.getElementById('activity-input-bar');
-      if (bar) bar.innerHTML = '<span class="activity-status">Done signal sent</span>';
+      if (bar) bar.innerHTML = '<span class="activity-status">' + i18n.t('activity.doneSent') + '</span>';
     }
   }).catch((err) => {
     const terminal = document.getElementById('activity-terminal');
     if (terminal) {
-      appendActivityEvent(terminal, 'status', { message: 'Failed to send: ' + err.message });
+      appendActivityEvent(terminal, 'status', { message: i18n.t('activity.failedToSend', [err.message]) });
     }
   });
 }
@@ -3200,11 +3204,11 @@ function loadRoutines() {
 
 function renderRoutinesSummary(s) {
   document.getElementById('routines-summary').innerHTML = ''
-    + summaryCard('Total', s.total, '')
-    + summaryCard('Enabled', s.enabled, 'active')
-    + summaryCard('Disabled', s.disabled, '')
-    + summaryCard('Failing', s.failing, 'failed')
-    + summaryCard('Runs Today', s.runs_today, 'completed');
+    + summaryCard(i18n.t('routines.total'), s.total, '')
+    + summaryCard(i18n.t('routines.enabled'), s.enabled, 'active')
+    + summaryCard(i18n.t('routines.disabled'), s.disabled, '')
+    + summaryCard(i18n.t('routines.failing'), s.failing, 'failed')
+    + summaryCard(i18n.t('routines.runsToday'), s.runs_today, 'completed');
 }
 
 function renderRoutinesList(routines) {
@@ -3223,10 +3227,10 @@ function renderRoutinesList(routines) {
       : r.status === 'failing' ? 'failed'
       : 'pending';
 
-    const toggleLabel = r.enabled ? 'Disable' : 'Enable';
+    const toggleLabel = r.enabled ? i18n.t('routines.disable') : i18n.t('routines.enable');
     const toggleClass = r.enabled ? 'btn-cancel' : 'btn-restart';
 
-    return '<tr class="routine-row" onclick="openRoutineDetail(\'' + r.id + '\')">'
+    return '<tr class="routine-row" onclick="openRoutineDetail(\'' + escapeJs(r.id) + '\')">'
       + '<td>' + escapeHtml(r.name) + '</td>'
       + '<td>' + escapeHtml(r.trigger_summary) + '</td>'
       + '<td>' + escapeHtml(r.action_type) + '</td>'
@@ -3235,9 +3239,9 @@ function renderRoutinesList(routines) {
       + '<td>' + r.run_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(r.status) + '</span></td>'
       + '<td>'
-      + '<button class="' + toggleClass + '" onclick="event.stopPropagation(); toggleRoutine(\'' + r.id + '\')">' + toggleLabel + '</button> '
-      + '<button class="btn-restart" onclick="event.stopPropagation(); triggerRoutine(\'' + r.id + '\')">Run</button> '
-      + '<button class="btn-cancel" onclick="event.stopPropagation(); deleteRoutine(\'' + r.id + '\', \'' + escapeHtml(r.name) + '\')">Delete</button>'
+      + '<button class="' + toggleClass + '" onclick="event.stopPropagation(); toggleRoutine(\'' + escapeJs(r.id) + '\')">' + toggleLabel + '</button> '
+      + '<button class="btn-restart" onclick="event.stopPropagation(); triggerRoutine(\'' + escapeJs(r.id) + '\')">' + i18n.t('routines.run') + '</button> '
+      + '<button class="btn-cancel" onclick="event.stopPropagation(); deleteRoutine(\'' + escapeJs(r.id) + '\', \'' + escapeJs(r.name) + '\')">' + i18n.t('routines.delete') + '</button>'
       + '</td>'
       + '</tr>';
   }).join('');
@@ -3248,7 +3252,7 @@ function openRoutineDetail(id) {
   apiFetch('/api/routines/' + id).then((routine) => {
     renderRoutineDetail(routine);
   }).catch((err) => {
-    showToast('Failed to load routine: ' + err.message, 'error');
+    showToast(i18n.t('routines.failedToLoad', [err.message]), 'error');
   });
 }
 
@@ -3273,41 +3277,41 @@ function renderRoutineDetail(routine) {
     : 'active';
 
   let html = '<div class="job-detail-header">'
-    + '<button class="btn-back" onclick="closeRoutineDetail()">&larr; Back</button>'
+    + '<button class="btn-back" onclick="closeRoutineDetail()">&larr; ' + i18n.t('routines.back') + '</button>'
     + '<h2>' + escapeHtml(routine.name) + '</h2>'
     + '<span class="badge ' + statusClass + '">' + escapeHtml(statusLabel) + '</span>'
     + '</div>';
 
   // Metadata grid
   html += '<div class="job-meta-grid">'
-    + metaItem('Routine ID', routine.id)
-    + metaItem('Enabled', routine.enabled ? 'Yes' : 'No')
-    + metaItem('Run Count', routine.run_count)
-    + metaItem('Failures', routine.consecutive_failures)
-    + metaItem('Last Run', formatDate(routine.last_run_at))
-    + metaItem('Next Fire', formatDate(routine.next_fire_at))
-    + metaItem('Created', formatDate(routine.created_at))
+    + metaItem(i18n.t('routines.routineId'), routine.id)
+    + metaItem(i18n.t('routines.enabled'), routine.enabled ? i18n.t('routines.yes') : i18n.t('routines.no'))
+    + metaItem(i18n.t('routines.runCount'), routine.run_count)
+    + metaItem(i18n.t('routines.failures'), routine.consecutive_failures)
+    + metaItem(i18n.t('routines.lastRun'), formatDate(routine.last_run_at))
+    + metaItem(i18n.t('routines.nextFire'), formatDate(routine.next_fire_at))
+    + metaItem(i18n.t('jobs.created'), formatDate(routine.created_at))
     + '</div>';
 
   // Description
   if (routine.description) {
-    html += '<div class="job-description"><h3>Description</h3>'
+    html += '<div class="job-description"><h3>' + i18n.t('routines.description') + '</h3>'
       + '<div class="job-description-body">' + escapeHtml(routine.description) + '</div></div>';
   }
 
   // Trigger config
-  html += '<div class="job-description"><h3>Trigger</h3>'
+  html += '<div class="job-description"><h3>' + i18n.t('routines.trigger') + '</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
 
   // Action config
-  html += '<div class="job-description"><h3>Action</h3>'
+  html += '<div class="job-description"><h3>' + i18n.t('routines.action') + '</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
 
   // Recent runs
   if (routine.recent_runs && routine.recent_runs.length > 0) {
-    html += '<div class="job-timeline-section"><h3>Recent Runs</h3>'
+    html += '<div class="job-timeline-section"><h3>' + i18n.t('routines.recentRuns') + '</h3>'
       + '<table class="routines-table"><thead><tr>'
-      + '<th>Trigger</th><th>Started</th><th>Completed</th><th>Status</th><th>Summary</th><th>Tokens</th>'
+      + '<th>' + i18n.t('routines.triggerType') + '</th><th>' + i18n.t('routines.started') + '</th><th>' + i18n.t('routines.completedAt') + '</th><th>' + i18n.t('routines.status') + '</th><th>' + i18n.t('routines.summary') + '</th><th>' + i18n.t('routines.tokens') + '</th>'
       + '</tr></thead><tbody>';
     for (const run of routine.recent_runs) {
       const runStatusClass = run.status === 'Ok' ? 'completed'
@@ -3334,32 +3338,32 @@ function renderRoutineDetail(routine) {
 function triggerRoutine(id) {
   apiFetch('/api/routines/' + id + '/trigger', { method: 'POST' })
     .then(() => {
-      showToast('Routine triggered', 'success');
+      showToast(i18n.t('routines.triggered'), 'success');
       if (currentRoutineId === id) openRoutineDetail(id);
       else loadRoutines();
     })
-    .catch((err) => showToast('Trigger failed: ' + err.message, 'error'));
+    .catch((err) => showToast(i18n.t('routines.triggerFailed', [err.message]), 'error'));
 }
 
 function toggleRoutine(id) {
   apiFetch('/api/routines/' + id + '/toggle', { method: 'POST' })
     .then((res) => {
-      showToast('Routine ' + (res.status || 'toggled'), 'success');
+      showToast(i18n.t('routines.toggled', [res.status || 'toggled']), 'success');
       if (currentRoutineId) openRoutineDetail(currentRoutineId);
       else loadRoutines();
     })
-    .catch((err) => showToast('Toggle failed: ' + err.message, 'error'));
+    .catch((err) => showToast(i18n.t('routines.toggleFailed', [err.message]), 'error'));
 }
 
 function deleteRoutine(id, name) {
-  if (!confirm('Delete routine "' + name + '"?')) return;
+  if (!confirm(i18n.t('routines.deleteConfirm', [name]))) return;
   apiFetch('/api/routines/' + id, { method: 'DELETE' })
     .then(() => {
-      showToast('Routine deleted', 'success');
+      showToast(i18n.t('routines.deleted'), 'success');
       if (currentRoutineId === id) closeRoutineDetail();
       else loadRoutines();
     })
-    .catch((err) => showToast('Delete failed: ' + err.message, 'error'));
+    .catch((err) => showToast(i18n.t('routines.deleteFailed', [err.message]), 'error'));
 }
 
 function formatRelativeTime(isoString) {
@@ -3426,25 +3430,25 @@ function fetchGatewayStatus() {
     }
 
     // Connection info
-    html += '<div class="gw-section-label">Connections</div>';
-    html += '<div class="gw-stat"><span>SSE</span><span>' + (data.sse_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>WebSocket</span><span>' + (data.ws_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>Uptime</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
+    html += '<div class="gw-section-label">' + i18n.t('gateway.connections') + '</div>';
+    html += '<div class="gw-stat"><span>' + i18n.t('gateway.sse') + '</span><span>' + (data.sse_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>' + i18n.t('gateway.webSocket') + '</span><span>' + (data.ws_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>' + i18n.t('gateway.uptime') + '</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
 
     // Cost tracker
     if (data.daily_cost != null) {
       html += '<div class="gw-divider"></div>';
-      html += '<div class="gw-section-label">Cost Today</div>';
-      html += '<div class="gw-stat"><span>Spent</span><span>' + formatCost(data.daily_cost) + '</span></div>';
+      html += '<div class="gw-section-label">' + i18n.t('gateway.costToday') + '</div>';
+      html += '<div class="gw-stat"><span>' + i18n.t('gateway.spent') + '</span><span>' + formatCost(data.daily_cost) + '</span></div>';
       if (data.actions_this_hour != null) {
-        html += '<div class="gw-stat"><span>Actions/hr</span><span>' + data.actions_this_hour + '</span></div>';
+        html += '<div class="gw-stat"><span>' + i18n.t('gateway.actionsPerHour') + '</span><span>' + data.actions_this_hour + '</span></div>';
       }
     }
 
     // Per-model token usage
     if (data.model_usage && data.model_usage.length > 0) {
       html += '<div class="gw-divider"></div>';
-      html += '<div class="gw-section-label">Token Usage</div>';
+      html += '<div class="gw-section-label">' + i18n.t('gateway.tokenUsage') + '</div>';
       data.model_usage.sort(function(a, b) {
         return (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens);
       });
@@ -3456,8 +3460,8 @@ function fetchGatewayStatus() {
           + '<span class="gw-model-cost">' + escapeHtml(formatCost(m.cost)) + '</span>'
           + '</div>';
         html += '<div class="gw-token-detail">'
-          + '<span>in: ' + formatTokenCount(m.input_tokens) + '</span>'
-          + '<span>out: ' + formatTokenCount(m.output_tokens) + '</span>'
+          + '<span>' + i18n.t('gateway.in') + ': ' + formatTokenCount(m.input_tokens) + '</span>'
+          + '<span>' + i18n.t('gateway.out') + ': ' + formatTokenCount(m.output_tokens) + '</span>'
           + '</div>';
       }
     }
@@ -3514,7 +3518,7 @@ function fetchTeeReport() {
   var base = teeApiBase();
   if (!base) return;
   var popover = document.getElementById('tee-popover');
-  popover.innerHTML = '<div class="tee-popover-loading">Loading attestation report...</div>';
+  popover.innerHTML = '<div class="tee-popover-loading">' + i18n.t('tee.loadingReport') + '</div>';
   fetch(base + '/attestation/report').then(function(res) {
     if (!res.ok) throw new Error(res.status);
     return res.json();
@@ -3522,7 +3526,7 @@ function fetchTeeReport() {
     teeReportCache = data;
     renderTeePopover(data);
   }).catch(function() {
-    popover.innerHTML = '<div class="tee-popover-loading">Could not load attestation report</div>';
+    popover.innerHTML = '<div class="tee-popover-loading">' + i18n.t('tee.loadFailed') + '</div>';
   }).finally(function() {
     teeReportLoading = false;
   });
@@ -3538,25 +3542,25 @@ function renderTeePopover(report) {
   popover.innerHTML = '<div class="tee-popover-title">'
     + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>'
     + 'TEE Attestation</div>'
-    + '<div class="tee-field"><div class="tee-field-label">Image Digest</div>'
+    + '<div class="tee-field"><div class="tee-field-label">' + i18n.t('tee.imageDigest') + '</div>'
     + '<div class="tee-field-value">' + escapeHtml(digest) + '</div></div>'
-    + '<div class="tee-field"><div class="tee-field-label">TLS Certificate Fingerprint</div>'
+    + '<div class="tee-field"><div class="tee-field-label">' + i18n.t('tee.tlsFingerprint') + '</div>'
     + '<div class="tee-field-value">' + escapeHtml(fingerprint) + '</div></div>'
-    + '<div class="tee-field"><div class="tee-field-label">Report Data</div>'
+    + '<div class="tee-field"><div class="tee-field-label">' + i18n.t('tee.reportData') + '</div>'
     + '<div class="tee-field-value">' + escapeHtml(truncated) + '</div></div>'
-    + '<div class="tee-field"><div class="tee-field-label">VM Config</div>'
+    + '<div class="tee-field"><div class="tee-field-label">' + i18n.t('tee.vmConfig') + '</div>'
     + '<div class="tee-field-value">' + escapeHtml(vmConfig) + '</div></div>'
     + '<div class="tee-popover-actions">'
-    + '<button class="tee-btn-copy" onclick="copyTeeReport()">Copy Full Report</button></div>';
+    + '<button class="tee-btn-copy" onclick="copyTeeReport()">' + i18n.t('tee.copyReport') + '</button></div>';
 }
 
 function copyTeeReport() {
   if (!teeReportCache) return;
   var combined = Object.assign({}, teeReportCache, teeInfo || {});
   navigator.clipboard.writeText(JSON.stringify(combined, null, 2)).then(function() {
-    showToast('Attestation report copied', 'success');
+    showToast(i18n.t('tee.reportCopied'), 'success');
   }).catch(function() {
-    showToast('Failed to copy report', 'error');
+    showToast(i18n.t('tee.copyFailed'), 'error');
   });
 }
 
@@ -3573,12 +3577,12 @@ document.getElementById('tee-shield').addEventListener('mouseleave', function() 
 function installWasmExtension() {
   var name = document.getElementById('wasm-install-name').value.trim();
   if (!name) {
-    showToast('Extension name is required', 'error');
+    showToast(i18n.t('extensions.nameRequired'), 'error');
     return;
   }
   var url = document.getElementById('wasm-install-url').value.trim();
   if (!url) {
-    showToast('URL to .tar.gz bundle is required', 'error');
+    showToast(i18n.t('extensions.urlRequired'), 'error');
     return;
   }
 
@@ -3587,27 +3591,27 @@ function installWasmExtension() {
     body: { name: name, url: url, kind: 'wasm_tool' },
   }).then(function(res) {
     if (res.success) {
-      showToast('Installed ' + name, 'success');
+      showToast(i18n.t('extensions.installed_label') + ' ' + name, 'success');
       document.getElementById('wasm-install-name').value = '';
       document.getElementById('wasm-install-url').value = '';
       loadExtensions();
     } else {
-      showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
+      showToast(i18n.t('extensions.installFailed', [res.message || i18n.t('common.unknownError')]), 'error');
     }
   }).catch(function(err) {
-    showToast('Install failed: ' + err.message, 'error');
+    showToast(i18n.t('extensions.installFailed', [err.message]), 'error');
   });
 }
 
 function addMcpServer() {
   var name = document.getElementById('mcp-install-name').value.trim();
   if (!name) {
-    showToast('Server name is required', 'error');
+    showToast(i18n.t('extensions.serverNameRequired'), 'error');
     return;
   }
   var url = document.getElementById('mcp-install-url').value.trim();
   if (!url) {
-    showToast('MCP server URL is required', 'error');
+    showToast(i18n.t('extensions.mcpUrlRequired'), 'error');
     return;
   }
 
@@ -3616,15 +3620,15 @@ function addMcpServer() {
     body: { name: name, url: url, kind: 'mcp_server' },
   }).then(function(res) {
     if (res.success) {
-      showToast('Added MCP server ' + name, 'success');
+      showToast(i18n.t('extensions.addedMcpServer', [name]), 'success');
       document.getElementById('mcp-install-name').value = '';
       document.getElementById('mcp-install-url').value = '';
       loadExtensions();
     } else {
-      showToast('Failed to add MCP server: ' + (res.message || 'unknown error'), 'error');
+      showToast(i18n.t('extensions.failedToAddMcp', [res.message || i18n.t('common.unknownError')]), 'error');
     }
   }).catch(function(err) {
-    showToast('Failed to add MCP server: ' + err.message, 'error');
+    showToast(i18n.t('extensions.failedToAddMcp', [err.message]), 'error');
   });
 }
 
@@ -3634,7 +3638,7 @@ function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   apiFetch('/api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
-      skillsList.innerHTML = '<div class="empty-state">No skills installed</div>';
+      skillsList.innerHTML = '<div class="empty-state">' + i18n.t('skills.noSkills') + '</div>';
       return;
     }
     skillsList.innerHTML = '';
@@ -3642,7 +3646,7 @@ function loadSkills() {
       skillsList.appendChild(renderSkillCard(data.skills[i]));
     }
   }).catch(function(err) {
-    skillsList.innerHTML = '<div class="empty-state">Failed to load skills: ' + escapeHtml(err.message) + '</div>';
+    skillsList.innerHTML = '<div class="empty-state">' + i18n.t('skills.failedToLoad', [escapeHtml(err.message)]) + '</div>';
   });
 }
 
@@ -3679,7 +3683,7 @@ function renderSkillCard(skill) {
   if (skill.keywords && skill.keywords.length > 0) {
     var kw = document.createElement('div');
     kw.className = 'ext-keywords';
-    kw.textContent = 'Activates on: ' + skill.keywords.join(', ');
+    kw.textContent = i18n.t('skills.activatesOn', [skill.keywords.join(', ')]);
     card.appendChild(kw);
   }
 
@@ -3690,7 +3694,7 @@ function renderSkillCard(skill) {
   if (skill.trust.toLowerCase() !== 'trusted') {
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
-    removeBtn.textContent = 'Remove';
+    removeBtn.textContent = i18n.t('extensions.remove');
     removeBtn.addEventListener('click', function() { removeSkill(skill.name); });
     actions.appendChild(removeBtn);
   }
@@ -3705,7 +3709,7 @@ function searchClawHub() {
   if (!query) return;
 
   var resultsDiv = document.getElementById('skill-search-results');
-  resultsDiv.innerHTML = '<div class="empty-state">Searching...</div>';
+  resultsDiv.innerHTML = '<div class="empty-state">' + i18n.t('skills.searching') + '</div>';
 
   apiFetch('/api/skills/search', {
     method: 'POST',
@@ -3721,7 +3725,7 @@ function searchClawHub() {
       warning.style.borderLeft = '3px solid #f0ad4e';
       warning.style.paddingLeft = '12px';
       warning.style.marginBottom = '16px';
-      warning.textContent = 'Could not reach ClawHub registry: ' + data.catalog_error;
+      warning.textContent = i18n.t('skills.couldNotReachClawHub', [data.catalog_error]);
       resultsDiv.appendChild(warning);
     }
 
@@ -3753,10 +3757,10 @@ function searchClawHub() {
     }
 
     if (resultsDiv.children.length === 0) {
-      resultsDiv.innerHTML = '<div class="empty-state">No skills found for "' + escapeHtml(query) + '"</div>';
+      resultsDiv.innerHTML = '<div class="empty-state">' + i18n.t('skills.noResults', [escapeHtml(query)]) + '</div>';
     }
   }).catch(function(err) {
-    resultsDiv.innerHTML = '<div class="empty-state">Search failed: ' + escapeHtml(err.message) + '</div>';
+    resultsDiv.innerHTML = '<div class="empty-state">' + i18n.t('skills.searchFailed', [escapeHtml(err.message)]) + '</div>';
   });
 }
 
@@ -3775,7 +3779,7 @@ function renderCatalogSkillCard(entry, installedNames) {
   name.rel = 'noopener';
   name.style.textDecoration = 'none';
   name.style.color = 'inherit';
-  name.title = 'View on ClawHub';
+  name.title = i18n.t('skills.viewOnClawHub');
   header.appendChild(name);
 
   if (entry.version) {
@@ -3809,21 +3813,21 @@ function renderCatalogSkillCard(entry, installedNames) {
 
   if (entry.owner) {
     var ownerSpan = document.createElement('span');
-    ownerSpan.textContent = 'by ' + entry.owner;
+    ownerSpan.textContent = i18n.t('common.by', [entry.owner]);
     meta.appendChild(ownerSpan);
   }
 
   if (entry.stars != null) {
     addMetaSep();
     var starsSpan = document.createElement('span');
-    starsSpan.textContent = entry.stars + ' stars';
+    starsSpan.textContent = i18n.t('common.stars', [entry.stars]);
     meta.appendChild(starsSpan);
   }
 
   if (entry.downloads != null) {
     addMetaSep();
     var dlSpan = document.createElement('span');
-    dlSpan.textContent = formatCompactNumber(entry.downloads) + ' downloads';
+    dlSpan.textContent = i18n.t('common.downloads', [formatCompactNumber(entry.downloads)]);
     meta.appendChild(dlSpan);
   }
 
@@ -3832,7 +3836,7 @@ function renderCatalogSkillCard(entry, installedNames) {
     if (ago) {
       addMetaSep();
       var updatedSpan = document.createElement('span');
-      updatedSpan.textContent = 'updated ' + ago;
+      updatedSpan.textContent = i18n.t('common.updated', [ago]);
       meta.appendChild(updatedSpan);
     }
   }
@@ -3850,17 +3854,17 @@ function renderCatalogSkillCard(entry, installedNames) {
   if (isInstalled) {
     var label = document.createElement('span');
     label.className = 'ext-active-label';
-    label.textContent = 'Installed';
+    label.textContent = i18n.t('extensions.installed_label');
     actions.appendChild(label);
   } else {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
-    installBtn.textContent = 'Install';
+    installBtn.textContent = i18n.t('extensions.install');
     installBtn.addEventListener('click', (function(s, btn) {
       return function() {
-        if (!confirm('Install skill "' + s + '" from ClawHub?')) return;
+        if (!confirm(i18n.t('skills.installConfirm', [s]))) return;
         btn.disabled = true;
-        btn.textContent = 'Installing...';
+        btn.textContent = i18n.t('extensions.installing');
         installSkill(s, null, btn);
       };
     })(slug, installBtn));
@@ -3902,44 +3906,44 @@ function installSkill(nameOrSlug, url, btn) {
     body: body,
   }).then(function(res) {
     if (res.success) {
-      showToast('Installed skill "' + nameOrSlug + '"', 'success');
+      showToast(i18n.t('skills.installedSkill', [nameOrSlug]), 'success');
     } else {
-      showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
+      showToast(i18n.t('extensions.installFailed', [res.message || i18n.t('common.unknownError')]), 'error');
     }
     loadSkills();
-    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+    if (btn) { btn.disabled = false; btn.textContent = i18n.t('extensions.install'); }
   }).catch(function(err) {
-    showToast('Install failed: ' + err.message, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+    showToast(i18n.t('skills.installFailed', [err.message]), 'error');
+    if (btn) { btn.disabled = false; btn.textContent = i18n.t('extensions.install'); }
   });
 }
 
 function removeSkill(name) {
-  if (!confirm('Remove skill "' + name + '"?')) return;
+  if (!confirm(i18n.t('skills.removeConfirm', [name]))) return;
   apiFetch('/api/skills/' + encodeURIComponent(name), {
     method: 'DELETE',
     headers: { 'X-Confirm-Action': 'true' },
   }).then(function(res) {
     if (res.success) {
-      showToast('Removed skill "' + name + '"', 'success');
+      showToast(i18n.t('skills.removedSkill', [name]), 'success');
     } else {
-      showToast('Remove failed: ' + (res.message || 'unknown error'), 'error');
+      showToast(i18n.t('skills.removeFailed', [res.message || i18n.t('common.unknownError')]), 'error');
     }
     loadSkills();
   }).catch(function(err) {
-    showToast('Remove failed: ' + err.message, 'error');
+    showToast(i18n.t('skills.removeFailed', [err.message]), 'error');
   });
 }
 
 function installSkillFromForm() {
   var name = document.getElementById('skill-install-name').value.trim();
-  if (!name) { showToast('Skill name is required', 'error'); return; }
+  if (!name) { showToast(i18n.t('skills.nameRequired'), 'error'); return; }
   var url = document.getElementById('skill-install-url').value.trim() || null;
   if (url && !url.startsWith('https://')) {
-    showToast('URL must use HTTPS', 'error');
+    showToast(i18n.t('skills.urlMustHttps'), 'error');
     return;
   }
-  if (!confirm('Install skill "' + name + '"?')) return;
+  if (!confirm(i18n.t('skills.installSkillConfirm', [name]))) return;
   installSkill(name, url, null);
   document.getElementById('skill-install-name').value = '';
   document.getElementById('skill-install-url').value = '';
@@ -4024,8 +4028,65 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// Escape a value for safe embedding inside a JS string literal in an onclick attribute.
+// Prevents ID-injection attacks where an attacker-controlled ID could break out of the
+// string context (e.g. id = "');alert(1)//").
+function escapeJs(str) {
+  return String(str)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+}
+
 function formatDate(isoString) {
   if (!isoString) return '-';
   const d = new Date(isoString);
   return d.toLocaleString();
 }
+
+// ─── Language Switcher ────────────────────────────────────────────────────────
+
+const LANG_LABELS = { 'en': 'EN', 'zh': '中文', 'zh-TW': '繁體' };
+
+function updateLangSwitcherUI(locale) {
+  const btn = document.getElementById('lang-switcher-label');
+  if (btn) btn.textContent = LANG_LABELS[locale] || locale.toUpperCase();
+
+  document.querySelectorAll('#lang-menu li').forEach(li => {
+    li.classList.toggle('active', li.dataset.lang === locale);
+  });
+}
+
+function switchLanguage(locale) {
+  i18n.load(locale).then(() => {
+    updateLangSwitcherUI(locale);
+    closeLangMenu();
+  });
+}
+
+function toggleLangMenu(event) {
+  event.stopPropagation();
+  const switcher = document.getElementById('lang-switcher');
+  const isOpen = switcher.classList.toggle('open');
+  document.getElementById('lang-switcher-btn').setAttribute('aria-expanded', isOpen);
+}
+
+function closeLangMenu() {
+  const switcher = document.getElementById('lang-switcher');
+  if (switcher) {
+    switcher.classList.remove('open');
+    document.getElementById('lang-switcher-btn').setAttribute('aria-expanded', 'false');
+  }
+}
+
+// Close menu when clicking anywhere outside
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('#lang-switcher')) closeLangMenu();
+});
+
+// Initialize label once i18n is ready
+i18n.onReady(function() {
+  updateLangSwitcherUI(i18n.locale);
+});
