@@ -10,16 +10,25 @@
 //!   against `api.openai.com/v1`.
 //! - **ChatGPT** (`auth_mode: "chatgpt"`) → uses `tokens.access_token`
 //!   (OAuth JWT) against `chatgpt.com/backend-api/codex`.
+//!
+//! When in ChatGPT mode, the provider supports automatic token refresh
+//! on 401 responses using the `refresh_token` from `auth.json`.
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// ChatGPT backend API endpoint used by Codex in ChatGPT auth mode.
 const CHATGPT_BACKEND_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 /// Standard OpenAI API endpoint used by Codex in API key mode.
 const OPENAI_API_URL: &str = "https://api.openai.com/v1";
+
+/// OAuth token refresh endpoint (same as Codex CLI).
+const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+
+/// OAuth client ID used for token refresh (same as Codex CLI).
+const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 /// Credentials extracted from Codex's `auth.json`.
 #[derive(Debug, Clone)]
@@ -28,6 +37,10 @@ pub struct CodexCredentials {
     pub token: String,
     /// Whether this is a ChatGPT OAuth token (vs. an OpenAI API key).
     pub is_chatgpt_mode: bool,
+    /// OAuth refresh token (only present in ChatGPT mode).
+    pub refresh_token: Option<String>,
+    /// Path to the auth.json file (for persisting refreshed tokens).
+    pub auth_path: Option<PathBuf>,
 }
 
 impl CodexCredentials {
@@ -56,6 +69,22 @@ struct CodexAuthJson {
 #[derive(Debug, Deserialize)]
 struct CodexTokens {
     access_token: String,
+    refresh_token: Option<String>,
+}
+
+/// Request body for OAuth token refresh.
+#[derive(Debug, Serialize)]
+struct RefreshRequest<'a> {
+    client_id: &'a str,
+    grant_type: &'a str,
+    refresh_token: &'a str,
+}
+
+/// Response from the OAuth token refresh endpoint.
+#[derive(Debug, Deserialize)]
+struct RefreshResponse {
+    access_token: String,
+    refresh_token: Option<String>,
 }
 
 /// Default path used by Codex CLI: `~/.codex/auth.json`.
@@ -104,6 +133,8 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
             return Some(CodexCredentials {
                 token: key,
                 is_chatgpt_mode: false,
+                refresh_token: None,
+                auth_path: None,
             });
         }
         // If auth_mode was explicitly `apiKey`, do not fall back to checking for a token.
@@ -122,6 +153,8 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
             return Some(CodexCredentials {
                 token: tokens.access_token,
                 is_chatgpt_mode: true,
+                refresh_token: tokens.refresh_token,
+                auth_path: Some(path.to_path_buf()),
             });
         }
     }
@@ -131,6 +164,102 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
         path.display()
     );
     None
+}
+
+/// Attempt to refresh an expired access token using the refresh token.
+///
+/// On success, returns the new `access_token` and persists the refreshed
+/// tokens back to `auth.json`. This follows the same OAuth protocol as
+/// Codex CLI (`POST https://auth.openai.com/oauth/token`).
+///
+/// Returns `None` if the refresh token is missing, the request fails,
+/// or the response is malformed.
+pub async fn refresh_access_token(
+    refresh_token: &str,
+    auth_path: Option<&Path>,
+) -> Option<String> {
+    let client = reqwest::Client::new();
+    let req = RefreshRequest {
+        client_id: CLIENT_ID,
+        grant_type: "refresh_token",
+        refresh_token,
+    };
+
+    tracing::info!("Attempting to refresh Codex OAuth access token");
+
+    let resp = match client
+        .post(REFRESH_TOKEN_URL)
+        .header("Content-Type", "application/json")
+        .json(&req)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Token refresh request failed: {e}");
+            return None;
+        }
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tracing::warn!("Token refresh failed: HTTP {status}: {body}");
+        if status.as_u16() == 401 {
+            tracing::warn!(
+                "Refresh token may be expired or revoked. \
+                 Please re-authenticate with: codex --login"
+            );
+        }
+        return None;
+    }
+
+    let refresh_resp: RefreshResponse = match resp.json().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to parse token refresh response: {e}");
+            return None;
+        }
+    };
+
+    let new_access_token = refresh_resp.access_token.clone();
+
+    // Persist refreshed tokens back to auth.json
+    if let Some(path) = auth_path {
+        if let Err(e) = persist_refreshed_tokens(
+            path,
+            &refresh_resp.access_token,
+            refresh_resp.refresh_token.as_deref(),
+        ) {
+            tracing::warn!("Failed to persist refreshed tokens to {}: {e}", path.display());
+        } else {
+            tracing::info!("Refreshed tokens persisted to {}", path.display());
+        }
+    }
+
+    Some(new_access_token)
+}
+
+/// Update `auth.json` with refreshed tokens, preserving other fields.
+fn persist_refreshed_tokens(
+    path: &Path,
+    new_access_token: &str,
+    new_refresh_token: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)?;
+    let mut json: serde_json::Value = serde_json::from_str(&content)?;
+
+    if let Some(tokens) = json.get_mut("tokens") {
+        tokens["access_token"] = serde_json::Value::String(new_access_token.to_string());
+        if let Some(rt) = new_refresh_token {
+            tokens["refresh_token"] = serde_json::Value::String(rt.to_string());
+        }
+    }
+
+    let updated = serde_json::to_string_pretty(&json)?;
+    std::fs::write(path, updated)?;
+    Ok(())
 }
 
 #[cfg(test)]

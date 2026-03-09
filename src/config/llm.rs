@@ -87,6 +87,10 @@ pub struct RegistryProviderConfig {
     /// When true, use the Codex ChatGPT Responses API provider instead of
     /// the standard OpenAI-compatible Chat Completions client.
     pub is_codex_chatgpt: bool,
+    /// OAuth refresh token for Codex ChatGPT token refresh.
+    pub refresh_token: Option<String>,
+    /// Path to Codex auth.json for persisting refreshed tokens.
+    pub auth_path: Option<std::path::PathBuf>,
 }
 
 /// LLM provider configuration.
@@ -336,6 +340,9 @@ impl LlmConfig {
             None
         };
 
+        let codex_refresh_token = codex_creds.as_ref().and_then(|c| c.refresh_token.clone());
+        let codex_auth_path = codex_creds.as_ref().and_then(|c| c.auth_path.clone());
+
         let api_key = if let Some(creds) = codex_creds {
             if creds.is_chatgpt_mode {
                 codex_base_url_override = Some(creds.base_url().to_string());
@@ -430,6 +437,8 @@ impl LlmConfig {
             extra_headers,
             oauth_token,
             is_codex_chatgpt,
+            refresh_token: codex_refresh_token,
+            auth_path: codex_auth_path,
         })
     }
 }

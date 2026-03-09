@@ -140,6 +140,8 @@ fn create_codex_chatgpt_from_registry(
                 &config.base_url,
                 &api_key,
                 &config.model,
+                config.refresh_token.clone(),
+                config.auth_path.clone(),
             ),
         )
     });

@@ -17,8 +17,11 @@ use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
+use crate::codex_auth;
 use crate::error::LlmError;
 
 use super::provider::{
@@ -30,8 +33,12 @@ use super::provider::{
 pub struct CodexChatGptProvider {
     client: Client,
     base_url: String,
-    api_key: String,
+    api_key: RwLock<String>,
     model: String,
+    /// OAuth refresh token for automatic 401 retry.
+    refresh_token: Option<String>,
+    /// Path to auth.json for persisting refreshed tokens.
+    auth_path: Option<PathBuf>,
 }
 
 impl CodexChatGptProvider {
@@ -39,8 +46,10 @@ impl CodexChatGptProvider {
         Self {
             client: Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            api_key: api_key.to_string(),
+            api_key: RwLock::new(api_key.to_string()),
             model: model.to_string(),
+            refresh_token: None,
+            auth_path: None,
         }
     }
 
@@ -59,6 +68,8 @@ impl CodexChatGptProvider {
         base_url: &str,
         api_key: &str,
         configured_model: &str,
+        refresh_token: Option<String>,
+        auth_path: Option<PathBuf>,
     ) -> Self {
         let base = base_url.trim_end_matches('/');
         let client = Client::new();
@@ -104,8 +115,10 @@ impl CodexChatGptProvider {
         Self {
             client,
             base_url: base.to_string(),
-            api_key: api_key.to_string(),
+            api_key: RwLock::new(api_key.to_string()),
             model,
+            refresh_token,
+            auth_path,
         }
     }
 
@@ -260,6 +273,9 @@ impl CodexChatGptProvider {
     }
 
     /// Send a request and parse the SSE response.
+    ///
+    /// On HTTP 401, if a refresh token is available, attempts to refresh
+    /// the access token and retry the request once.
     async fn send_request(&self, body: Value) -> Result<ResponsesResult, LlmError> {
         let url = format!("{}/responses", self.base_url);
 
@@ -269,25 +285,66 @@ impl CodexChatGptProvider {
             "Codex ChatGPT: sending request"
         );
 
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::RequestFailed {
-                provider: "codex_chatgpt".to_string(),
-                reason: format!("HTTP request failed: {e}"),
-            })?;
+        let api_key = self.api_key.read().await.clone();
+        let resp = Self::send_http_request(&self.client, &url, &api_key, &body).await?;
 
         let status = resp.status();
+        if status.as_u16() == 401 {
+            // Attempt token refresh if we have a refresh token
+            if let Some(ref rt) = self.refresh_token {
+                tracing::info!("Received 401, attempting token refresh");
+                if let Some(new_token) = codex_auth::refresh_access_token(
+                    rt,
+                    self.auth_path.as_deref(),
+                ).await {
+                    // Update stored api_key
+                    *self.api_key.write().await = new_token.clone();
+                    tracing::info!("Token refreshed, retrying request");
+
+                    // Retry the request with the new token
+                    let retry_resp = Self::send_http_request(
+                        &self.client, &url, &new_token, &body,
+                    ).await?;
+
+                    let retry_status = retry_resp.status();
+                    if !retry_status.is_success() {
+                        let body_text = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            retry_resp.text(),
+                        )
+                        .await
+                        .unwrap_or(Ok(String::new()))
+                        .unwrap_or_default();
+                        return Err(LlmError::RequestFailed {
+                            provider: "codex_chatgpt".to_string(),
+                            reason: format!("HTTP {retry_status} from {url} (after token refresh): {body_text}"),
+                        });
+                    }
+
+                    let sse_text = retry_resp.text().await.map_err(|e| LlmError::RequestFailed {
+                        provider: "codex_chatgpt".to_string(),
+                        reason: format!("Failed to read SSE response: {e}"),
+                    })?;
+                    return Self::parse_sse_response(&sse_text);
+                } else {
+                    tracing::warn!(
+                        "Token refresh failed. Please re-authenticate with: codex --login"
+                    );
+                }
+            }
+
+            // No refresh token or refresh failed — return the 401 error
+            // Drain the response body to release the connection
+            let _ = resp.text().await;
+            return Err(LlmError::AuthFailed {
+                provider: "codex_chatgpt".to_string(),
+            });
+        }
+
         if !status.is_success() {
             // Read the error body with a timeout to avoid hanging
             let body_text = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
+                Duration::from_secs(5),
                 resp.text(),
             )
             .await
@@ -308,6 +365,27 @@ impl CodexChatGptProvider {
         })?;
 
         Self::parse_sse_response(&sse_text)
+    }
+
+    /// Low-level HTTP POST to the /responses endpoint.
+    async fn send_http_request(
+        client: &Client,
+        url: &str,
+        api_key: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, LlmError> {
+        client
+            .post(url)
+            .bearer_auth(api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "codex_chatgpt".to_string(),
+                reason: format!("HTTP request failed: {e}"),
+            })
     }
 
     /// Parse SSE events from the response text.
