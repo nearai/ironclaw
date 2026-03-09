@@ -528,11 +528,11 @@ fn poi_map_entry_to_json(
     e: &PoiMapEntry,
     sources: &serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Value {
-    let url = e.url.clone().unwrap_or_default();
-    let title = e.title.clone().unwrap_or_else(|| "Untitled".to_string());
+    let url = e.url.as_deref().unwrap_or_default();
+    let title = e.title.as_deref().unwrap_or("Untitled");
     let name = e.name.as_deref();
     let snippets = e.snippets.as_deref().unwrap_or(&[]);
-    build_entry_json(&url, &title, name, snippets, sources)
+    build_entry_json(url, title, name, snippets, sources)
 }
 
 /// Extract hostname from a URL string (no URL parser dependency). Handles http(s) and strips port.
