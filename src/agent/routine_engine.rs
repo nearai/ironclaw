@@ -789,11 +789,11 @@ async fn execute_lightweight_with_tools(
 
             let response = ctx
                 .llm
-                    .complete(request)
-                    .await
-                    .map_err(|e| RoutineError::LlmFailed {
-                        reason: e.to_string(),
-                    })?;
+                .complete(request)
+                .await
+                .map_err(|e| RoutineError::LlmFailed {
+                    reason: e.to_string(),
+                })?;
 
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
@@ -812,13 +812,11 @@ async fn execute_lightweight_with_tools(
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);
 
-            let response = ctx
-                .llm
-                .complete_with_tools(request)
-                .await
-                .map_err(|e| RoutineError::LlmFailed {
+            let response = ctx.llm.complete_with_tools(request).await.map_err(|e| {
+                RoutineError::LlmFailed {
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
 
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
@@ -848,14 +846,20 @@ async fn execute_lightweight_with_tools(
                 let result_content = match result {
                     Ok(output) => {
                         let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &output);
-                        ctx.safety
-                            .wrap_for_llm(&tc.name, &sanitized.content, sanitized.was_modified)
+                        ctx.safety.wrap_for_llm(
+                            &tc.name,
+                            &sanitized.content,
+                            sanitized.was_modified,
+                        )
                     }
                     Err(e) => {
                         let error_msg = format!("Tool '{}' failed: {}", tc.name, e);
                         let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &error_msg);
-                        ctx.safety
-                            .wrap_for_llm(&tc.name, &sanitized.content, sanitized.was_modified)
+                        ctx.safety.wrap_for_llm(
+                            &tc.name,
+                            &sanitized.content,
+                            sanitized.was_modified,
+                        )
                     }
                 };
 
