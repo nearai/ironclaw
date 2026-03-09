@@ -158,10 +158,9 @@ gh pr comment {number} --body "..."
 
 ## Phase 3: Fix
 
-Checkout the PR branch if not already on it:
+Checkout the PR branch if not already on it (handles fork PRs automatically):
 ```
-git fetch origin {headRefName}
-git checkout {headRefName}
+gh pr checkout {number}
 ```
 
 **Implement fixes** for:
