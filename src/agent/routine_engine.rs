@@ -344,10 +344,16 @@ impl RoutineEngine {
                 }
             };
 
-            let last_reason = job.transitions.last().and_then(|t| t.reason.clone());
+            // Sanitize the last transition reason: truncate to prevent oversized
+            // notifications and strip control characters to prevent injection.
+            let last_reason = job
+                .transitions
+                .last()
+                .and_then(|t| t.reason.clone())
+                .map(|r| sanitize_summary(&r));
 
             let (new_status, summary) = match job.state {
-                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                JobState::Completed | JobState::Accepted => {
                     let summary =
                         last_reason.unwrap_or_else(|| "Job completed successfully".to_string());
                     (RunStatus::Ok, summary)
@@ -358,8 +364,11 @@ impl RoutineEngine {
                     (RunStatus::Failed, summary)
                 }
                 JobState::Cancelled => (RunStatus::Failed, "Job was cancelled".to_string()),
-                // Still in progress — skip
-                JobState::Pending | JobState::InProgress | JobState::Stuck => continue,
+                // Still in progress — skip (Submitted can still transition to Failed)
+                JobState::Pending
+                | JobState::InProgress
+                | JobState::Stuck
+                | JobState::Submitted => continue,
             };
 
             tracing::info!(
@@ -1306,6 +1315,16 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Sanitize a summary string from job transitions before using in notifications.
+/// Truncates to 500 chars and strips control characters to prevent injection.
+fn sanitize_summary(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect();
+    truncate(&cleaned, 500)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{NotifyConfig, RunStatus};
@@ -1545,7 +1564,7 @@ mod tests {
         let map_state = |state: JobState, reason: Option<&str>| -> Option<(RunStatus, String)> {
             let last_reason = reason.map(|s| s.to_string());
             match state {
-                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                JobState::Completed | JobState::Accepted => {
                     let summary =
                         last_reason.unwrap_or_else(|| "Job completed successfully".to_string());
                     Some((RunStatus::Ok, summary))
@@ -1556,19 +1575,22 @@ mod tests {
                     Some((RunStatus::Failed, summary))
                 }
                 JobState::Cancelled => Some((RunStatus::Failed, "Job was cancelled".to_string())),
-                JobState::Pending | JobState::InProgress | JobState::Stuck => None,
+                // Submitted can still transition to Failed, so treat as in-progress
+                JobState::Pending
+                | JobState::InProgress
+                | JobState::Stuck
+                | JobState::Submitted => None,
             }
         };
 
+        // Terminal success states
         let (status, _) = map_state(JobState::Completed, None).unwrap();
-        assert_eq!(status, RunStatus::Ok);
-
-        let (status, _) = map_state(JobState::Submitted, None).unwrap();
         assert_eq!(status, RunStatus::Ok);
 
         let (status, _) = map_state(JobState::Accepted, None).unwrap();
         assert_eq!(status, RunStatus::Ok);
 
+        // Terminal failure states
         let (status, summary) = map_state(JobState::Failed, Some("OOM killed")).unwrap();
         assert_eq!(status, RunStatus::Failed);
         assert_eq!(summary, "OOM killed");
@@ -1580,8 +1602,30 @@ mod tests {
         let (status, _) = map_state(JobState::Cancelled, None).unwrap();
         assert_eq!(status, RunStatus::Failed);
 
+        // In-progress states (including Submitted which can still fail)
         assert!(map_state(JobState::Pending, None).is_none());
         assert!(map_state(JobState::InProgress, None).is_none());
         assert!(map_state(JobState::Stuck, None).is_none());
+        assert!(map_state(JobState::Submitted, None).is_none());
+    }
+
+    #[test]
+    fn test_sanitize_summary_strips_control_chars() {
+        use super::sanitize_summary;
+
+        // Preserves normal text
+        assert_eq!(sanitize_summary("Job completed"), "Job completed");
+
+        // Strips control characters but preserves newlines
+        assert_eq!(
+            sanitize_summary("line1\nline2\x00\x1b[31mred"),
+            "line1\nline2[31mred"
+        );
+
+        // Truncates long strings
+        let long = "x".repeat(600);
+        let result = sanitize_summary(&long);
+        assert!(result.len() <= 503); // 500 + "..."
+        assert!(result.ends_with("..."));
     }
 }
