@@ -115,7 +115,7 @@ jobs:
 
       - name: Generate GitHub App token
         id: app-token
-        if: ${{ secrets.GH_RELEASES_MANAGER_APP_ID != '' }}
+        continue-on-error: true
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
@@ -230,7 +230,7 @@ jobs:
 
       - name: Generate GitHub App token
         id: app-token
-        if: ${{ secrets.GH_RELEASES_MANAGER_APP_ID != '' }}
+        continue-on-error: true
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
