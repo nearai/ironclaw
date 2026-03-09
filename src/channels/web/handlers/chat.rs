@@ -174,7 +174,7 @@ pub async fn chat_auth_token_handler(
         }
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("Invalid token") || msg.contains("API returned") {
+            if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                 state.sse.broadcast(SseEvent::AuthRequired {
                     extension_name: req.extension_name.clone(),
                     instructions: Some(msg.clone()),

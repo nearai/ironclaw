@@ -1153,7 +1153,7 @@ async fn chat_auth_token_handler(
         Err(e) => {
             let msg = e.to_string();
             // Re-emit auth_required for retry on validation errors
-            if msg.contains("Invalid token") || msg.contains("API returned") {
+            if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
                 state.sse.broadcast(SseEvent::AuthRequired {
                     extension_name: req.extension_name.clone(),
                     instructions: Some(msg.clone()),
