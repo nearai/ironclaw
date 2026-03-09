@@ -183,16 +183,16 @@ Switching between them overwrites the same credential slot.
 - Pre-configured OpenAI-compatible preset with base URL `https://openrouter.ai/api/v1`
 - Delegates to `setup_api_key_provider()` with a display name override ("OpenRouter")
 - Sets `llm_backend = "openai_compatible"` and `openai_compatible_base_url` automatically
+- Preserves `selected_model` on a same-backend re-run
 - Clears `selected_model` only when switching from a different backend, so
-  Step 4 prompts for a compatible model when needed without discarding the
-  existing model on a same-provider re-run
+  Step 4 prompts for a compatible model when needed
 
 **API-key providers** (`setup_api_key_provider`):
 1. Check env var → if set, ask to reuse, persist to secrets store
 2. Otherwise prompt for key entry via `secret_input()`
 3. Store encrypted in secrets via `init_secrets_context()`
 4. **Cache key in `self.llm_api_key`** for model fetching in Step 4
-5. Preserve `selected_model` when the backend is unchanged; clear it only
+5. Preserve `selected_model` when re-running the same backend; clear it only
    when the user switches to a different backend
 
 **NEAR AI** (`setup_nearai`):

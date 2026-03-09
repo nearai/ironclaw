@@ -3345,6 +3345,17 @@ mod tests {
     }
 
     #[test]
+    fn test_set_llm_backend_preserves_model_when_backend_was_unset() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("openai");
+
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("openai"));
+        assert_eq!(wizard.settings.selected_model, None);
+    }
+
+    #[test]
     fn test_set_llm_backend_clears_model_when_backend_changes() {
         let mut wizard = SetupWizard::new();
         wizard.settings.llm_backend = Some("openai".to_string());
