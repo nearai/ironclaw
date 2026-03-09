@@ -207,9 +207,9 @@ cargo check --all-features
 
 ## Phase 5: Commit & Push
 
-Stage and commit changes:
+Stage changed files by name (never `git add -A` — it can include unintended files):
 ```bash
-git add -A
+git add path/to/changed/file1 path/to/changed/file2
 git commit -m "{message}"
 ```
 
@@ -230,15 +230,12 @@ git push origin {headRefName}
 
 ## Phase 6: CI Monitor & Fix Loop
 
-Wait briefly for CI to start, then check:
-```
-gh pr checks {number} --json name,status,conclusion --watch --fail-fast
-```
-
-If that hangs or isn't available, poll:
+Wait briefly for CI to start, then poll (do NOT use `--watch` as it can hang indefinitely):
 ```
 gh pr checks {number} --json name,status,conclusion
 ```
+
+Re-check every 30 seconds, up to 10 minutes. If still pending after 10 minutes, report status and ask the user whether to keep waiting.
 
 **If CI passes** → proceed to Phase 7.
 
@@ -280,14 +277,16 @@ Commits added: {N}
 - PR is not draft
 - PR is mergeable (no conflicts)
 
-If all conditions met:
+If all conditions met, ask the user for merge strategy:
+
+"CI is green. Merge this PR? [squash/rebase/merge/no]"
+
+Then execute:
 ```
-gh pr merge {number} --squash --delete-branch
+gh pr merge {number} --{strategy} --delete-branch
 ```
 
 If any condition NOT met, report what's blocking and let the user decide.
-
-If `--merge` not set, ask: "CI is green. Merge this PR? [squash/rebase/no]"
 
 ---
 

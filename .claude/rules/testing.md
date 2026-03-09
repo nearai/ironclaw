@@ -22,4 +22,4 @@ Run `bash scripts/check-boundaries.sh` to verify test tier gating.
 - No mocks, prefer real implementations or stubs
 - Use `tempfile` crate for test directories, never hardcode `/tmp/`
 - Regression test with every bug fix (enforced by commit-msg hook)
-- Integration tests (`--test workspace_integration`) require PostgreSQL; expected to fail locally
+- Integration tests (`--test workspace_integration`) require PostgreSQL; skipped if DB is unreachable
