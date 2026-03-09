@@ -308,17 +308,16 @@ fn format_output(query: &str, response: BraveLlmContextResponse) -> Result<Strin
 
     let generic = grounding
         .as_ref()
-        .and_then(|g| g.generic.as_ref())
-        .cloned()
+        .and_then(|g| g.generic.as_deref())
         .unwrap_or_default();
 
     let entries: Vec<serde_json::Value> = generic
-        .into_iter()
+        .iter()
         .filter_map(|e| {
-            let url = e.url?;
-            let title = e.title.unwrap_or_else(|| "Untitled".to_string());
-            let snippets = e.snippets.unwrap_or_default();
-            Some(build_entry_json(&url, &title, None, &snippets, &sources))
+            let url = e.url.as_ref()?;
+            let title = e.title.as_deref().unwrap_or("Untitled");
+            let snippets = e.snippets.as_deref().unwrap_or(&[]);
+            Some(build_entry_json(url, title, None, snippets, &sources))
         })
         .collect();
 
