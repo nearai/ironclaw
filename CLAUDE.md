@@ -174,30 +174,7 @@ SKILL.md files extend the agent's prompt with domain-specific instructions. See 
 
 ## Configuration
 
-See `.env.example` for all environment variables. Key settings:
-
-```bash
-DATABASE_BACKEND=postgres               # or "libsql" / "turso"
-DATABASE_URL=postgres://user:pass@localhost/ironclaw
-LLM_BACKEND=nearai                      # nearai/openai/anthropic/ollama/openai_compatible/tinfoil
-GATEWAY_ENABLED=true                    # Web gateway
-GATEWAY_PORT=3001
-GATEWAY_AUTH_TOKEN=changeme
-SANDBOX_ENABLED=true                    # Docker sandbox
-SANDBOX_DEFAULT_POLICY=workspace_write  # ReadOnly/WorkspaceWrite/FullAccess
-SKILLS_ENABLED=true
-SKILLS_MAX_TOKENS=4000
-ROUTINES_ENABLED=true
-HEARTBEAT_ENABLED=true                  # Proactive periodic execution
-HEARTBEAT_INTERVAL_SECS=1800            # 30 minutes
-EMBEDDING_PROVIDER=nearai               # or openai
-TUNNEL_PROVIDER=none                    # none/cloudflare/tailscale/ngrok/custom
-OBSERVABILITY_BACKEND=none              # none or log
-```
-
-### LLM Providers
-
-Backends: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock` (requires `--features bedrock`) — set via `LLM_BACKEND`. See `src/llm/CLAUDE.md` for per-provider auth and configuration details.
+See `.env.example` for all environment variables. LLM backends (`nearai`, `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock`) documented in `src/llm/CLAUDE.md`.
 
 ## Adding a New Channel
 
