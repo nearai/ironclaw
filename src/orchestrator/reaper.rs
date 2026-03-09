@@ -69,6 +69,15 @@ impl SandboxReaper {
 
     /// Run the reaper loop forever. Should be spawned with `tokio::spawn`.
     pub async fn run(self) {
+        // Validate scan_interval is non-zero to prevent tokio::time::interval panic
+        if self.config.scan_interval.as_secs() == 0 {
+            tracing::error!(
+                "Reaper: scan_interval must be > 0, got {:?}. Reaper will not start.",
+                self.config.scan_interval
+            );
+            return;
+        }
+
         let mut interval = tokio::time::interval(self.config.scan_interval);
         // Skip any missed ticks if scan takes longer than the interval
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -88,41 +97,39 @@ impl SandboxReaper {
         };
 
         let now = Utc::now();
+        // Compute threshold once outside the loop
+        let threshold = match chrono::Duration::from_std(self.config.orphan_threshold) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Reaper: failed to convert orphan_threshold to chrono::Duration, using default of 10 minutes"
+                );
+                chrono::Duration::minutes(10)
+            }
+        };
+
         for (container_id, job_id, created_at) in containers {
             let age = now.signed_duration_since(created_at);
-            let threshold = match chrono::Duration::from_std(self.config.orphan_threshold) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Reaper: failed to convert orphan_threshold to chrono::Duration, using default of 10 minutes"
-                    );
-                    chrono::Duration::minutes(10)
-                }
-            };
 
             if age < threshold {
                 continue; // Too young — skip
             }
 
-            // Check if job is still running (not terminal).
+            // Check if job is still active (any non-terminal state prevents reaping).
             // Terminal states: Failed, Cancelled, Accepted
-            // Reapable states: Pending, InProgress, Completed, Submitted, Stuck (if old enough)
-            // Note: Completed and Submitted are non-terminal but can be reaped if old enough.
-            // Only truly active states (InProgress, Stuck) prevent reaping regardless of age.
-            let is_actively_running = match self.context_manager.get_context(job_id).await {
-                Ok(ctx) => {
-                    use crate::context::JobState;
-                    matches!(ctx.state, JobState::InProgress | JobState::Stuck)
-                }
+            // Active states: Pending, InProgress, Completed, Submitted, Stuck
+            // If job doesn't exist or is in a terminal state, it's eligible for reaping.
+            let is_active = match self.context_manager.get_context(job_id).await {
+                Ok(ctx) => ctx.state.is_active(),
                 Err(_) => false, // Not found — treat as orphaned
             };
 
-            if is_actively_running {
+            if is_active {
                 tracing::debug!(
                     job_id = %job_id,
                     container_id = %&container_id[..12.min(container_id.len())],
-                    "Reaper: container has actively running job, skipping"
+                    "Reaper: container has active job, skipping"
                 );
                 continue;
             }
@@ -166,15 +173,16 @@ impl SandboxReaper {
 
             let labels = summary.labels.unwrap_or_default();
 
-            // Parse job_id from label
+            // Parse job_id from label (using configured label key for consistency)
             let job_id = match labels
-                .get("ironclaw.job_id")
+                .get(&self.config.container_label)
                 .and_then(|s| s.parse::<Uuid>().ok())
             {
                 Some(id) => id,
                 None => {
                     tracing::warn!(
                         container_id = %&container_id[..12.min(container_id.len())],
+                        label_key = %&self.config.container_label,
                         "Reaper: ironclaw container missing valid job_id label"
                     );
                     continue;
@@ -419,7 +427,7 @@ mod tests {
         // Verify parsing works
         let parsed_id: Option<Uuid> = labels
             .get("ironclaw.job_id")
-            .and_then(|s: &String| s.parse::<Uuid>().ok());
+            .and_then(|s| s.parse::<Uuid>().ok());
         assert_eq!(parsed_id, Some(job_id));
 
         let parsed_time = labels
@@ -434,11 +442,11 @@ mod tests {
         let labels: HashMap<String, String> = HashMap::new();
         let job_id: Option<Uuid> = labels
             .get("ironclaw.job_id")
-            .and_then(|s: &String| s.parse::<Uuid>().ok());
+            .and_then(|s| s.parse::<Uuid>().ok());
         assert_eq!(job_id, None);
     }
 
-    // Test: malformed timestamp falls back to current time
+    // Test: malformed timestamp falls back to Docker's created timestamp
     #[test]
     fn malformed_timestamp_fallback_works() {
         let mut labels: HashMap<String, String> = HashMap::new();
@@ -455,9 +463,12 @@ mod tests {
             "Malformed timestamp should fail to parse"
         );
 
-        // In actual code, Utc::now() is used as fallback
-        let fallback = Utc::now();
-        assert!(fallback.timestamp() > 0);
+        // In actual code, Docker's summary.created timestamp is used as fallback.
+        // If both our label and Docker's timestamp are missing/invalid, the container is skipped.
+        // Verify that a valid Docker timestamp would be used as fallback:
+        let docker_timestamp: Option<i64> = Some(1705324245); // Some valid Unix timestamp
+        let fallback = docker_timestamp.and_then(|ts| DateTime::from_timestamp(ts, 0));
+        assert!(fallback.is_some(), "Docker timestamp fallback should parse successfully");
     }
 
     // Test: age calculation distinguishes young from old containers
@@ -683,17 +694,11 @@ mod tests {
             let job_id = Uuid::new_v4();
             let test_name = format!("ironclaw-reaper-test-{}", &job_id.to_string()[..8]);
 
-            let mut labels = std::collections::HashMap::new();
-            labels.insert("ironclaw.job_id".to_string(), job_id.to_string());
-            labels.insert(
-                "ironclaw.created_at".to_string(),
-                (Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
-            );
+            let job_id_str = job_id.to_string();
+            let created_at_str = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
 
             let mut labels_str: std::collections::HashMap<&str, &str> =
                 std::collections::HashMap::new();
-            let job_id_str = job_id.to_string();
-            let created_at_str = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
             labels_str.insert("ironclaw.job_id", &job_id_str);
             labels_str.insert("ironclaw.created_at", &created_at_str);
 

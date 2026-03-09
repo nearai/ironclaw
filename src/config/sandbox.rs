@@ -49,6 +49,24 @@ impl SandboxModeConfig {
             .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())
             .unwrap_or_default();
 
+        let reaper_interval_secs: u64 = parse_optional_env("SANDBOX_REAPER_INTERVAL_SECS", 300)?;
+        let orphan_threshold_secs: u64 = parse_optional_env("SANDBOX_ORPHAN_THRESHOLD_SECS", 600)?;
+
+        // Validate that reaper timings are non-zero to prevent tokio::time::interval panics
+        if reaper_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                key: "SANDBOX_REAPER_INTERVAL_SECS".to_string(),
+                message: "must be greater than 0".to_string(),
+            });
+        }
+
+        if orphan_threshold_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                key: "SANDBOX_ORPHAN_THRESHOLD_SECS".to_string(),
+                message: "must be greater than 0".to_string(),
+            });
+        }
+
         Ok(Self {
             enabled: parse_bool_env("SANDBOX_ENABLED", true)?,
             policy: parse_string_env("SANDBOX_POLICY", "readonly")?,
@@ -58,8 +76,8 @@ impl SandboxModeConfig {
             image: parse_string_env("SANDBOX_IMAGE", "ironclaw-worker:latest")?,
             auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", true)?,
             extra_allowed_domains: extra_domains,
-            reaper_interval_secs: parse_optional_env("SANDBOX_REAPER_INTERVAL_SECS", 300)?,
-            orphan_threshold_secs: parse_optional_env("SANDBOX_ORPHAN_THRESHOLD_SECS", 600)?,
+            reaper_interval_secs,
+            orphan_threshold_secs,
         })
     }
 
