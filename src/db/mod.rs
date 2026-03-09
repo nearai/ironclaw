@@ -498,10 +498,10 @@ pub trait Database:
 mod tests {
     use super::*;
 
-    /// Regression test: create_secrets_store selects the correct backend at
-    /// runtime based on DatabaseConfig, not at compile time. Previously the
-    /// CLI duplicated this logic with compile-time #[cfg] gates that always
-    /// chose postgres when both features were enabled.
+    /// Regression test: `create_secrets_store` selects the correct backend at
+    /// runtime based on `DatabaseConfig`, not at compile time. Previously the
+    /// CLI duplicated this logic with compile-time `#[cfg]` gates that always
+    /// chose postgres when both features were enabled (PR #209).
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn test_create_secrets_store_libsql_backend() {
