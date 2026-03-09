@@ -462,6 +462,30 @@ impl RoutineStore for LibSqlBackend {
         Ok(counts)
     }
 
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {} FROM routine_runs WHERE status = 'running' AND job_id IS NOT NULL",
+                    ROUTINE_RUN_COLUMNS
+                ),
+                params![],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut runs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            runs.push(row_to_routine_run_libsql(&row)?);
+        }
+        Ok(runs)
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
