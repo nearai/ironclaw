@@ -3593,10 +3593,15 @@ let teeReportCache = null;
 let teeReportLoading = false;
 
 function teeApiBase() {
-  var parts = window.location.hostname.split('.');
-  if (parts.length < 2) return null;
-  var domain = parts.slice(1).join('.');
-  return window.location.protocol + '//api.' + domain;
+    var hostname = window.location.hostname;
+    // Skip IP addresses (IPv4 and IPv6) and localhost
+    if (hostname === "localhost" || /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(hostname) || hostname.indexOf(":") !== -1) {
+        return null;
+    }
+    var parts = hostname.split(".");
+    if (parts.length < 2) return null;
+    var domain = parts.slice(1).join(".");
+    return window.location.protocol + "//api." + domain;
 }
 
 function teeInstanceName() {
@@ -3607,13 +3612,19 @@ function checkTeeStatus() {
   var base = teeApiBase();
   if (!base) return;
   var name = teeInstanceName();
-  fetch(base + '/instances/' + encodeURIComponent(name) + '/attestation').then(function(res) {
-    if (!res.ok) throw new Error(res.status);
-    return res.json();
-  }).then(function(data) {
-    teeInfo = data;
-    document.getElementById('tee-shield').style.display = 'flex';
-  }).catch(function() {});
+  try {
+    fetch(base + '/instances/' + encodeURIComponent(name) + '/attestation').then(function(res) {
+      if (!res.ok) throw new Error(res.status);
+      return res.json();
+    }).then(function(data) {
+      teeInfo = data;
+      document.getElementById('tee-shield').style.display = 'flex';
+    }).catch(function(err) {
+      console.warn('Failed to fetch TEE attestation:', err);
+    });
+  } catch (e) {
+    console.warn("Failed to check TEE status:", e);
+  }
 }
 
 function fetchTeeReport() {
