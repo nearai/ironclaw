@@ -199,7 +199,7 @@ RUST_LOG=ironclaw=debug,tower_http=debug cargo run  # + HTTP request logging
 
 1. Domain-specific tools (`marketplace.rs`, `restaurant.rs`, etc.) are stubs
 2. Integration tests need testcontainers for PostgreSQL
-3. MCP: only HTTP transport (no stdio)
+3. MCP: no streaming support; stdio/HTTP/Unix transports all use request-response
 4. WIT bindgen: auto-extract tool schema from WASM is stubbed
 5. Built tools get empty capabilities; need UX for granting access
 6. No tool versioning or rollback

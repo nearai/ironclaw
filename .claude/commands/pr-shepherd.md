@@ -1,7 +1,7 @@
 ---
 description: Full PR lifecycle — review, fix findings, address comments, quality gate, push, CI fix loop, merge
 disable-model-invocation: true
-allowed-tools: Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr comment:*), Bash(gh pr merge:*), Bash(gh pr checks:*), Bash(gh pr edit:*), Bash(gh api:*), Bash(gh repo view:*), Bash(gh run view:*), Bash(gh run watch:*), Bash(git diff:*), Bash(git log:*), Bash(git fetch:*), Bash(git checkout:*), Bash(git status:*), Bash(git branch:*), Bash(git add:*), Bash(git commit:*), Bash(git push:*), Bash(git merge:*), Bash(git rebase:*), Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo check:*), Read, Edit, Write, Grep, Glob, Agent
+allowed-tools: Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr comment:*), Bash(gh pr merge:*), Bash(gh pr checks:*), Bash(gh pr edit:*), Bash(gh pr list:*), Bash(gh pr checkout:*), Bash(gh api:*), Bash(gh repo view:*), Bash(gh run view:*), Bash(gh run watch:*), Bash(git diff:*), Bash(git log:*), Bash(git fetch:*), Bash(git checkout:*), Bash(git status:*), Bash(git branch:*), Bash(git add:*), Bash(git commit:*), Bash(git push:*), Bash(git merge:*), Bash(git rebase:*), Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo check:*), Read, Edit, Write, Grep, Glob, Agent
 argument-hint: "<pr-number or url> [--fix] [--merge] [--review-only]"
 ---
 
@@ -98,7 +98,7 @@ Read EVERY changed file in full (not just diff hunks). For PRs touching >20 file
 
 ### IronClaw-specific checks (always)
 - No `.unwrap()` or `.expect()` in production code
-- `crate::` imports, not `super::`
+- Prefer `crate::` for cross-module imports (`super::` OK in tests/intra-module)
 - Error types use `thiserror`
 - If persistence touched, both backends updated (postgres.rs AND libsql/)
 - New tools implement `Tool` trait correctly and registered

@@ -38,7 +38,7 @@ When writing SQL for both backends, translate these types:
 | `BOOLEAN` | `INTEGER` (0/1 -- use `get_i64(row, idx) != 0` to read) |
 | `NUMERIC` | `TEXT` (preserves `rust_decimal` precision) |
 | `TEXT[]` | `TEXT` (JSON-encoded array) |
-| `VECTOR` | `F32_BLOB(1536)` via `libsql_vector_idx` |
+| `VECTOR` | `BLOB` (flexible dimensions; vector index dropped, brute-force search fallback) |
 | `jsonb_set(col, '{key}', val)` | `json_patch(col, '{"key": val}')` -- replaces top-level keys entirely, cannot do partial nested updates |
 | `DEFAULT NOW()` | `DEFAULT (datetime('now'))` |
 | `tsvector` + `ts_rank_cd` | FTS5 virtual table + sync triggers |
