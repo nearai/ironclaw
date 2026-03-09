@@ -246,9 +246,9 @@ impl McpClient {
 
         // Only inject OAuth token if the user hasn't set a custom Authorization header.
         let has_custom_auth = self
-            .server_config
-            .as_ref()
-            .is_some_and(|c| c.has_custom_auth_header());
+            .custom_headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"));
         if !has_custom_auth && let Some(token) = self.get_access_token().await? {
             headers.insert("Authorization".to_string(), format!("Bearer {}", token));
         }

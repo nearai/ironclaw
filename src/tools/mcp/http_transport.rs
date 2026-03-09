@@ -473,7 +473,8 @@ mod tests {
         let response = transport.send(&request, &per_request).await.unwrap();
 
         let echoed = response.result.unwrap();
-        // reqwest merges headers; later one wins
+        // Per-request headers are inserted after custom headers via HeaderMap::insert,
+        // which replaces any existing entry for the same key.
         assert_eq!(echoed["authorization"], "Bearer oauth-token");
     }
 

@@ -188,24 +188,25 @@ impl McpServerConfig {
             }
         }
 
-        // Validate custom header names and values (prevent CRLF injection)
+        // Validate custom header names and values using the http crate's RFC 9110
+        // token validation (catches CRLF, spaces, colons, null bytes, etc.)
         for (name, value) in &self.headers {
             if name.is_empty() {
                 return Err(ConfigError::InvalidConfig {
                     reason: "Header name cannot be empty".to_string(),
                 });
             }
-            if name.bytes().any(|b| b == b'\r' || b == b'\n') {
-                return Err(ConfigError::InvalidConfig {
-                    reason: format!("Header name '{}' contains invalid CRLF characters", name),
-                });
-            }
-            if value.bytes().any(|b| b == b'\r' || b == b'\n') {
+            if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
                 return Err(ConfigError::InvalidConfig {
                     reason: format!(
-                        "Header value for '{}' contains invalid CRLF characters",
+                        "Header name '{}' is not a valid HTTP header name (RFC 9110)",
                         name
                     ),
+                });
+            }
+            if reqwest::header::HeaderValue::from_str(value).is_err() {
+                return Err(ConfigError::InvalidConfig {
+                    reason: format!("Header value for '{}' contains invalid characters", name),
                 });
             }
         }
@@ -413,6 +414,13 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     let content = fs::read_to_string(path).await?;
     let config: McpServersFile = serde_json::from_str(&content)?;
 
+    // Validate every server on load so corrupted configs are caught early
+    for server in &config.servers {
+        server.validate().map_err(|e| ConfigError::InvalidConfig {
+            reason: format!("Server '{}': {}", server.name, e),
+        })?;
+    }
+
     Ok(config)
 }
 
@@ -489,6 +497,12 @@ pub async fn load_mcp_servers_from_db(
     match store.get_setting(user_id, "mcp_servers").await {
         Ok(Some(value)) => {
             let config: McpServersFile = serde_json::from_value(value)?;
+            // Validate every server on load so corrupted DB configs are caught early
+            for server in &config.servers {
+                server.validate().map_err(|e| ConfigError::InvalidConfig {
+                    reason: format!("Server '{}': {}", server.name, e),
+                })?;
+            }
             Ok(config)
         }
         Ok(None) => {
@@ -701,6 +715,34 @@ mod tests {
         assert!(config.servers.is_empty());
     }
 
+    #[tokio::test]
+    async fn test_load_rejects_corrupted_headers() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        // Write a config with an invalid header name directly to disk,
+        // bypassing the add_mcp_server() validation path.
+        let corrupted = serde_json::json!({
+            "servers": [{
+                "name": "bad-server",
+                "url": "https://mcp.example.com",
+                "enabled": true,
+                "headers": { "X Bad": "value" }
+            }]
+        });
+        tokio::fs::write(&path, corrupted.to_string())
+            .await
+            .unwrap();
+
+        let result = load_mcp_servers_from(&path).await;
+        assert!(result.is_err(), "Load should reject corrupted headers");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("bad-server"),
+            "Error should name the offending server, got: {err}"
+        );
+    }
+
     #[test]
     fn test_token_secret_names() {
         let config = McpServerConfig::new("notion", "https://mcp.notion.com");
@@ -871,7 +913,10 @@ mod tests {
         let config =
             McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("CRLF"), "Expected CRLF error, got: {err}");
+        assert!(
+            err.contains("not a valid HTTP header name"),
+            "Expected RFC 9110 error, got: {err}"
+        );
     }
 
     #[test]
@@ -885,7 +930,34 @@ mod tests {
         let config =
             McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
         let err = config.validate().unwrap_err().to_string();
-        assert!(err.contains("CRLF"), "Expected CRLF error, got: {err}");
+        assert!(
+            err.contains("invalid characters"),
+            "Expected invalid characters error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_header_name_with_space_rejected() {
+        let headers = HashMap::from([("X Bad".to_string(), "value".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_header_name_with_colon_rejected() {
+        let headers = HashMap::from([("X:Bad".to_string(), "value".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_header_name_with_null_byte_rejected() {
+        let headers = HashMap::from([("X-Bad\0".to_string(), "value".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.validate().is_err());
     }
 
     #[test]
