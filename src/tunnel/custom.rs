@@ -69,10 +69,13 @@ impl Tunnel for CustomTunnel {
             .kill_on_drop(true)
             .spawn()?;
 
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
         let mut public_url = format!("http://{local_host}:{local_port}");
 
         if self.url_pattern.is_some()
-            && let Some(stdout) = child.stdout.take()
+            && let Some(stdout) = stdout
         {
             let mut reader = tokio::io::BufReader::new(stdout).lines();
             let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
@@ -100,6 +103,23 @@ impl Tunnel for CustomTunnel {
                     Err(_) => {}
                 }
             }
+            
+            // Drain remaining stdout to prevent SIGPIPE/buffer stalls.
+            tokio::spawn(async move { while let Ok(Some(_)) = reader.next_line().await {} });
+        } else if let Some(stdout) = stdout {
+            // No url_pattern: still drain stdout to prevent pipe stalls.
+            tokio::spawn(async move {
+                let mut reader = tokio::io::BufReader::new(stdout).lines();
+                while let Ok(Some(_)) = reader.next_line().await {}
+            });
+        }
+
+        // Drain stderr silently.
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut reader = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(_)) = reader.next_line().await {}
+            });
         }
 
         if let Ok(mut guard) = self.url.write() {
