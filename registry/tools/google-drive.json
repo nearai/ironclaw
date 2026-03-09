@@ -2,7 +2,8 @@
   "name": "google-drive",
   "display_name": "Google Drive",
   "kind": "tool",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Upload, download, search, and manage Google Drive files and folders",
   "keywords": [
     "storage",
@@ -18,7 +19,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/google-drive-wasm32-wasip2.tar.gz",
-      "sha256": "36d5116c7faaaf34b91f98e92573ed230ce0d85e261f05a996a02d14ae4715c4"
+      "sha256": "1b107d575a5d52cc8c76d9a681802190f4373fb485f7f54f445533f097fa37c0"
     }
   },
   "auth_summary": {

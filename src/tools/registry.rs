@@ -10,17 +10,17 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
-use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
-    JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
-    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
+    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
+    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
+    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+    ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -62,6 +62,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_list",
     "routine_update",
     "routine_delete",
+    "routine_fire",
     "routine_history",
     "skill_list",
     "skill_search",
@@ -70,6 +71,9 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "message",
     "web_fetch",
     "restart",
+    "image_generate",
+    "image_edit",
+    "image_analyze",
 ];
 
 /// Registry of available tools.
@@ -386,8 +390,10 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
-        tracing::info!("Registered 6 extension management tools");
+        self.register_sync(Arc::new(ToolRemoveTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ToolUpgradeTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ExtensionInfoTool::new(manager)));
+        tracing::info!("Registered 8 extension management tools");
     }
 
     /// Register skill management tools (list, search, install, remove).
@@ -421,8 +427,8 @@ impl ToolRegistry {
         engine: Arc<crate::agent::routine_engine::RoutineEngine>,
     ) {
         use crate::tools::builtin::{
-            RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool,
-            RoutineUpdateTool,
+            RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool,
+            RoutineListTool, RoutineUpdateTool,
         };
         self.register_sync(Arc::new(RoutineCreateTool::new(
             Arc::clone(&store),
@@ -437,8 +443,12 @@ impl ToolRegistry {
             Arc::clone(&store),
             Arc::clone(&engine),
         )));
+        self.register_sync(Arc::new(RoutineFireTool::new(
+            Arc::clone(&store),
+            Arc::clone(&engine),
+        )));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
-        tracing::info!("Registered 5 routine management tools");
+        tracing::info!("Registered 6 routine management tools");
     }
 
     /// Register message tool for sending messages to channels.
@@ -468,6 +478,52 @@ impl ToolRegistry {
         }
     }
 
+    /// Register image generation and editing tools.
+    ///
+    /// These tools allow the LLM to generate and edit images using cloud APIs.
+    /// Requires an API base URL, API key, and model name for the image generation backend.
+    pub fn register_image_tools(
+        &self,
+        api_base_url: String,
+        api_key: String,
+        gen_model: String,
+        base_dir: Option<std::path::PathBuf>,
+    ) {
+        use crate::tools::builtin::{ImageEditTool, ImageGenerateTool};
+        self.register_sync(Arc::new(ImageGenerateTool::new(
+            api_base_url.clone(),
+            api_key.clone(),
+            gen_model.clone(),
+        )));
+        self.register_sync(Arc::new(ImageEditTool::new(
+            api_base_url,
+            api_key,
+            gen_model,
+            base_dir,
+        )));
+        tracing::info!("Registered 2 image tools (generate, edit)");
+    }
+
+    /// Register vision/image analysis tools.
+    ///
+    /// These tools allow the LLM to analyze images using a vision-capable model.
+    pub fn register_vision_tools(
+        &self,
+        api_base_url: String,
+        api_key: String,
+        vision_model: String,
+        base_dir: Option<std::path::PathBuf>,
+    ) {
+        use crate::tools::builtin::ImageAnalyzeTool;
+        self.register_sync(Arc::new(ImageAnalyzeTool::new(
+            api_base_url,
+            api_key,
+            vision_model,
+            base_dir,
+        )));
+        tracing::info!("Registered 1 vision tool (analyze)");
+    }
+
     /// Register the software builder tool.
     ///
     /// The builder tool allows the agent to create new software including WASM tools,
@@ -477,17 +533,15 @@ impl ToolRegistry {
     pub async fn register_builder_tool(
         self: &Arc<Self>,
         llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
         config: Option<BuilderConfig>,
     ) {
         // First register dev tools needed by the builder
         self.register_dev_tools();
 
-        // Create the builder (arg order: config, llm, safety, tools)
+        // Create the builder (arg order: config, llm, tools)
         let builder = Arc::new(LlmSoftwareBuilder::new(
             config.unwrap_or_default(),
             llm,
-            safety,
             Arc::clone(self),
         ));
 
@@ -761,6 +815,44 @@ mod tests {
             .to_string();
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_register_and_read_no_panic() {
+        use std::sync::Arc as StdArc;
+
+        let registry = StdArc::new(ToolRegistry::new());
+        registry.register_builtin_tools();
+
+        // Spawn concurrent readers and check they don't panic
+        let mut handles = Vec::new();
+
+        // Readers
+        for _ in 0..10 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                let tools = reg.all().await;
+                assert!(!tools.is_empty());
+                let names = reg.list().await;
+                assert!(!names.is_empty());
+                let _ = reg.get("echo").await;
+                let _ = reg.has("echo").await;
+                let _ = reg.tool_definitions().await;
+            }));
+        }
+
+        // Concurrent register attempts (will be rejected as shadowing)
+        for _ in 0..5 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                // This will be rejected (echo is protected) but should not panic
+                reg.register(Arc::new(EchoTool)).await;
+            }));
+        }
+
+        for handle in handles {
+            handle.await.expect("task should not panic");
+        }
     }
 
     #[tokio::test]

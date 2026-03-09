@@ -53,6 +53,14 @@ pub struct CapabilitiesFile {
     #[serde(default)]
     pub parameters: Option<serde_json::Value>,
 
+    /// Extension version (semver).
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// WIT interface version this extension was compiled against (semver).
+    #[serde(default)]
+    pub wit_version: Option<String>,
+
     /// HTTP request capability.
     #[serde(default)]
     pub http: Option<HttpCapabilitySchema>,

@@ -23,7 +23,7 @@ use ironclaw::{
     },
     config::Config,
     hooks::bootstrap_hooks,
-    llm::{SessionConfig, create_session_manager},
+    llm::create_session_manager,
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
@@ -75,7 +75,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
-            return run_mcp_command(mcp_cmd.clone()).await;
+            return run_mcp_command(*mcp_cmd.clone()).await;
         }
         Some(Command::Memory(mem_cmd)) => {
             init_cli_tracing();
@@ -121,19 +121,21 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Onboard {
             skip_auth,
             channels_only,
+            provider_only,
         }) => {
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
                 let config = SetupConfig {
                     skip_auth: *skip_auth,
                     channels_only: *channels_only,
+                    provider_only: *provider_only,
                 };
                 let mut wizard = SetupWizard::with_config(config);
                 wizard.run().await?;
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
             {
-                let _ = (skip_auth, channels_only);
+                let _ = (skip_auth, channels_only, provider_only);
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
             }
             return Ok(());
@@ -142,6 +144,24 @@ async fn async_main() -> anyhow::Result<()> {
             // Continue to run agent
         }
     }
+
+    // ── PID lock (prevent multiple instances) ────────────────────────
+    let _pid_lock = match ironclaw::bootstrap::PidLock::acquire() {
+        Ok(lock) => Some(lock),
+        Err(ironclaw::bootstrap::PidLockError::AlreadyRunning { pid }) => {
+            anyhow::bail!(
+                "Another IronClaw instance is already running (PID {}). \
+                 If this is incorrect, remove the stale PID file: {}",
+                pid,
+                ironclaw::bootstrap::pid_lock_path().display()
+            );
+        }
+        Err(e) => {
+            eprintln!("Warning: Could not acquire PID lock: {}", e);
+            eprintln!("Continuing without PID lock protection.");
+            None
+        }
+    };
 
     // ── Agent startup ──────────────────────────────────────────────────
 
@@ -156,28 +176,26 @@ async fn async_main() -> anyhow::Result<()> {
         wizard.run().await?;
     }
 
-    // Load initial config from env + disk + optional TOML (before DB is available)
+    // Load initial config from env + disk + optional TOML (before DB is available).
+    // Credentials may be missing at this point — that's fine. LlmConfig::resolve()
+    // defers gracefully, and AppBuilder::build_all() re-resolves after loading
+    // secrets from the encrypted DB.
     let toml_path = cli.config.as_deref();
     let config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
-            eprintln!("Configuration error: Missing required setting '{}'", key);
-            eprintln!("  {}", hint);
-            eprintln!();
-            eprintln!(
-                "Run 'ironclaw onboard' to configure, or set the required environment variables."
+            anyhow::bail!(
+                "Configuration error: Missing required setting '{}'. {}. \
+                 Run 'ironclaw onboard' to configure, or set the required environment variables.",
+                key,
+                hint
             );
-            std::process::exit(1);
         }
         Err(e) => return Err(e.into()),
     };
 
-    // Initialize session manager and authenticate before channel setup
-    let session_config = SessionConfig {
-        auth_base_url: config.llm.nearai.auth_base_url.clone(),
-        session_path: config.llm.nearai.session_path.clone(),
-    };
-    let session = create_session_manager(session_config).await;
+    // Initialize session manager before channel setup
+    let session = create_session_manager(config.llm.session.clone()).await;
 
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     let log_broadcaster = Arc::new(LogBroadcaster::new());
@@ -205,13 +223,6 @@ async fn async_main() -> anyhow::Result<()> {
     .await?;
 
     let config = components.config;
-
-    // Session-based auth is only needed for NEAR AI backend without an API key.
-    if config.llm.backend == ironclaw::config::LlmBackend::NearAi
-        && config.llm.nearai.api_key.is_none()
-    {
-        session.ensure_authenticated().await?;
-    }
 
     // ── Tunnel setup ───────────────────────────────────────────────────
 
@@ -484,6 +495,7 @@ async fn async_main() -> anyhow::Result<()> {
     let mut sse_sender: Option<
         tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
     > = None;
+    let mut routine_engine_slot: Option<ironclaw::channels::web::server::RoutineEngineSlot> = None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw =
             GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
@@ -537,10 +549,11 @@ async fn async_main() -> anyhow::Result<()> {
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
-        // Capture SSE sender before moving gw into channels.
+        // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
         sse_sender = Some(gw.state().sse.sender());
+        routine_engine_slot = Some(Arc::clone(&gw.state().routine_engine));
 
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
@@ -678,9 +691,16 @@ async fn async_main() -> anyhow::Result<()> {
         cost_guard: components.cost_guard,
         sse_tx: sse_sender,
         http_interceptor,
+        transcription: config
+            .transcription
+            .create_provider()
+            .map(|p| Arc::new(ironclaw::transcription::TranscriptionMiddleware::new(p))),
+        document_extraction: Some(Arc::new(
+            ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
+        )),
     };
 
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         config.agent.clone(),
         deps,
         channels,
@@ -694,9 +714,17 @@ async fn async_main() -> anyhow::Result<()> {
     // Fill the scheduler slot now that Agent (and its Scheduler) exist.
     *scheduler_slot.write().await = Some(agent.scheduler());
 
+    // Give the agent the routine engine slot so it can expose the engine to the gateway.
+    if let Some(slot) = routine_engine_slot {
+        agent.set_routine_engine_slot(slot);
+    }
+
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+
+    // Shut down all stdio MCP server child processes.
+    components.mcp_process_manager.shutdown_all().await;
 
     // Flush LLM trace recording if enabled
     if let Some(ref recorder) = components.recording_handle
@@ -738,30 +766,11 @@ async fn run_memory_command(mem_cmd: &ironclaw::cli::MemoryCommand) -> anyhow::R
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let session = create_session_manager(SessionConfig {
-        auth_base_url: config.llm.nearai.auth_base_url.clone(),
-        session_path: config.llm.nearai.session_path.clone(),
-    })
-    .await;
+    let session = create_session_manager(config.llm.session.clone()).await;
 
     let embeddings = config
         .embeddings
         .create_provider(&config.llm.nearai.base_url, session);
-
-    // Warn if libSQL backend is used with non-1536 embedding dimension.
-    if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
-        && config.embeddings.enabled
-        && config.embeddings.dimension != 1536
-    {
-        tracing::warn!(
-            configured_dimension = config.embeddings.dimension,
-            "Embedding dimension {} is not 1536. The libSQL schema uses \
-             F32_BLOB(1536) which requires exactly 1536 dimensions. \
-             Embedding storage will fail. Use PostgreSQL or set \
-             EMBEDDING_DIMENSION=1536.",
-            config.embeddings.dimension
-        );
-    }
 
     let db: Arc<dyn ironclaw::db::Database> = ironclaw::db::connect_from_config(&config.database)
         .await
@@ -1135,6 +1144,9 @@ fn check_onboard_needed() -> Option<&'static str> {
 ///
 /// Looks for secrets matching the pattern `{channel_name}_*` and injects them
 /// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
+///
+/// Falls back to environment variables with the uppercase name if not found
+/// in the secrets store (e.g., `TELEGRAM_BOT_TOKEN`).
 async fn inject_channel_credentials(
     channel: &Arc<ironclaw::channels::wasm::WasmChannel>,
     secrets: &dyn SecretsStore,
@@ -1147,6 +1159,7 @@ async fn inject_channel_credentials(
 
     let prefix = format!("{}_", channel_name);
     let mut count = 0;
+    let mut injected_placeholders = std::collections::HashSet::new();
 
     for secret_meta in all_secrets {
         if !secret_meta.name.starts_with(&prefix) {
@@ -1177,7 +1190,32 @@ async fn inject_channel_credentials(
         channel
             .set_credential(&placeholder, decrypted.expose().to_string())
             .await;
+        injected_placeholders.insert(placeholder);
         count += 1;
+    }
+
+    // Fall back to environment variables for required secrets not found in the store.
+    // This allows channels to work when configured via env vars (e.g., TELEGRAM_BOT_TOKEN)
+    // without requiring the setup wizard to have run.
+    let caps = channel.capabilities();
+    if let Some(ref http_cap) = caps.tool_capabilities.http {
+        for cred_mapping in http_cap.credentials.values() {
+            let placeholder = cred_mapping.secret_name.to_uppercase();
+            if injected_placeholders.contains(&placeholder) {
+                continue;
+            }
+            if let Ok(env_value) = std::env::var(&placeholder)
+                && !env_value.is_empty()
+            {
+                tracing::debug!(
+                    channel = %channel_name,
+                    placeholder = %placeholder,
+                    "Injecting credential from environment variable"
+                );
+                channel.set_credential(&placeholder, env_value).await;
+                count += 1;
+            }
+        }
     }
 
     Ok(count)

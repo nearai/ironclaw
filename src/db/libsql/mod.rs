@@ -118,15 +118,37 @@ impl LibSqlBackend {
     /// Sets `PRAGMA busy_timeout = 5000` on every connection so concurrent
     /// writers wait up to 5 seconds instead of failing instantly with
     /// "database is locked".
+    ///
+    /// Retries up to 3 times with exponential backoff to handle transient
+    /// "unable to open database file" errors from concurrent connection
+    /// creation (e.g. cron ticker vs main thread).
     pub async fn connect(&self) -> Result<Connection, DatabaseError> {
-        let conn = self
-            .db
-            .connect()
-            .map_err(|e| DatabaseError::Pool(format!("Failed to create connection: {}", e)))?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
-            .await
-            .map_err(|e| DatabaseError::Pool(format!("Failed to set busy_timeout: {}", e)))?;
-        Ok(conn)
+        let mut last_err = None;
+        for attempt in 0..3u32 {
+            match self.db.connect() {
+                Ok(conn) => {
+                    conn.query("PRAGMA busy_timeout = 5000", ())
+                        .await
+                        .map_err(|e| {
+                            DatabaseError::Pool(format!("Failed to set busy_timeout: {}", e))
+                        })?;
+                    return Ok(conn);
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            50 * 2u64.pow(attempt),
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+        Err(DatabaseError::Pool(format!(
+            "Failed to create connection after 3 attempts: {}",
+            last_err.map(|e| e.to_string()).unwrap_or_default()
+        )))
     }
 }
 
@@ -147,10 +169,18 @@ pub(crate) fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
     }
     // Naive with fractional seconds (legacy or SQLite datetime() output)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        tracing::warn!(
+            timestamp = %s,
+            "parsed naive timestamp without timezone; assuming UTC for backward compatibility"
+        );
         return Ok(ndt.and_utc());
     }
     // Naive without fractional seconds (legacy format)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        tracing::warn!(
+            timestamp = %s,
+            "parsed naive timestamp without timezone; assuming UTC for backward compatibility"
+        );
         return Ok(ndt.and_utc());
     }
     Err(format!("unparseable timestamp: {:?}", s))
@@ -292,6 +322,8 @@ impl Database for LibSqlBackend {
         conn.execute_batch(libsql_migrations::SCHEMA)
             .await
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
+        // Apply incremental migrations (V9+) tracked in _migrations table.
+        libsql_migrations::run_incremental(&conn).await?;
         Ok(())
     }
 }
@@ -378,8 +410,47 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+
     use crate::db::Database;
-    use crate::db::libsql::LibSqlBackend;
+    use crate::db::libsql::{LibSqlBackend, parse_timestamp};
+
+    #[test]
+    fn test_parse_timestamp_accepts_rfc3339_and_legacy_naive_formats() {
+        let expected = Utc.with_ymd_and_hms(2026, 3, 7, 12, 34, 56).unwrap();
+
+        let with_millis = parse_timestamp("2026-03-07T12:34:56.789Z").unwrap();
+        assert_eq!(with_millis, expected + chrono::Duration::milliseconds(789));
+
+        let naive_with_millis = parse_timestamp("2026-03-07 12:34:56.789").unwrap();
+        assert_eq!(
+            naive_with_millis,
+            expected + chrono::Duration::milliseconds(789)
+        );
+
+        let naive_without_millis = parse_timestamp("2026-03-07 12:34:56").unwrap();
+        assert_eq!(naive_without_millis, expected);
+    }
+
+    #[tokio::test]
+    async fn test_libsql_now_format_is_rfc3339_and_parseable() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn
+            .query("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let ts: String = row.get(0).unwrap();
+
+        let parsed = parse_timestamp(&ts).unwrap();
+        assert_eq!(
+            ts,
+            parsed.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
+    }
 
     #[tokio::test]
     async fn test_wal_mode_after_migrations() {
@@ -456,5 +527,34 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let count: i64 = row.get(0).unwrap();
         assert_eq!(count, 20);
+    }
+
+    #[tokio::test]
+    async fn test_connect_retry_succeeds_on_valid_db() {
+        // Verify connect() works with retry logic on a file-backed DB
+        // (exercises the retry path even though transient failures are hard
+        // to reproduce deterministically).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_retry.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Multiple concurrent connect() calls should all succeed
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let b = LibSqlBackend {
+                db: backend.shared_db(),
+            };
+            handles.push(tokio::spawn(async move { b.connect().await }));
+        }
+
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(
+                result.is_ok(),
+                "concurrent connect failed: {:?}",
+                result.err()
+            );
+        }
     }
 }
