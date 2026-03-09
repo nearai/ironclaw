@@ -22,7 +22,7 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
-use crate::config::llm::OAUTH_PLACEHOLDER;
+use crate::config::OAUTH_PLACEHOLDER;
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
@@ -992,7 +992,10 @@ impl SetupWizard {
         let session = if let Some(ref s) = self.session_manager {
             Arc::clone(s)
         } else {
-            let config = SessionConfig::default();
+            let config = SessionConfig {
+                session_path: crate::config::llm::default_session_path(),
+                ..SessionConfig::default()
+            };
             Arc::new(SessionManager::new(config))
         };
 
@@ -1588,7 +1591,7 @@ impl SetupWizard {
             backend: "nearai".to_string(),
             session: crate::llm::session::SessionConfig {
                 auth_base_url,
-                session_path: crate::llm::session::default_session_path(),
+                session_path: crate::config::llm::default_session_path(),
             },
             nearai: crate::config::NearAiConfig {
                 model: "dummy".to_string(),
@@ -2552,7 +2555,7 @@ impl SetupWizard {
     /// Best-effort: silently ignores errors (no DB connection yet, no
     /// session file, etc.).
     async fn persist_session_to_db(&self) {
-        let session_path = crate::llm::session::default_session_path();
+        let session_path = crate::config::llm::default_session_path();
         let data = match std::fs::read_to_string(&session_path) {
             Ok(d) if !d.trim().is_empty() => d,
             _ => return,
@@ -2861,7 +2864,7 @@ async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String
     let api_key = cached_key
         .map(String::from)
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .filter(|k| !k.is_empty() && k != crate::config::llm::OAUTH_PLACEHOLDER);
+        .filter(|k| !k.is_empty() && k != crate::config::OAUTH_PLACEHOLDER);
 
     // Fall back to OAuth token if no API key
     let oauth_token = if api_key.is_none() {
