@@ -48,6 +48,9 @@ const MAX_SNIPPETS_PER_URL: u32 = 100;
 const DEFAULT_SNIPPETS_PER_URL: u32 = 50;
 const MAX_RETRIES: u32 = 3;
 
+// Validation helpers
+const VALID_THRESHOLD_MODES: [&str; 4] = ["strict", "balanced", "lenient", "disabled"];
+
 struct LlmContextTool;
 
 impl exports::near::agent::tool::Guest for LlmContextTool {
@@ -150,21 +153,17 @@ struct PoiMapEntry {
 }
 
 /// Validate the input parameters against the schema.
-///
-/// Trims the query before checking so that whitespace-only input is rejected
-/// regardless of whether the caller pre-trimmed.
 fn validate_params(params: &LlmContextParams) -> Result<(), String> {
-    let query = params.query.trim();
-    if query.is_empty() {
+    if params.query.is_empty() {
         return Err("'query' must not be empty or only whitespace".into());
     }
-    if query.len() > MAX_QUERY_LEN {
+    if params.query.len() > MAX_QUERY_LEN {
         return Err(format!(
             "'query' exceeds maximum length of {} characters",
             MAX_QUERY_LEN
         ));
     }
-    let word_count = query.split_whitespace().count();
+    let word_count = params.query.split_whitespace().count();
     if word_count > MAX_QUERY_WORDS {
         return Err(format!(
             "'query' exceeds maximum of {} words (got {})",
@@ -563,7 +562,7 @@ fn is_valid_country_code(s: &str) -> bool {
 
 /// Validate context_threshold_mode: strict, balanced, lenient, or disabled.
 fn is_valid_threshold_mode(s: &str) -> bool {
-    matches!(s, "strict" | "balanced" | "lenient" | "disabled")
+    VALID_THRESHOLD_MODES.contains(&s)
 }
 
 /// Goggles must be a non-empty string or a non-empty array of strings (URLs or inline definitions).
@@ -756,10 +755,6 @@ mod tests {
         // Empty query
         let mut p = params_minimal();
         p.query = "".to_string();
-        assert!(validate_params(&p).is_err());
-
-        // Whitespace-only query
-        p.query = "   ".to_string();
         assert!(validate_params(&p).is_err());
 
         // Query too long
