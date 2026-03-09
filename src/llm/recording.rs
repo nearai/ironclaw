@@ -437,7 +437,11 @@ impl RecordingLlm {
             .find(|m| m.role == Role::User)
             .map(|msg| {
                 let hint_text = if msg.content.len() > 80 {
-                    msg.content[..80].to_string()
+                    let mut end = 80;
+                    while end > 0 && !msg.content.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    msg.content[..end].to_string()
                 } else {
                     msg.content.clone()
                 };
@@ -546,6 +550,10 @@ impl LlmProvider for RecordingLlm {
     fn set_model(&self, model: &str) -> Result<(), LlmError> {
         self.inner.set_model(model)
     }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        self.inner.calculate_cost(input_tokens, output_tokens)
+    }
 }
 
 #[cfg(test)]
@@ -554,9 +562,10 @@ mod tests {
     use crate::testing::StubLlm;
 
     fn make_recorder(stub: Arc<StubLlm>) -> RecordingLlm {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
         RecordingLlm::new(
             stub,
-            PathBuf::from("/tmp/test_recording.json"),
+            dir.path().join("test_recording.json"),
             "test-recording".to_string(),
         )
     }
@@ -898,6 +907,32 @@ mod tests {
         assert_eq!(parsed.http_exchanges.len(), 1);
         assert_eq!(parsed.steps.len(), 3);
         assert_eq!(parsed.steps[2].expected_tool_results.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn request_hint_handles_multibyte_utf8() {
+        let stub = Arc::new(StubLlm::new("response"));
+        let recorder = make_recorder(stub);
+
+        // Create a string where byte index 80 falls inside a multi-byte char.
+        // Each CJK character is 3 bytes; 26 chars × 3 bytes = 78, then "ab" = 80 bytes,
+        // but let's use 27 CJK chars (81 bytes) so truncation must respect the boundary.
+        let long_cjk = "你".repeat(27); // 81 bytes, > 80
+        assert!(long_cjk.len() > 80);
+
+        let request = CompletionRequest::new(vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user(&long_cjk),
+        ]);
+        recorder.complete(request).await.unwrap();
+
+        let steps = recorder.steps.lock().await;
+        let text_step = &steps[1];
+        let hint = text_step.request_hint.as_ref().unwrap();
+        let hint_text = hint.last_user_message_contains.as_deref().unwrap();
+        // Must be valid UTF-8 and not longer than 80 bytes
+        assert!(hint_text.len() <= 80);
+        assert!(hint_text.is_ascii() || hint_text.chars().count() > 0);
     }
 
     #[test]

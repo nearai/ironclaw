@@ -228,12 +228,15 @@ echo "--- Check 6: LLM module isolation ---"
 
 # Match any `crate::` reference (use-imports AND inline paths) that isn't
 # crate::llm or crate::testing.  Filter out comments.
+# We strip inline comments (everything after //) with sed before checking,
+# so a line like `real_code(crate::foo); // crate::llm` is still caught.
 results=$(grep -rn 'crate::' src/llm/ \
     --include='*.rs' \
+    | grep -v '^\s*//' \
+    | sed 's|//.*||' \
+    | grep 'crate::' \
     | grep -v 'crate::llm' \
     | grep -v 'crate::testing' \
-    | grep -v '^\s*//' \
-    | grep -v '//.*crate::' \
     || true)
 
 if [ -n "$results" ]; then

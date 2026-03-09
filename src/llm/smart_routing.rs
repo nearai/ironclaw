@@ -946,6 +946,10 @@ impl LlmProvider for SmartRoutingProvider {
         self.primary.model_metadata().await
     }
 
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.primary.effective_model_name(requested_model)
+    }
+
     fn active_model_name(&self) -> String {
         self.primary.active_model_name()
     }

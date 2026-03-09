@@ -49,10 +49,11 @@ pub fn callback_url() -> String {
 ///
 /// Reads `OAUTH_CALLBACK_HOST` from the environment (default: `127.0.0.1`).
 ///
-/// **Remote server usage:** set `OAUTH_CALLBACK_HOST` to the network interface
-/// address you want to listen on (e.g. the server's LAN IP or `0.0.0.0`).
-/// The callback listener will bind to that specific address instead of the
-/// loopback interface, so the OAuth redirect can reach an external browser.
+/// **Remote server usage:** set `OAUTH_CALLBACK_HOST` to the specific network
+/// interface address you want to listen on (e.g. the server's LAN IP).
+/// Wildcard addresses (`0.0.0.0`, `::`) are rejected — use a specific interface
+/// IP to limit exposure. The callback listener will bind to that address so the
+/// OAuth redirect can reach an external browser.
 /// Note: this transmits the session token over plain HTTP — prefer SSH port
 /// forwarding (`ssh -L 9876:127.0.0.1:9876 user@host`) when possible.
 pub fn callback_host() -> String {
@@ -69,6 +70,16 @@ pub fn is_loopback_host(host: &str) -> bool {
     }
     host.parse::<std::net::IpAddr>()
         .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Returns `true` if `host` is a wildcard/unspecified address (`0.0.0.0` or `::`).
+///
+/// Wildcard binds accept connections on all interfaces, which is a security risk
+/// for OAuth callbacks that carry session tokens over plain HTTP.
+fn is_wildcard_host(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_unspecified())
         .unwrap_or(false)
 }
 
@@ -91,6 +102,14 @@ fn bind_error(e: std::io::Error) -> OAuthCallbackError {
 /// specific address so only connections directed to it are accepted.
 pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError> {
     let host = callback_host();
+
+    if is_wildcard_host(&host) {
+        return Err(OAuthCallbackError::Io(format!(
+            "OAUTH_CALLBACK_HOST={host} is a wildcard address — this would accept \
+             connections on all interfaces, exposing the session token. \
+             Use a specific interface IP (e.g. 192.168.1.x) or SSH port forwarding instead."
+        )));
+    }
 
     if is_loopback_host(&host) {
         // Local mode: prefer IPv4 loopback, fall back to IPv6.
@@ -338,4 +357,60 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
         subtitle = subtitle,
         accent = accent,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_detection() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.0.0.2")); // full 127.0.0.0/8 range
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(!is_loopback_host("192.168.1.1"));
+        assert!(!is_loopback_host("::"));
+        assert!(!is_loopback_host("example.com"));
+    }
+
+    #[test]
+    fn wildcard_detection() {
+        assert!(is_wildcard_host("0.0.0.0"));
+        assert!(is_wildcard_host("::"));
+        assert!(!is_wildcard_host("127.0.0.1"));
+        assert!(!is_wildcard_host("192.168.1.1"));
+        assert!(!is_wildcard_host("::1"));
+        assert!(!is_wildcard_host("localhost"));
+    }
+
+    #[tokio::test]
+    async fn bind_rejects_wildcard_ipv4() {
+        // SAFETY: test is single-threaded; env var is restored immediately after.
+        unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "0.0.0.0") };
+        let result = bind_callback_listener().await;
+        unsafe { std::env::remove_var("OAUTH_CALLBACK_HOST") };
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("wildcard"),
+            "error should mention wildcard: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_rejects_wildcard_ipv6() {
+        // SAFETY: test is single-threaded; env var is restored immediately after.
+        unsafe { std::env::set_var("OAUTH_CALLBACK_HOST", "::") };
+        let result = bind_callback_listener().await;
+        unsafe { std::env::remove_var("OAUTH_CALLBACK_HOST") };
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("wildcard"),
+            "error should mention wildcard: {err}"
+        );
+    }
 }
