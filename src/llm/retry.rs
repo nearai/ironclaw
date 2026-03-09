@@ -5,6 +5,7 @@
 //! - `retry_backoff_delay()` — exponential backoff with jitter
 //! - `RetryProvider` — decorator that wraps any `LlmProvider` with automatic retries
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use async_trait::async_trait;
 use rand::Rng;
 use rust_decimal::Decimal;
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -97,6 +98,50 @@ impl RetryProvider {
     pub fn new(inner: Arc<dyn LlmProvider>, config: RetryConfig) -> Self {
         Self { inner, config }
     }
+
+    async fn retry_loop<T, F, Fut>(&self, mut op: F, label: &str) -> Result<T, LlmError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, LlmError>>,
+    {
+        let mut last_error: Option<LlmError> = None;
+
+        for attempt in 0..=self.config.max_retries {
+            match op().await {
+                Ok(resp) => return Ok(resp),
+                Err(err) => {
+                    if !is_retryable(&err) || attempt == self.config.max_retries {
+                        return Err(err);
+                    }
+
+                    let delay = match &err {
+                        LlmError::RateLimited {
+                            retry_after: Some(duration),
+                            ..
+                        } => *duration,
+                        _ => retry_backoff_delay(attempt),
+                    };
+
+                    tracing::warn!(
+                        provider = %self.inner.model_name(),
+                        attempt = attempt + 1,
+                        max_retries = self.config.max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %err,
+                        "Retrying after transient error{label}"
+                    );
+
+                    last_error = Some(err);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
+            provider: self.inner.model_name().to_string(),
+            reason: "retry loop exited unexpectedly".to_string(),
+        }))
+    }
 }
 
 #[async_trait]
@@ -118,88 +163,30 @@ impl LlmProvider for RetryProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let mut last_error: Option<LlmError> = None;
-
-        for attempt in 0..=self.config.max_retries {
-            let req = request.clone();
-            match self.inner.complete(req).await {
-                Ok(resp) => return Ok(resp),
-                Err(err) => {
-                    if !is_retryable(&err) || attempt == self.config.max_retries {
-                        return Err(err);
-                    }
-
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
-
-                    tracing::warn!(
-                        provider = %self.inner.model_name(),
-                        attempt = attempt + 1,
-                        max_retries = self.config.max_retries,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %err,
-                        "Retrying after transient error"
-                    );
-
-                    last_error = Some(err);
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
-            provider: self.inner.model_name().to_string(),
-            reason: "retry loop exited unexpectedly".to_string(),
-        }))
+        let inner = &self.inner;
+        self.retry_loop(
+            || {
+                let req = request.clone();
+                async move { inner.complete(req).await }
+            },
+            "",
+        )
+        .await
     }
 
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let mut last_error: Option<LlmError> = None;
-
-        for attempt in 0..=self.config.max_retries {
-            let req = request.clone();
-            match self.inner.complete_with_tools(req).await {
-                Ok(resp) => return Ok(resp),
-                Err(err) => {
-                    if !is_retryable(&err) || attempt == self.config.max_retries {
-                        return Err(err);
-                    }
-
-                    let delay = match &err {
-                        LlmError::RateLimited {
-                            retry_after: Some(duration),
-                            ..
-                        } => *duration,
-                        _ => retry_backoff_delay(attempt),
-                    };
-
-                    tracing::warn!(
-                        provider = %self.inner.model_name(),
-                        attempt = attempt + 1,
-                        max_retries = self.config.max_retries,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %err,
-                        "Retrying after transient error (tools)"
-                    );
-
-                    last_error = Some(err);
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
-            provider: self.inner.model_name().to_string(),
-            reason: "retry loop exited unexpectedly".to_string(),
-        }))
+        let inner = &self.inner;
+        self.retry_loop(
+            || {
+                let req = request.clone();
+                async move { inner.complete_with_tools(req).await }
+            },
+            " (tools)",
+        )
+        .await
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -208,6 +195,10 @@ impl LlmProvider for RetryProvider {
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
     }
 
     fn active_model_name(&self) -> String {

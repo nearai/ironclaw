@@ -20,8 +20,8 @@ use aws_sdk_bedrockruntime::types::{
 use aws_smithy_types::Document;
 use rust_decimal::Decimal;
 
-use crate::config::BedrockConfig;
-use crate::error::LlmError;
+use crate::llm::config::BedrockConfig;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,

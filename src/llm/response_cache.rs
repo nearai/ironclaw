@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -298,6 +298,10 @@ impl LlmProvider for CachedProvider {
         // hit again rather than wasted. Natural TTL / LRU eviction cleans them up.
         self.inner.set_model(model)
     }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        self.inner.calculate_cost(input_tokens, output_tokens)
+    }
 }
 
 #[cfg(test)]
@@ -307,7 +311,7 @@ mod tests {
     use rust_decimal::Decimal;
     use tracing_test::traced_test;
 
-    use crate::error::LlmError;
+    use crate::llm::error::LlmError;
     use crate::llm::provider::{
         ChatMessage, CompletionResponse, FinishReason, ToolCompletionRequest,
         ToolCompletionResponse,
