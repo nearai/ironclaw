@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use crate::error::LlmError;
 
@@ -97,7 +98,7 @@ impl CodexChatGptProvider {
     /// model slugs, ordered by priority (highest first).
     async fn fetch_available_models(client: &Client, base_url: &str, api_key: &str) -> Vec<String> {
         let url = format!("{base_url}/models?client_version=1.0.0");
-        let resp = match client.get(&url).bearer_auth(api_key).send().await {
+        let resp = match client.get(&url).bearer_auth(api_key).timeout(Duration::from_secs(10)).send().await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("Failed to fetch Codex models: {e}");
