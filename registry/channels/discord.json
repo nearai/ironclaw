@@ -2,8 +2,8 @@
   "name": "discord",
   "display_name": "Discord Channel",
   "kind": "channel",
-  "version": "0.1.0",
-  "wit_version": "0.2.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Talk to your agent in Discord",
   "keywords": [
     "messaging",
@@ -19,7 +19,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/discord-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "030707431717bca3411a48f311c6ab5f92a45c747de26cafe4f6e3e23a8b3b2d"
     }
   },
   "auth_summary": {

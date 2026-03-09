@@ -513,30 +513,41 @@ impl LlmProvider for TraceLlm {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let step = self.next_step(&request.messages)?;
-        match step.response {
-            TraceResponse::Text {
-                content,
-                input_tokens,
-                output_tokens,
-            } => Ok(CompletionResponse {
-                content,
-                input_tokens,
-                output_tokens,
-                finish_reason: FinishReason::Stop,
-            }),
-            TraceResponse::ToolCalls { .. } => Err(LlmError::RequestFailed {
-                provider: self.model_name.clone(),
-                reason: "TraceLlm::complete() called but current step is a tool_calls response; \
-                         use complete_with_tools() instead"
-                    .to_string(),
-            }),
-            TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {
-                provider: self.model_name.clone(),
-                reason: "TraceLlm::complete() encountered a user_input step; \
-                         these should have been filtered out during construction"
-                    .to_string(),
-            }),
+        // complete() is called when Reasoning has force_text=true (no tools
+        // available). Skip any remaining ToolCalls steps in the trace and
+        // return the next Text step, since in real usage the LLM would
+        // produce text when no tools are offered.
+        loop {
+            let step = self.next_step(&request.messages)?;
+            match step.response {
+                TraceResponse::Text {
+                    content,
+                    input_tokens,
+                    output_tokens,
+                } => {
+                    return Ok(CompletionResponse {
+                        content,
+                        input_tokens,
+                        output_tokens,
+                        finish_reason: FinishReason::Stop,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    });
+                }
+                TraceResponse::ToolCalls { .. } => {
+                    // Skip tool_calls steps — complete() is called in
+                    // force_text mode so the LLM can't use tools anyway.
+                    continue;
+                }
+                TraceResponse::UserInput { .. } => {
+                    return Err(LlmError::RequestFailed {
+                        provider: self.model_name.clone(),
+                        reason: "TraceLlm::complete() encountered a user_input step; \
+                                 these should have been filtered out during construction"
+                            .to_string(),
+                    });
+                }
+            }
         }
     }
 
@@ -556,6 +567,8 @@ impl LlmProvider for TraceLlm {
                 input_tokens,
                 output_tokens,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }),
             TraceResponse::ToolCalls {
                 tool_calls,
@@ -576,6 +589,8 @@ impl LlmProvider for TraceLlm {
                     input_tokens,
                     output_tokens,
                     finish_reason: FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 })
             }
             TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {

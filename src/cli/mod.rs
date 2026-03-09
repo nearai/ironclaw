@@ -86,7 +86,7 @@ pub enum Command {
     /// Interactive onboarding wizard
     #[command(
         about = "Run interactive setup wizard",
-        long_about = "Guides through initial configuration.\nExamples:\n  ironclaw onboard --skip-auth  # Skip auth step\n  ironclaw onboard --channels-only  # Reconfigure channels"
+        long_about = "Guides through initial configuration.\nExamples:\n  ironclaw onboard --skip-auth  # Skip auth step\n  ironclaw onboard --channels-only  # Reconfigure channels\n  ironclaw onboard --provider-only  # Change LLM provider and model"
     )]
     Onboard {
         /// Skip authentication (use existing session)
@@ -94,8 +94,12 @@ pub enum Command {
         skip_auth: bool,
 
         /// Reconfigure channels only
-        #[arg(long)]
+        #[arg(long, conflicts_with = "provider_only")]
         channels_only: bool,
+
+        /// Reconfigure LLM provider and model only
+        #[arg(long, conflicts_with = "channels_only")]
+        provider_only: bool,
     },
 
     /// Manage configuration settings
@@ -128,7 +132,7 @@ pub enum Command {
         about = "Manage MCP servers",
         long_about = "Add, auth, list, or test MCP servers.\nExample: ironclaw mcp add notion https://mcp.notion.com"
     )]
-    Mcp(McpCommand),
+    Mcp(Box<McpCommand>),
 
     /// Query and manage workspace memory
     #[command(

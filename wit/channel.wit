@@ -1,3 +1,5 @@
+package near:agent@0.3.0;
+
 // WASM Channel Sandbox Interface
 //
 // Defines the contract between sandboxed channels and the host runtime.
@@ -37,8 +39,6 @@
 // - Secrets are NEVER exposed to WASM; credentials are injected at host boundary
 // - Workspace writes are prefixed with channels/<name>/ to prevent escape
 // - Message emission is rate-limited
-
-package near:agent@0.2.0;
 
 /// Host-provided capabilities for sandboxed channels.
 ///
@@ -113,6 +113,50 @@ interface channel-host {
 
     // ==================== Channel-Specific Capabilities ====================
 
+    /// A file or media attachment on an inbound message (channel → agent).
+    ///
+    /// Core fields are part of the record. Extended metadata (duration, dimensions,
+    /// codec, etc.) goes in `extras-json` to avoid WIT record changes when new
+    /// properties are needed. Binary data (e.g., downloaded voice bytes) should be
+    /// stored via `store-attachment-data` rather than inlined in the record.
+    record inbound-attachment {
+        /// Unique identifier within the channel (e.g., Telegram file_id).
+        id: string,
+        /// MIME type (e.g., "image/jpeg", "audio/ogg", "application/pdf").
+        mime-type: string,
+        /// Original filename, if known.
+        filename: option<string>,
+        /// File size in bytes, if known.
+        size-bytes: option<u64>,
+        /// URL to download the file from the channel's API.
+        /// May require authentication (handled by host credential injection).
+        source-url: option<string>,
+        /// Opaque key for host-side storage (e.g., after download/caching).
+        storage-key: option<string>,
+        /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
+        extracted-text: option<string>,
+        /// Extensible metadata as JSON string.
+        ///
+        /// Used for properties that may be added over time without changing WIT.
+        /// Well-known keys:
+        /// - "duration_secs": u32 — duration in seconds (audio/video)
+        /// - "width": u32, "height": u32 — pixel dimensions (images/video)
+        /// - "codec": string — audio/video codec
+        /// - "thumbnail_file_id": string — thumbnail identifier
+        extras-json: string,
+    }
+
+    /// Store binary data for an attachment (e.g., downloaded voice note bytes).
+    ///
+    /// Call this before emit-message to associate raw bytes with an attachment.
+    /// The host retrieves the data after the callback using the attachment ID.
+    ///
+    /// Security:
+    /// - Maximum 20MB per attachment
+    /// - Maximum 50MB total per callback execution
+    /// - Data is cleared after the callback completes
+    store-attachment-data: func(attachment-id: string, data: list<u8>) -> result<_, string>;
+
     /// A message to emit to the agent.
     record emitted-message {
         /// User identifier within the channel (e.g., Slack user ID).
@@ -125,6 +169,8 @@ interface channel-host {
         thread-id: option<string>,
         /// Channel-specific metadata as JSON string.
         metadata-json: string,
+        /// File or media attachments on this message.
+        attachments: list<inbound-attachment>,
     }
 
     /// Emit a message to the agent.
@@ -235,6 +281,18 @@ interface channel {
         body: list<u8>,
     }
 
+    /// A file or image attachment on an outbound message (agent → channel).
+    ///
+    /// Contains raw file bytes for the channel to upload/send.
+    record attachment {
+        /// Original filename (e.g., "screenshot.png").
+        filename: string,
+        /// MIME type (e.g., "image/png").
+        mime-type: string,
+        /// Raw file bytes.
+        data: list<u8>,
+    }
+
     /// Agent response to be sent back to the channel.
     record agent-response {
         /// Unique message ID for correlation.
@@ -245,6 +303,8 @@ interface channel {
         thread-id: option<string>,
         /// Channel-specific metadata as JSON string.
         metadata-json: string,
+        /// File/image attachments to send.
+        attachments: list<attachment>,
     }
 
     // ==================== Status Types ====================
@@ -339,6 +399,20 @@ interface channel {
     /// Arguments:
     /// - update: The status update
     on-status: func(update: status-update);
+
+    /// Send a proactive message to a user without a prior incoming message.
+    ///
+    /// Used for broadcasts, alerts, and agent-initiated messages with attachments.
+    /// The user-id identifies the target user within the channel.
+    ///
+    /// Arguments:
+    /// - user-id: Target user identifier (e.g., Telegram chat_id)
+    /// - response: The message content and attachments to send
+    ///
+    /// Returns:
+    /// - Ok: Message delivered successfully
+    /// - Err(string): Delivery failure message
+    on-broadcast: func(user-id: string, response: agent-response) -> result<_, string>;
 
     /// Clean up channel resources.
     ///

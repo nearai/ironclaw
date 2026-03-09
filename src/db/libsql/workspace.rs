@@ -561,7 +561,10 @@ impl WorkspaceStore for LibSqlBackend {
                     .join(",")
             );
 
-            let mut rows = conn
+            // vector_top_k requires a libsql_vector_idx index. After the V9
+            // migration the index is dropped (to support flexible embedding
+            // dimensions), so this query may fail. Fall back to FTS-only.
+            match conn
                 .query(
                     r#"
                     SELECT c.id, c.document_id, d.path, c.content
@@ -573,27 +576,34 @@ impl WorkspaceStore for LibSqlBackend {
                     params![vector_json, pre_limit, user_id, agent_id_str.as_deref()],
                 )
                 .await
-                .map_err(|e| WorkspaceError::SearchFailed {
-                    reason: format!("Vector query failed: {}", e),
-                })?;
-
-            let mut results = Vec::new();
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|e| WorkspaceError::SearchFailed {
-                    reason: format!("Vector row fetch failed: {}", e),
-                })?
             {
-                results.push(RankedResult {
-                    chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
-                    document_id: get_text(&row, 1).parse().unwrap_or_default(),
-                    document_path: get_text(&row, 2),
-                    content: get_text(&row, 3),
-                    rank: results.len() as u32 + 1,
-                });
+                Ok(mut rows) => {
+                    let mut results = Vec::new();
+                    while let Some(row) =
+                        rows.next()
+                            .await
+                            .map_err(|e| WorkspaceError::SearchFailed {
+                                reason: format!("Vector row fetch failed: {}", e),
+                            })?
+                    {
+                        results.push(RankedResult {
+                            chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
+                            document_id: get_text(&row, 1).parse().unwrap_or_default(),
+                            document_path: get_text(&row, 2),
+                            content: get_text(&row, 3),
+                            rank: results.len() as u32 + 1,
+                        });
+                    }
+                    results
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Vector index query failed (expected after V9 migration), \
+                         falling back to FTS-only: {e}"
+                    );
+                    Vec::new()
+                }
             }
-            results
         } else {
             Vec::new()
         };

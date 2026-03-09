@@ -27,6 +27,8 @@ use crate::support::metrics::{ToolInvocation, TraceMetrics};
 use crate::support::test_channel::TestChannel;
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
+use ironclaw::llm::recording::{HttpExchange, ReplayingHttpInterceptor};
+
 // ---------------------------------------------------------------------------
 // TestChannelHandle -- wraps Arc<TestChannel> as Box<dyn Channel>
 // ---------------------------------------------------------------------------
@@ -127,6 +129,21 @@ impl TestRig {
     /// Inject a user message into the agent.
     pub async fn send_message(&self, content: &str) {
         self.channel.send_message(content).await;
+    }
+
+    /// Inject a raw `IncomingMessage` (for tests that need attachments, etc.).
+    pub async fn send_incoming(&self, msg: ironclaw::channels::IncomingMessage) {
+        self.channel.send_incoming(msg).await;
+    }
+
+    /// Return all message lists that were sent to the LLM provider.
+    ///
+    /// Only available when the rig was built with a `TraceLlm` (i.e., via `.with_trace()`).
+    pub fn captured_llm_requests(&self) -> Vec<Vec<ironclaw::llm::ChatMessage>> {
+        self.trace_llm
+            .as_ref()
+            .map(|t| t.captured_requests())
+            .unwrap_or_default()
     }
 
     /// Wait until at least `n` responses have been captured, or `timeout` elapses.
@@ -362,6 +379,8 @@ pub struct TestRigBuilder {
     llm: Option<Arc<dyn LlmProvider>>,
     max_tool_iterations: usize,
     injection_check: bool,
+    enable_routines: bool,
+    http_exchanges: Vec<HttpExchange>,
     extra_tools: Vec<Arc<dyn Tool>>,
 }
 
@@ -373,6 +392,8 @@ impl TestRigBuilder {
             llm: None,
             max_tool_iterations: 10,
             injection_check: false,
+            enable_routines: false,
+            http_exchanges: Vec::new(),
             extra_tools: Vec::new(),
         }
     }
@@ -411,6 +432,23 @@ impl TestRigBuilder {
         self
     }
 
+    /// Enable the routines system so the scheduler is wired with a `RoutineEngine`,
+    /// allowing routine jobs to actually execute. Routine tools are always registered
+    /// but require the engine to dispatch jobs.
+    pub fn with_routines(mut self) -> Self {
+        self.enable_routines = true;
+        self
+    }
+
+    /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
+    ///
+    /// When set, all `http` tool calls will return these responses in order
+    /// instead of making real network requests.
+    pub fn with_http_exchanges(mut self, exchanges: Vec<HttpExchange>) -> Self {
+        self.http_exchanges = exchanges;
+        self
+    }
+
     /// Build the test rig, creating a real agent and spawning it in the background.
     ///
     /// Uses `AppBuilder::build_all()` to get the same component set as the real
@@ -421,6 +459,17 @@ impl TestRigBuilder {
     pub async fn build(self) -> TestRig {
         use ironclaw::channels::ChannelManager;
         use ironclaw::db::libsql::LibSqlBackend;
+
+        // Destructure self up front to avoid partial-move issues.
+        let TestRigBuilder {
+            trace,
+            llm,
+            max_tool_iterations,
+            injection_check,
+            enable_routines,
+            http_exchanges: explicit_http_exchanges,
+            extra_tools,
+        } = self;
 
         // 1. Create temp dir + libSQL database + run migrations.
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -440,24 +489,23 @@ impl TestRigBuilder {
         let _ = std::fs::create_dir_all(&skills_dir);
         let _ = std::fs::create_dir_all(&installed_skills_dir);
         let mut config = Config::for_testing(db_path, skills_dir, installed_skills_dir);
-        config.agent.max_tool_iterations = self.max_tool_iterations;
-        config.safety.injection_check_enabled = self.injection_check;
+        config.agent.max_tool_iterations = max_tool_iterations;
+        config.safety.injection_check_enabled = injection_check;
 
         // 3. Create SessionManager + LogBroadcaster.
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
         let log_broadcaster = Arc::new(LogBroadcaster::new());
 
         // 4. Create TraceLlm + InstrumentedLlm, extract HTTP exchanges for replay.
-        let http_exchanges = self
-            .trace
+        let trace_http_exchanges = trace
             .as_ref()
             .map(|t| t.http_exchanges.clone())
             .unwrap_or_default();
 
         let mut trace_llm_ref: Option<Arc<TraceLlm>> = None;
-        let base_llm: Arc<dyn LlmProvider> = if let Some(llm) = self.llm {
+        let base_llm: Arc<dyn LlmProvider> = if let Some(llm) = llm {
             llm
-        } else if let Some(trace) = self.trace {
+        } else if let Some(trace) = trace {
             let tlm = Arc::new(TraceLlm::from_trace(trace));
             trace_llm_ref = Some(Arc::clone(&tlm));
             tlm
@@ -497,16 +545,14 @@ impl TestRigBuilder {
             .await
             .expect("AppBuilder::build_all() failed in test rig");
 
+        let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
+            Arc::new(tokio::sync::RwLock::new(None));
+
         // 6. Register job tools, routine tools, and extra tools.
         {
-            use ironclaw::context::ContextManager;
-
-            let ctx_mgr = Arc::new(ContextManager::new(
-                components.config.agent.max_parallel_jobs,
-            ));
             components.tools.register_job_tools(
-                ctx_mgr,
-                None,
+                Arc::clone(&components.context_manager),
+                Some(scheduler_slot.clone()),
                 None,
                 components.db.clone(),
                 None,
@@ -536,7 +582,7 @@ impl TestRigBuilder {
             }
 
             // Register any extra test-specific tools.
-            for tool in self.extra_tools {
+            for tool in extra_tools {
                 components.tools.register(tool).await;
             }
         }
@@ -560,13 +606,22 @@ impl TestRigBuilder {
             hooks: components.hooks,
             cost_guard: components.cost_guard,
             sse_tx: None,
-            http_interceptor: if http_exchanges.is_empty() {
-                None
-            } else {
-                Some(Arc::new(
-                    ironclaw::llm::recording::ReplayingHttpInterceptor::new(http_exchanges),
-                ))
+            http_interceptor: {
+                // Prefer explicit exchanges from with_http_exchanges(), fall back to trace.
+                let exchanges = if explicit_http_exchanges.is_empty() {
+                    trace_http_exchanges
+                } else {
+                    explicit_http_exchanges
+                };
+                if exchanges.is_empty() {
+                    None
+                } else {
+                    Some(Arc::new(ReplayingHttpInterceptor::new(exchanges))
+                        as Arc<dyn ironclaw::llm::recording::HttpInterceptor>)
+                }
             },
+            transcription: None,
+            document_extraction: None,
         };
 
         // 7. Create TestChannel and ChannelManager.
@@ -576,17 +631,36 @@ impl TestRigBuilder {
         channel_manager.add(Box::new(handle)).await;
         let channels = Arc::new(channel_manager);
 
+        // 7b. Register message tool so routines can send messages to channels.
+        deps.tools
+            .register_message_tools(Arc::clone(&channels))
+            .await;
+
         // 8. Create Agent.
+        let routine_config = if enable_routines {
+            Some(ironclaw::config::RoutineConfig {
+                enabled: true,
+                cron_check_interval_secs: 60,
+                max_concurrent_routines: 3,
+                default_cooldown_secs: 300,
+                max_lightweight_tokens: 4096,
+            })
+        } else {
+            None
+        };
         let agent = Agent::new(
             components.config.agent.clone(),
             deps,
             channels,
             None, // heartbeat_config
             None, // hygiene_config
-            None, // routine_config
-            None, // context_manager
+            routine_config,
+            Some(Arc::clone(&components.context_manager)),
             None, // session_manager
         );
+
+        // Match main.rs: fill the scheduler slot once Agent::new has created it.
+        *scheduler_slot.write().await = Some(agent.scheduler());
 
         // 9. Spawn agent in background task.
         let agent_handle = tokio::spawn(async move {
@@ -604,7 +678,7 @@ impl TestRigBuilder {
             channel: test_channel,
             instrumented_llm: instrumented,
             start_time: Instant::now(),
-            max_tool_iterations: self.max_tool_iterations,
+            max_tool_iterations,
             agent_handle: Some(agent_handle),
             db: db_ref,
             workspace: workspace_ref,

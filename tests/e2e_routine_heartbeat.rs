@@ -20,9 +20,8 @@ mod tests {
     use ironclaw::agent::routine_engine::RoutineEngine;
     use ironclaw::agent::{HeartbeatConfig, HeartbeatRunner};
     use ironclaw::channels::IncomingMessage;
-    use ironclaw::config::{RoutineConfig, SafetyConfig};
+    use ironclaw::config::RoutineConfig;
     use ironclaw::db::Database;
-    use ironclaw::safety::SafetyLayer;
     use ironclaw::workspace::Workspace;
     use ironclaw::workspace::hygiene::HygieneConfig;
 
@@ -118,6 +117,7 @@ mod tests {
             "cron-test",
             Trigger::Cron {
                 schedule: "* * * * *".to_string(),
+                timezone: None,
             },
             "Check system status.",
         );
@@ -203,6 +203,8 @@ mod tests {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
+            timezone: None,
+            attachments: Vec::new(),
         };
         let fired = engine.check_event_triggers(&matching_msg).await;
         assert!(
@@ -223,6 +225,8 @@ mod tests {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
+            timezone: None,
+            attachments: Vec::new(),
         };
         let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
@@ -286,6 +290,8 @@ mod tests {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
+            timezone: None,
+            attachments: Vec::new(),
         };
         let fired1 = engine.check_event_triggers(&msg).await;
         assert!(fired1 >= 1, "First fire should work");
@@ -339,10 +345,6 @@ mod tests {
             }],
         );
         let llm = Arc::new(TraceLlm::from_trace(trace));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
@@ -354,9 +356,8 @@ mod tests {
             state_dir: _tmp.path().to_path_buf(),
         };
 
-        let runner =
-            HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm, safety)
-                .with_response_channel(tx);
+        let runner = HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm)
+            .with_response_channel(tx);
 
         let result = runner.check_heartbeat().await;
         match result {
@@ -393,10 +394,6 @@ mod tests {
         // LLM should NOT be called, so provide a trace that would panic if called.
         let trace = LlmTrace::single_turn("test-heartbeat-skip", "skip", vec![]);
         let llm = Arc::new(TraceLlm::from_trace(trace));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
 
         let hygiene_config = HygieneConfig {
             enabled: false,
@@ -406,8 +403,7 @@ mod tests {
             state_dir: _tmp.path().to_path_buf(),
         };
 
-        let runner =
-            HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm, safety);
+        let runner = HeartbeatRunner::new(HeartbeatConfig::default(), hygiene_config, ws, llm);
 
         let result = runner.check_heartbeat().await;
         assert!(

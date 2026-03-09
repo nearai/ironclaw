@@ -19,7 +19,7 @@ mod time;
 pub use echo::EchoTool;
 pub use extension_tools::{
     ExtensionInfoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
-    ToolRemoveTool, ToolSearchTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;
@@ -32,12 +32,29 @@ pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTo
 pub use message::MessageTool;
 pub use restart::RestartTool;
 pub use routine::{
-    RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
+    RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool, RoutineListTool,
+    RoutineUpdateTool,
 };
 pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
 mod html_converter;
+pub mod image_analyze;
+pub mod image_edit;
+pub mod image_gen;
 
 pub use html_converter::convert_html_to_markdown;
+pub use image_analyze::ImageAnalyzeTool;
+pub use image_edit::ImageEditTool;
+pub use image_gen::ImageGenerateTool;
+
+/// Detect image media type from file extension via `mime_guess`.
+/// Falls back to `image/jpeg` for unrecognized or non-image extensions.
+pub(crate) fn media_type_from_path(path: &str) -> String {
+    mime_guess::from_path(path)
+        .first_raw()
+        .filter(|m| m.starts_with("image/"))
+        .unwrap_or("image/jpeg")
+        .to_string()
+}

@@ -20,9 +20,11 @@
 use crate::secrets::SecretError;
 
 /// Service name for keychain entries.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const SERVICE_NAME: &str = "ironclaw";
 
 /// Account name for the master key.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const MASTER_KEY_ACCOUNT: &str = "master_key";
 
 /// Generate a random 32-byte master key.
@@ -261,6 +263,7 @@ mod platform {
 pub use platform::{delete_master_key, get_master_key, has_master_key, store_master_key};
 
 /// Parse a hex string to bytes.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {
     if !hex.len().is_multiple_of(2) {
         return Err(SecretError::KeychainError(

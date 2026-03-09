@@ -2,8 +2,8 @@
   "name": "gmail",
   "display_name": "Gmail",
   "kind": "tool",
-  "version": "0.1.0",
-  "wit_version": "0.2.0",
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "description": "Read, send, and manage Gmail messages and threads",
   "keywords": [
     "email",
@@ -19,7 +19,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/gmail-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "sha256": "023da7000b17568bf0e64b2e5013c8a042b2f323c85f1632339231c73d500e39"
     }
   },
   "auth_summary": {

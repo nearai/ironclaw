@@ -181,6 +181,14 @@ impl LlmProvider for CachedProvider {
         self.inner.cost_per_token()
     }
 
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let effective_model = self.inner.effective_model_name(request.model.as_deref());
         let key = cache_key(&effective_model, &request);
@@ -352,6 +360,8 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -365,6 +375,8 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }

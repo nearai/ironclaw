@@ -2,6 +2,7 @@
 //!
 //! Provides:
 //! - [`StubLlm`]: A configurable LLM provider that returns a fixed response
+//! - [`StubChannel`]: A configurable channel stub with message injection and response capture
 //! - [`TestHarnessBuilder`]: Builder for wiring `AgentDeps` with defaults
 //! - [`TestHarness`]: The assembled components ready for use in tests
 //!
@@ -18,14 +19,19 @@
 //! ```
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
+use tokio::sync::mpsc;
 
 use crate::agent::AgentDeps;
+use crate::channels::{
+    Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+};
 use crate::db::Database;
-use crate::error::LlmError;
+use crate::error::{ChannelError, LlmError};
 use crate::llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -168,6 +174,8 @@ impl LlmProvider for StubLlm {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         })
     }
 
@@ -185,7 +193,133 @@ impl LlmProvider for StubLlm {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         })
+    }
+}
+
+/// A configurable channel stub for tests.
+///
+/// Supports:
+/// - Message injection via the returned `mpsc::Sender`
+/// - Response capture for assertion
+/// - Status update capture
+/// - Configurable health check failure
+///
+/// # Usage
+///
+/// ```rust,no_run
+/// let (channel, sender) = StubChannel::new("test");
+/// sender.send(IncomingMessage::new("test", "user1", "hello")).await.unwrap();
+/// // ... run agent logic that calls channel.respond() ...
+/// let responses = channel.captured_responses();
+/// ```
+pub struct StubChannel {
+    name: String,
+    rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
+    responses: Arc<Mutex<Vec<(IncomingMessage, OutgoingResponse)>>>,
+    statuses: Arc<Mutex<Vec<StatusUpdate>>>,
+    healthy: AtomicBool,
+}
+
+impl StubChannel {
+    /// Create a new stub channel and its message sender.
+    ///
+    /// The sender is used by tests to inject messages into the channel's stream.
+    /// The channel captures all responses and status updates for later assertion.
+    pub fn new(name: impl Into<String>) -> (Self, mpsc::Sender<IncomingMessage>) {
+        let (tx, rx) = mpsc::channel(64);
+        let channel = Self {
+            name: name.into(),
+            rx: tokio::sync::Mutex::new(Some(rx)),
+            responses: Arc::new(Mutex::new(Vec::new())),
+            statuses: Arc::new(Mutex::new(Vec::new())),
+            healthy: AtomicBool::new(true),
+        };
+        (channel, tx)
+    }
+
+    /// Get all captured (message, response) pairs.
+    pub fn captured_responses(&self) -> Vec<(IncomingMessage, OutgoingResponse)> {
+        self.responses.lock().expect("poisoned").clone()
+    }
+
+    /// Get a shared handle to the response capture list.
+    ///
+    /// Call this *before* moving the channel into a `ChannelManager`,
+    /// since `add()` takes ownership.
+    pub fn captured_responses_handle(
+        &self,
+    ) -> Arc<Mutex<Vec<(IncomingMessage, OutgoingResponse)>>> {
+        Arc::clone(&self.responses)
+    }
+
+    /// Get all captured status updates.
+    pub fn captured_statuses(&self) -> Vec<StatusUpdate> {
+        self.statuses.lock().expect("poisoned").clone()
+    }
+
+    /// Get a shared handle to the status capture list.
+    pub fn captured_statuses_handle(&self) -> Arc<Mutex<Vec<StatusUpdate>>> {
+        Arc::clone(&self.statuses)
+    }
+
+    /// Set whether `health_check()` succeeds or fails.
+    pub fn set_healthy(&self, healthy: bool) {
+        self.healthy.store(healthy, Ordering::Relaxed);
+    }
+}
+
+#[async_trait]
+impl Channel for StubChannel {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn start(&self) -> Result<MessageStream, ChannelError> {
+        let rx = self
+            .rx
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| ChannelError::StartupFailed {
+                name: self.name.clone(),
+                reason: "start() already called".to_string(),
+            })?;
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Box::pin(stream))
+    }
+
+    async fn respond(
+        &self,
+        msg: &IncomingMessage,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.responses
+            .lock()
+            .expect("poisoned")
+            .push((msg.clone(), response));
+        Ok(())
+    }
+
+    async fn send_status(
+        &self,
+        status: StatusUpdate,
+        _metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        self.statuses.lock().expect("poisoned").push(status);
+        Ok(())
+    }
+
+    async fn health_check(&self) -> Result<(), ChannelError> {
+        if self.healthy.load(Ordering::Relaxed) {
+            Ok(())
+        } else {
+            Err(ChannelError::HealthCheckFailed {
+                name: self.name.clone(),
+            })
+        }
     }
 }
 
@@ -195,6 +329,8 @@ pub struct TestHarness {
     pub deps: AgentDeps,
     /// Direct reference to the database (as `Arc<dyn Database>`).
     pub db: Arc<dyn Database>,
+    /// Stub channel sender + manager, present if `with_stub_channel()` was called.
+    pub channel: Option<(mpsc::Sender<IncomingMessage>, ChannelManager)>,
     /// Temp directory guard — keeps the test database alive. Dropped
     /// automatically when the harness goes out of scope.
     #[cfg(feature = "libsql")]
@@ -214,6 +350,7 @@ pub struct TestHarnessBuilder {
     db: Option<Arc<dyn Database>>,
     llm: Option<Arc<dyn LlmProvider>>,
     tools: Option<Arc<ToolRegistry>>,
+    stub_channel: bool,
 }
 
 impl TestHarnessBuilder {
@@ -223,6 +360,7 @@ impl TestHarnessBuilder {
             db: None,
             llm: None,
             tools: None,
+            stub_channel: false,
         }
     }
 
@@ -241,6 +379,15 @@ impl TestHarnessBuilder {
     /// Override the tool registry.
     pub fn with_tools(mut self, tools: Arc<ToolRegistry>) -> Self {
         self.tools = Some(tools);
+        self
+    }
+
+    /// Include a `StubChannel` wired into a `ChannelManager`.
+    ///
+    /// The harness will expose the sender (for injecting messages) and
+    /// the manager (for routing responses) via [`TestHarness::channel`].
+    pub fn with_stub_channel(mut self) -> Self {
+        self.stub_channel = true;
         self
     }
 
@@ -280,6 +427,15 @@ impl TestHarnessBuilder {
             max_actions_per_hour: None,
         }));
 
+        let channel = if self.stub_channel {
+            let (stub, sender) = StubChannel::new("stub");
+            let manager = ChannelManager::new();
+            manager.add(Box::new(stub)).await;
+            Some((sender, manager))
+        } else {
+            None
+        };
+
         let deps = AgentDeps {
             store: Some(Arc::clone(&db)),
             llm,
@@ -295,11 +451,14 @@ impl TestHarnessBuilder {
             cost_guard,
             sse_tx: None,
             http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
         };
 
         TestHarness {
             deps,
             db,
+            channel,
             _temp_dir: temp_dir,
         }
     }
@@ -653,6 +812,48 @@ mod tests {
         assert_eq!(response.finish_reason, FinishReason::Stop);
     }
 
+    #[tokio::test]
+    async fn test_stub_channel_inject_and_capture() {
+        use futures::StreamExt;
+
+        let (channel, sender) = StubChannel::new("test-channel");
+
+        // Start the channel to get the message stream
+        let mut stream = channel.start().await.expect("start failed");
+
+        // Inject a message
+        sender
+            .send(IncomingMessage::new("test-channel", "user1", "hello"))
+            .await
+            .expect("send failed");
+
+        // Read it from the stream
+        let msg = stream.next().await.expect("stream ended");
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.user_id, "user1");
+        assert_eq!(msg.channel, "test-channel");
+
+        // Send a response and verify it was captured
+        let response = OutgoingResponse::text("world");
+        channel
+            .respond(&msg, response)
+            .await
+            .expect("respond failed");
+
+        let captured = channel.captured_responses();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].1.content, "world");
+    }
+
+    #[tokio::test]
+    async fn test_stub_channel_health_check() {
+        let (channel, _sender) = StubChannel::new("healthy");
+        channel.health_check().await.expect("health check failed");
+
+        channel.set_healthy(false);
+        assert!(channel.health_check().await.is_err());
+    }
+
     // === Database CRUD coverage for untested trait methods ===
 
     #[cfg(feature = "libsql")]
@@ -703,6 +904,24 @@ mod tests {
         // Delete non-existent
         let deleted = db.delete_setting("user1", "theme").await.expect("delete");
         assert!(!deleted);
+    }
+
+    #[tokio::test]
+    async fn test_harness_with_channel() {
+        let harness = TestHarnessBuilder::new().with_stub_channel().build().await;
+
+        let (sender, channel_manager) =
+            harness.channel.as_ref().expect("channel should be present");
+
+        // Inject a message via sender
+        sender
+            .send(IncomingMessage::new("stub", "user1", "test message"))
+            .await
+            .expect("send failed");
+
+        // Verify channel is registered in the manager
+        let names = channel_manager.channel_names().await;
+        assert!(names.contains(&"stub".to_string()));
     }
 
     #[cfg(feature = "libsql")]
@@ -790,6 +1009,7 @@ mod tests {
             enabled: true,
             trigger: Trigger::Cron {
                 schedule: "0 * * * *".to_string(),
+                timezone: None,
             },
             action: RoutineAction::Lightweight {
                 prompt: "Check status".to_string(),
