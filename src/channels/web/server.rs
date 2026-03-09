@@ -2531,9 +2531,10 @@ async fn webhook_proxy_handler(
     // Copy response headers
     for (name, value) in response.headers() {
         if let Ok(name) = axum::http::HeaderName::try_from(name.as_str())
-            && let Ok(value) = axum::http::HeaderValue::try_from(value.as_bytes()) {
-                resp_builder = resp_builder.header(name, value);
-            }
+            && let Ok(value) = axum::http::HeaderValue::try_from(value.as_bytes())
+        {
+            resp_builder = resp_builder.header(name, value);
+        }
     }
 
     // Forward response body
