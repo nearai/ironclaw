@@ -581,7 +581,7 @@ INSERT OR IGNORE INTO leak_detection_patterns (id, name, pattern, severity, acti
 -- Mark incremental migrations as already applied (the base schema includes their changes).
 INSERT OR IGNORE INTO _migrations (version, name) VALUES
     (9, 'flexible_embedding_dimension'),
-    (10, 'add_retry_attempts');
+    (12, 'add_retry_attempts');
 
 "#;
 
@@ -653,7 +653,7 @@ END;
 "#,
     ),
     (
-        10,
+        12,
         "add_retry_attempts",
         "ALTER TABLE job_actions ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0;",
     ),

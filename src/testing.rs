@@ -777,7 +777,7 @@ mod tests {
             success: true,
             error: None,
             executed_at: chrono::Utc::now(),
-            retry_attempts: 0,
+            retry_attempts: 3,
         };
         db.save_action(job_id, &action).await.expect("save action");
 
@@ -788,6 +788,10 @@ mod tests {
         assert_eq!(actions[0].output_raw, Some("hello".to_string()));
         assert!(actions[0].success);
         assert_eq!(actions[0].duration, std::time::Duration::from_millis(42));
+        assert_eq!(
+            actions[0].retry_attempts, 3,
+            "retry_attempts should round-trip through DB"
+        );
 
         // Update job status.
         db.update_job_status(job_id, JobState::Completed, None)

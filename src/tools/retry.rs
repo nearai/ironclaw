@@ -94,6 +94,21 @@ pub async fn retry_tool_execute(
                 let elapsed = start.elapsed();
                 let remaining = budget.saturating_sub(elapsed);
 
+                // No time left — exit immediately rather than doing a gratuitous
+                // zero-delay retry that would have no time for the actual call.
+                if remaining.is_zero() {
+                    tracing::warn!(
+                        tool = %tool.name(),
+                        attempt = attempt + 1,
+                        error = %err,
+                        "Retry budget fully exhausted, returning last error"
+                    );
+                    return ToolRetryOutcome {
+                        result: Err(err),
+                        retry_attempts: retry_counter.load(Ordering::Relaxed),
+                    };
+                }
+
                 // Calculate delay: prefer server-suggested for RateLimited,
                 // capped against remaining budget (not max_delay) so we never
                 // sleep longer than the caller's deadline allows.
