@@ -122,13 +122,12 @@ impl Tool for MockGithubWebhookTool {
             .pointer("/webhook/body_json")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
-        if payload.get("repository").and_then(|v| v.as_str()).is_none() {
-            if let Some(full_name) = payload
+        if payload.get("repository").and_then(|v| v.as_str()).is_none()
+            && let Some(full_name) = payload
                 .pointer("/repository/full_name")
                 .and_then(|v| v.as_str())
-            {
-                payload["repository"] = serde_json::json!(full_name);
-            }
+        {
+            payload["repository"] = serde_json::json!(full_name);
         }
         let event_type = format!(
             "{}.{}",
@@ -352,7 +351,7 @@ impl GatewayWorkflowHarness {
         .expect("failed to start gateway server");
 
         let webhook_state = ironclaw::webhooks::ToolWebhookState {
-            tools: Arc::clone(&gateway_state.tool_registry.as_ref().expect("tool registry")),
+            tools: Arc::clone(gateway_state.tool_registry.as_ref().expect("tool registry")),
             routine_engine: Arc::clone(&routine_slot),
             user_id: user_id.clone(),
             secrets_store: None,
