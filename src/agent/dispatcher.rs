@@ -1197,6 +1197,7 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            sandbox_available: false,
         };
 
         Agent::new(
@@ -2037,6 +2038,7 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            sandbox_available: false,
         };
 
         Agent::new(
@@ -2155,6 +2157,7 @@ mod tests {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                sandbox_available: false,
             };
 
             Agent::new(

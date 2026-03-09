@@ -727,6 +727,7 @@ async fn async_main() -> anyhow::Result<()> {
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
+        sandbox_available: config.sandbox.enabled && docker_status.is_ok(),
     };
 
     let mut agent = Agent::new(

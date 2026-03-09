@@ -97,6 +97,8 @@ pub struct AgentDeps {
     pub transcription: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
+    /// Whether the Docker sandbox is available for full-job routines.
+    pub sandbox_available: bool,
 }
 
 /// The main agent that coordinates all components.
@@ -484,6 +486,7 @@ impl Agent {
                         Some(self.scheduler.clone()),
                         self.tools().clone(),
                         self.safety().clone(),
+                        self.deps.sandbox_available,
                     ));
 
                     // Register routine tools

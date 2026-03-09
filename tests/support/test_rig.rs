@@ -578,6 +578,7 @@ impl TestRigBuilder {
                     None,
                     components.tools.clone(),
                     components.safety.clone(),
+                    false,
                 ));
                 components
                     .tools
@@ -642,6 +643,7 @@ impl TestRigBuilder {
             },
             transcription: None,
             document_extraction: None,
+            sandbox_available: false,
         };
 
         // 7. Create TestChannel and ChannelManager.
