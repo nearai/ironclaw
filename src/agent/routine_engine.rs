@@ -787,13 +787,13 @@ async fn execute_lightweight_with_tools(
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);
 
-            let response = ctx
-                .llm
-                .complete(request)
-                .await
-                .map_err(|e| RoutineError::LlmFailed {
-                    reason: e.to_string(),
-                })?;
+            let response =
+                ctx.llm
+                    .complete(request)
+                    .await
+                    .map_err(|e| RoutineError::LlmFailed {
+                        reason: e.to_string(),
+                    })?;
 
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
@@ -893,13 +893,11 @@ async fn execute_routine_tool(
     match tool.requires_approval(&tc.arguments) {
         ApprovalRequirement::Never => {}
         ApprovalRequirement::UnlessAutoApproved | ApprovalRequirement::Always => {
-            return Err(
-                format!(
-                    "Tool '{}' requires manual approval and cannot be used in lightweight routines",
-                    tc.name
-                )
-                .into(),
-            );
+            return Err(format!(
+                "Tool '{}' requires manual approval and cannot be used in lightweight routines",
+                tc.name
+            )
+            .into());
         }
     }
 
@@ -912,10 +910,7 @@ async fn execute_routine_tool(
             .map(|e| format!("{}: {}", e.field, e.message))
             .collect::<Vec<_>>()
             .join("; ");
-        return Err(
-            format!("Invalid tool parameters: {}", details)
-                .into(),
-        );
+        return Err(format!("Invalid tool parameters: {}", details).into());
     }
 
     let safe_params = redact_params(&tc.arguments, tool.sensitive_params());
@@ -1083,13 +1078,19 @@ mod tests {
     #[test]
     fn test_routine_config_lightweight_tools_enabled_default() {
         let config = RoutineConfig::default();
-        assert!(config.lightweight_tools_enabled, "Tools should be enabled by default");
+        assert!(
+            config.lightweight_tools_enabled,
+            "Tools should be enabled by default"
+        );
     }
 
     #[test]
     fn test_routine_config_lightweight_max_iterations_default() {
         let config = RoutineConfig::default();
-        assert_eq!(config.lightweight_max_iterations, 3, "Default should be 3 iterations");
+        assert_eq!(
+            config.lightweight_max_iterations, 3,
+            "Default should be 3 iterations"
+        );
     }
 
     #[test]
@@ -1192,7 +1193,10 @@ mod tests {
         let finish_reason_length = crate::llm::FinishReason::Length;
         let finish_reason_stop = crate::llm::FinishReason::Stop;
 
-        assert!(empty_content.trim().is_empty(), "Should detect empty content");
+        assert!(
+            empty_content.trim().is_empty(),
+            "Should detect empty content"
+        );
         assert_eq!(finish_reason_length, crate::llm::FinishReason::Length);
         assert_eq!(finish_reason_stop, crate::llm::FinishReason::Stop);
     }
