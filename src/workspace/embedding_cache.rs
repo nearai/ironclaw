@@ -517,6 +517,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn embed_batch_all_misses() {
+        let inner = Arc::new(CountingMock::new(4, "test-model"));
+        let cached =
+            CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 100 });
+
+        // Nothing cached — every text is a miss
+        let texts: Vec<String> = vec!["alpha".into(), "beta".into(), "gamma".into()];
+        let results = cached.embed_batch(&texts).await.unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            inner.batch_calls(),
+            1,
+            "should call inner provider once for all misses"
+        );
+        assert_eq!(cached.len().await, 3, "all results should be cached");
+
+        // Second call should be all hits — no new inner calls
+        let results2 = cached.embed_batch(&texts).await.unwrap();
+        assert_eq!(results2.len(), 3);
+        assert_eq!(
+            inner.batch_calls(),
+            1,
+            "should not call inner provider again"
+        );
+    }
+
+    #[tokio::test]
     async fn zero_max_entries_clamped_to_one() {
         let inner = Arc::new(CountingMock::new(4, "test-model"));
         let cached =
