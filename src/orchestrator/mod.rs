@@ -31,12 +31,14 @@
 pub mod api;
 pub mod auth;
 pub mod job_manager;
+pub mod reaper;
 
 pub use api::OrchestratorApi;
 pub use auth::{CredentialGrant, TokenStore};
 pub use job_manager::{
     CompletionResult, ContainerHandle, ContainerJobConfig, ContainerJobManager, JobMode,
 };
+pub use reaper::{ReaperConfig, SandboxReaper};
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

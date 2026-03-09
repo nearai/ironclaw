@@ -633,14 +633,61 @@ impl WasmToolWrapper {
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
 
-        // Check for tool-level error
+        // Check for tool-level error — on failure, call the WASM module's
+        // description() and schema() exports so the LLM can retry with the
+        // correct parameters without us having to include the (large) schema
+        // in every request's tools array.
         if let Some(err) = response.error {
-            return Err(WasmError::ToolReturnedError(err));
+            let hint = build_tool_hint(tool_iface, &mut store);
+            return Err(WasmError::ToolReturnedError { message: err, hint });
         }
 
         // Return result (or empty string if none)
         Ok((response.output.unwrap_or_default(), logs))
     }
+}
+
+/// Maximum characters for the description portion of a tool hint.
+const HINT_DESC_MAX: usize = 500;
+/// Maximum characters for the schema portion of a tool hint.
+const HINT_SCHEMA_MAX: usize = 3000;
+
+/// Call the WASM module's `description()` and `schema()` exports to build a
+/// hint string.  Returns an empty string if both calls fail or return empty.
+/// Description is capped at [`HINT_DESC_MAX`] chars, schema at
+/// [`HINT_SCHEMA_MAX`] chars.
+fn build_tool_hint(tool_iface: &wit_tool::Guest, store: &mut Store<StoreData>) -> String {
+    let desc = tool_iface
+        .call_description(&mut *store)
+        .ok()
+        .unwrap_or_default();
+    let schema = tool_iface.call_schema(&mut *store).ok().unwrap_or_default();
+    if desc.is_empty() && schema.is_empty() {
+        return String::new();
+    }
+    let mut hint = String::new();
+    if !desc.is_empty() {
+        hint.push_str("Description: ");
+        if desc.len() > HINT_DESC_MAX {
+            let end = crate::util::floor_char_boundary(&desc, HINT_DESC_MAX);
+            hint.push_str(&desc[..end]);
+            hint.push('…');
+        } else {
+            hint.push_str(&desc);
+        }
+        hint.push('\n');
+    }
+    if !schema.is_empty() {
+        hint.push_str("Parameters schema: ");
+        if schema.len() > HINT_SCHEMA_MAX {
+            let end = crate::util::floor_char_boundary(&schema, HINT_SCHEMA_MAX);
+            hint.push_str(&schema[..end]);
+            hint.push('…');
+        } else {
+            hint.push_str(&schema);
+        }
+    }
+    hint
 }
 
 #[async_trait]

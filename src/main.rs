@@ -1,6 +1,7 @@
 //! IronClaw - Main entry point.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -20,6 +21,7 @@ use ironclaw::{
     config::Config,
     hooks::bootstrap_hooks,
     llm::create_session_manager,
+    orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
 };
@@ -591,6 +593,9 @@ async fn async_main() -> anyhow::Result<()> {
         .recording_handle
         .as_ref()
         .map(|r| r.http_interceptor());
+    // Clone context_manager for the reaper before it's moved into Agent::new()
+    let reaper_context_manager = Arc::clone(&components.context_manager);
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -628,6 +633,23 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Fill the scheduler slot now that Agent (and its Scheduler) exist.
     *scheduler_slot.write().await = Some(agent.scheduler());
+
+    // Spawn sandbox reaper for orphaned container cleanup
+    if let Some(ref jm) = container_job_manager {
+        let reaper_jm = Arc::clone(jm);
+        let reaper_config = ReaperConfig {
+            scan_interval: Duration::from_secs(config.sandbox.reaper_interval_secs),
+            orphan_threshold: Duration::from_secs(config.sandbox.orphan_threshold_secs),
+            ..ReaperConfig::default()
+        };
+        let reaper_ctx = Arc::clone(&reaper_context_manager);
+        tokio::spawn(async move {
+            match SandboxReaper::new(reaper_jm, reaper_ctx, reaper_config).await {
+                Ok(reaper) => reaper.run().await,
+                Err(e) => tracing::error!("Sandbox reaper failed to initialize: {}", e),
+            }
+        });
+    }
 
     // Give the agent the routine engine slot so it can expose the engine to the gateway.
     if let Some(slot) = routine_engine_slot {

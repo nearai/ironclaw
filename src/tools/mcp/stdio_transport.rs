@@ -124,7 +124,7 @@ impl McpTransport for StdioMcpTransport {
         // so we don't miss a fast response from the child.
         {
             let mut pending = self.pending.lock().await;
-            pending.insert(request.id, tx);
+            pending.insert(request.id.unwrap_or(0), tx);
         }
 
         // Write the request to stdin.
@@ -133,7 +133,7 @@ impl McpTransport for StdioMcpTransport {
             if let Err(e) = write_jsonrpc_line(&mut *stdin, request).await {
                 // Remove the pending entry on write failure.
                 let mut pending = self.pending.lock().await;
-                pending.remove(&request.id);
+                pending.remove(&request.id.unwrap_or(0));
                 return Err(e);
             }
         }
@@ -145,18 +145,18 @@ impl McpTransport for StdioMcpTransport {
             Ok(Err(_)) => {
                 // Sender was dropped (reader task ended). Clean up pending entry.
                 let mut pending = self.pending.lock().await;
-                pending.remove(&request.id);
+                pending.remove(&request.id.unwrap_or(0));
                 Err(ToolError::ExternalService(format!(
-                    "[{}] MCP server closed connection before responding to request {}",
+                    "[{}] MCP server closed connection before responding to request {:?}",
                     self.server_name, request.id
                 )))
             }
             Err(_) => {
                 // Timeout: remove the pending entry.
                 let mut pending = self.pending.lock().await;
-                pending.remove(&request.id);
+                pending.remove(&request.id.unwrap_or(0));
                 Err(ToolError::ExternalService(format!(
-                    "[{}] Timeout waiting for response to request {} after {:?}",
+                    "[{}] Timeout waiting for response to request {:?} after {:?}",
                     self.server_name, request.id, timeout
                 )))
             }

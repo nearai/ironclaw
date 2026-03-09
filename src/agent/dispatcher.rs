@@ -743,23 +743,6 @@ impl Agent {
                                         .await;
                                 }
 
-                                // Record result in thread
-                                {
-                                    let mut sess = session.lock().await;
-                                    if let Some(thread) = sess.threads.get_mut(&thread_id)
-                                        && let Some(turn) = thread.last_turn_mut()
-                                    {
-                                        match &tool_result {
-                                            Ok(output) => {
-                                                turn.record_tool_result(serde_json::json!(output));
-                                            }
-                                            Err(e) => {
-                                                turn.record_tool_error(e.to_string());
-                                            }
-                                        }
-                                    }
-                                }
-
                                 // Check for auth awaiting — defer the return
                                 // until all results are recorded.
                                 if deferred_auth.is_none()
@@ -799,6 +782,7 @@ impl Agent {
                                 }
 
                                 // Sanitize and add tool result to context
+                                let is_tool_error = tool_result.is_err();
                                 let result_content = match tool_result {
                                     Ok(output) => {
                                         let sanitized =
@@ -811,6 +795,23 @@ impl Agent {
                                     }
                                     Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                                 };
+
+                                // Record sanitized result in thread so messages()
+                                // and persist_tool_calls() use cleaned content.
+                                {
+                                    let mut sess = session.lock().await;
+                                    if let Some(thread) = sess.threads.get_mut(&thread_id)
+                                        && let Some(turn) = thread.last_turn_mut()
+                                    {
+                                        if is_tool_error {
+                                            turn.record_tool_error(result_content.clone());
+                                        } else {
+                                            turn.record_tool_result(serde_json::json!(
+                                                result_content
+                                            ));
+                                        }
+                                    }
+                                }
 
                                 context_messages.push(ChatMessage::tool_result(
                                     &tc.id,

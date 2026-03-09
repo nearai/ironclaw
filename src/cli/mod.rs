@@ -240,15 +240,7 @@ pub async fn init_secrets_store()
 
     let crypto = Arc::new(crate::secrets::SecretsCrypto::new(master_key.clone())?);
 
-    let (_db, handles) = crate::db::connect_with_handles(&config.database)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    crate::secrets::create_secrets_store(crypto, &handles).ok_or_else(|| {
-        anyhow::anyhow!(
-            "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
-        )
-    })
+    Ok(crate::db::create_secrets_store(&config.database, crypto).await?)
 }
 
 /// Run the Memory CLI subcommand.

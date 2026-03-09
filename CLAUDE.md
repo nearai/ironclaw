@@ -488,6 +488,13 @@ SKILLS_AUTO_DISCOVER=true              # Scan skill directories on startup
 TINFOIL_API_KEY=...                    # Required when LLM_BACKEND=tinfoil
 TINFOIL_MODEL=kimi-k2-5               # Default model
 
+# AWS Bedrock (native Converse API, requires --features bedrock)
+# LLM_BACKEND=bedrock
+# BEDROCK_REGION=us-east-1                    # AWS region
+# BEDROCK_MODEL=anthropic.claude-opus-4-6-v1  # Required model ID
+# BEDROCK_CROSS_REGION=us                     # Cross-region prefix (us/eu/apac/global)
+# AWS_PROFILE=my-profile                      # Named profile (SSO/assume-role)
+
 # Tunnel (public internet exposure for webhooks)
 TUNNEL_URL=https://abc123.ngrok.io     # Static public URL (manual tunnel)
 # Or use a managed tunnel provider:
@@ -504,7 +511,9 @@ OBSERVABILITY_BACKEND=none             # none/noop (default) or log
 
 ### LLM Providers
 
-Backends: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil` — set via `LLM_BACKEND`. See [src/llm/CLAUDE.md](src/llm/CLAUDE.md) for per-provider auth and configuration details.
+Backends: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock` (requires `--features bedrock`) — set via `LLM_BACKEND`. See [src/llm/CLAUDE.md](src/llm/CLAUDE.md) for per-provider auth and configuration details.
+
+**AWS Bedrock** -- Uses the native Converse API via `aws-sdk-bedrockruntime`. Requires `--features bedrock` at build time (not included in default features due to heavy AWS SDK dependencies). Supports standard AWS auth methods: IAM credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`), SSO profiles (`AWS_PROFILE`), and instance roles. Configure with `BEDROCK_REGION` (default: `us-east-1`), `BEDROCK_MODEL` (required, e.g., `anthropic.claude-opus-4-6-v1`), and `BEDROCK_CROSS_REGION` (optional: `us`, `eu`, `apac`, `global` for cross-region inference profiles). The SDK credential chain resolves auth automatically from the environment.
 
 ## Database
 
