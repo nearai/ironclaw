@@ -4,6 +4,14 @@
 //! (`POST /responses`) used by the ChatGPT backend at
 //! `chatgpt.com/backend-api/codex`. This bypasses `rig-core`'s Chat
 //! Completions path, which is incompatible with this endpoint.
+//!
+//! # Warning
+//!
+//! The ChatGPT backend endpoint (`chatgpt.com/backend-api/codex`) is a
+//! **private, undocumented API**. Using subscriber OAuth tokens from a
+//! third-party application may violate the token's intended scope or
+//! OpenAI's Terms of Service. This feature is provided as-is for
+//! convenience and may break without notice.
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -54,6 +62,13 @@ impl CodexChatGptProvider {
     ) -> Self {
         let base = base_url.trim_end_matches('/');
         let client = Client::new();
+
+        tracing::warn!(
+            "Codex ChatGPT provider uses a private, undocumented API \
+             (chatgpt.com/backend-api/codex). This may violate OpenAI's \
+             Terms of Service and could break without notice."
+        );
+
         let available = Self::fetch_available_models(&client, base, api_key).await;
 
         let model = if !configured_model.is_empty() && configured_model != "default" {
