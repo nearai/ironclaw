@@ -43,6 +43,6 @@ cargo check --all-features                           # all features
 **Mechanical verification before committing:**
 - `cargo clippy --all --benches --tests --examples --all-features` -- zero warnings
 - `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
-- `grep -rn 'super::' <files>` -- use `crate::` imports
+- `grep -rn 'super::' <files>` -- prefer `crate::` for cross-module imports (`super::` OK in tests/intra-module)
 - If you fixed a pattern bug, `grep` for other instances across `src/`
 - Run `scripts/pre-commit-safety.sh` to catch UTF-8, case-sensitivity, hardcoded /tmp, and logging issues

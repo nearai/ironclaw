@@ -5,7 +5,7 @@ paths:
 ---
 # Tool Architecture
 
-**Keep tool-specific logic out of the main agent codebase.** The main agent provides generic infrastructure; tools are self-contained units that declare requirements through `capabilities.json` files.
+**Keep tool-specific logic out of the main agent codebase.** The main agent provides generic infrastructure; tools are self-contained units that declare requirements through `<name>.capabilities.json` sidecar files (in dev mode: `tools-src/<name>/<name>-tool.capabilities.json`).
 
 Tools can be WASM (sandboxed, credential-injected, single binary) or MCP servers (ecosystem, any language, no sandbox). Both are first-class via `ironclaw tool install`.
 

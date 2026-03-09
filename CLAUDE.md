@@ -16,7 +16,7 @@ E2E tests: see `tests/e2e/CLAUDE.md`.
 
 ## Code Style
 
-- Use `crate::` imports, not `super::`
+- Prefer `crate::` for cross-module imports; `super::` is fine in tests and intra-module refs
 - No `pub use` re-exports unless exposing to downstream consumers
 - No `.unwrap()` or `.expect()` in production code (tests are fine)
 - Use `thiserror` for error types in `error.rs`
