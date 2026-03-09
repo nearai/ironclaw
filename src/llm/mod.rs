@@ -6,8 +6,11 @@
 //! - **Anthropic**: Direct API access with your own key
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
+//! - **AWS Bedrock**: Native Converse API via aws-sdk-bedrockruntime
 
 mod anthropic_oauth;
+#[cfg(feature = "bedrock")]
+mod bedrock;
 pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
@@ -57,7 +60,7 @@ use crate::error::LlmError;
 ///
 /// - NearAI backend: Uses session manager for authentication
 /// - Registry providers: Looked up by protocol and constructed generically
-pub fn create_llm_provider(
+pub async fn create_llm_provider(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -65,6 +68,21 @@ pub fn create_llm_provider(
 
     if config.backend == "nearai" || config.backend == "near_ai" || config.backend == "near" {
         return create_llm_provider_with_config(&config.nearai, session, timeout);
+    }
+
+    // Bedrock uses a native AWS SDK, not the rig-core registry
+    if config.backend == "bedrock" {
+        #[cfg(feature = "bedrock")]
+        {
+            return create_bedrock_provider(config).await;
+        }
+        #[cfg(not(feature = "bedrock"))]
+        {
+            return Err(LlmError::RequestFailed {
+                provider: "bedrock".to_string(),
+                reason: "Bedrock support not compiled. Rebuild with --features bedrock".to_string(),
+            });
+        }
     }
 
     let reg_config = config
@@ -118,6 +136,24 @@ fn create_registry_provider(
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
     }
+}
+
+#[cfg(feature = "bedrock")]
+async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let br = config
+        .bedrock
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "bedrock".to_string(),
+        })?;
+
+    let provider = bedrock::BedrockProvider::new(br).await?;
+    tracing::info!(
+        "Using AWS Bedrock (Converse API, region: {}, model: {})",
+        br.region,
+        provider.active_model_name(),
+    );
+    Ok(Arc::new(provider))
 }
 
 fn create_openai_compat_from_registry(
@@ -344,7 +380,7 @@ pub fn create_cheap_llm_provider(
 /// This is the single source of truth for provider chain construction,
 /// called by both `main.rs` and `app.rs`.
 #[allow(clippy::type_complexity)]
-pub fn build_provider_chain(
+pub async fn build_provider_chain(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<
@@ -355,7 +391,7 @@ pub fn build_provider_chain(
     ),
     LlmError,
 > {
-    let llm = create_llm_provider(config, session.clone())?;
+    let llm = create_llm_provider(config, session.clone()).await?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
 
     // 1. Retry
@@ -522,6 +558,7 @@ mod tests {
             session: SessionConfig::default(),
             nearai: test_nearai_config(),
             provider: None,
+            bedrock: None,
             request_timeout_secs: 120,
         }
     }

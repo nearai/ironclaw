@@ -124,7 +124,7 @@ src/
 │
 ├── secrets/            # Secrets management (AES-256-GCM, OS keychain for master key)
 │
-├── setup/              # 8-step onboarding wizard — see src/setup/README.md
+├── setup/              # 7-step onboarding wizard — see src/setup/README.md
 │
 ├── skills/             # SKILL.md prompt extension system — see .claude/rules/skills.md
 │
@@ -193,7 +193,18 @@ HEARTBEAT_INTERVAL_SECS=1800            # 30 minutes
 EMBEDDING_PROVIDER=nearai               # or openai
 TUNNEL_PROVIDER=none                    # none/cloudflare/tailscale/ngrok/custom
 OBSERVABILITY_BACKEND=none              # none or log
+# AWS Bedrock (requires --features bedrock)
+# LLM_BACKEND=bedrock
+# BEDROCK_REGION=us-east-1
+# BEDROCK_MODEL=anthropic.claude-opus-4-6-v1
+# BEDROCK_CROSS_REGION=us               # us/eu/apac/global
 ```
+
+### LLM Providers
+
+Backends: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock` (requires `--features bedrock`) — set via `LLM_BACKEND`. See `src/llm/CLAUDE.md` for per-provider auth and configuration details.
+
+**AWS Bedrock** — native Converse API via `aws-sdk-bedrockruntime`. Not in default features (heavy SDK deps). Standard AWS auth: IAM creds, SSO profiles (`AWS_PROFILE`), instance roles. Configure `BEDROCK_REGION`, `BEDROCK_MODEL` (required), `BEDROCK_CROSS_REGION` (optional).
 
 ## Adding a New Channel
 

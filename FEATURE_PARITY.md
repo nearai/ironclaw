@@ -215,7 +215,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | NEAR AI | ✅ | ✅ | - | Primary provider |
 | Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy; Opus 4.5, Sonnet 4, Sonnet 4.6 |
 | OpenAI | ✅ | 🚧 | - | Via NEAR AI proxy |
-| AWS Bedrock | ✅ | ✅ | P3 | Via `openai_compatible` adapter (e.g. LiteLLM) |
+| AWS Bedrock | ✅ | ✅ | - | Native Converse API via aws-sdk-bedrockruntime (requires `--features bedrock`) |
 | Google Gemini | ✅ | ✅ | P3 | Via `gemini` adapter |
 | io.net | ✅ | ✅ | P3 | Via `ionet` adapter |
 | Mistral | ✅ | ✅ | P3 | Via `mistral` adapter |
