@@ -468,7 +468,10 @@ mod tests {
         // Verify that a valid Docker timestamp would be used as fallback:
         let docker_timestamp: Option<i64> = Some(1705324245); // Some valid Unix timestamp
         let fallback = docker_timestamp.and_then(|ts| DateTime::from_timestamp(ts, 0));
-        assert!(fallback.is_some(), "Docker timestamp fallback should parse successfully");
+        assert!(
+            fallback.is_some(),
+            "Docker timestamp fallback should parse successfully"
+        );
     }
 
     // Test: age calculation distinguishes young from old containers
