@@ -777,7 +777,7 @@ mod tests {
     async fn test_non_http_transport_skips_401_retry() {
         let response = McpResponse {
             jsonrpc: "2.0".to_string(),
-            id: 1,
+            id: Some(1),
             result: Some(serde_json::json!({"tools": []})),
             error: None,
         };
