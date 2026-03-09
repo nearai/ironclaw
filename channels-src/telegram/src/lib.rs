@@ -894,6 +894,10 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
+/// Maximum file size to download (20 MB). Files larger than this are discarded
+/// to avoid excessive memory use and slow downloads in the WASM runtime.
+const MAX_DOWNLOAD_SIZE_BYTES: u64 = 20 * 1024 * 1024;
+
 fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
     // Reject file_id containing curly braces to prevent credential placeholder injection
     if file_id.contains('{') || file_id.contains('}') {
@@ -958,6 +962,16 @@ fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
         return Err(format!(
             "File download returned status {}",
             response.status
+        ));
+    }
+
+    // Post-download size guard: Telegram metadata file_size is optional,
+    // so enforce the limit on actual downloaded bytes.
+    if response.body.len() as u64 > MAX_DOWNLOAD_SIZE_BYTES {
+        return Err(format!(
+            "Downloaded file exceeds {} MB limit ({} bytes)",
+            MAX_DOWNLOAD_SIZE_BYTES / (1024 * 1024),
+            response.body.len()
         ));
     }
 
@@ -2636,5 +2650,11 @@ mod tests {
         assert!(!is_downloadable_document(&make("image/jpeg", None)));
         assert!(!is_downloadable_document(&make("audio/mpeg", Some("song.mp3"))));
         assert!(!is_downloadable_document(&make("video/mp4", Some("clip.mp4"))));
+    }
+
+    #[test]
+    fn test_max_download_size_constant() {
+        // Verify the constant is 20 MB, matching the Slack channel limit
+        assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
     }
 }

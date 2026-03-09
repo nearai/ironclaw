@@ -412,6 +412,21 @@ fn download_and_store_slack_files(attachments: &[InboundAttachment]) {
 
         match download_slack_file(url) {
             Ok(bytes) => {
+                // Post-download size guard: metadata size_bytes is optional,
+                // so a file with no size info could bypass the pre-download check.
+                if bytes.len() as u64 > MAX_DOWNLOAD_SIZE_BYTES {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!(
+                            "Discarding Slack file after download: {} bytes exceeds {} MB limit (id={})",
+                            bytes.len(),
+                            MAX_DOWNLOAD_SIZE_BYTES / (1024 * 1024),
+                            att.id
+                        ),
+                    );
+                    continue;
+                }
+
                 channel_host::log(
                     channel_host::LogLevel::Info,
                     &format!(
