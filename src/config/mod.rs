@@ -32,7 +32,9 @@ use crate::settings::Settings;
 // Re-export all public types so `crate::config::FooConfig` continues to work.
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
-pub use self::channels::{ChannelsConfig, CliConfig, GatewayConfig, HttpConfig, SignalConfig};
+pub use self::channels::{
+    ChannelsConfig, CliConfig, FeishuConfig, GatewayConfig, HttpConfig, SignalConfig,
+};
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
@@ -120,6 +122,7 @@ impl Config {
                 http: None,
                 gateway: None,
                 signal: None,
+                feishu: None,
                 wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
                 wasm_channels_enabled: false,
                 wasm_channel_owner_ids: HashMap::new(),

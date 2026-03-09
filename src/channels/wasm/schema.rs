@@ -185,6 +185,42 @@ impl ChannelCapabilitiesFile {
             .and_then(|w| w.secret_name.clone())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.name))
     }
+
+    /// Get JSON body paths used for host-side secret validation.
+    pub fn webhook_body_secret_paths(&self) -> Vec<String> {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .map(|w| w.body_secret_paths.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get all setup secret names declared by the channel.
+    pub fn setup_secret_names(&self) -> Vec<String> {
+        self.setup
+            .required_secrets
+            .iter()
+            .map(|secret| secret.name.clone())
+            .collect()
+    }
+
+    /// Get host-managed secret names that should not be injected into WASM as credentials.
+    pub fn reserved_host_secret_names(&self) -> Vec<String> {
+        let mut names = vec![self.webhook_secret_name()];
+
+        if let Some(name) = self.signature_key_secret_name() {
+            names.push(name.to_string());
+        }
+
+        if let Some(name) = self.hmac_secret_name() {
+            names.push(name.to_string());
+        }
+
+        names.sort();
+        names.dedup();
+        names
+    }
 }
 
 /// Schema for channel capabilities.
@@ -293,6 +329,15 @@ pub struct WebhookSchema {
     /// Default: "{channel_name}_webhook_secret"
     #[serde(default)]
     pub secret_name: Option<String>,
+
+    /// JSON body paths used for host-side secret validation.
+    ///
+    /// Each path is dot-separated (for example `token` or `header.token`).
+    /// When present, the host validates the secret against the request body
+    /// instead of query/header parameters and does not inject the secret into
+    /// the channel runtime config.
+    #[serde(default)]
+    pub body_secret_paths: Vec<String>,
 
     /// Secret name in secrets store containing the Ed25519 public key
     /// for signature verification (e.g., Discord interaction verification).
@@ -623,6 +668,32 @@ mod tests {
         let file = ChannelCapabilitiesFile::from_json(json).unwrap();
         assert_eq!(file.webhook_secret_header(), None);
         assert_eq!(file.webhook_secret_name(), "mybot_webhook_secret");
+    }
+
+    #[test]
+    fn test_webhook_body_secret_paths() {
+        let json = r#"{
+            "name": "feishu",
+            "capabilities": {
+                "channel": {
+                    "allowed_paths": ["/webhook/feishu"],
+                    "webhook": {
+                        "secret_name": "feishu_verification_token",
+                        "body_secret_paths": ["token", "header.token"]
+                    }
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            file.webhook_body_secret_paths(),
+            vec!["token".to_string(), "header.token".to_string()]
+        );
+        assert_eq!(
+            file.reserved_host_secret_names(),
+            vec!["feishu_verification_token".to_string()]
+        );
     }
 
     #[test]

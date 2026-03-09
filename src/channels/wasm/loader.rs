@@ -299,6 +299,30 @@ impl LoadedChannel {
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.channel.channel_name()))
     }
+
+    /// Get JSON body paths used for host-side secret validation.
+    pub fn webhook_body_secret_paths(&self) -> Vec<String> {
+        self.capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_body_secret_paths())
+            .unwrap_or_default()
+    }
+
+    /// Get all setup secret names declared by the channel.
+    pub fn setup_secret_names(&self) -> Vec<String> {
+        self.capabilities_file
+            .as_ref()
+            .map(|f| f.setup_secret_names())
+            .unwrap_or_default()
+    }
+
+    /// Get host-managed secret names that should not be injected into WASM credentials.
+    pub fn reserved_host_secret_names(&self) -> Vec<String> {
+        self.capabilities_file
+            .as_ref()
+            .map(|f| f.reserved_host_secret_names())
+            .unwrap_or_default()
+    }
 }
 
 /// Results from loading multiple channels.

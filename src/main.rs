@@ -1,6 +1,6 @@
 //! IronClaw - Main entry point.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use std::time::Duration;
 
 use clap::Parser;
@@ -10,7 +10,8 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
+        ChannelManager, FeishuChannel, GatewayChannel, HttpChannel, ReplChannel, SignalChannel,
+        WebhookServer,
         WebhookServerConfig,
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
@@ -396,6 +397,22 @@ async fn async_main() -> anyhow::Result<()> {
             tracing::warn!(
                 "Signal channel has empty allow_from list - ALL messages will be DENIED."
             );
+        }
+    }
+
+    // Add Feishu channel if configured and not CLI-only mode.
+    if !cli.cli_only
+        && let Some(ref feishu_config) = config.channels.feishu
+    {
+        match FeishuChannel::new(feishu_config.clone()) {
+            Ok(feishu_channel) => {
+                channel_names.push("feishu".to_string());
+                channels.add(Box::new(feishu_channel)).await;
+                tracing::info!("Feishu channel enabled (WebSocket long connection)");
+            }
+            Err(e) => {
+                tracing::error!("Failed to create Feishu channel: {e}");
+            }
         }
     }
 
@@ -938,6 +955,8 @@ async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ironclaw::extensions::ExtensionManager>>,
     database: Option<&Arc<dyn ironclaw::db::Database>>,
 ) -> Option<WasmChannelSetup> {
+    let secrets_store_ref = secrets_store.as_deref();
+
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
         Err(e) => {
@@ -979,18 +998,18 @@ async fn setup_wasm_channels(
         tracing::info!("Loaded WASM channel: {}", channel_name);
 
         let secret_name = loaded.webhook_secret_name();
+        let body_secret_paths = loaded.webhook_body_secret_paths();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
+        let setup_secret_names = loaded.setup_secret_names();
+        let reserved_host_secret_names = loaded.reserved_host_secret_names();
 
-        let webhook_secret = if let Some(secrets) = secrets_store {
-            secrets
-                .get_decrypted("default", &secret_name)
-                .await
-                .ok()
-                .map(|s| s.expose().to_string())
-        } else {
-            None
-        };
+        let webhook_secret = resolve_channel_secret(
+            secrets_store_ref,
+            "default",
+            &secret_name,
+        )
+        .await;
 
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
 
@@ -1003,6 +1022,7 @@ async fn setup_wasm_channels(
         }];
 
         let channel_arc = Arc::new(loaded.channel);
+        let inject_runtime_webhook_secret = webhook_secret.is_some() && body_secret_paths.is_empty();
 
         {
             let mut config_updates = std::collections::HashMap::new();
@@ -1014,7 +1034,9 @@ async fn setup_wasm_channels(
                 );
             }
 
-            if let Some(ref secret) = webhook_secret {
+            if inject_runtime_webhook_secret
+                && let Some(ref secret) = webhook_secret
+            {
                 config_updates.insert(
                     "webhook_secret".to_string(),
                     serde_json::Value::String(secret.clone()),
@@ -1036,6 +1058,7 @@ async fn setup_wasm_channels(
                     channel = %channel_name,
                     has_tunnel = config.tunnel.public_url.is_some(),
                     has_webhook_secret = webhook_secret.is_some(),
+                    inject_runtime_webhook_secret,
                     "Injected runtime config into channel"
                 );
             }
@@ -1054,16 +1077,16 @@ async fn setup_wasm_channels(
                 endpoints,
                 webhook_secret.clone(),
                 secret_header,
+                body_secret_paths.clone(),
             )
             .await;
 
         // Register Ed25519 signature key if declared in capabilities
         if let Some(ref sig_key_name) = sig_key_secret_name
-            && let Some(secrets) = secrets_store
-            && let Ok(key_secret) = secrets.get_decrypted("default", sig_key_name).await
+            && let Some(key_secret) = resolve_channel_secret(secrets_store_ref, "default", sig_key_name).await
         {
             match wasm_router
-                .register_signature_key(&channel_name, key_secret.expose())
+                .register_signature_key(&channel_name, &key_secret)
                 .await
             {
                 Ok(()) => {
@@ -1077,33 +1100,44 @@ async fn setup_wasm_channels(
 
         // Register HMAC signing secret if declared in capabilities
         if let Some(ref hmac_secret_name) = hmac_secret_name
-            && let Some(secrets) = secrets_store
-            && let Ok(secret) = secrets.get_decrypted("default", hmac_secret_name).await
+            && let Some(secret) = resolve_channel_secret(
+                secrets_store_ref,
+                "default",
+                hmac_secret_name,
+            )
+            .await
         {
             wasm_router
-                .register_hmac_secret(&channel_name, secret.expose())
+                .register_hmac_secret(&channel_name, &secret)
                 .await;
             tracing::info!(channel = %channel_name, "Registered HMAC signing secret");
         }
 
-        if let Some(secrets) = secrets_store {
-            match inject_channel_credentials(&channel_arc, secrets.as_ref(), &channel_name).await {
-                Ok(count) => {
-                    if count > 0 {
-                        tracing::info!(
-                            channel = %channel_name,
-                            credentials_injected = count,
-                            "Channel credentials injected"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
+        match inject_channel_credentials(
+            &channel_arc,
+            secrets_store_ref,
+            &channel_name,
+            &setup_secret_names,
+            &reserved_host_secret_names,
+            "default",
+        )
+        .await
+        {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
                         channel = %channel_name,
-                        error = %e,
-                        "Failed to inject channel credentials"
+                        credentials_injected = count,
+                        "Channel credentials injected"
                     );
                 }
+            }
+            Err(e) => {
+                tracing::error!(
+                    channel = %channel_name,
+                    error = %e,
+                    "Failed to inject channel credentials"
+                );
             }
         }
 
@@ -1161,6 +1195,20 @@ fn check_onboard_needed() -> Option<&'static str> {
     None
 }
 
+async fn resolve_channel_secret(
+    secrets: Option<&(dyn SecretsStore + Send + Sync)>,
+    user_id: &str,
+    secret_name: &str,
+) -> Option<String> {
+    if let Some(secrets) = secrets
+        && let Ok(secret) = secrets.get_decrypted(user_id, secret_name).await
+    {
+        return Some(secret.expose().to_string());
+    }
+
+    std::env::var(secret_name.to_ascii_uppercase()).ok()
+}
+
 /// Inject credentials for a channel based on naming convention.
 ///
 /// Looks for secrets matching the pattern `{channel_name}_*` and injects them
@@ -1170,42 +1218,79 @@ fn check_onboard_needed() -> Option<&'static str> {
 /// in the secrets store (e.g., `TELEGRAM_BOT_TOKEN`).
 async fn inject_channel_credentials(
     channel: &Arc<ironclaw::channels::wasm::WasmChannel>,
-    secrets: &dyn SecretsStore,
+    secrets: Option<&(dyn SecretsStore + Send + Sync)>,
     channel_name: &str,
+    declared_secret_names: &[String],
+    reserved_host_secret_names: &[String],
+    user_id: &str,
 ) -> anyhow::Result<usize> {
-    let all_secrets = secrets
-        .list("default")
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
-
     let prefix = format!("{}_", channel_name);
+    let reserved: HashSet<&str> = reserved_host_secret_names
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut injected = HashSet::new();
     let mut count = 0;
     let mut injected_placeholders = std::collections::HashSet::new();
 
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
+    if let Some(secrets) = secrets {
+        let all_secrets = secrets
+            .list(user_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
+
+        for secret_meta in all_secrets {
+            if !secret_meta.name.starts_with(&prefix) || reserved.contains(secret_meta.name.as_str()) {
+                continue;
+            }
+
+            let decrypted = match secrets.get_decrypted(user_id, &secret_meta.name).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        secret = %secret_meta.name,
+                        error = %e,
+                        "Failed to decrypt secret for channel credential injection"
+                    );
+                    continue;
+                }
+            };
+
+            let placeholder = secret_meta.name.to_uppercase();
+
+            tracing::debug!(
+                channel = %channel_name,
+                secret = %secret_meta.name,
+                placeholder = %placeholder,
+                "Injecting credential from secrets store"
+            );
+
+            channel
+                .set_credential(&placeholder, decrypted.expose().to_string())
+                .await;
+            injected.insert(placeholder);
+            count += 1;
+        }
+    }
+
+    for secret_name in declared_secret_names {
+        if reserved.contains(secret_name.as_str()) {
             continue;
         }
 
-        let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
-                );
-                continue;
-            }
-        };
+        let placeholder = secret_name.to_ascii_uppercase();
+        if injected.contains(&placeholder) {
+            continue;
+        }
 
-        let placeholder = secret_meta.name.to_uppercase();
+        let Ok(value) = std::env::var(&placeholder) else {
+            continue;
+        };
 
         tracing::debug!(
             channel = %channel_name,
-            secret = %secret_meta.name,
-            placeholder = %placeholder,
-            "Injecting credential"
+            env = %placeholder,
+            "Injecting credential from environment"
         );
 
         channel

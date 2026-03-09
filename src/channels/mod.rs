@@ -28,6 +28,8 @@
 //! See the [`wasm`] module for details.
 
 mod channel;
+mod feishu;
+mod feishu_proto;
 mod http;
 mod manager;
 mod repl;
@@ -40,6 +42,7 @@ pub use channel::{
     AttachmentKind, Channel, IncomingAttachment, IncomingMessage, MessageStream, OutgoingResponse,
     StatusUpdate,
 };
+pub use feishu::FeishuChannel;
 pub use http::HttpChannel;
 pub use manager::ChannelManager;
 pub use repl::ReplChannel;

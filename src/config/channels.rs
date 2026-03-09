@@ -15,6 +15,7 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    pub feishu: Option<FeishuConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -88,6 +89,20 @@ pub struct SignalConfig {
     pub ignore_attachments: bool,
     /// Skip story messages.
     pub ignore_stories: bool,
+}
+
+/// Feishu / Lark channel configuration (WebSocket long connection).
+#[derive(Debug, Clone)]
+pub struct FeishuConfig {
+    /// App ID from the Feishu Open Platform console.
+    pub app_id: String,
+    /// App Secret from the Feishu Open Platform console.
+    pub app_secret: String,
+    /// Feishu Open API base URL. Defaults to `https://open.feishu.cn`.
+    /// Set to `https://open.larksuite.com` for Lark (international).
+    pub api_base: String,
+    /// Reconnect delay after WebSocket disconnect (seconds). Default: 5.
+    pub reconnect_delay_secs: u64,
 }
 
 impl ChannelsConfig {
@@ -167,6 +182,25 @@ impl ChannelsConfig {
             None
         };
 
+        let feishu = if let Some(app_id) = optional_env("FEISHU_APP_ID")? {
+            let app_secret =
+                optional_env("FEISHU_APP_SECRET")?.ok_or(ConfigError::InvalidValue {
+                    key: "FEISHU_APP_SECRET".to_string(),
+                    message: "FEISHU_APP_SECRET is required when FEISHU_APP_ID is set".to_string(),
+                })?;
+            Some(FeishuConfig {
+                app_id,
+                app_secret,
+                api_base: optional_env("FEISHU_API_BASE")?
+                    .unwrap_or_else(|| "https://open.feishu.cn".to_string()),
+                reconnect_delay_secs: optional_env("FEISHU_RECONNECT_DELAY_SECS")?
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(5),
+            })
+        } else {
+            None
+        };
+
         let cli_enabled = optional_env("CLI_ENABLED")?
             .map(|s| s.to_lowercase() != "false" && s != "0")
             .unwrap_or(true);
@@ -178,6 +212,7 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
+            feishu,
             wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_channels_dir),
@@ -321,6 +356,7 @@ mod tests {
             http: None,
             gateway: None,
             signal: None,
+            feishu: None,
             wasm_channels_dir: PathBuf::from("/tmp/channels"),
             wasm_channels_enabled: true,
             wasm_channel_owner_ids: HashMap::new(),
@@ -329,6 +365,7 @@ mod tests {
         assert!(cfg.http.is_none());
         assert!(cfg.gateway.is_none());
         assert!(cfg.signal.is_none());
+        assert!(cfg.feishu.is_none());
         assert_eq!(cfg.wasm_channels_dir, PathBuf::from("/tmp/channels"));
         assert!(cfg.wasm_channels_enabled);
         assert!(cfg.wasm_channel_owner_ids.is_empty());
@@ -345,6 +382,7 @@ mod tests {
             http: None,
             gateway: None,
             signal: None,
+            feishu: None,
             wasm_channels_dir: PathBuf::from("/opt/channels"),
             wasm_channels_enabled: false,
             wasm_channel_owner_ids: ids,

@@ -2671,19 +2671,19 @@ impl ExtensionManager {
 
         let channel_name = loaded.name().to_string();
         let webhook_secret_name = loaded.webhook_secret_name();
+        let body_secret_paths = loaded.webhook_body_secret_paths();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
+        let setup_secret_names = loaded.setup_secret_names();
+        let reserved_host_secret_names = loaded.reserved_host_secret_names();
 
-        // Get webhook secret from secrets store
-        let webhook_secret = self
-            .secrets
-            .get_decrypted(&self.user_id, &webhook_secret_name)
-            .await
-            .ok()
-            .map(|s| s.expose().to_string());
+        let webhook_secret =
+            resolve_channel_secret(Some(self.secrets.as_ref()), &self.user_id, &webhook_secret_name)
+                .await;
 
         let channel_arc = Arc::new(loaded.channel);
+        let inject_runtime_webhook_secret = webhook_secret.is_some() && body_secret_paths.is_empty();
 
         // Inject runtime config (tunnel_url, webhook_secret, owner_id)
         {
@@ -2696,7 +2696,9 @@ impl ExtensionManager {
                 );
             }
 
-            if let Some(ref secret) = webhook_secret {
+            if inject_runtime_webhook_secret
+                && let Some(ref secret) = webhook_secret
+            {
                 config_updates.insert(
                     "webhook_secret".to_string(),
                     serde_json::Value::String(secret.clone()),
@@ -2713,6 +2715,7 @@ impl ExtensionManager {
                     channel = %channel_name,
                     has_tunnel = self.tunnel_url.is_some(),
                     has_webhook_secret = webhook_secret.is_some(),
+                    inject_runtime_webhook_secret,
                     "Injected runtime config into hot-activated channel"
                 );
             }
@@ -2734,19 +2737,19 @@ impl ExtensionManager {
                     endpoints,
                     webhook_secret,
                     secret_header,
+                    body_secret_paths.clone(),
                 )
                 .await;
             tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
 
             // Register Ed25519 signature key if declared in capabilities
             if let Some(ref sig_key_name) = sig_key_secret_name
-                && let Ok(key_secret) = self
-                    .secrets
-                    .get_decrypted(&self.user_id, sig_key_name)
-                    .await
+                && let Some(key_secret) =
+                    resolve_channel_secret(Some(self.secrets.as_ref()), &self.user_id, sig_key_name)
+                        .await
             {
                 match wasm_channel_router
-                    .register_signature_key(&channel_name, key_secret.expose())
+                    .register_signature_key(&channel_name, &key_secret)
                     .await
                 {
                     Ok(()) => {
@@ -2760,25 +2763,29 @@ impl ExtensionManager {
 
             // Register HMAC signing secret if declared in capabilities
             if let Some(hmac_name) = &hmac_secret_name {
-                match self.secrets.get_decrypted(&self.user_id, hmac_name).await {
-                    Ok(secret) => {
+                match resolve_channel_secret(Some(self.secrets.as_ref()), &self.user_id, hmac_name)
+                    .await
+                {
+                    Some(secret) => {
                         wasm_channel_router
-                            .register_hmac_secret(&channel_name, secret.expose())
+                            .register_hmac_secret(&channel_name, &secret)
                             .await;
                         tracing::info!(channel = %channel_name, "Registered HMAC signing secret for hot-activated channel");
                     }
-                    Err(e) => {
-                        tracing::warn!(channel = %channel_name, error = %e, "HMAC secret not found");
+                    None => {
+                        tracing::warn!(channel = %channel_name, secret = %hmac_name, "HMAC secret not found");
                     }
                 }
             }
         }
 
         // Inject credentials
-        match crate::extensions::manager::inject_channel_credentials_from_secrets(
+        match crate::extensions::manager::inject_channel_credentials(
             &channel_arc,
-            self.secrets.as_ref(),
+            Some(self.secrets.as_ref()),
             &channel_name,
+            &setup_secret_names,
+            &reserved_host_secret_names,
             &self.user_id,
         )
         .await
@@ -2859,26 +2866,6 @@ impl ExtensionManager {
             }
         };
 
-        // Re-inject credentials from secrets store into the running channel
-        let cred_count = match inject_channel_credentials_from_secrets(
-            &existing_channel,
-            self.secrets.as_ref(),
-            name,
-            &self.user_id,
-        )
-        .await
-        {
-            Ok(count) => count,
-            Err(e) => {
-                tracing::warn!(
-                    channel = %name,
-                    error = %e,
-                    "Failed to refresh credentials on already-active channel"
-                );
-                0
-            }
-        };
-
         // Load capabilities file once to extract all secret names
         let cap_path = self
             .wasm_channels_dir
@@ -2902,34 +2889,68 @@ impl ExtensionManager {
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
 
-        // Refresh webhook secret
-        if let Ok(secret) = self
-            .secrets
-            .get_decrypted(&self.user_id, &webhook_secret_name)
-            .await
+        let body_secret_paths = capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_body_secret_paths())
+            .unwrap_or_default();
+
+        let setup_secret_names = capabilities_file
+            .as_ref()
+            .map(|f| f.setup_secret_names())
+            .unwrap_or_default();
+
+        let reserved_host_secret_names = capabilities_file
+            .as_ref()
+            .map(|f| f.reserved_host_secret_names())
+            .unwrap_or_else(|| vec![webhook_secret_name.clone()]);
+
+        // Re-inject credentials from secrets store/env into the running channel
+        let cred_count = match inject_channel_credentials(
+            &existing_channel,
+            Some(self.secrets.as_ref()),
+            name,
+            &setup_secret_names,
+            &reserved_host_secret_names,
+            &self.user_id,
+        )
+        .await
         {
-            router
-                .update_secret(name, secret.expose().to_string())
-                .await;
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to refresh credentials on already-active channel"
+                );
+                0
+            }
+        };
+
+        // Refresh webhook secret
+        if let Some(secret) =
+            resolve_channel_secret(Some(self.secrets.as_ref()), &self.user_id, &webhook_secret_name)
+                .await
+        {
+            router.update_secret(name, secret.clone()).await;
 
             // Also inject the webhook_secret into the channel's runtime config
-            let mut config_updates = std::collections::HashMap::new();
-            config_updates.insert(
-                "webhook_secret".to_string(),
-                serde_json::Value::String(secret.expose().to_string()),
-            );
-            existing_channel.update_config(config_updates).await;
+            if body_secret_paths.is_empty() {
+                let mut config_updates = std::collections::HashMap::new();
+                config_updates.insert(
+                    "webhook_secret".to_string(),
+                    serde_json::Value::String(secret.clone()),
+                );
+                existing_channel.update_config(config_updates).await;
+            }
         }
 
         // Refresh signature key
         if let Some(ref sig_key_name) = sig_key_secret_name
-            && let Ok(key_secret) = self
-                .secrets
-                .get_decrypted(&self.user_id, sig_key_name)
-                .await
+            && let Some(key_secret) =
+                resolve_channel_secret(Some(self.secrets.as_ref()), &self.user_id, sig_key_name).await
         {
             match router
-                .register_signature_key(name, key_secret.expose())
+                .register_signature_key(name, &key_secret)
                 .await
             {
                 Ok(()) => {
@@ -2943,17 +2964,19 @@ impl ExtensionManager {
 
         // Refresh HMAC signing secret
         if let Some(ref hmac_secret_name_ref) = hmac_secret_name {
-            match self
-                .secrets
-                .get_decrypted(&self.user_id, hmac_secret_name_ref)
-                .await
+            match resolve_channel_secret(
+                Some(self.secrets.as_ref()),
+                &self.user_id,
+                hmac_secret_name_ref,
+            )
+            .await
             {
-                Ok(secret) => {
-                    router.register_hmac_secret(name, secret.expose()).await;
+                Some(secret) => {
+                    router.register_hmac_secret(name, &secret).await;
                     tracing::info!(channel = %name, "Refreshed HMAC signing secret");
                 }
-                Err(e) => {
-                    tracing::warn!(channel = %name, error = %e, "HMAC secret not found");
+                None => {
+                    tracing::warn!(channel = %name, secret = %hmac_secret_name_ref, "HMAC secret not found");
                 }
             }
         }
@@ -3436,47 +3459,87 @@ impl ExtensionManager {
     }
 }
 
-/// Inject credentials for a channel based on naming convention.
-///
-/// Looks for secrets matching the pattern `{channel_name}_*` and injects them
-/// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
+async fn resolve_channel_secret(
+    secrets: Option<&(dyn SecretsStore + Send + Sync)>,
+    user_id: &str,
+    secret_name: &str,
+) -> Option<String> {
+    if let Some(secrets) = secrets
+        && let Ok(secret) = secrets.get_decrypted(user_id, secret_name).await
+    {
+        return Some(secret.expose().to_string());
+    }
+
+    std::env::var(secret_name.to_ascii_uppercase()).ok()
+}
+
+/// Inject credentials for a channel from the secrets store, with env-var fallback.
 ///
 /// Returns the number of credentials injected.
-async fn inject_channel_credentials_from_secrets(
+async fn inject_channel_credentials(
     channel: &Arc<crate::channels::wasm::WasmChannel>,
-    secrets: &dyn SecretsStore,
+    secrets: Option<&(dyn SecretsStore + Send + Sync)>,
     channel_name: &str,
+    declared_secret_names: &[String],
+    reserved_host_secret_names: &[String],
     user_id: &str,
 ) -> Result<usize, String> {
-    let all_secrets = secrets
-        .list(user_id)
-        .await
-        .map_err(|e| format!("Failed to list secrets: {}", e))?;
-
     let prefix = format!("{}_", channel_name);
+    let reserved: HashSet<&str> = reserved_host_secret_names
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut injected = HashSet::new();
     let mut count = 0;
 
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
+    if let Some(secrets) = secrets {
+        let all_secrets = secrets
+            .list(user_id)
+            .await
+            .map_err(|e| format!("Failed to list secrets: {}", e))?;
+
+        for secret_meta in all_secrets {
+            if !secret_meta.name.starts_with(&prefix) || reserved.contains(secret_meta.name.as_str()) {
+                continue;
+            }
+
+            let decrypted = match secrets.get_decrypted(user_id, &secret_meta.name).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        secret = %secret_meta.name,
+                        error = %e,
+                        "Failed to decrypt secret for channel credential injection"
+                    );
+                    continue;
+                }
+            };
+
+            let placeholder = secret_meta.name.to_uppercase();
+            channel
+                .set_credential(&placeholder, decrypted.expose().to_string())
+                .await;
+            injected.insert(placeholder);
+            count += 1;
+        }
+    }
+
+    for secret_name in declared_secret_names {
+        if reserved.contains(secret_name.as_str()) {
             continue;
         }
 
-        let decrypted = match secrets.get_decrypted(user_id, &secret_meta.name).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
-                );
-                continue;
-            }
+        let placeholder = secret_name.to_ascii_uppercase();
+        if injected.contains(&placeholder) {
+            continue;
+        }
+
+        let Ok(value) = std::env::var(&placeholder) else {
+            continue;
         };
 
-        let placeholder = secret_meta.name.to_uppercase();
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
+        channel.set_credential(&placeholder, value).await;
+        injected.insert(placeholder);
         count += 1;
     }
 
