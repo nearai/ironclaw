@@ -103,7 +103,6 @@ impl Tunnel for CustomTunnel {
                     Err(_) => {}
                 }
             }
-            
             // Drain remaining stdout to prevent SIGPIPE/buffer stalls.
             tokio::spawn(async move { while let Ok(Some(_)) = reader.next_line().await {} });
         } else if let Some(stdout) = stdout {
