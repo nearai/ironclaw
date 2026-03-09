@@ -91,6 +91,64 @@ pub async fn connect_from_config(
     }
 }
 
+/// Create a secrets store from database and secrets configuration.
+///
+/// This is the shared factory for CLI commands and other call sites that need
+/// a `SecretsStore` without going through the full `AppBuilder`. Mirrors the
+/// pattern of [`connect_from_config`] but returns a secrets-specific store.
+pub async fn create_secrets_store(
+    config: &crate::config::DatabaseConfig,
+    crypto: Arc<crate::secrets::SecretsCrypto>,
+) -> Result<Arc<dyn crate::secrets::SecretsStore + Send + Sync>, DatabaseError> {
+    match config.backend {
+        #[cfg(feature = "libsql")]
+        crate::config::DatabaseBackend::LibSql => {
+            use secrecy::ExposeSecret as _;
+
+            let default_path = crate::config::default_libsql_path();
+            let db_path = config.libsql_path.as_deref().unwrap_or(&default_path);
+
+            let backend = if let Some(ref url) = config.libsql_url {
+                let token = config.libsql_auth_token.as_ref().ok_or_else(|| {
+                    DatabaseError::Pool(
+                        "LIBSQL_AUTH_TOKEN required when LIBSQL_URL is set".to_string(),
+                    )
+                })?;
+                libsql::LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+                    .await
+                    .map_err(|e| DatabaseError::Pool(e.to_string()))?
+            } else {
+                libsql::LibSqlBackend::new_local(db_path)
+                    .await
+                    .map_err(|e| DatabaseError::Pool(e.to_string()))?
+            };
+            backend.run_migrations().await?;
+
+            Ok(Arc::new(crate::secrets::LibSqlSecretsStore::new(
+                backend.shared_db(),
+                crypto,
+            )))
+        }
+        #[cfg(feature = "postgres")]
+        _ => {
+            let pg = postgres::PgBackend::new(config)
+                .await
+                .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+            pg.run_migrations().await?;
+
+            Ok(Arc::new(crate::secrets::PostgresSecretsStore::new(
+                pg.pool(),
+                crypto,
+            )))
+        }
+        #[cfg(not(feature = "postgres"))]
+        _ => Err(DatabaseError::Pool(
+            "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
+                .to_string(),
+        )),
+    }
+}
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
@@ -434,4 +492,44 @@ pub trait Database:
 {
     /// Run schema migrations for this backend.
     async fn run_migrations(&self) -> Result<(), DatabaseError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: create_secrets_store selects the correct backend at
+    /// runtime based on DatabaseConfig, not at compile time. Previously the
+    /// CLI duplicated this logic with compile-time #[cfg] gates that always
+    /// chose postgres when both features were enabled.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_create_secrets_store_libsql_backend() {
+        use secrecy::SecretString;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+
+        let config = crate::config::DatabaseConfig {
+            backend: crate::config::DatabaseBackend::LibSql,
+            libsql_path: Some(db_path),
+            libsql_url: None,
+            libsql_auth_token: None,
+            url: SecretString::from("unused://libsql".to_string()),
+            pool_size: 1,
+            ssl_mode: crate::config::SslMode::default(),
+        };
+
+        let master_key = SecretString::from("a]".repeat(16));
+        let crypto = Arc::new(crate::secrets::SecretsCrypto::new(master_key).unwrap());
+
+        let store = create_secrets_store(&config, crypto).await;
+        assert!(store.is_ok(), "create_secrets_store should succeed for libsql backend");
+
+        // Verify basic operation works
+        let store = store.unwrap();
+        let exists = store.exists("test_user", "nonexistent_secret").await;
+        assert!(exists.is_ok());
+        assert!(!exists.unwrap());
+    }
 }
