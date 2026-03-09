@@ -2607,6 +2607,7 @@ mod tests {
 
         let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets,
             tool_registry,
             None,
@@ -2656,6 +2657,7 @@ mod tests {
 
         let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets.clone(),
             tool_registry,
             None,
@@ -2761,6 +2763,7 @@ mod tests {
 
         let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets.clone(),
             tool_registry,
             None,

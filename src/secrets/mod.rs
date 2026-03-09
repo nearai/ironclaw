@@ -75,3 +75,35 @@ pub use types::{
 };
 
 pub use store::in_memory::InMemorySecretsStore;
+
+/// Create a secrets store from a master key and database handles.
+///
+/// Returns `None` if no matching backend handle is available.
+pub fn create_secrets_store(
+    crypto: std::sync::Arc<SecretsCrypto>,
+    handles: &crate::db::DatabaseHandles,
+) -> Option<std::sync::Arc<dyn SecretsStore + Send + Sync>> {
+    let store: Option<std::sync::Arc<dyn SecretsStore + Send + Sync>> = None;
+
+    #[cfg(feature = "libsql")]
+    let store = store.or_else(|| {
+        handles.libsql_db.as_ref().map(|db| {
+            std::sync::Arc::new(LibSqlSecretsStore::new(
+                std::sync::Arc::clone(db),
+                std::sync::Arc::clone(&crypto),
+            )) as std::sync::Arc<dyn SecretsStore + Send + Sync>
+        })
+    });
+
+    #[cfg(feature = "postgres")]
+    let store = store.or_else(|| {
+        handles.pg_pool.as_ref().map(|pool| {
+            std::sync::Arc::new(PostgresSecretsStore::new(
+                pool.clone(),
+                std::sync::Arc::clone(&crypto),
+            )) as std::sync::Arc<dyn SecretsStore + Send + Sync>
+        })
+    });
+
+    store
+}

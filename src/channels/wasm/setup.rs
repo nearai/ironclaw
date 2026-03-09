@@ -1,0 +1,311 @@
+//! WASM channel setup and credential injection.
+//!
+//! Encapsulates the logic for loading WASM channels, registering their
+//! webhook routes, and injecting credentials from the secrets store.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use crate::channels::wasm::{
+    RegisteredEndpoint, SharedWasmChannel, WasmChannel, WasmChannelLoader, WasmChannelRouter,
+    WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
+};
+use crate::config::Config;
+use crate::db::Database;
+use crate::extensions::ExtensionManager;
+use crate::pairing::PairingStore;
+use crate::secrets::SecretsStore;
+
+/// Result of WASM channel setup.
+pub struct WasmChannelSetup {
+    pub channels: Vec<(String, Box<dyn crate::channels::Channel>)>,
+    pub channel_names: Vec<String>,
+    pub webhook_routes: Option<axum::Router>,
+    /// Runtime objects needed for hot-activation via ExtensionManager.
+    pub wasm_channel_runtime: Arc<WasmChannelRuntime>,
+    pub pairing_store: Arc<PairingStore>,
+    pub wasm_channel_router: Arc<WasmChannelRouter>,
+}
+
+/// Load WASM channels and register their webhook routes.
+pub async fn setup_wasm_channels(
+    config: &Config,
+    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+    extension_manager: Option<&Arc<ExtensionManager>>,
+    database: Option<&Arc<dyn Database>>,
+) -> Option<WasmChannelSetup> {
+    let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
+        Ok(r) => Arc::new(r),
+        Err(e) => {
+            tracing::warn!("Failed to initialize WASM channel runtime: {}", e);
+            return None;
+        }
+    };
+
+    let pairing_store = Arc::new(PairingStore::new());
+    let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
+        database.map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore>);
+    let mut loader = WasmChannelLoader::new(
+        Arc::clone(&runtime),
+        Arc::clone(&pairing_store),
+        settings_store,
+    );
+    if let Some(secrets) = secrets_store {
+        loader = loader.with_secrets_store(Arc::clone(secrets));
+    }
+
+    let results = match loader
+        .load_from_dir(&config.channels.wasm_channels_dir)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to scan WASM channels directory: {}", e);
+            return None;
+        }
+    };
+
+    let wasm_router = Arc::new(WasmChannelRouter::new());
+    let mut channels: Vec<(String, Box<dyn crate::channels::Channel>)> = Vec::new();
+    let mut channel_names: Vec<String> = Vec::new();
+
+    for loaded in results.loaded {
+        let channel_name = loaded.name().to_string();
+        channel_names.push(channel_name.clone());
+        tracing::info!("Loaded WASM channel: {}", channel_name);
+
+        let secret_name = loaded.webhook_secret_name();
+        let sig_key_secret_name = loaded.signature_key_secret_name();
+        let hmac_secret_name = loaded.hmac_secret_name();
+
+        let webhook_secret = if let Some(secrets) = secrets_store {
+            secrets
+                .get_decrypted("default", &secret_name)
+                .await
+                .ok()
+                .map(|s| s.expose().to_string())
+        } else {
+            None
+        };
+
+        let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+
+        let webhook_path = format!("/webhook/{}", channel_name);
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: channel_name.clone(),
+            path: webhook_path,
+            methods: vec!["POST".to_string()],
+            require_secret: webhook_secret.is_some(),
+        }];
+
+        let channel_arc = Arc::new(loaded.channel);
+
+        {
+            let mut config_updates = std::collections::HashMap::new();
+
+            if let Some(ref tunnel_url) = config.tunnel.public_url {
+                config_updates.insert(
+                    "tunnel_url".to_string(),
+                    serde_json::Value::String(tunnel_url.clone()),
+                );
+            }
+
+            if let Some(ref secret) = webhook_secret {
+                config_updates.insert(
+                    "webhook_secret".to_string(),
+                    serde_json::Value::String(secret.clone()),
+                );
+            }
+
+            // Inject owner_id if configured for this channel.
+            if let Some(&owner_id) = config
+                .channels
+                .wasm_channel_owner_ids
+                .get(channel_name.as_str())
+            {
+                config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
+            }
+
+            if !config_updates.is_empty() {
+                channel_arc.update_config(config_updates).await;
+                tracing::info!(
+                    channel = %channel_name,
+                    has_tunnel = config.tunnel.public_url.is_some(),
+                    has_webhook_secret = webhook_secret.is_some(),
+                    "Injected runtime config into channel"
+                );
+            }
+        }
+
+        tracing::info!(
+            channel = %channel_name,
+            has_webhook_secret = webhook_secret.is_some(),
+            secret_header = ?secret_header,
+            "Registering channel with router"
+        );
+
+        wasm_router
+            .register(
+                Arc::clone(&channel_arc),
+                endpoints,
+                webhook_secret.clone(),
+                secret_header,
+            )
+            .await;
+
+        // Register Ed25519 signature key if declared in capabilities
+        if let Some(ref sig_key_name) = sig_key_secret_name
+            && let Some(secrets) = secrets_store
+            && let Ok(key_secret) = secrets.get_decrypted("default", sig_key_name).await
+        {
+            match wasm_router
+                .register_signature_key(&channel_name, key_secret.expose())
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(channel = %channel_name, "Registered Ed25519 signature key")
+                }
+                Err(e) => {
+                    tracing::error!(channel = %channel_name, error = %e, "Invalid signature key in secrets store")
+                }
+            }
+        }
+
+        // Register HMAC signing secret if declared in capabilities
+        if let Some(ref hmac_secret_name) = hmac_secret_name
+            && let Some(secrets) = secrets_store
+            && let Ok(secret) = secrets.get_decrypted("default", hmac_secret_name).await
+        {
+            wasm_router
+                .register_hmac_secret(&channel_name, secret.expose())
+                .await;
+            tracing::info!(channel = %channel_name, "Registered HMAC signing secret");
+        }
+
+        if let Some(secrets) = secrets_store {
+            match inject_channel_credentials(&channel_arc, secrets.as_ref(), &channel_name).await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!(
+                            channel = %channel_name,
+                            credentials_injected = count,
+                            "Channel credentials injected"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        channel = %channel_name,
+                        error = %e,
+                        "Failed to inject channel credentials"
+                    );
+                }
+            }
+        }
+
+        channels.push((channel_name, Box::new(SharedWasmChannel::new(channel_arc))));
+    }
+
+    for (path, err) in &results.errors {
+        tracing::warn!("Failed to load WASM channel {}: {}", path.display(), err);
+    }
+
+    // Always create webhook routes (even with no channels loaded) so that
+    // channels hot-added at runtime can receive webhooks without a restart.
+    let webhook_routes = {
+        Some(create_wasm_channel_router(
+            Arc::clone(&wasm_router),
+            extension_manager.map(Arc::clone),
+        ))
+    };
+
+    Some(WasmChannelSetup {
+        channels,
+        channel_names,
+        webhook_routes,
+        wasm_channel_runtime: runtime,
+        pairing_store,
+        wasm_channel_router: wasm_router,
+    })
+}
+
+/// Inject credentials for a channel based on naming convention.
+///
+/// Looks for secrets matching the pattern `{channel_name}_*` and injects them
+/// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
+///
+/// Falls back to environment variables with the uppercase name if not found
+/// in the secrets store (e.g., `TELEGRAM_BOT_TOKEN`).
+pub async fn inject_channel_credentials(
+    channel: &Arc<WasmChannel>,
+    secrets: &dyn SecretsStore,
+    channel_name: &str,
+) -> anyhow::Result<usize> {
+    let all_secrets = secrets
+        .list("default")
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
+
+    let prefix = format!("{}_", channel_name);
+    let mut count = 0;
+    let mut injected_placeholders = HashSet::new();
+
+    for secret_meta in all_secrets {
+        if !secret_meta.name.starts_with(&prefix) {
+            continue;
+        }
+
+        let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    secret = %secret_meta.name,
+                    error = %e,
+                    "Failed to decrypt secret for channel credential injection"
+                );
+                continue;
+            }
+        };
+
+        let placeholder = secret_meta.name.to_uppercase();
+
+        tracing::debug!(
+            channel = %channel_name,
+            secret = %secret_meta.name,
+            placeholder = %placeholder,
+            "Injecting credential"
+        );
+
+        channel
+            .set_credential(&placeholder, decrypted.expose().to_string())
+            .await;
+        injected_placeholders.insert(placeholder);
+        count += 1;
+    }
+
+    // Fall back to environment variables for required secrets not found in the store.
+    // This allows channels to work when configured via env vars (e.g., TELEGRAM_BOT_TOKEN)
+    // without requiring the setup wizard to have run.
+    let caps = channel.capabilities();
+    if let Some(ref http_cap) = caps.tool_capabilities.http {
+        for cred_mapping in http_cap.credentials.values() {
+            let placeholder = cred_mapping.secret_name.to_uppercase();
+            if injected_placeholders.contains(&placeholder) {
+                continue;
+            }
+            if let Ok(env_value) = std::env::var(&placeholder)
+                && !env_value.is_empty()
+            {
+                tracing::debug!(
+                    channel = %channel_name,
+                    placeholder = %placeholder,
+                    "Injecting credential from environment variable"
+                );
+                channel.set_credential(&placeholder, env_value).await;
+                count += 1;
+            }
+        }
+    }
+
+    Ok(count)
+}

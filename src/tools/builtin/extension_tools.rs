@@ -749,6 +749,7 @@ mod tests {
 
         Arc::new(ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,

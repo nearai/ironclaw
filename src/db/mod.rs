@@ -91,6 +91,73 @@ pub async fn connect_from_config(
     }
 }
 
+/// Backend-specific handles retained after database connection.
+///
+/// These are needed by satellite stores (e.g., `SecretsStore`) that require
+/// a backend-specific handle rather than the generic `Arc<dyn Database>`.
+#[derive(Default)]
+pub struct DatabaseHandles {
+    #[cfg(feature = "postgres")]
+    pub pg_pool: Option<deadpool_postgres::Pool>,
+    #[cfg(feature = "libsql")]
+    pub libsql_db: Option<Arc<::libsql::Database>>,
+}
+
+/// Connect to the database, run migrations, and return both the generic
+/// `Database` trait object and the backend-specific handles.
+pub async fn connect_with_handles(
+    config: &crate::config::DatabaseConfig,
+) -> Result<(Arc<dyn Database>, DatabaseHandles), DatabaseError> {
+    let mut handles = DatabaseHandles::default();
+
+    match config.backend {
+        #[cfg(feature = "libsql")]
+        crate::config::DatabaseBackend::LibSql => {
+            use secrecy::ExposeSecret as _;
+
+            let default_path = crate::config::default_libsql_path();
+            let db_path = config.libsql_path.as_deref().unwrap_or(&default_path);
+
+            let backend = if let Some(ref url) = config.libsql_url {
+                let token = config.libsql_auth_token.as_ref().ok_or_else(|| {
+                    DatabaseError::Pool(
+                        "LIBSQL_AUTH_TOKEN required when LIBSQL_URL is set".to_string(),
+                    )
+                })?;
+                libsql::LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+                    .await
+                    .map_err(|e| DatabaseError::Pool(e.to_string()))?
+            } else {
+                libsql::LibSqlBackend::new_local(db_path)
+                    .await
+                    .map_err(|e| DatabaseError::Pool(e.to_string()))?
+            };
+            backend.run_migrations().await?;
+            tracing::info!("libSQL database connected and migrations applied");
+
+            handles.libsql_db = Some(backend.shared_db());
+
+            Ok((Arc::new(backend) as Arc<dyn Database>, handles))
+        }
+        #[cfg(feature = "postgres")]
+        _ => {
+            let pg = postgres::PgBackend::new(config)
+                .await
+                .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+            pg.run_migrations().await?;
+            tracing::info!("PostgreSQL database connected and migrations applied");
+
+            handles.pg_pool = Some(pg.pool());
+
+            Ok((Arc::new(pg) as Arc<dyn Database>, handles))
+        }
+        #[cfg(not(feature = "postgres"))]
+        _ => Err(DatabaseError::Pool(
+            "No database backend available. Enable 'postgres' or 'libsql' feature.".to_string(),
+        )),
+    }
+}
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait

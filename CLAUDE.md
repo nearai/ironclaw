@@ -111,6 +111,7 @@ src/
 │       ├── capabilities.rs # Channel-specific capabilities (HTTP endpoint, emit rate)
 │       ├── error.rs    # WASM channel error types
 │       ├── runtime.rs  # WASM channel execution runtime
+│       ├── setup.rs    # WasmChannelSetup, setup_wasm_channels(), inject_channel_credentials()
 │       └── wrapper.rs  # Channel trait wrapper for WASM modules
 │
 ├── cli/                # CLI subcommands (clap)
@@ -142,7 +143,7 @@ src/
 │   └── bundled.rs      # Built-in hooks: rule-based filters, webhook forwarders, HookBundleConfig
 │
 ├── tunnel/             # Tunnel abstraction for public internet exposure
-│   ├── mod.rs          # Tunnel trait, TunnelProviderConfig, create_tunnel() factory
+│   ├── mod.rs          # Tunnel trait, TunnelProviderConfig, create_tunnel(), start_managed_tunnel()
 │   ├── cloudflare.rs   # CloudflareTunnel (cloudflared binary)
 │   ├── ngrok.rs        # NgrokTunnel
 │   ├── tailscale.rs    # TailscaleTunnel (serve/funnel modes)
@@ -205,6 +206,7 @@ src/
 │   │   └── validation.rs # WASM validation
 │   ├── mcp/            # Model Context Protocol
 │   │   ├── client.rs   # MCP client over HTTP
+│   │   ├── factory.rs  # create_client_from_config() — transport dispatch factory
 │   │   ├── protocol.rs # JSON-RPC types
 │   │   └── session.rs  # MCP session management (Mcp-Session-Id header, per-server state)
 │   └── wasm/           # Full WASM sandbox (wasmtime)
@@ -293,6 +295,8 @@ tests/
 ### Architecture
 
 When designing new features or systems, always prefer generic/extensible architectures over hardcoding specific integrations. Ask clarifying questions about the desired abstraction level before implementing.
+
+**Module-owned initialization:** Module-specific initialization logic (database connection, transport creation, channel setup) must live in the owning module as a public factory function — not in `main.rs` or `app.rs`. These entry-point files orchestrate calls to module factories. Feature-flag branching (`#[cfg(feature = ...)]`) must be confined to the module that owns the abstraction.
 
 ### Error Handling
 - Use `thiserror` for error types in `error.rs`

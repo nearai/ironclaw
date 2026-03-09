@@ -31,3 +31,31 @@ pub use prompts::{
 };
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 pub use wizard::{SetupConfig, SetupWizard};
+
+/// Check if onboarding is needed and return the reason.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub fn check_onboard_needed() -> Option<&'static str> {
+    let has_db = std::env::var("DATABASE_URL").is_ok()
+        || std::env::var("LIBSQL_PATH").is_ok()
+        || crate::config::default_libsql_path().exists();
+
+    if !has_db {
+        return Some("Database not configured");
+    }
+
+    if std::env::var("ONBOARD_COMPLETED")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    if std::env::var("NEARAI_API_KEY").is_err() {
+        let session_path = crate::llm::session::default_session_path();
+        if !session_path.exists() {
+            return Some("First run");
+        }
+    }
+
+    None
+}

@@ -37,3 +37,121 @@ pub use auth::{CredentialGrant, TokenStore};
 pub use job_manager::{
     CompletionResult, ContainerHandle, ContainerJobConfig, ContainerJobManager, JobMode,
 };
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+
+use tokio::sync::{Mutex, broadcast};
+use uuid::Uuid;
+
+use crate::channels::web::types::SseEvent;
+use crate::db::Database;
+use crate::llm::LlmProvider;
+use crate::secrets::SecretsStore;
+
+/// Result of orchestrator setup, containing all handles needed by the agent.
+pub struct OrchestratorSetup {
+    pub container_job_manager: Option<Arc<ContainerJobManager>>,
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>>,
+    pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<api::PendingPrompt>>>>,
+    pub docker_status: crate::sandbox::DockerStatus,
+}
+
+/// Detect Docker availability, create the container job manager, and start
+/// the orchestrator internal API in the background.
+pub async fn setup_orchestrator(
+    config: &crate::config::Config,
+    llm: &Arc<dyn LlmProvider>,
+    db: Option<&Arc<dyn Database>>,
+    secrets_store: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+) -> OrchestratorSetup {
+    let prompt_queue = Arc::new(Mutex::new(
+        HashMap::<Uuid, VecDeque<api::PendingPrompt>>::new(),
+    ));
+
+    let docker_status = if config.sandbox.enabled {
+        let detection = crate::sandbox::check_docker().await;
+        match detection.status {
+            crate::sandbox::DockerStatus::Available => {
+                tracing::info!("Docker is available");
+            }
+            crate::sandbox::DockerStatus::NotInstalled => {
+                tracing::warn!(
+                    "Docker is not installed -- sandbox disabled for this session. {}",
+                    detection.platform.install_hint()
+                );
+            }
+            crate::sandbox::DockerStatus::NotRunning => {
+                tracing::warn!(
+                    "Docker is installed but not running -- sandbox disabled for this session. {}",
+                    detection.platform.start_hint()
+                );
+            }
+            crate::sandbox::DockerStatus::Disabled => {}
+        }
+        detection.status
+    } else {
+        crate::sandbox::DockerStatus::Disabled
+    };
+
+    let job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>> =
+        if config.sandbox.enabled && docker_status.is_ok() {
+            let (tx, _) = broadcast::channel(256);
+            Some(tx)
+        } else {
+            None
+        };
+
+    let container_job_manager: Option<Arc<ContainerJobManager>> =
+        if config.sandbox.enabled && docker_status.is_ok() {
+            let token_store = TokenStore::new();
+            let job_config = ContainerJobConfig {
+                image: config.sandbox.image.clone(),
+                memory_limit_mb: config.sandbox.memory_limit_mb,
+                cpu_shares: config.sandbox.cpu_shares,
+                orchestrator_port: 50051,
+                claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+                claude_code_oauth_token: crate::config::ClaudeCodeConfig::extract_oauth_token(),
+                claude_code_model: config.claude_code.model.clone(),
+                claude_code_max_turns: config.claude_code.max_turns,
+                claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
+                claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            };
+            let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+
+            let orchestrator_state = api::OrchestratorState {
+                llm: Arc::clone(llm),
+                job_manager: Arc::clone(&jm),
+                token_store,
+                job_event_tx: job_event_tx.clone(),
+                prompt_queue: Arc::clone(&prompt_queue),
+                store: db.cloned(),
+                secrets_store: secrets_store.cloned(),
+                user_id: "default".to_string(),
+            };
+
+            tokio::spawn(async move {
+                if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
+                    tracing::error!("Orchestrator API failed: {}", e);
+                }
+            });
+
+            if config.claude_code.enabled {
+                tracing::info!(
+                    "Claude Code sandbox mode available (model: {}, max_turns: {})",
+                    config.claude_code.model,
+                    config.claude_code.max_turns
+                );
+            }
+            Some(jm)
+        } else {
+            None
+        };
+
+    OrchestratorSetup {
+        container_job_manager,
+        job_event_tx,
+        prompt_queue,
+        docker_status,
+    }
+}
