@@ -382,7 +382,7 @@ async fn job_event_handler(
                             rationale: item
                                 .get("rationale")
                                 .and_then(|v| v.as_str())
-                                .map(normalize_tool_reasoning)
+                                .map(|rationale| normalize_tool_reasoning(rationale).into_owned())
                                 .unwrap_or_else(|| DEFAULT_TOOL_RATIONALE.to_string()),
                             outcome: item
                                 .get("outcome")

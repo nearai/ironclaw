@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::LlmError;
 
 use crate::llm::{
-    ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
-    normalize_tool_reasoning,
+    ChatMessage, CompletionRequest, DEFAULT_TOOL_RATIONALE, LlmProvider, ToolCall,
+    ToolCompletionRequest, ToolDefinition, normalize_tool_reasoning,
 };
 use crate::safety::SafetyLayer;
 
@@ -369,15 +369,30 @@ impl Reasoning {
 
         let response = self.llm.complete_with_tools(request).await?;
 
+        let reasoning_narrative = response.content.clone();
         let selections: Vec<ToolSelection> = response
             .tool_calls
             .into_iter()
-            .map(|tool_call| ToolSelection {
-                tool_name: tool_call.name,
-                parameters: tool_call.arguments,
-                reasoning: normalize_tool_reasoning(&tool_call.reasoning),
-                alternatives: vec![],
-                tool_call_id: tool_call.id,
+            .map(|tool_call| {
+                let normalized_reasoning = normalize_tool_reasoning(&tool_call.reasoning);
+                let reasoning = if normalized_reasoning == DEFAULT_TOOL_RATIONALE {
+                    reasoning_narrative
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(std::borrow::ToOwned::to_owned)
+                        .unwrap_or_else(|| normalized_reasoning.into_owned())
+                } else {
+                    normalized_reasoning.into_owned()
+                };
+
+                ToolSelection {
+                    tool_name: tool_call.name,
+                    parameters: tool_call.arguments,
+                    reasoning,
+                    alternatives: vec![],
+                    tool_call_id: tool_call.id,
+                }
             })
             .collect();
 
@@ -496,7 +511,7 @@ Respond in JSON format:
                         id: tool_call.id,
                         name: tool_call.name,
                         arguments: tool_call.arguments,
-                        reasoning: normalize_tool_reasoning(&tool_call.reasoning),
+                        reasoning: normalize_tool_reasoning(&tool_call.reasoning).into_owned(),
                     })
                     .collect();
                 return Ok(RespondOutput {
@@ -1124,7 +1139,7 @@ fn recover_tool_calls_from_content(
                     id: format!("recovered_{}", calls.len()),
                     name: name.to_string(),
                     arguments,
-                    reasoning: normalize_tool_reasoning(""),
+                    reasoning: normalize_tool_reasoning("").into_owned(),
                 });
                 continue;
             }
@@ -1136,7 +1151,7 @@ fn recover_tool_calls_from_content(
                     id: format!("recovered_{}", calls.len()),
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
-                    reasoning: normalize_tool_reasoning(""),
+                    reasoning: normalize_tool_reasoning("").into_owned(),
                 });
             }
         }
@@ -1878,10 +1893,42 @@ That's my plan."#;
     }
 
     #[tokio::test]
-    async fn test_toolcall_reasoning_falls_back_when_empty() {
+    async fn test_toolcall_reasoning_falls_back_to_content_when_tool_reasoning_empty() {
         let provider = Arc::new(StaticToolCompletionProvider {
             tool_response: ToolCompletionResponse {
-                content: Some("planning".to_string()),
+                content: Some("  planning  ".to_string()),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "memory_search".to_string(),
+                    arguments: serde_json::json!({"query": "reasoning"}),
+                    reasoning: "   ".to_string(),
+                }],
+                input_tokens: 12,
+                output_tokens: 7,
+                finish_reason: FinishReason::ToolUse,
+            },
+        });
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let reasoning = Reasoning::new(provider, safety);
+
+        let context = ReasoningContext::new().with_tools(make_tools(&["memory_search"]));
+        let selections = reasoning
+            .select_tools(&context)
+            .await
+            .expect("select tools");
+
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].reasoning, "planning");
+    }
+
+    #[tokio::test]
+    async fn test_toolcall_reasoning_falls_back_to_default_when_both_empty() {
+        let provider = Arc::new(StaticToolCompletionProvider {
+            tool_response: ToolCompletionResponse {
+                content: Some("   ".to_string()),
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_string(),
                     name: "memory_search".to_string(),

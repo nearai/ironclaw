@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 use crate::error::LlmError;
 
@@ -177,12 +178,12 @@ pub struct ToolDefinition {
 pub const DEFAULT_TOOL_RATIONALE: &str = "Tool selected to satisfy the current subtask.";
 
 /// Normalize provider-supplied tool rationale to a non-empty string.
-pub fn normalize_tool_reasoning(reasoning: &str) -> String {
+pub fn normalize_tool_reasoning(reasoning: &str) -> Cow<'_, str> {
     let trimmed = reasoning.trim();
     if trimmed.is_empty() {
-        DEFAULT_TOOL_RATIONALE.to_string()
+        Cow::Borrowed(DEFAULT_TOOL_RATIONALE)
     } else {
-        trimmed.to_string()
+        Cow::Borrowed(trimmed)
     }
 }
 
@@ -406,7 +407,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
-            reasoning: normalize_tool_reasoning(""),
+            reasoning: normalize_tool_reasoning("").into_owned(),
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -450,7 +451,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
-            reasoning: normalize_tool_reasoning(""),
+            reasoning: normalize_tool_reasoning("").into_owned(),
         };
         let mut messages = vec![
             ChatMessage::user("test"),
