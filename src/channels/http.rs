@@ -243,9 +243,7 @@ async fn webhook_handler(
             Json(WebhookResponse {
                 message_id: Uuid::nil(),
                 status: "error".to_string(),
-                response: Some(
-                    "Content-Type must be application/json".to_string(),
-                ),
+                response: Some("Content-Type must be application/json".to_string()),
             }),
         )
             .into_response();
@@ -265,9 +263,7 @@ async fn webhook_handler(
                                 Json(WebhookResponse {
                                     message_id: Uuid::nil(),
                                     status: "error".to_string(),
-                                    response: Some(
-                                        "Invalid webhook signature".to_string(),
-                                    ),
+                                    response: Some("Invalid webhook signature".to_string()),
                                 }),
                             )
                                 .into_response();
@@ -280,9 +276,7 @@ async fn webhook_handler(
                             Json(WebhookResponse {
                                 message_id: Uuid::nil(),
                                 status: "error".to_string(),
-                                response: Some(
-                                    "Invalid signature header encoding".to_string(),
-                                ),
+                                response: Some("Invalid signature header encoding".to_string()),
                             }),
                         )
                             .into_response();
@@ -317,9 +311,7 @@ async fn webhook_handler(
 
                 match &req.secret {
                     Some(provided)
-                        if bool::from(
-                            provided.as_bytes().ct_eq(expected_secret.as_bytes()),
-                        ) =>
+                        if bool::from(provided.as_bytes().ct_eq(expected_secret.as_bytes())) =>
                     {
                         tracing::warn!(
                             "Webhook authenticated via deprecated 'secret' field in request body. \
@@ -335,9 +327,7 @@ async fn webhook_handler(
                             Json(WebhookResponse {
                                 message_id: Uuid::nil(),
                                 status: "error".to_string(),
-                                response: Some(
-                                    "Invalid webhook secret".to_string(),
-                                ),
+                                response: Some("Invalid webhook secret".to_string()),
                             }),
                         )
                             .into_response();
