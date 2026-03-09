@@ -188,7 +188,39 @@ impl McpServerConfig {
             }
         }
 
+        // Validate custom header names and values (prevent CRLF injection)
+        for (name, value) in &self.headers {
+            if name.is_empty() {
+                return Err(ConfigError::InvalidConfig {
+                    reason: "Header name cannot be empty".to_string(),
+                });
+            }
+            if name.bytes().any(|b| b == b'\r' || b == b'\n') {
+                return Err(ConfigError::InvalidConfig {
+                    reason: format!("Header name '{}' contains invalid CRLF characters", name),
+                });
+            }
+            if value.bytes().any(|b| b == b'\r' || b == b'\n') {
+                return Err(ConfigError::InvalidConfig {
+                    reason: format!(
+                        "Header value for '{}' contains invalid CRLF characters",
+                        name
+                    ),
+                });
+            }
+        }
+
         Ok(())
+    }
+
+    /// Check if any custom header sets an Authorization value.
+    ///
+    /// Used to skip OAuth token injection when the user has explicitly
+    /// configured an Authorization header (e.g. for API-key-based servers).
+    pub fn has_custom_auth_header(&self) -> bool {
+        self.headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"))
     }
 
     /// Check if this server requires authentication.
@@ -828,6 +860,64 @@ mod tests {
 
         config.oauth = Some(OAuthConfig::new("client-123"));
         assert!(!config.requires_auth());
+    }
+
+    #[test]
+    fn test_header_crlf_injection_rejected() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Good".to_string(), "safe".to_string());
+        headers.insert("X-Bad\r\nInjected: true".to_string(), "value".to_string());
+
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("CRLF"), "Expected CRLF error, got: {err}");
+    }
+
+    #[test]
+    fn test_header_value_crlf_injection_rejected() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "X-Header".to_string(),
+            "value\r\nInjected: true".to_string(),
+        );
+
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("CRLF"), "Expected CRLF error, got: {err}");
+    }
+
+    #[test]
+    fn test_header_empty_name_rejected() {
+        let mut headers = HashMap::new();
+        headers.insert(String::new(), "value".to_string());
+
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("empty"),
+            "Expected empty name error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_has_custom_auth_header_case_insensitive() {
+        let headers = HashMap::from([("authorization".to_string(), "Bearer token".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.has_custom_auth_header());
+
+        let headers = HashMap::from([("AUTHORIZATION".to_string(), "Bearer token".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.has_custom_auth_header());
+
+        let headers = HashMap::from([("X-Api-Key".to_string(), "key".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(!config.has_custom_auth_header());
     }
 
     #[test]
