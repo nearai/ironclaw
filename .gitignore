@@ -23,4 +23,5 @@ bench-results/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+# Traces
 trace_*.json

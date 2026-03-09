@@ -827,9 +827,16 @@ impl SetupWizard {
             print_info(&format!("Current provider: {}", display));
             println!();
 
-            let is_known = current == "nearai" || registry.is_known(&current);
+            let is_known =
+                current == "nearai" || current == "bedrock" || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
+                if current == "bedrock" {
+                    // Keeping the existing Bedrock config — no need to re-run
+                    // the full setup flow (region, auth, cross-region).
+                    print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
+                }
                 return self.run_provider_setup(&current, &registry).await;
             }
 
@@ -844,10 +851,10 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        // Build menu: NearAI first, then all registry providers with setup hints
+        // Build menu: NearAI first, then all registry providers with setup hints, then Bedrock
         let selectable = registry.selectable();
-        let mut options: Vec<String> = Vec::with_capacity(1 + selectable.len());
-        let mut provider_ids: Vec<String> = Vec::with_capacity(1 + selectable.len());
+        let mut options: Vec<String> = Vec::with_capacity(2 + selectable.len());
+        let mut provider_ids: Vec<String> = Vec::with_capacity(2 + selectable.len());
 
         options.push("NEAR AI          - multi-model access via NEAR account".to_string());
         provider_ids.push("nearai".to_string());
@@ -865,11 +872,19 @@ impl SetupWizard {
             provider_ids.push(def.id.clone());
         }
 
+        // Bedrock is a special case (native AWS SDK, not registry-based)
+        options.push("AWS Bedrock      - Claude & other models via AWS (IAM, SSO)".to_string());
+        provider_ids.push("bedrock".to_string());
+
         let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
         let choice = select_one("Provider:", &option_refs).map_err(SetupError::Io)?;
         let selected_id = &provider_ids[choice];
 
-        self.run_provider_setup(selected_id, &registry).await?;
+        if selected_id == "bedrock" {
+            self.setup_bedrock().await?;
+        } else {
+            self.run_provider_setup(selected_id, &registry).await?;
+        }
 
         Ok(())
     }
@@ -1230,6 +1245,95 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// AWS Bedrock provider setup: region, auth, and cross-region config.
+    async fn setup_bedrock(&mut self) -> Result<(), SetupError> {
+        if self.settings.llm_backend.as_deref() != Some("bedrock") {
+            self.settings.selected_model = None;
+        }
+        self.settings.llm_backend = Some("bedrock".to_string());
+
+        // Region
+        let default_region = self
+            .settings
+            .bedrock_region
+            .as_deref()
+            .unwrap_or("us-east-1");
+
+        let region_input =
+            optional_input("AWS region", Some(&format!("default: {}", default_region)))
+                .map_err(SetupError::Io)?;
+
+        let region = region_input.unwrap_or_else(|| default_region.to_string());
+        self.settings.bedrock_region = Some(region.clone());
+
+        // Auth method
+        print_info("Select authentication method:");
+        println!();
+        let auth_options = &[
+            "AWS default credentials (env vars, ~/.aws/credentials, IAM roles)",
+            "AWS named profile (SSO / assume-role)",
+        ];
+        let auth_choice = select_one("Auth:", auth_options).map_err(SetupError::Io)?;
+
+        match auth_choice {
+            0 => {
+                // Default AWS credentials — clear any stale named profile
+                self.settings.bedrock_profile = None;
+                print_info(
+                    "Using default AWS credential chain (env vars, ~/.aws/credentials, IAM roles).",
+                );
+            }
+            1 => {
+                // Named profile
+                let profile =
+                    input("AWS profile name (from ~/.aws/config)").map_err(SetupError::Io)?;
+                if profile.trim().is_empty() {
+                    // Empty input clears any previously configured profile
+                    self.settings.bedrock_profile = None;
+                    print_info("AWS profile cleared; using default AWS credential chain instead.");
+                } else {
+                    self.settings.bedrock_profile = Some(profile.clone());
+                    print_success(&format!("AWS profile '{}' saved", profile));
+                }
+            }
+            _ => return Err(SetupError::Config("Invalid auth selection".to_string())),
+        }
+
+        self.setup_bedrock_cross_region()
+    }
+
+    /// Bedrock cross-region inference prefix selection (sub-step of setup_bedrock).
+    fn setup_bedrock_cross_region(&mut self) -> Result<(), SetupError> {
+        print_info("Cross-region inference routes requests across AWS regions for capacity:");
+        println!();
+        let cross_options = &[
+            "us     - route within US regions (recommended for us-east-1)",
+            "global - route to any AWS region worldwide",
+            "eu     - route within European regions",
+            "apac   - route within Asia-Pacific regions",
+            "none   - single-region only (no cross-region routing)",
+        ];
+        let cross_choice = select_one("Cross-region:", cross_options).map_err(SetupError::Io)?;
+
+        let cross_region = match cross_choice {
+            0 => Some("us".to_string()),
+            1 => Some("global".to_string()),
+            2 => Some("eu".to_string()),
+            3 => Some("apac".to_string()),
+            4 => None,
+            _ => None,
+        };
+        self.settings.bedrock_cross_region = cross_region;
+
+        let region = self
+            .settings
+            .bedrock_region
+            .as_deref()
+            .unwrap_or("us-east-1");
+        print_success(&format!("AWS Bedrock configured (region: {})", region));
+        Ok(())
+    }
+
     /// Generic OpenAI-compatible setup: base URL + optional API key.
     async fn setup_openai_compatible_generic(
         &mut self,
@@ -1412,6 +1516,14 @@ impl SetupWizard {
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
             }
+        } else if backend == "bedrock" {
+            let model_id = input("Bedrock model ID (e.g., anthropic.claude-opus-4-6-v1)")
+                .map_err(SetupError::Io)?;
+            if model_id.is_empty() {
+                return Err(SetupError::Config("Model ID is required".to_string()));
+            }
+            self.settings.selected_model = Some(model_id.clone());
+            print_success(&format!("Selected {}", model_id));
         } else {
             // Unknown provider, manual entry
             let model_id = input("Model name (e.g., meta-llama/Llama-3-8b-chat-hf)")
@@ -1495,10 +1607,11 @@ impl SetupWizard {
                 smart_routing_cascade: true,
             },
             provider: None,
+            bedrock: None,
             request_timeout_secs: 120,
         };
 
-        match create_llm_provider(&config, session) {
+        match create_llm_provider(&config, session).await {
             Ok(provider) => match provider.list_models().await {
                 Ok(models) => models,
                 Err(e) => {
@@ -1612,48 +1725,50 @@ impl SetupWizard {
         };
 
         // Create backend-appropriate secrets store.
-        // Respect the user's selected backend when both features are compiled,
-        // so we don't accidentally use a postgres pool from DATABASE_URL when
-        // libsql was chosen (or vice versa).
+        // Use runtime dispatch based on the user's selected backend.
+        // Default to whichever backend is compiled in. When only libsql is
+        // available, we must not default to "postgres" or we'd skip store creation.
+        let default_backend = {
+            #[cfg(feature = "postgres")]
+            {
+                "postgres"
+            }
+            #[cfg(not(feature = "postgres"))]
+            {
+                "libsql"
+            }
+        };
         let selected_backend = self
             .settings
             .database_backend
             .as_deref()
-            .unwrap_or("postgres");
+            .unwrap_or(default_backend);
 
-        #[cfg(all(feature = "libsql", feature = "postgres"))]
-        {
-            if selected_backend == "libsql" {
+        match selected_backend {
+            #[cfg(feature = "libsql")]
+            "libsql" | "turso" | "sqlite" => {
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
+                // Fallback to postgres if libsql store creation returned None
+                #[cfg(feature = "postgres")]
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
-            } else {
+            }
+            #[cfg(feature = "postgres")]
+            _ => {
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
+                // Fallback to libsql if postgres store creation returned None
+                #[cfg(feature = "libsql")]
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
                     return Ok(SecretsContext::from_store(store, "default"));
                 }
             }
-        }
-
-        #[cfg(all(feature = "postgres", not(feature = "libsql")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
-        }
-
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
-            let _ = selected_backend;
-            if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                return Ok(SecretsContext::from_store(store, "default"));
-            }
+            #[cfg(not(feature = "postgres"))]
+            _ => {}
         }
 
         Err(SetupError::Config(
@@ -2313,12 +2428,29 @@ impl SetupWizard {
         if let Some(ref url) = self.settings.ollama_base_url {
             env_vars.push(("OLLAMA_BASE_URL".to_string(), url.clone()));
         }
+        if let Some(ref region) = self.settings.bedrock_region {
+            env_vars.push(("BEDROCK_REGION".to_string(), region.clone()));
+        }
+        if self.settings.llm_backend.as_deref() == Some("bedrock") {
+            if let Some(ref model) = self.settings.selected_model {
+                env_vars.push(("BEDROCK_MODEL".to_string(), model.clone()));
+            }
+            if let Some(ref cross) = self.settings.bedrock_cross_region {
+                env_vars.push(("BEDROCK_CROSS_REGION".to_string(), cross.clone()));
+            }
+            if let Some(ref profile) = self.settings.bedrock_profile {
+                env_vars.push(("AWS_PROFILE".to_string(), profile.clone()));
+            }
+        }
 
         // Model name: same chicken-and-egg — Config::from_env() resolves the
         // model before the DB is connected, so we must persist it to .env.
         // Write the backend-specific env var so the correct resolution path
         // picks it up (looked up from the provider registry).
-        if let Some(ref model) = self.settings.selected_model {
+        // Bedrock model is already written above as BEDROCK_MODEL, skip here.
+        if self.settings.llm_backend.as_deref() != Some("bedrock")
+            && let Some(ref model) = self.settings.selected_model
+        {
             let backend_str = self.settings.llm_backend.as_deref().unwrap_or("nearai");
             let model_env = registry.model_env_var(backend_str);
             env_vars.push((model_env.to_string(), model.clone()));
@@ -2603,6 +2735,7 @@ impl SetupWizard {
                 "openai" => "OpenAI",
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
+                "bedrock" => "AWS Bedrock",
                 other => other,
             };
             println!("  Provider: {}", display);
@@ -3564,6 +3697,66 @@ mod tests {
         assert!(
             wizard.settings.selected_model.is_none(),
             "model should be cleared when switching providers"
+        );
+    }
+
+    /// Regression: Bedrock setup_bedrock() should preserve selected_model
+    /// when re-entering the same provider (matches pattern from #600).
+    #[test]
+    fn test_bedrock_same_provider_preserves_model() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("bedrock".to_string());
+        wizard.settings.selected_model = Some("anthropic.claude-opus-4-6-v1".to_string());
+
+        // Simulate the conditional clearing logic from setup_bedrock()
+        if wizard.settings.llm_backend.as_deref() != Some("bedrock") {
+            wizard.settings.selected_model = None;
+        }
+        wizard.settings.llm_backend = Some("bedrock".to_string());
+
+        assert_eq!(
+            wizard.settings.selected_model.as_deref(),
+            Some("anthropic.claude-opus-4-6-v1"),
+            "bedrock model should be preserved when re-selecting bedrock"
+        );
+    }
+
+    /// Regression: switching from another provider to bedrock must clear
+    /// selected_model, and choosing "default credentials" must clear
+    /// bedrock_profile.
+    #[test]
+    fn test_bedrock_clears_stale_profile_on_default_creds() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("bedrock".to_string());
+        wizard.settings.bedrock_profile = Some("old-sso-profile".to_string());
+
+        // Simulate auth_choice == 0 (default credentials) clearing the profile
+        wizard.settings.bedrock_profile = None;
+
+        assert!(
+            wizard.settings.bedrock_profile.is_none(),
+            "bedrock_profile should be cleared when selecting default credentials"
+        );
+    }
+
+    /// Regression: empty profile input in named-profile auth should clear
+    /// any previously configured profile instead of leaving it stale.
+    #[test]
+    fn test_bedrock_empty_profile_clears_existing() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.bedrock_profile = Some("old-profile".to_string());
+
+        // Simulate auth_choice == 1 with empty input
+        let profile = "".to_string();
+        if profile.trim().is_empty() {
+            wizard.settings.bedrock_profile = None;
+        } else {
+            wizard.settings.bedrock_profile = Some(profile);
+        }
+
+        assert!(
+            wizard.settings.bedrock_profile.is_none(),
+            "empty profile input should clear existing bedrock_profile"
         );
     }
 

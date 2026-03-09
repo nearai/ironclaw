@@ -730,8 +730,8 @@ async fn test_chat_completions_body_too_large() {
     let (addr, _state, _mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
-    // Build a payload over 1 MB (the gateway's DefaultBodyLimit)
-    let big_content = "x".repeat(2 * 1024 * 1024);
+    // Build a payload over 10 MB (the gateway's DefaultBodyLimit)
+    let big_content = "x".repeat(11 * 1024 * 1024);
     let resp = client()
         .post(&url)
         .bearer_auth(AUTH_TOKEN)

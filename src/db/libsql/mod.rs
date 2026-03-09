@@ -169,10 +169,18 @@ pub(crate) fn parse_timestamp(s: &str) -> Result<DateTime<Utc>, String> {
     }
     // Naive with fractional seconds (legacy or SQLite datetime() output)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        tracing::warn!(
+            timestamp = %s,
+            "parsed naive timestamp without timezone; assuming UTC for backward compatibility"
+        );
         return Ok(ndt.and_utc());
     }
     // Naive without fractional seconds (legacy format)
     if let Ok(ndt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        tracing::warn!(
+            timestamp = %s,
+            "parsed naive timestamp without timezone; assuming UTC for backward compatibility"
+        );
         return Ok(ndt.and_utc());
     }
     Err(format!("unparseable timestamp: {:?}", s))
@@ -402,8 +410,47 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+
     use crate::db::Database;
-    use crate::db::libsql::LibSqlBackend;
+    use crate::db::libsql::{LibSqlBackend, parse_timestamp};
+
+    #[test]
+    fn test_parse_timestamp_accepts_rfc3339_and_legacy_naive_formats() {
+        let expected = Utc.with_ymd_and_hms(2026, 3, 7, 12, 34, 56).unwrap();
+
+        let with_millis = parse_timestamp("2026-03-07T12:34:56.789Z").unwrap();
+        assert_eq!(with_millis, expected + chrono::Duration::milliseconds(789));
+
+        let naive_with_millis = parse_timestamp("2026-03-07 12:34:56.789").unwrap();
+        assert_eq!(
+            naive_with_millis,
+            expected + chrono::Duration::milliseconds(789)
+        );
+
+        let naive_without_millis = parse_timestamp("2026-03-07 12:34:56").unwrap();
+        assert_eq!(naive_without_millis, expected);
+    }
+
+    #[tokio::test]
+    async fn test_libsql_now_format_is_rfc3339_and_parseable() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn
+            .query("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", ())
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let ts: String = row.get(0).unwrap();
+
+        let parsed = parse_timestamp(&ts).unwrap();
+        assert_eq!(
+            ts,
+            parsed.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
+    }
 
     #[tokio::test]
     async fn test_wal_mode_after_migrations() {

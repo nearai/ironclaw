@@ -4,6 +4,7 @@
 //! See: https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/authorization/
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -199,23 +200,285 @@ impl PkceChallenge {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Well-known URI construction (RFC 8414 / RFC 9728)
+// ---------------------------------------------------------------------------
+
+/// Build a well-known URI according to RFC 8414 / RFC 9728.
+///
+/// The path component of the base URL is placed *after* the well-known suffix:
+/// ```text
+/// https://example.com/path + oauth-authorization-server
+///   -> https://example.com/.well-known/oauth-authorization-server/path
+/// ```
+pub fn build_well_known_uri(base_url: &str, suffix: &str) -> Result<String, AuthError> {
+    let parsed = reqwest::Url::parse(base_url)
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid URL: {}", e)))?;
+    let origin = parsed.origin().ascii_serialization();
+    let path = parsed.path().trim_end_matches('/');
+    Ok(format!("{}/.well-known/{}{}", origin, suffix, path))
+}
+
+// ---------------------------------------------------------------------------
+// RFC 8707 resource parameter
+// ---------------------------------------------------------------------------
+
+/// Compute the canonical resource URI for RFC 8707.
+///
+/// Strips fragments and trailing slashes from the server URL.
+pub fn canonical_resource_uri(server_url: &str) -> String {
+    match reqwest::Url::parse(server_url) {
+        Ok(mut parsed) => {
+            parsed.set_fragment(None);
+            let s = parsed.to_string();
+            s.trim_end_matches('/').to_string()
+        }
+        Err(_) => server_url.trim_end_matches('/').to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSRF protection
+// ---------------------------------------------------------------------------
+
+/// Check if an IP address is dangerous (loopback, link-local, private, etc.)
+fn is_dangerous_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || (v4.octets()[0] == 169 && v4.octets()[1] == 254) // link-local
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGNAT 100.64/10
+        }
+        IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Link-local (fe80::/10)
+                || (segs[0] & 0xffc0) == 0xfe80
+                // Site-local / deprecated (fec0::/10)
+                || (segs[0] & 0xffc0) == 0xfec0
+                // Unique local (fc00::/7)
+                || (segs[0] & 0xfe00) == 0xfc00
+                // Documentation (2001:db8::/32)
+                || (segs[0] == 0x2001 && segs[1] == 0x0db8)
+                // Check for IPv4-mapped IPv6 (::ffff:x.x.x.x)
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| is_dangerous_ip(IpAddr::V4(v4)))
+        }
+    }
+}
+
+/// Validate that a URL is safe for server-side requests (SSRF protection).
+async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid URL: {}", e)))?;
+
+    // Must be HTTPS. HTTP is only allowed for localhost/loopback (dev scenarios).
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
+        return Err(AuthError::DiscoveryFailed(format!(
+            "Unsupported scheme: {}",
+            scheme
+        )));
+    }
+    if scheme == "http" {
+        let host = parsed.host_str().unwrap_or("");
+        let is_localhost =
+            host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]";
+        if !is_localhost {
+            return Err(AuthError::DiscoveryFailed(format!(
+                "HTTP is only allowed for localhost; use HTTPS for '{}'",
+                host
+            )));
+        }
+        // Localhost HTTP is allowed for dev — skip SSRF checks since we've
+        // already validated the host is localhost/loopback.
+        return Ok(());
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AuthError::DiscoveryFailed("URL has no host".to_string()))?;
+
+    // For IP literals, parse directly and check.
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_dangerous_ip(ip)
+    {
+        return Err(AuthError::DiscoveryFailed(format!(
+            "URL points to a restricted IP address: {}",
+            host
+        )));
+    }
+
+    // For hostnames, resolve DNS and check each resolved address.
+    // This prevents DNS-based SSRF where a hostname resolves to an internal IP
+    // (e.g., 169.254.169.254 for cloud metadata endpoints).
+    if host.parse::<IpAddr>().is_err() {
+        let addr = format!("{}:{}", host, parsed.port_or_known_default().unwrap_or(443));
+        match tokio::net::lookup_host(&addr).await {
+            Ok(addrs) => {
+                for socket_addr in addrs {
+                    if is_dangerous_ip(socket_addr.ip()) {
+                        return Err(AuthError::DiscoveryFailed(format!(
+                            "URL hostname '{}' resolves to restricted IP address: {}",
+                            host,
+                            socket_addr.ip()
+                        )));
+                    }
+                }
+            }
+            Err(e) => {
+                // DNS failure = fail closed (do not allow the request)
+                return Err(AuthError::DiscoveryFailed(format!(
+                    "DNS resolution failed for '{}': {}",
+                    host, e
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Multi-strategy OAuth discovery helpers
+// ---------------------------------------------------------------------------
+
+/// Parse the resource_metadata URL from a WWW-Authenticate header value.
+fn parse_resource_metadata_url(www_authenticate: &str) -> Option<String> {
+    // Try comma-separated parameters first
+    for part in www_authenticate.split(',') {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix("resource_metadata=\"") {
+            return rest.strip_suffix('"').map(|s| s.to_string());
+        }
+        if let Some(rest) = part.strip_prefix("resource_metadata=") {
+            let val = rest.trim_matches('"');
+            return Some(val.to_string());
+        }
+    }
+    // Also try whitespace-separated tokens (e.g. Bearer resource_metadata="url")
+    for part in www_authenticate.split_whitespace() {
+        if let Some(rest) = part.strip_prefix("resource_metadata=\"") {
+            return rest
+                .trim_end_matches(',')
+                .strip_suffix('"')
+                .map(|s| s.to_string());
+        }
+        if let Some(rest) = part.strip_prefix("resource_metadata=") {
+            let val = rest.trim_matches('"').trim_end_matches(',');
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
+/// Fetch protected resource metadata from a URL.
+async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata, AuthError> {
+    validate_url_safe(url).await?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| AuthError::Http(e.to_string()))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(AuthError::DiscoveryFailed(format!(
+            "HTTP {}",
+            response.status()
+        )));
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid metadata: {}", e)))
+}
+
+/// Try to discover OAuth metadata via 401 challenge response.
+async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadata, AuthError> {
+    validate_url_safe(server_url).await?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| AuthError::Http(e.to_string()))?;
+
+    let response = client
+        .post(server_url)
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    if response.status().as_u16() != 401 {
+        return Err(AuthError::DiscoveryFailed(format!(
+            "Expected 401, got {}",
+            response.status()
+        )));
+    }
+
+    let www_auth = response
+        .headers()
+        .get("WWW-Authenticate")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            AuthError::DiscoveryFailed("No WWW-Authenticate header in 401 response".to_string())
+        })?;
+
+    let resource_metadata_url = parse_resource_metadata_url(www_auth).ok_or_else(|| {
+        AuthError::DiscoveryFailed(
+            "No resource_metadata URL in WWW-Authenticate header".to_string(),
+        )
+    })?;
+
+    let resource_meta = fetch_resource_metadata(&resource_metadata_url).await?;
+    try_discover_from_auth_servers(&resource_meta).await
+}
+
+/// Try to discover auth server metadata from resource metadata's authorization_servers list.
+async fn try_discover_from_auth_servers(
+    resource_meta: &ProtectedResourceMetadata,
+) -> Result<AuthorizationServerMetadata, AuthError> {
+    let auth_server_url = resource_meta
+        .authorization_servers
+        .first()
+        .ok_or_else(|| AuthError::DiscoveryFailed("No authorization servers listed".to_string()))?;
+
+    discover_authorization_server(auth_server_url).await
+}
+
+// ---------------------------------------------------------------------------
+// Discovery functions
+// ---------------------------------------------------------------------------
+
 /// Discover protected resource metadata from an MCP server.
 pub async fn discover_protected_resource(
     server_url: &str,
 ) -> Result<ProtectedResourceMetadata, AuthError> {
+    validate_url_safe(server_url).await?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
-    // Parse the server URL to extract the origin (scheme + host + port)
-    // The .well-known endpoints are always at the root of the origin, not under any path
-    let parsed = reqwest::Url::parse(server_url)
-        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid server URL: {}", e)))?;
-    let origin = parsed.origin().ascii_serialization();
-
-    // Try the well-known endpoint at the origin root
-    let well_known_url = format!("{}/.well-known/oauth-protected-resource", origin);
+    let well_known_url = build_well_known_uri(server_url, "oauth-protected-resource")?;
 
     let response = client
         .get(&well_known_url)
@@ -237,13 +500,15 @@ pub async fn discover_protected_resource(
 pub async fn discover_authorization_server(
     auth_server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
+    validate_url_safe(auth_server_url).await?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
-    let base_url = auth_server_url.trim_end_matches('/');
-    let well_known_url = format!("{}/.well-known/oauth-authorization-server", base_url);
+    let well_known_url = build_well_known_uri(auth_server_url, "oauth-authorization-server")?;
 
     let response = client
         .get(&well_known_url)
@@ -298,20 +563,27 @@ pub async fn discover_oauth_endpoints(
 /// Discover full OAuth metadata including DCR support.
 ///
 /// Returns authorization server metadata which includes registration_endpoint if DCR is supported.
+/// Uses a 3-strategy discovery chain:
+/// 1. **401-based**: POST to MCP server, parse WWW-Authenticate header for resource_metadata URL
+/// 2. **RFC 9728**: Discover protected resource metadata, then authorization server from it
+/// 3. **Direct**: Treat MCP server as its own auth server
 pub async fn discover_full_oauth_metadata(
     server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
-    // Try to discover from the server
-    let resource_meta = discover_protected_resource(server_url).await?;
+    // Strategy 1: 401-based discovery
+    if let Ok(meta) = discover_via_401(server_url).await {
+        return Ok(meta);
+    }
 
-    // Get the first authorization server
-    let auth_server_url = resource_meta
-        .authorization_servers
-        .first()
-        .ok_or_else(|| AuthError::DiscoveryFailed("No authorization servers listed".to_string()))?;
+    // Strategy 2: RFC 9728 protected resource discovery
+    if let Ok(resource_meta) = discover_protected_resource(server_url).await
+        && let Ok(meta) = try_discover_from_auth_servers(&resource_meta).await
+    {
+        return Ok(meta);
+    }
 
-    // Discover the authorization server metadata
-    discover_authorization_server(auth_server_url).await
+    // Strategy 3: Direct - treat MCP server as its own auth server
+    discover_authorization_server(server_url).await
 }
 
 /// Perform Dynamic Client Registration with an authorization server.
@@ -321,8 +593,11 @@ pub async fn register_client(
     registration_endpoint: &str,
     redirect_uri: &str,
 ) -> Result<ClientRegistrationResponse, AuthError> {
+    validate_url_safe(registration_endpoint).await?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
@@ -417,7 +692,7 @@ pub async fn authorize_mcp_server(
 
             println!("  Registering client dynamically...");
             let registration = register_client(&registration_endpoint, &redirect_uri).await?;
-            println!("  ✓ Client registered: {}", registration.client_id);
+            println!("  Client registered: {}", registration.client_id);
 
             (
                 registration.client_id,
@@ -436,6 +711,15 @@ pub async fn authorize_mcp_server(
         None
     };
 
+    // Compute canonical resource URI for RFC 8707
+    let resource = canonical_resource_uri(&server_config.url);
+
+    // Validate the discovered authorization URL to prevent a malicious MCP server
+    // from redirecting the user to a phishing page or non-HTTPS endpoint.
+    validate_url_safe(&authorization_url)
+        .await
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Unsafe authorization endpoint: {}", e)))?;
+
     // Build authorization URL
     let auth_url = build_authorization_url(
         &authorization_url,
@@ -444,6 +728,7 @@ pub async fn authorize_mcp_server(
         &scopes,
         pkce.as_ref(),
         &extra_params,
+        Some(&resource),
     );
 
     // Open browser
@@ -462,9 +747,15 @@ pub async fn authorize_mcp_server(
     println!("  Exchanging code for token...");
 
     // Exchange code for token
-    let token =
-        exchange_code_for_token(&token_url, &client_id, &code, &redirect_uri, pkce.as_ref())
-            .await?;
+    let token = exchange_code_for_token(
+        &token_url,
+        &client_id,
+        &code,
+        &redirect_uri,
+        pkce.as_ref(),
+        Some(&resource),
+    )
+    .await?;
 
     // Store the tokens
     store_tokens(secrets, user_id, server_config, &token).await?;
@@ -493,6 +784,7 @@ pub fn build_authorization_url(
     scopes: &[String],
     pkce: Option<&PkceChallenge>,
     extra_params: &HashMap<String, String>,
+    resource: Option<&str>,
 ) -> String {
     let mut url = format!(
         "{}?client_id={}&response_type=code&redirect_uri={}",
@@ -521,6 +813,10 @@ pub fn build_authorization_url(
             urlencoding::encode(key),
             urlencoding::encode(value)
         ));
+    }
+
+    if let Some(resource) = resource {
+        url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
     }
 
     url
@@ -553,9 +849,13 @@ pub async fn exchange_code_for_token(
     code: &str,
     redirect_uri: &str,
     pkce: Option<&PkceChallenge>,
+    resource: Option<&str>,
 ) -> Result<AccessToken, AuthError> {
+    validate_url_safe(token_url).await?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
@@ -568,6 +868,10 @@ pub async fn exchange_code_for_token(
 
     if let Some(pkce) = pkce {
         params.push(("code_verifier", pkce.verifier.clone()));
+    }
+
+    if let Some(resource) = resource {
+        params.push(("resource", resource.to_string()));
     }
 
     let response = client
@@ -738,15 +1042,22 @@ pub async fn refresh_access_token(
         auth_meta.token_endpoint
     };
 
+    validate_url_safe(&token_url).await?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
+
+    // Compute canonical resource URI for RFC 8707
+    let resource = canonical_resource_uri(&server_config.url);
 
     let params = vec![
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh_token.expose().to_string()),
         ("client_id", client_id),
+        ("resource", resource),
     ];
 
     let response = client
@@ -815,6 +1126,7 @@ mod tests {
             &["read".to_string(), "write".to_string()],
             None,
             &HashMap::new(),
+            None,
         );
 
         assert!(url.starts_with("https://auth.example.com/authorize?"));
@@ -834,6 +1146,7 @@ mod tests {
             &[],
             Some(&pkce),
             &HashMap::new(),
+            None,
         );
 
         assert!(url.contains(&format!("code_challenge={}", pkce.challenge)));
@@ -853,6 +1166,7 @@ mod tests {
             &[],
             None,
             &extra,
+            None,
         );
 
         assert!(url.contains("owner=user"));
@@ -880,6 +1194,7 @@ mod tests {
             &[],
             None,
             &HashMap::new(),
+            None,
         );
 
         // With no scopes, the URL must not contain a scope parameter at all.
@@ -895,6 +1210,7 @@ mod tests {
             &[],
             None,
             &HashMap::new(),
+            None,
         );
 
         // Spaces and ampersands in client_id must be percent-encoded.
@@ -1163,5 +1479,236 @@ mod tests {
                 error
             );
         }
+    }
+
+    // --- New tests for well-known URI construction ---
+
+    #[test]
+    fn test_build_well_known_uri_no_path() {
+        let uri =
+            build_well_known_uri("https://example.com", "oauth-authorization-server").unwrap();
+        assert_eq!(
+            uri,
+            "https://example.com/.well-known/oauth-authorization-server"
+        );
+    }
+
+    #[test]
+    fn test_build_well_known_uri_with_path() {
+        let uri =
+            build_well_known_uri("https://example.com/path", "oauth-authorization-server").unwrap();
+        assert_eq!(
+            uri,
+            "https://example.com/.well-known/oauth-authorization-server/path"
+        );
+    }
+
+    #[test]
+    fn test_build_well_known_uri_with_trailing_slash() {
+        let uri =
+            build_well_known_uri("https://example.com/path/", "oauth-protected-resource").unwrap();
+        assert_eq!(
+            uri,
+            "https://example.com/.well-known/oauth-protected-resource/path"
+        );
+    }
+
+    #[test]
+    fn test_build_well_known_uri_root_trailing_slash() {
+        let uri =
+            build_well_known_uri("https://example.com/", "oauth-authorization-server").unwrap();
+        assert_eq!(
+            uri,
+            "https://example.com/.well-known/oauth-authorization-server"
+        );
+    }
+
+    // --- New tests for canonical_resource_uri ---
+
+    #[test]
+    fn test_canonical_resource_uri_strips_fragment() {
+        assert_eq!(
+            canonical_resource_uri("https://mcp.example.com/v1#section"),
+            "https://mcp.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_canonical_resource_uri_strips_trailing_slash() {
+        assert_eq!(
+            canonical_resource_uri("https://mcp.example.com/v1/"),
+            "https://mcp.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_canonical_resource_uri_no_changes_needed() {
+        assert_eq!(
+            canonical_resource_uri("https://mcp.example.com/v1"),
+            "https://mcp.example.com/v1"
+        );
+    }
+
+    // --- New tests for SSRF protection ---
+
+    #[test]
+    fn test_is_dangerous_ip_loopback_v4() {
+        assert!(is_dangerous_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_dangerous_ip("127.0.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_private_v4() {
+        assert!(is_dangerous_ip("10.0.0.1".parse().unwrap()));
+        assert!(is_dangerous_ip("172.16.0.1".parse().unwrap()));
+        assert!(is_dangerous_ip("192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_link_local_v4() {
+        assert!(is_dangerous_ip("169.254.169.254".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_cgnat() {
+        assert!(is_dangerous_ip("100.64.0.1".parse().unwrap()));
+        assert!(is_dangerous_ip("100.127.255.254".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_safe_v4() {
+        assert!(!is_dangerous_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_dangerous_ip("1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_ipv4_mapped_v6_loopback() {
+        // ::ffff:127.0.0.1 must be blocked
+        let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(is_dangerous_ip(ip));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_ipv4_mapped_v6_link_local() {
+        // ::ffff:169.254.169.254 must be blocked
+        let ip: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(is_dangerous_ip(ip));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_unspecified() {
+        assert!(is_dangerous_ip("0.0.0.0".parse().unwrap()));
+        assert!(is_dangerous_ip("::".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_v6_loopback() {
+        assert!(is_dangerous_ip("::1".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn test_validate_url_safe_https() {
+        assert!(validate_url_safe("https://example.com/path").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_url_safe_http_localhost_allowed() {
+        // HTTP is only allowed for localhost dev scenarios
+        assert!(validate_url_safe("http://localhost/path").await.is_ok());
+        assert!(
+            validate_url_safe("http://localhost:8080/path")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_url_safe_http_non_localhost_rejected() {
+        // HTTP to non-localhost hosts must be rejected (plaintext credential risk)
+        assert!(validate_url_safe("http://example.com/path").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_url_safe_bad_scheme() {
+        assert!(validate_url_safe("ftp://example.com/path").await.is_err());
+        assert!(validate_url_safe("file:///etc/passwd").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_url_safe_private_ip() {
+        // 127.0.0.1 over HTTP is allowed (localhost dev scenario)
+        assert!(validate_url_safe("http://127.0.0.1/path").await.is_ok());
+        // Private/link-local IPs over HTTPS are blocked (SSRF protection)
+        assert!(validate_url_safe("https://10.0.0.1/path").await.is_err());
+        assert!(
+            validate_url_safe("https://169.254.169.254/latest/meta-data")
+                .await
+                .is_err()
+        );
+        // Private IPs over HTTP (non-localhost) are blocked
+        assert!(validate_url_safe("http://10.0.0.1/path").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_validate_url_safe_public_ip() {
+        assert!(validate_url_safe("https://8.8.8.8/dns").await.is_ok());
+    }
+
+    // --- New tests for parse_resource_metadata_url ---
+
+    #[test]
+    fn test_parse_resource_metadata_url_bearer() {
+        let header = r#"Bearer resource_metadata="https://res.example.com/.well-known/oauth-protected-resource""#;
+        let url = parse_resource_metadata_url(header);
+        assert_eq!(
+            url.as_deref(),
+            Some("https://res.example.com/.well-known/oauth-protected-resource")
+        );
+    }
+
+    #[test]
+    fn test_parse_resource_metadata_url_with_other_params() {
+        let header = r#"Bearer realm="example", resource_metadata="https://res.example.com/meta""#;
+        let url = parse_resource_metadata_url(header);
+        assert_eq!(url.as_deref(), Some("https://res.example.com/meta"));
+    }
+
+    #[test]
+    fn test_parse_resource_metadata_url_missing() {
+        let header = r#"Bearer realm="example""#;
+        let url = parse_resource_metadata_url(header);
+        assert!(url.is_none());
+    }
+
+    // --- New tests for resource parameter in authorization URL ---
+
+    #[test]
+    fn test_build_authorization_url_with_resource() {
+        let url = build_authorization_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "http://localhost:9876/callback",
+            &[],
+            None,
+            &HashMap::new(),
+            Some("https://mcp.example.com/v1"),
+        );
+
+        assert!(url.contains("resource=https%3A%2F%2Fmcp.example.com%2Fv1"));
+    }
+
+    #[test]
+    fn test_build_authorization_url_without_resource() {
+        let url = build_authorization_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "http://localhost:9876/callback",
+            &[],
+            None,
+            &HashMap::new(),
+            None,
+        );
+
+        assert!(!url.contains("resource="));
     }
 }
