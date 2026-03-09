@@ -61,6 +61,31 @@ impl Agent {
         let msg_count;
 
         if let Some(store) = self.store() {
+            // Never hydrate history from a conversation UUID that isn't owned
+            // by the current authenticated user.
+            let owned = match store
+                .conversation_belongs_to_user(thread_uuid, &message.user_id)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to verify conversation ownership for hydration {}: {}",
+                        thread_uuid,
+                        e
+                    );
+                    false
+                }
+            };
+            if !owned {
+                tracing::warn!(
+                    user = %message.user_id,
+                    thread_id = %thread_uuid,
+                    "Rejected hydration for unowned thread id"
+                );
+                return;
+            }
+
             let db_messages = store
                 .list_conversation_messages(thread_uuid)
                 .await
@@ -423,6 +448,82 @@ impl Agent {
         }
     }
 
+    /// Ensure a thread UUID is safe to persist under this user.
+    ///
+    /// Returns `true` when:
+    /// - the conversation already belongs to `user_id`, or
+    /// - no conversation row exists yet and we can create one for `user_id`.
+    ///
+    /// Returns `false` for foreign/unowned conversation IDs or DB errors.
+    async fn ensure_writable_conversation(
+        &self,
+        store: &Arc<dyn crate::db::Database>,
+        thread_id: Uuid,
+        user_id: &str,
+    ) -> bool {
+        match store.conversation_belongs_to_user(thread_id, user_id).await {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to verify conversation ownership for write {}: {}",
+                    thread_id,
+                    e
+                );
+                return false;
+            }
+        }
+
+        // Distinguish "missing conversation" from "existing but foreign".
+        match store.get_conversation_metadata(thread_id).await {
+            Ok(Some(_)) => {
+                tracing::warn!(
+                    user = %user_id,
+                    thread_id = %thread_id,
+                    "Rejected write for unowned thread id"
+                );
+                return false;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to inspect conversation metadata {}: {}",
+                    thread_id,
+                    e
+                );
+                return false;
+            }
+        }
+
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", user_id, None)
+            .await
+        {
+            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
+            return false;
+        }
+
+        match store.conversation_belongs_to_user(thread_id, user_id).await {
+            Ok(true) => true,
+            Ok(false) => {
+                tracing::warn!(
+                    user = %user_id,
+                    thread_id = %thread_id,
+                    "Conversation remained unowned after ensure; skipping persistence"
+                );
+                false
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to re-check conversation ownership {}: {}",
+                    thread_id,
+                    e
+                );
+                false
+            }
+        }
+    }
+
     /// Persist the user message to the DB at turn start (before the agentic loop).
     ///
     /// This ensures the user message is durable even if the process crashes
@@ -438,11 +539,10 @@ impl Agent {
             None => return,
         };
 
-        if let Err(e) = store
-            .ensure_conversation(thread_id, "gateway", user_id, None)
+        if !self
+            .ensure_writable_conversation(&store, thread_id, user_id)
             .await
         {
-            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
             return;
         }
 
@@ -470,11 +570,10 @@ impl Agent {
             None => return,
         };
 
-        if let Err(e) = store
-            .ensure_conversation(thread_id, "gateway", user_id, None)
+        if !self
+            .ensure_writable_conversation(&store, thread_id, user_id)
             .await
         {
-            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
             return;
         }
 
@@ -543,11 +642,10 @@ impl Agent {
             }
         };
 
-        if let Err(e) = store
-            .ensure_conversation(thread_id, "gateway", user_id, None)
+        if !self
+            .ensure_writable_conversation(&store, thread_id, user_id)
             .await
         {
-            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
             return;
         }
 
