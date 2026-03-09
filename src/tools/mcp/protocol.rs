@@ -642,6 +642,55 @@ mod tests {
     }
 
     #[test]
+    fn test_notification_serializes_without_id_field() {
+        // JSON-RPC 2.0 spec: notifications MUST NOT have an "id" field.
+        let notif = McpRequest::initialized_notification();
+        let json = serde_json::to_value(&notif).expect("serialize notification");
+        assert!(
+            json.get("id").is_none(),
+            "notifications must not contain an 'id' field per JSON-RPC 2.0 spec"
+        );
+        assert_eq!(json.get("method").unwrap(), "notifications/initialized");
+    }
+
+    #[test]
+    fn test_response_with_string_id() {
+        // Some MCP servers return id as a string instead of a number.
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "42",
+            "result": {}
+        });
+        let resp: McpResponse = serde_json::from_value(json).expect("deserialize string id");
+        assert_eq!(resp.id, Some(42));
+    }
+
+    #[test]
+    fn test_response_with_null_id() {
+        // JSON-RPC error responses may have a null id.
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": { "code": -32700, "message": "Parse error" }
+        });
+        let resp: McpResponse = serde_json::from_value(json).expect("deserialize null id");
+        assert_eq!(resp.id, None);
+    }
+
+    #[test]
+    fn test_response_with_non_numeric_string_id() {
+        // Some servers send non-numeric string ids — these should parse as None.
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "not-a-number",
+            "result": {}
+        });
+        let resp: McpResponse =
+            serde_json::from_value(json).expect("deserialize non-numeric string id");
+        assert_eq!(resp.id, None);
+    }
+
+    #[test]
     fn test_mcp_tool_roundtrip_preserves_schema() {
         // Simulate what list_tools returns from a real MCP server
         let server_response = serde_json::json!({
