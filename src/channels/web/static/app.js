@@ -225,23 +225,6 @@ function updateRestartButtonVisibility() {
   }
 }
 
-function startGatewayStatusPolling() {
-  fetchGatewayStatus();
-  // Poll every 5 seconds
-  setInterval(fetchGatewayStatus, 5000);
-}
-
-function fetchGatewayStatus() {
-  apiFetch('/api/gateway/status')
-    .then((data) => {
-      restartEnabled = data.restart_enabled || false;
-      updateRestartButtonVisibility();
-    })
-    .catch((err) => {
-      console.warn('[gateway status] Failed to fetch:', err);
-    });
-}
-
 // --- SSE ---
 
 function connectSSE() {
@@ -3528,6 +3511,10 @@ function shortModelName(model) {
 
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
+    // Update restart button visibility
+    restartEnabled = data.restart_enabled || false;
+    updateRestartButtonVisibility();
+
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
