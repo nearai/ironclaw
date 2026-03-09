@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::context::JobContext;
+use crate::tools::builtin::path_utils::validate_path;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
 /// Tool for editing images using an AI image editing API.
@@ -44,23 +45,13 @@ impl ImageEditTool {
     }
 
     /// Read binary image bytes from filesystem.
+    ///
+    /// Validates the path against the base directory sandbox to prevent
+    /// path traversal attacks, then reads the file bytes.
     async fn read_image_bytes(&self, image_path: &str) -> Result<Vec<u8>, ToolError> {
-        let resolved = if let Some(base) = &self.base_dir {
-            let candidate = base.join(image_path);
-            if candidate.exists() {
-                candidate
-            } else {
-                PathBuf::from(image_path)
-            }
-        } else {
-            PathBuf::from(image_path)
-        };
+        let resolved = validate_path(image_path, self.base_dir.as_deref())?;
 
-        let canonical = resolved
-            .canonicalize()
-            .map_err(|e| ToolError::ExecutionFailed(format!("Image path not found: {e}")))?;
-
-        tokio::fs::read(&canonical)
+        tokio::fs::read(&resolved)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read image file: {e}")))
     }
@@ -275,6 +266,7 @@ impl ImageEditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_tool_metadata() {
@@ -289,6 +281,42 @@ mod tests {
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_image_bytes_rejects_path_traversal() {
+        let dir = TempDir::new().unwrap();
+        let tool = ImageEditTool::new(
+            "https://api.example.com".to_string(),
+            "test-key".to_string(),
+            "flux-1".to_string(),
+            Some(dir.path().to_path_buf()),
+        );
+
+        let result = tool.read_image_bytes("../../etc/passwd").await;
+        assert!(
+            result.is_err(),
+            "Should reject path traversal, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_image_bytes_rejects_absolute_path_outside_sandbox() {
+        let dir = TempDir::new().unwrap();
+        let tool = ImageEditTool::new(
+            "https://api.example.com".to_string(),
+            "test-key".to_string(),
+            "flux-1".to_string(),
+            Some(dir.path().to_path_buf()),
+        );
+
+        let result = tool.read_image_bytes("/etc/passwd").await;
+        assert!(
+            result.is_err(),
+            "Should reject absolute path outside sandbox, got: {:?}",
+            result
         );
     }
 }

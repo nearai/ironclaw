@@ -7,6 +7,7 @@ use base64::Engine;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::context::JobContext;
+use crate::tools::builtin::path_utils::validate_path;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
 /// Tool for analyzing images using a vision-capable model.
@@ -46,25 +47,12 @@ impl ImageAnalyzeTool {
 
     /// Read binary image bytes from filesystem.
     ///
-    /// Resolves the path relative to the base directory if set, falling
-    /// back to treating it as an absolute path.
+    /// Validates the path against the base directory sandbox to prevent
+    /// path traversal attacks, then reads the file bytes.
     async fn read_image_bytes(&self, image_path: &str) -> Result<Vec<u8>, ToolError> {
-        let resolved = if let Some(base) = &self.base_dir {
-            let candidate = base.join(image_path);
-            if candidate.exists() {
-                candidate
-            } else {
-                PathBuf::from(image_path)
-            }
-        } else {
-            PathBuf::from(image_path)
-        };
+        let resolved = validate_path(image_path, self.base_dir.as_deref())?;
 
-        let canonical = resolved
-            .canonicalize()
-            .map_err(|e| ToolError::ExecutionFailed(format!("Image path not found: {e}")))?;
-
-        tokio::fs::read(&canonical)
+        tokio::fs::read(&resolved)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read image file: {e}")))
     }
@@ -99,7 +87,7 @@ impl Tool for ImageAnalyzeTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::Never
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -196,6 +184,8 @@ impl Tool for ImageAnalyzeTool {
 #[cfg(test)]
 mod tests {
     use super::super::media_type_from_path;
+    use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_media_type_detection() {
@@ -206,5 +196,55 @@ mod tests {
         assert_eq!(media_type_from_path("photo.webp"), "image/webp");
         assert_eq!(media_type_from_path("photo.bmp"), "image/jpeg");
         assert_eq!(media_type_from_path("photo.svg"), "image/svg+xml");
+    }
+
+    #[test]
+    fn test_requires_approval_returns_unless_auto_approved() {
+        let tool = ImageAnalyzeTool::new(
+            "https://api.example.com".to_string(),
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            None,
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_image_bytes_rejects_path_traversal() {
+        let dir = TempDir::new().unwrap();
+        let tool = ImageAnalyzeTool::new(
+            "https://api.example.com".to_string(),
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            Some(dir.path().to_path_buf()),
+        );
+
+        let result = tool.read_image_bytes("../../etc/passwd").await;
+        assert!(
+            result.is_err(),
+            "Should reject path traversal, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_image_bytes_rejects_absolute_path_outside_sandbox() {
+        let dir = TempDir::new().unwrap();
+        let tool = ImageAnalyzeTool::new(
+            "https://api.example.com".to_string(),
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            Some(dir.path().to_path_buf()),
+        );
+
+        let result = tool.read_image_bytes("/etc/passwd").await;
+        assert!(
+            result.is_err(),
+            "Should reject absolute path outside sandbox, got: {:?}",
+            result
+        );
     }
 }
