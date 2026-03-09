@@ -69,8 +69,9 @@ pub fn env_or_override(key: &str) -> Option<String> {
 
     // Check INJECTED_VARS (secrets from DB, set once at startup)
     if let Some(val) = INJECTED_VARS
-        .get()
-        .and_then(|m| m.get(key))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
         .filter(|v| !v.is_empty())
         .cloned()
     {
