@@ -557,6 +557,9 @@ pub enum ExtensionError {
         fallback: Box<ExtensionError>,
     },
 
+    #[error("Token validation failed: {0}")]
+    ValidationFailed(String),
+
     #[error("{0}")]
     Other(String),
 }

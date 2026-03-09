@@ -3555,10 +3555,13 @@ impl ExtensionManager {
                         .send()
                         .await
                         .map_err(|e| {
-                            ExtensionError::Other(format!("Failed to validate token: {}", e))
+                            ExtensionError::ValidationFailed(format!(
+                                "Failed to validate token: {}",
+                                e
+                            ))
                         })?;
                     if !resp.status().is_success() {
-                        return Err(ExtensionError::Other(format!(
+                        return Err(ExtensionError::ValidationFailed(format!(
                             "Invalid token (API returned {})",
                             resp.status()
                         )));
