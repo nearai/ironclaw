@@ -326,6 +326,7 @@ mod tests {
             extra_allowed_domains: vec!["example.com".to_string()],
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
+            allow_full_access: false,
         };
         assert!(!cfg.enabled);
         assert_eq!(cfg.policy, "full_access");
@@ -350,6 +351,7 @@ mod tests {
             extra_allowed_domains: vec!["custom.example.com".to_string()],
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
+            allow_full_access: false,
         };
         let sc = mode.to_sandbox_config();
         assert!(sc.enabled);
@@ -509,11 +511,6 @@ mod tests {
             );
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn test_full_access_downgraded_without_allow() {
