@@ -54,7 +54,7 @@
 
 **IronClaw**
 - Docker 支持
-- 需要 PostgreSQL 15+
+- 需要 PostgreSQL 15+ 及 pgvector 扩展
 - Rust 1.85+
 
 **OpenClaw**
