@@ -578,26 +578,32 @@ INSERT OR IGNORE INTO leak_detection_patterns (id, name, pattern, severity, acti
     ('550e8400-e29b-41d4-a716-446655440011', 'mailchimp_api_key', '[a-f0-9]{32}-us[0-9]{1,2}', 'medium', 'block', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     ('550e8400-e29b-41d4-a716-446655440012', 'high_entropy_hex', '(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])', 'medium', 'warn', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
+-- Mark incremental migrations as already applied (the base schema includes their changes).
+INSERT OR IGNORE INTO _migrations (version, name) VALUES
+    (9, 'flexible_embedding_dimension'),
+    (10, 'add_retry_attempts');
+
 "#;
 
 /// Incremental migrations applied after the base schema.
 ///
 /// Each entry is `(version, name, sql)`. Migrations are idempotent: the
 /// `_migrations` table tracks which versions have been applied.
-pub const INCREMENTAL_MIGRATIONS: &[(i64, &str, &str)] = &[(
-    9,
-    "flexible_embedding_dimension",
-    // Rebuild memory_chunks to remove the fixed F32_BLOB(1536) type
-    // constraint so any embedding dimension works. Existing embeddings
-    // are preserved; users only need to re-embed if they change models.
-    //
-    // The vector index (libsql_vector_idx) requires a fixed-dimension
-    // F32_BLOB(N), so we drop it entirely. Vector search falls back to
-    // brute-force cosine distance which is fast enough for personal
-    // assistant workspaces. This matches PostgreSQL after its V9 migration.
-    //
-    // SQLite cannot ALTER COLUMN types, so we recreate the table.
-    r#"
+pub const INCREMENTAL_MIGRATIONS: &[(i64, &str, &str)] = &[
+    (
+        9,
+        "flexible_embedding_dimension",
+        // Rebuild memory_chunks to remove the fixed F32_BLOB(1536) type
+        // constraint so any embedding dimension works. Existing embeddings
+        // are preserved; users only need to re-embed if they change models.
+        //
+        // The vector index (libsql_vector_idx) requires a fixed-dimension
+        // F32_BLOB(N), so we drop it entirely. Vector search falls back to
+        // brute-force cosine distance which is fast enough for personal
+        // assistant workspaces. This matches PostgreSQL after its V9 migration.
+        //
+        // SQLite cannot ALTER COLUMN types, so we recreate the table.
+        r#"
 -- Drop vector index (requires fixed F32_BLOB(N), incompatible with flexible dimensions)
 DROP INDEX IF EXISTS idx_memory_chunks_embedding;
 
@@ -645,11 +651,13 @@ CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_update AFTER UPDATE ON memory_chu
     INSERT INTO memory_chunks_fts(rowid, content) VALUES (new._rowid, new.content);
 END;
 "#,
-), (
-    10,
-    "add_retry_attempts",
-    "ALTER TABLE job_actions ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0;",
-)];
+    ),
+    (
+        10,
+        "add_retry_attempts",
+        "ALTER TABLE job_actions ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0;",
+    ),
+];
 
 /// Run incremental migrations that haven't been applied yet.
 ///

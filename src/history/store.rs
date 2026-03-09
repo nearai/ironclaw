@@ -329,8 +329,7 @@ impl Store {
                 &action.success,
                 &action.error,
                 &action.executed_at,
-                // Safety: bounded by ToolRetryConfig::max_retries (default 5), well within i32 range.
-                &(action.retry_attempts as i32),
+                &i32::try_from(action.retry_attempts).unwrap_or(i32::MAX),
             ],
         )
         .await?;

@@ -114,7 +114,7 @@ pub async fn retry_tool_execute(
                 };
 
                 // Budget check: stop if sleeping would exceed remaining time
-                if delay >= remaining {
+                if delay > remaining {
                     tracing::warn!(
                         tool = %tool.name(),
                         attempt = attempt + 1,
