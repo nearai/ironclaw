@@ -7,12 +7,11 @@
 //! `HashMap` + `last_accessed` tracking + manual LRU eviction.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
 
 use crate::workspace::embeddings::{EmbeddingError, EmbeddingProvider};
 
@@ -30,7 +29,7 @@ pub struct EmbeddingCacheConfig {
 impl Default for EmbeddingCacheConfig {
     fn default() -> Self {
         Self {
-            max_entries: 10_000,
+            max_entries: crate::config::DEFAULT_EMBEDDING_CACHE_SIZE,
         }
     }
 }
@@ -42,8 +41,9 @@ struct CacheEntry {
 
 /// Embedding provider wrapper that caches results in memory.
 ///
-/// Thread-safe via `tokio::sync::Mutex`. The lock is **never held**
-/// during HTTP calls to the inner provider.
+/// Thread-safe via `std::sync::Mutex`. The lock is **never held**
+/// across `.await` points (all critical sections are scoped blocks),
+/// so a synchronous mutex is cheaper than `tokio::sync::Mutex`.
 pub struct CachedEmbeddingProvider {
     inner: Arc<dyn EmbeddingProvider>,
     cache: Mutex<HashMap<String, CacheEntry>>,
@@ -73,17 +73,20 @@ impl CachedEmbeddingProvider {
 
     /// Number of entries currently in the cache.
     pub async fn len(&self) -> usize {
-        self.cache.lock().await.len()
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Whether the cache is empty.
     pub async fn is_empty(&self) -> bool {
-        self.cache.lock().await.is_empty()
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 
     /// Clear all cached entries.
     pub async fn clear(&self) {
-        self.cache.lock().await.clear();
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Build a deterministic cache key: `SHA-256(model_name + "\0" + text)`.
@@ -134,7 +137,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         // Check cache (short critical section)
         {
-            let mut guard = self.cache.lock().await;
+            let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = guard.get_mut(&key) {
                 entry.last_accessed = Instant::now();
                 tracing::debug!("embedding cache hit");
@@ -150,7 +153,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         // Store result
         {
-            let mut guard = self.cache.lock().await;
+            let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             Self::evict_lru(&mut guard, self.config.max_entries);
             guard.insert(
                 key,
@@ -176,7 +179,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         let mut miss_indices: Vec<usize> = Vec::new();
 
         {
-            let mut guard = self.cache.lock().await;
+            let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
             for (i, key) in keys.iter().enumerate() {
                 if let Some(entry) = guard.get_mut(key) {
@@ -226,7 +229,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         // Store misses and assemble results.
         // Evict before each insert to keep peak memory bounded.
         {
-            let mut guard = self.cache.lock().await;
+            let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             let now = Instant::now();
             for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
                 Self::evict_lru(&mut guard, self.config.max_entries);

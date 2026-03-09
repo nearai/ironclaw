@@ -8,6 +8,9 @@ use crate::llm::SessionManager;
 use crate::settings::Settings;
 use crate::workspace::EmbeddingProvider;
 
+/// Default maximum number of cached embeddings.
+pub const DEFAULT_EMBEDDING_CACHE_SIZE: usize = 10_000;
+
 /// Embeddings provider configuration.
 #[derive(Debug, Clone)]
 pub struct EmbeddingsConfig {
@@ -46,7 +49,7 @@ impl Default for EmbeddingsConfig {
             ollama_base_url: "http://localhost:11434".to_string(),
             dimension,
             openai_base_url: None,
-            cache_size: 10_000,
+            cache_size: DEFAULT_EMBEDDING_CACHE_SIZE,
         }
     }
 }
@@ -87,7 +90,7 @@ impl EmbeddingsConfig {
 
         let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
 
-        let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", 10_000usize)?;
+        let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", DEFAULT_EMBEDDING_CACHE_SIZE)?;
 
         if cache_size == 0 {
             return Err(ConfigError::InvalidValue {
