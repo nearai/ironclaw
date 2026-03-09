@@ -28,7 +28,9 @@ use crate::config::RoutineConfig;
 use crate::context::JobContext;
 use crate::db::Database;
 use crate::error::RoutineError;
-use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest};
+use crate::llm::{
+    ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
+};
 use crate::safety::SafetyLayer;
 use crate::tools::{ApprovalContext, ApprovalRequirement, ToolRegistry, redact_params};
 use crate::workspace::Workspace;
@@ -758,11 +760,11 @@ async fn execute_lightweight_with_tools(
 
             let response = ctx
                 .llm
-                .complete(request)
-                .await
-                .map_err(|e| RoutineError::LlmFailed {
-                    reason: e.to_string(),
-                })?;
+                    .complete(request)
+                    .await
+                    .map_err(|e| RoutineError::LlmFailed {
+                        reason: e.to_string(),
+                    })?;
 
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
@@ -785,7 +787,11 @@ async fn execute_lightweight_with_tools(
             }
 
             let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
-            return Ok((RunStatus::Attention, Some(content.to_string()), total_tokens));
+            return Ok((
+                RunStatus::Attention,
+                Some(content.to_string()),
+                total_tokens,
+            ));
         } else {
             // Tool-enabled iteration
             let tool_defs = ctx.tools.tool_definitions().await;
