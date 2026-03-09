@@ -26,10 +26,14 @@
 
 pub mod api;
 pub mod claude_bridge;
+pub mod container;
+pub mod job;
 pub mod proxy_llm;
 pub mod runtime;
 
 pub use api::WorkerHttpClient;
 pub use claude_bridge::ClaudeBridgeRuntime;
+pub use container::ContainerDelegate;
+pub use job::{JobDelegate, JobDeps};
 pub use proxy_llm::ProxyLlmProvider;
 pub use runtime::WorkerRuntime;

@@ -16,6 +16,8 @@ mod commands;
 pub mod compaction;
 pub mod context_monitor;
 pub mod cost_guard;
+pub mod agentic_loop_engine;
+mod chat_delegate;
 mod dispatcher;
 mod heartbeat;
 pub mod job_monitor;
@@ -40,11 +42,15 @@ pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_hea
 pub use router::{MessageIntent, Router};
 pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};
 pub use routine_engine::RoutineEngine;
-pub use scheduler::Scheduler;
+pub use scheduler::{Scheduler, WorkerMessage};
 pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
 pub use session::{PendingApproval, PendingAuth, Session, Thread, ThreadState, Turn, TurnState};
 pub use session_manager::SessionManager;
 pub use submission::{Submission, SubmissionParser, SubmissionResult};
 pub use task::{Task, TaskContext, TaskHandler, TaskOutput};
 pub use undo::{Checkpoint, UndoManager};
+pub use agentic_loop_engine::{
+    AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, ToolExecResult,
+};
+pub use chat_delegate::{ChatDelegate, ChatDeps};
 pub use worker::{Worker, WorkerDeps};
