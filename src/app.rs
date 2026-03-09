@@ -21,7 +21,7 @@ use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
 use crate::skills::catalog::SkillCatalog;
 use crate::tools::ToolRegistry;
-use crate::tools::mcp::McpSessionManager;
+use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingProvider, Workspace};
@@ -41,6 +41,7 @@ pub struct AppComponents {
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub mcp_session_manager: Arc<McpSessionManager>,
+    pub mcp_process_manager: Arc<McpProcessManager>,
     pub wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
     pub log_broadcaster: Arc<LogBroadcaster>,
     pub context_manager: Arc<ContextManager>,
@@ -420,6 +421,7 @@ impl AppBuilder {
     ) -> Result<
         (
             Arc<McpSessionManager>,
+            Arc<McpProcessManager>,
             Option<Arc<WasmToolRuntime>>,
             Option<Arc<ExtensionManager>>,
             Vec<crate::extensions::RegistryEntry>,
@@ -427,10 +429,13 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::tools::mcp::{McpClient, config::load_mcp_servers_from_db, is_authenticated};
+        use crate::tools::mcp::{
+            McpClient, McpTransport, config::load_mcp_servers_from_db, is_authenticated,
+        };
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
+        let mcp_process_manager = Arc::new(McpProcessManager::new());
 
         // Create WASM tool runtime eagerly so extensions installed after startup
         // (e.g. via the web UI) can still be activated. The tools directory is only
@@ -506,97 +511,175 @@ impl AppBuilder {
             let db = self.db.clone();
             let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
+            let pm = Arc::clone(&mcp_process_manager);
             async move {
-                if let Some(ref secrets) = secrets_store {
-                    let servers_result = if let Some(ref d) = db {
-                        load_mcp_servers_from_db(d.as_ref(), "default").await
-                    } else {
-                        crate::tools::mcp::config::load_mcp_servers().await
-                    };
-                    match servers_result {
-                        Ok(servers) => {
-                            let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
-                            if !enabled.is_empty() {
-                                tracing::info!(
-                                    "Loading {} configured MCP server(s)...",
-                                    enabled.len()
-                                );
-                            }
+                let servers_result = if let Some(ref d) = db {
+                    load_mcp_servers_from_db(d.as_ref(), "default").await
+                } else {
+                    crate::tools::mcp::config::load_mcp_servers().await
+                };
+                match servers_result {
+                    Ok(servers) => {
+                        let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
+                        if !enabled.is_empty() {
+                            tracing::info!("Loading {} configured MCP server(s)...", enabled.len());
+                        }
 
-                            let mut join_set = tokio::task::JoinSet::new();
-                            for server in enabled {
-                                let mcp_sm = Arc::clone(&mcp_sm);
-                                let secrets = Arc::clone(secrets);
-                                let tools = Arc::clone(&tools);
+                        let mut join_set = tokio::task::JoinSet::new();
+                        for server in enabled {
+                            let mcp_sm = Arc::clone(&mcp_sm);
+                            let secrets = secrets_store.clone();
+                            let tools = Arc::clone(&tools);
+                            let pm = Arc::clone(&pm);
 
-                                join_set.spawn(async move {
-                                    let server_name = server.name.clone();
-                                    let has_tokens =
-                                        is_authenticated(&server, &secrets, "default").await;
+                            join_set.spawn(async move {
+                                let server_name = server.name.clone();
 
-                                    let client = if has_tokens || server.requires_auth() {
-                                        McpClient::new_authenticated(
-                                            server, mcp_sm, secrets, "default",
-                                        )
-                                    } else {
-                                        McpClient::new_with_name(&server_name, &server.url)
-                                    };
-
-                                    match client.list_tools().await {
-                                        Ok(mcp_tools) => {
-                                            let tool_count = mcp_tools.len();
-                                            match client.create_tools().await {
-                                                Ok(tool_impls) => {
-                                                    for tool in tool_impls {
-                                                        tools.register(tool).await;
-                                                    }
-                                                    tracing::info!(
-                                                        "Loaded {} tools from MCP server '{}'",
-                                                        tool_count,
-                                                        server_name
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "Failed to create tools from MCP server '{}': {}",
-                                                        server_name,
-                                                        e
-                                                    );
-                                                }
+                                let client: McpClient = match server.effective_transport() {
+                                    crate::tools::mcp::config::EffectiveTransport::Stdio {
+                                        command,
+                                        args,
+                                        env,
+                                    } => {
+                                        match pm
+                                            .spawn_stdio(
+                                                &server_name,
+                                                command,
+                                                args.to_vec(),
+                                                env.clone(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(transport) => McpClient::new_with_transport(
+                                                &server_name,
+                                                transport as Arc<dyn McpTransport>,
+                                                None,
+                                                secrets,
+                                                "default",
+                                                Some(server),
+                                            ),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to spawn stdio MCP server '{}': {}",
+                                                    server_name,
+                                                    e
+                                                );
+                                                return;
                                             }
                                         }
-                                        Err(e) => {
-                                            let err_str = e.to_string();
-                                            if err_str.contains("401")
-                                                || err_str.contains("authentication")
-                                            {
+                                    }
+                                    #[cfg(unix)]
+                                    crate::tools::mcp::config::EffectiveTransport::Unix {
+                                        socket_path,
+                                    } => {
+                                        match crate::tools::mcp::unix_transport::UnixMcpTransport::connect(
+                                            &server_name,
+                                            socket_path,
+                                        )
+                                        .await
+                                        {
+                                            Ok(transport) => McpClient::new_with_transport(
+                                                &server_name,
+                                                Arc::new(transport) as Arc<dyn McpTransport>,
+                                                None,
+                                                secrets,
+                                                "default",
+                                                Some(server),
+                                            ),
+                                            Err(e) => {
                                                 tracing::warn!(
-                                                    "MCP server '{}' requires authentication. \
-                                                     Run: ironclaw mcp auth {}",
+                                                    "Failed to connect to Unix MCP server '{}': {}",
                                                     server_name,
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    #[cfg(not(unix))]
+                                    crate::tools::mcp::config::EffectiveTransport::Unix { .. } => {
+                                        tracing::warn!(
+                                            "Unix socket transport is not supported on this platform (server '{}')",
+                                            server_name
+                                        );
+                                        return;
+                                    }
+                                    crate::tools::mcp::config::EffectiveTransport::Http => {
+                                        if let Some(ref secrets) = secrets {
+                                            let has_tokens =
+                                                is_authenticated(&server, secrets, "default")
+                                                    .await;
+
+                                            if has_tokens || server.requires_auth() {
+                                                McpClient::new_authenticated(
+                                                    server,
+                                                    Arc::clone(&mcp_sm),
+                                                    Arc::clone(secrets),
+                                                    "default",
+                                                )
+                                            } else {
+                                                McpClient::new_with_config(server)
+                                            }
+                                        } else {
+                                            McpClient::new_with_config(server)
+                                        }
+                                    }
+                                };
+
+                                match client.list_tools().await {
+                                    Ok(mcp_tools) => {
+                                        let tool_count = mcp_tools.len();
+                                        match client.create_tools().await {
+                                            Ok(tool_impls) => {
+                                                for tool in tool_impls {
+                                                    tools.register(tool).await;
+                                                }
+                                                tracing::info!(
+                                                    "Loaded {} tools from MCP server '{}'",
+                                                    tool_count,
                                                     server_name
                                                 );
-                                            } else {
+                                            }
+                                            Err(e) => {
                                                 tracing::warn!(
-                                                    "Failed to connect to MCP server '{}': {}",
+                                                    "Failed to create tools from MCP server '{}': {}",
                                                     server_name,
                                                     e
                                                 );
                                             }
                                         }
                                     }
-                                });
-                            }
-
-                            while let Some(result) = join_set.join_next().await {
-                                if let Err(e) = result {
-                                    tracing::warn!("MCP server loading task panicked: {}", e);
+                                    Err(e) => {
+                                        let err_str = e.to_string();
+                                        if err_str.contains("401")
+                                            || err_str.contains("authentication")
+                                        {
+                                            tracing::warn!(
+                                                "MCP server '{}' requires authentication. \
+                                                 Run: ironclaw mcp auth {}",
+                                                server_name,
+                                                server_name
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "Failed to connect to MCP server '{}': {}",
+                                                server_name,
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
+                            });
+                        }
+
+                        while let Some(result) = join_set.join_next().await {
+                            if let Err(e) = result {
+                                tracing::warn!("MCP server loading task panicked: {}", e);
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!("No MCP servers configured ({})", e);
-                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("No MCP servers configured ({})", e);
                     }
                 }
             }
@@ -667,6 +750,7 @@ impl AppBuilder {
 
         Ok((
             mcp_session_manager,
+            mcp_process_manager,
             wasm_tool_runtime,
             extension_manager,
             catalog_entries,
@@ -702,6 +786,7 @@ impl AppBuilder {
 
         let (
             mcp_session_manager,
+            mcp_process_manager,
             wasm_tool_runtime,
             extension_manager,
             catalog_entries,
@@ -799,6 +884,7 @@ impl AppBuilder {
             workspace,
             extension_manager,
             mcp_session_manager,
+            mcp_process_manager,
             wasm_tool_runtime,
             log_broadcaster: self.log_broadcaster,
             context_manager,

@@ -75,7 +75,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
-            return run_mcp_command(mcp_cmd.clone()).await;
+            return run_mcp_command(*mcp_cmd.clone()).await;
         }
         Some(Command::Memory(mem_cmd)) => {
             init_cli_tracing();
@@ -722,6 +722,9 @@ async fn async_main() -> anyhow::Result<()> {
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+
+    // Shut down all stdio MCP server child processes.
+    components.mcp_process_manager.shutdown_all().await;
 
     // Flush LLM trace recording if enabled
     if let Some(ref recorder) = components.recording_handle
