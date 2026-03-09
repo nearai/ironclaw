@@ -25,10 +25,12 @@ use crate::agent::routine::{
 };
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
+use crate::context::JobContext;
 use crate::db::Database;
 use crate::error::RoutineError;
-use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
-use crate::tools::ApprovalContext;
+use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest};
+use crate::safety::SafetyLayer;
+use crate::tools::{ApprovalContext, ApprovalRequirement, ToolRegistry, redact_params};
 use crate::workspace::Workspace;
 
 /// The routine execution engine.
@@ -45,9 +47,14 @@ pub struct RoutineEngine {
     event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
+    /// Tool registry for lightweight routine tool execution.
+    tools: Arc<ToolRegistry>,
+    /// Safety layer for tool output sanitization.
+    safety: Arc<SafetyLayer>,
 }
 
 impl RoutineEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: RoutineConfig,
         store: Arc<dyn Database>,
@@ -55,6 +62,8 @@ impl RoutineEngine {
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
         scheduler: Option<Arc<Scheduler>>,
+        tools: Arc<ToolRegistry>,
+        safety: Arc<SafetyLayer>,
     ) -> Self {
         Self {
             config,
@@ -65,6 +74,8 @@ impl RoutineEngine {
             running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
             scheduler,
+            tools,
+            safety,
         }
     }
 
@@ -240,12 +251,15 @@ impl RoutineEngine {
 
         // Execute inline for manual triggers (caller wants to wait)
         let engine = EngineContext {
+            config: self.config.clone(),
             store: self.store.clone(),
             llm: self.llm.clone(),
             workspace: self.workspace.clone(),
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            tools: self.tools.clone(),
+            safety: self.safety.clone(),
         };
 
         tokio::spawn(async move {
@@ -272,12 +286,15 @@ impl RoutineEngine {
         };
 
         let engine = EngineContext {
+            config: self.config.clone(),
             store: self.store.clone(),
             llm: self.llm.clone(),
             workspace: self.workspace.clone(),
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            tools: self.tools.clone(),
+            safety: self.safety.clone(),
         };
 
         // Record the run in DB, then spawn execution
@@ -319,12 +336,15 @@ impl RoutineEngine {
 
 /// Shared context passed to the execution function.
 struct EngineContext {
+    config: RoutineConfig,
     store: Arc<dyn Database>,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,
     running_count: Arc<AtomicUsize>,
     scheduler: Option<Arc<Scheduler>>,
+    tools: Arc<ToolRegistry>,
+    safety: Arc<SafetyLayer>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -538,7 +558,10 @@ async fn execute_full_job(
     Ok((RunStatus::Ok, Some(summary), None))
 }
 
-/// Execute a lightweight routine (single LLM call).
+/// Execute a lightweight routine with optional tool support.
+///
+/// If tools are enabled, this runs a simplified agentic loop (max 3-5 iterations).
+/// If tools are disabled, this does a single LLM call (original behavior).
 async fn execute_lightweight(
     ctx: &EngineContext,
     routine: &Routine,
@@ -570,7 +593,7 @@ async fn execute_lightweight(
         Err(_) => None,
     };
 
-    // Build the prompt
+    // Build the user-facing prompt
     let mut full_prompt = String::new();
     full_prompt.push_str(prompt);
 
@@ -598,15 +621,6 @@ async fn execute_lightweight(
         }
     };
 
-    let messages = if system_prompt.is_empty() {
-        vec![ChatMessage::user(&full_prompt)]
-    } else {
-        vec![
-            ChatMessage::system(&system_prompt),
-            ChatMessage::user(&full_prompt),
-        ]
-    };
-
     // Determine max_tokens from model metadata with fallback
     let effective_max_tokens = match ctx.llm.model_metadata().await {
         Ok(meta) => {
@@ -614,6 +628,45 @@ async fn execute_lightweight(
             from_api.max(max_tokens)
         }
         Err(_) => max_tokens,
+    };
+
+    // If tools are enabled, use the tool execution loop; otherwise, single LLM call
+    if ctx.config.lightweight_tools_enabled {
+        execute_lightweight_with_tools(
+            ctx,
+            routine,
+            &system_prompt,
+            &full_prompt,
+            effective_max_tokens,
+        )
+        .await
+    } else {
+        execute_lightweight_no_tools(
+            ctx,
+            routine,
+            &system_prompt,
+            &full_prompt,
+            effective_max_tokens,
+        )
+        .await
+    }
+}
+
+/// Execute a lightweight routine without tool support (original single-call behavior).
+async fn execute_lightweight_no_tools(
+    ctx: &EngineContext,
+    _routine: &Routine,
+    system_prompt: &str,
+    full_prompt: &str,
+    effective_max_tokens: u32,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let messages = if system_prompt.is_empty() {
+        vec![ChatMessage::user(full_prompt)]
+    } else {
+        vec![
+            ChatMessage::system(system_prompt),
+            ChatMessage::user(full_prompt),
+        ]
     };
 
     let request = CompletionRequest::new(messages)
@@ -631,7 +684,7 @@ async fn execute_lightweight(
     let content = response.content.trim();
     let tokens_used = Some((response.input_tokens + response.output_tokens) as i32);
 
-    // Empty content guard (same as heartbeat)
+    // Empty content guard
     if content.is_empty() {
         return if response.finish_reason == FinishReason::Length {
             Err(RoutineError::TruncatedResponse)
@@ -646,6 +699,260 @@ async fn execute_lightweight(
     }
 
     Ok((RunStatus::Attention, Some(content.to_string()), tokens_used))
+}
+
+/// Execute a lightweight routine with tool execution support (agentic loop).
+///
+/// This is a simplified version of the full dispatcher loop:
+/// - Max 3-5 iterations (configurable)
+/// - Sequential tool execution (not parallel)
+/// - Auto-approval of non-Always tools
+/// - No hooks or approval dialogs
+async fn execute_lightweight_with_tools(
+    ctx: &EngineContext,
+    routine: &Routine,
+    system_prompt: &str,
+    full_prompt: &str,
+    effective_max_tokens: u32,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let mut messages = if system_prompt.is_empty() {
+        vec![ChatMessage::user(full_prompt)]
+    } else {
+        vec![
+            ChatMessage::system(system_prompt),
+            ChatMessage::user(full_prompt),
+        ]
+    };
+
+    let max_iterations = ctx.config.lightweight_max_iterations.min(5);
+    let mut iteration = 0;
+    let mut total_input_tokens = 0;
+    let mut total_output_tokens = 0;
+
+    // Create a minimal job context for tool execution
+    let job_ctx = JobContext {
+        job_id: routine.id,
+        user_id: routine.user_id.clone(),
+        title: "Lightweight Routine".to_string(),
+        description: routine.name.clone(),
+        ..Default::default()
+    };
+
+    loop {
+        iteration += 1;
+        if iteration > 5 {
+            // Safety ceiling (should not reach if config is valid)
+            return Err(RoutineError::LlmFailed {
+                reason: "Exceeded maximum tool iterations".to_string(),
+            });
+        }
+
+        // Force text-only response at iteration limit
+        let force_text = iteration >= max_iterations;
+
+        if force_text {
+            // Final iteration: no tools, just get text response
+            let request = CompletionRequest::new(messages)
+                .with_max_tokens(effective_max_tokens)
+                .with_temperature(0.3);
+
+            let response = ctx
+                .llm
+                .complete(request)
+                .await
+                .map_err(|e| RoutineError::LlmFailed {
+                    reason: e.to_string(),
+                })?;
+
+            total_input_tokens += response.input_tokens;
+            total_output_tokens += response.output_tokens;
+
+            let content = response.content.trim();
+
+            // Empty content guard
+            if content.is_empty() {
+                return if response.finish_reason == FinishReason::Length {
+                    Err(RoutineError::TruncatedResponse)
+                } else {
+                    Err(RoutineError::EmptyResponse)
+                };
+            }
+
+            // Check for the "nothing to do" sentinel
+            if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
+                let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+                return Ok((RunStatus::Ok, None, total_tokens));
+            }
+
+            let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+            return Ok((RunStatus::Attention, Some(content.to_string()), total_tokens));
+        } else {
+            // Tool-enabled iteration
+            let tool_defs = ctx.tools.tool_definitions().await;
+
+            let request = ToolCompletionRequest::new(messages.clone(), tool_defs)
+                .with_max_tokens(effective_max_tokens)
+                .with_temperature(0.3);
+
+            let response = ctx
+                .llm
+                .complete_with_tools(request)
+                .await
+                .map_err(|e| RoutineError::LlmFailed {
+                    reason: e.to_string(),
+                })?;
+
+            total_input_tokens += response.input_tokens;
+            total_output_tokens += response.output_tokens;
+
+            // Check if LLM returned text (no tool calls)
+            if response.tool_calls.is_empty() {
+                let content_str = response.content.unwrap_or_default();
+                let content = content_str.trim();
+
+                // Empty content guard
+                if content.is_empty() {
+                    return if response.finish_reason == FinishReason::Length {
+                        Err(RoutineError::TruncatedResponse)
+                    } else {
+                        Err(RoutineError::EmptyResponse)
+                    };
+                }
+
+                // Check for the "nothing to do" sentinel
+                if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
+                    let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+                    return Ok((RunStatus::Ok, None, total_tokens));
+                }
+
+                let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+                return Ok((RunStatus::Attention, Some(content.to_string()), total_tokens));
+            }
+
+            // LLM returned tool calls: add assistant message and execute tools
+            messages.push(ChatMessage::assistant_with_tool_calls(
+                response.content.clone(),
+                response.tool_calls.clone(),
+            ));
+
+            // Execute tools sequentially
+            for tc in response.tool_calls {
+                let result = execute_routine_tool(ctx, &job_ctx, &tc).await;
+
+                // Sanitize and wrap result
+                let result_content = match result {
+                    Ok(output) => {
+                        let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &output);
+                        ctx.safety
+                            .wrap_for_llm(&tc.name, &sanitized.content, sanitized.was_modified)
+                    }
+                    Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
+                };
+
+                // Add tool result to context
+                messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &result_content));
+            }
+
+            // Continue loop to next LLM call
+        }
+    }
+}
+
+/// Execute a single tool for a lightweight routine.
+async fn execute_routine_tool(
+    ctx: &EngineContext,
+    job_ctx: &JobContext,
+    tc: &ToolCall,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Check if tool exists
+    let tool = ctx
+        .tools
+        .get(&tc.name)
+        .await
+        .ok_or_else(|| format!("Tool '{}' not found", tc.name))?;
+
+    // Check approval requirement: auto-approve everything except Always tools
+    match tool.requires_approval(&tc.arguments) {
+        ApprovalRequirement::Never => {}
+        ApprovalRequirement::UnlessAutoApproved => {}
+        ApprovalRequirement::Always => {
+            return Err(
+                format!("Tool '{}' requires manual approval in lightweight routines", tc.name)
+                    .into(),
+            );
+        }
+    }
+
+    // Validate tool parameters
+    let validation = ctx.safety.validator().validate_tool_params(&tc.arguments);
+    if !validation.is_valid {
+        let details = validation
+            .errors
+            .iter()
+            .map(|e| format!("{}: {}", e.field, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(
+            format!("Invalid tool parameters: {}", details)
+                .into(),
+        );
+    }
+
+    let safe_params = redact_params(&tc.arguments, tool.sensitive_params());
+    tracing::debug!(
+        tool = %tc.name,
+        params = %safe_params,
+        "Lightweight routine tool call started"
+    );
+
+    // Execute with per-tool timeout
+    let timeout = tool.execution_timeout();
+    let start = std::time::Instant::now();
+    let result = tokio::time::timeout(timeout, async {
+        tool.execute(tc.arguments.clone(), job_ctx).await
+    })
+    .await;
+    let elapsed = start.elapsed();
+
+    match &result {
+        Ok(Ok(_)) => {
+            tracing::debug!(
+                tool = %tc.name,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "Lightweight routine tool call succeeded"
+            );
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(
+                tool = %tc.name,
+                elapsed_ms = elapsed.as_millis() as u64,
+                error = %e,
+                "Lightweight routine tool call failed"
+            );
+        }
+        Err(_) => {
+            tracing::debug!(
+                tool = %tc.name,
+                elapsed_ms = elapsed.as_millis() as u64,
+                timeout_secs = timeout.as_secs(),
+                "Lightweight routine tool call timed out"
+            );
+        }
+    }
+
+    let result = result
+        .map_err(|_| {
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("Tool execution timed out after {:?}", timeout),
+            )) as Box<dyn std::error::Error + Send + Sync>
+        })?
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+    // Serialize result to JSON string
+    let result_str =
+        serde_json::to_string(&result.result).unwrap_or_else(|_| "<serialize error>".to_string());
+    Ok(result_str)
 }
 
 /// Send a notification based on the routine's notify config and run status.
