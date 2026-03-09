@@ -14,8 +14,8 @@ mod bedrock;
 pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
-mod nearai_chat;
 pub mod gemini_oauth;
+mod nearai_chat;
 mod provider;
 mod reasoning;
 pub mod recording;
@@ -31,8 +31,8 @@ pub mod vision_models;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
-pub use nearai_chat::{ModelInfo, NearAiChatProvider};
 pub use gemini_oauth::GeminiOauthProvider;
+pub use nearai_chat::{ModelInfo, NearAiChatProvider};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,
     LlmProvider, ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
@@ -534,6 +534,17 @@ pub async fn build_provider_chain(
     Ok((llm, cheap_llm, recording_handle))
 }
 
+pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let gemini_config = config
+        .gemini_oauth
+        .clone()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "gemini_oauth".to_string(),
+        })?;
+    let provider = gemini_oauth::GeminiOauthProvider::new(gemini_config)?;
+    Ok(Arc::new(provider))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,14 +617,4 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
-}
-
-pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    let gemini_config = config
-        .gemini_oauth
-        .clone()
-        .ok_or_else(|| LlmError::AuthFailed {
-            provider: "gemini_oauth".to_string(),
-        })?;
-    Ok(Arc::new(gemini_oauth::GeminiOauthProvider::new(gemini_config)))
 }

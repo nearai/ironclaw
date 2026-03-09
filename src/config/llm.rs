@@ -46,8 +46,6 @@ impl std::str::FromStr for CacheRetention {
                 "invalid cache retention '{}', expected one of: none, short, long",
                 s
             )),
-                s
-            )),
         }
     }
 }
@@ -203,6 +201,7 @@ impl LlmConfig {
             },
             provider: None,
             bedrock: None,
+            gemini_oauth: None,
             request_timeout_secs: 120,
         }
     }
@@ -334,16 +333,11 @@ impl LlmConfig {
 
         let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
 
-        let gemini_oauth = if backend == LlmBackend::GeminiOauth {
+        let gemini_oauth = if backend_lower == "gemini_oauth" || backend_lower == "gemini-oauth" {
             let model = Self::resolve_model("GEMINI_MODEL", settings, "gemini-2.5-flash")?;
             let credentials_path = optional_env("GEMINI_CREDENTIALS_PATH")?
                 .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .unwrap_or_else(|| PathBuf::from("/tmp"))
-                        .join(".gemini")
-                        .join("oauth_creds.json")
-                });
+                .unwrap_or_else(GeminiOauthConfig::default_credentials_path);
             Some(GeminiOauthConfig {
                 model,
                 credentials_path,
@@ -504,7 +498,6 @@ impl LlmConfig {
             model,
             extra_headers,
             oauth_token,
->>>>>>> origin/main
         })
     }
 }
