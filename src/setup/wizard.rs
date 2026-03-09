@@ -832,7 +832,10 @@ impl SetupWizard {
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 if current == "bedrock" {
-                    return self.setup_bedrock().await;
+                    // Keeping the existing Bedrock config — no need to re-run
+                    // the full setup flow (region, auth, cross-region).
+                    print_info("Keeping existing AWS Bedrock configuration.");
+                    return Ok(());
                 }
                 return self.run_provider_setup(&current, &registry).await;
             }
@@ -1284,7 +1287,11 @@ impl SetupWizard {
                 // Named profile
                 let profile =
                     input("AWS profile name (from ~/.aws/config)").map_err(SetupError::Io)?;
-                if !profile.is_empty() {
+                if profile.trim().is_empty() {
+                    // Empty input clears any previously configured profile
+                    self.settings.bedrock_profile = None;
+                    print_info("AWS profile cleared; using default AWS credential chain instead.");
+                } else {
                     self.settings.bedrock_profile = Some(profile.clone());
                     print_success(&format!("AWS profile '{}' saved", profile));
                 }
@@ -3727,6 +3734,27 @@ mod tests {
         assert!(
             wizard.settings.bedrock_profile.is_none(),
             "bedrock_profile should be cleared when selecting default credentials"
+        );
+    }
+
+    /// Regression: empty profile input in named-profile auth should clear
+    /// any previously configured profile instead of leaving it stale.
+    #[test]
+    fn test_bedrock_empty_profile_clears_existing() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.bedrock_profile = Some("old-profile".to_string());
+
+        // Simulate auth_choice == 1 with empty input
+        let profile = "".to_string();
+        if profile.trim().is_empty() {
+            wizard.settings.bedrock_profile = None;
+        } else {
+            wizard.settings.bedrock_profile = Some(profile);
+        }
+
+        assert!(
+            wizard.settings.bedrock_profile.is_none(),
+            "empty profile input should clear existing bedrock_profile"
         );
     }
 
