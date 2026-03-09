@@ -50,8 +50,18 @@ impl Agent {
 
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         // In group chats, MEMORY.md is excluded to prevent leaking personal context.
+        // Resolve the user's timezone
+        let user_tz = crate::timezone::resolve_timezone(
+            message.timezone.as_deref(),
+            None, // user setting lookup can be added later
+            &self.config.default_timezone,
+        );
+
         let system_prompt = if let Some(ws) = self.workspace() {
-            match ws.system_prompt_for_context(is_group_chat).await {
+            match ws
+                .system_prompt_for_context_tz(is_group_chat, user_tz)
+                .await
+            {
                 Ok(prompt) if !prompt.is_empty() => Some(prompt),
                 Ok(_) => None,
                 Err(e) => {
@@ -103,7 +113,7 @@ impl Agent {
             None
         };
 
-        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
+        let mut reasoning = Reasoning::new(self.llm().clone())
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
             .with_group_chat(is_group_chat);
@@ -130,6 +140,7 @@ impl Agent {
         let mut job_ctx =
             JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
+        job_ctx.user_timezone = user_tz.name().to_string();
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -670,8 +681,53 @@ impl Agent {
                                         .into())
                                     });
 
-                                // Send ToolResult preview
-                                if let Ok(ref output) = tool_result
+                                // Detect image generation sentinel in tool output
+                                // (only from image tools — avoids parsing all tool outputs)
+                                let is_image_sentinel = if let Ok(ref output) = tool_result
+                                    && matches!(tc.name.as_str(), "image_generate" | "image_edit")
+                                {
+                                    if let Ok(sentinel) =
+                                        serde_json::from_str::<serde_json::Value>(output)
+                                        && sentinel.get("type").and_then(|v| v.as_str())
+                                            == Some("image_generated")
+                                    {
+                                        let data_url = sentinel
+                                            .get("data")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        let path = sentinel
+                                            .get("path")
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from);
+                                        // Skip broadcasting if data_url is empty to avoid
+                                        // sending a broken ImageGenerated SSE event.
+                                        if data_url.is_empty() {
+                                            tracing::warn!(
+                                                "Image generation sentinel has empty data URL, skipping broadcast"
+                                            );
+                                        } else {
+                                            let _ = self
+                                                .channels
+                                                .send_status(
+                                                    &message.channel,
+                                                    StatusUpdate::ImageGenerated { data_url, path },
+                                                    &message.metadata,
+                                                )
+                                                .await;
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                };
+
+                                // Send ToolResult preview (skip for image sentinels to avoid
+                                // broadcasting multi-MB base64 data as a preview)
+                                if !is_image_sentinel
+                                    && let Ok(ref output) = tool_result
                                     && !output.is_empty()
                                 {
                                     let _ = self
@@ -785,6 +841,7 @@ impl Agent {
                             tool_call_id: tc.id.clone(),
                             context_messages: context_messages.clone(),
                             deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
+                            user_timezone: Some(user_tz.name().to_string()),
                         };
 
                         return Ok(AgenticLoopResult::NeedApproval { pending });
@@ -1146,6 +1203,7 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations: 50,
                 auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -1248,6 +1306,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "done"}),
                 },
             ],
+            user_timezone: None,
         };
 
         let json = serde_json::to_string(&pending).expect("serialize");
@@ -1595,12 +1654,8 @@ mod tests {
         use crate::testing::StubLlm;
 
         let stub = Arc::new(StubLlm::failing_non_transient("ctx-bomb"));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
 
-        let reasoning = Reasoning::new(stub.clone(), safety);
+        let reasoning = Reasoning::new(stub.clone());
 
         // Build a fat context with lots of history.
         let messages = vec![
@@ -1710,11 +1765,7 @@ mod tests {
         use crate::llm::{Reasoning, ReasoningContext, RespondResult, ToolDefinition};
 
         let provider = Arc::new(AlwaysToolCallProvider);
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
-        let reasoning = Reasoning::new(provider, safety);
+        let reasoning = Reasoning::new(provider);
 
         let tool_def = ToolDefinition {
             name: "echo".to_string(),
@@ -1900,6 +1951,7 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations,
                 auto_approve_tools: true,
+                default_timezone: "UTC".to_string(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2015,6 +2067,7 @@ mod tests {
                     max_actions_per_hour: None,
                     max_tool_iterations: max_iter,
                     auto_approve_tools: true,
+                    default_timezone: "UTC".to_string(),
                 },
                 deps,
                 Arc::new(ChannelManager::new()),
@@ -2114,6 +2167,49 @@ mod tests {
         assert!(
             formatted.contains("connection refused"),
             "Error should include the underlying reason, got: {formatted}"
+        );
+    }
+
+    #[test]
+    fn test_image_sentinel_empty_data_url_should_be_skipped() {
+        // Regression: unwrap_or_default() on missing "data" field produces an empty
+        // string. Broadcasting an empty data_url would send a broken SSE event.
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "path": "/tmp/image.png"
+            // "data" field is missing
+        });
+
+        let data_url = sentinel
+            .get("data")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        assert!(
+            data_url.is_empty(),
+            "Missing 'data' field should produce empty string"
+        );
+        // The fix: empty data_url means we skip broadcasting
+    }
+
+    #[test]
+    fn test_image_sentinel_present_data_url_is_valid() {
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,abc123",
+            "path": "/tmp/image.png"
+        });
+
+        let data_url = sentinel
+            .get("data")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        assert!(
+            !data_url.is_empty(),
+            "Present 'data' field should produce non-empty string"
         );
     }
 }

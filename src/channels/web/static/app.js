@@ -18,6 +18,7 @@ let unreadThreads = new Map(); // thread_id -> unread count
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
+let stagedImages = [];
 
 // --- Slash Commands ---
 
@@ -181,6 +182,7 @@ function confirmRestart() {
     body: {
       content: '/restart',
       thread_id: currentThreadId,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     },
   })
     .then((response) => {
@@ -388,6 +390,12 @@ function connectSSE() {
     if (currentTab === 'extensions') loadExtensions();
   });
 
+  eventSource.addEventListener('image_generated', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    addGeneratedImage(data.data_url, data.path);
+  });
+
   eventSource.addEventListener('error', (e) => {
     if (e.data) {
       const data = JSON.parse(e.data);
@@ -445,16 +453,23 @@ function sendMessage() {
     return;
   }
   const content = input.value.trim();
-  if (!content) return;
+  if (!content && stagedImages.length === 0) return;
 
-  addMessage('user', content);
+  addMessage('user', content || '(images attached)');
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
 
+  const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+  if (stagedImages.length > 0) {
+    body.images = stagedImages.map(img => ({ media_type: img.media_type, data: img.data }));
+    stagedImages = [];
+    renderImagePreviews();
+  }
+
   apiFetch('/api/chat/send', {
     method: 'POST',
-    body: { content, thread_id: currentThreadId || undefined },
+    body: body,
   }).catch((err) => {
     addMessage('system', 'Failed to send: ' + err.message);
   });
@@ -469,6 +484,104 @@ function enableChatInput() {
     input.placeholder = 'Message or / for commands...';
   }
   if (btn) btn.disabled = false;
+}
+
+// --- Image Upload ---
+
+function renderImagePreviews() {
+  const strip = document.getElementById('image-preview-strip');
+  strip.innerHTML = '';
+  stagedImages.forEach((img, idx) => {
+    const container = document.createElement('div');
+    container.className = 'image-preview-container';
+
+    const preview = document.createElement('img');
+    preview.className = 'image-preview';
+    preview.src = img.dataUrl;
+    preview.alt = 'Attached image';
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'image-preview-remove';
+    removeBtn.textContent = '\u00d7';
+    removeBtn.addEventListener('click', () => {
+      stagedImages.splice(idx, 1);
+      renderImagePreviews();
+    });
+
+    container.appendChild(preview);
+    container.appendChild(removeBtn);
+    strip.appendChild(container);
+  });
+}
+
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per image
+const MAX_STAGED_IMAGES = 5;
+
+function handleImageFiles(files) {
+  Array.from(files).forEach(file => {
+    if (!file.type.startsWith('image/')) return;
+    if (file.size > MAX_IMAGE_SIZE_BYTES) {
+      alert(`Image "${file.name}" exceeds 5 MB limit (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      return;
+    }
+    if (stagedImages.length >= MAX_STAGED_IMAGES) {
+      alert(`Maximum ${MAX_STAGED_IMAGES} images allowed per message`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const dataUrl = e.target.result;
+      const commaIdx = dataUrl.indexOf(',');
+      const meta = dataUrl.substring(0, commaIdx); // e.g. "data:image/png;base64"
+      const base64 = dataUrl.substring(commaIdx + 1);
+      const mediaType = meta.replace('data:', '').replace(';base64', '');
+      stagedImages.push({ media_type: mediaType, data: base64, dataUrl: dataUrl });
+      renderImagePreviews();
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+document.getElementById('attach-btn').addEventListener('click', () => {
+  document.getElementById('image-file-input').click();
+});
+
+document.getElementById('image-file-input').addEventListener('change', (e) => {
+  handleImageFiles(e.target.files);
+  e.target.value = '';
+});
+
+document.getElementById('chat-input').addEventListener('paste', (e) => {
+  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
+      const file = items[i].getAsFile();
+      if (file) handleImageFiles([file]);
+    }
+  }
+});
+
+function addGeneratedImage(dataUrl, path) {
+  const container = document.getElementById('chat-messages');
+  const card = document.createElement('div');
+  card.className = 'generated-image-card';
+
+  const img = document.createElement('img');
+  img.className = 'generated-image';
+  img.src = dataUrl;
+  img.alt = 'Generated image';
+
+  card.appendChild(img);
+
+  if (path) {
+    const pathLabel = document.createElement('div');
+    pathLabel.className = 'generated-image-path';
+    pathLabel.textContent = path;
+    card.appendChild(pathLabel);
+  }
+
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
 }
 
 // --- Slash Autocomplete ---
@@ -563,6 +676,13 @@ function sendApprovalAction(requestId, action) {
 
 function renderMarkdown(text) {
   if (typeof marked !== 'undefined') {
+    // Escape raw HTML error pages instead of rendering them as markup.
+    // Only triggers when the text *starts with* a doctype or <html> tag
+    // (after optional whitespace), so normal messages that mention HTML
+    // tags in prose or code fences are not affected.  See #263.
+    if (/^\s*<!doctype\s/i.test(text) || /^\s*<html[\s>]/i.test(text)) {
+      return escapeHtml(text);
+    }
     let html = marked.parse(text);
     // Sanitize HTML output to prevent XSS from tool output or LLM responses.
     html = sanitizeRenderedHtml(html);
@@ -1473,7 +1593,7 @@ chatInput.addEventListener('keydown', (e) => {
     }
   }
 
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     hideSlashAutocomplete();
     sendMessage();
@@ -3473,10 +3593,15 @@ let teeReportCache = null;
 let teeReportLoading = false;
 
 function teeApiBase() {
-  var parts = window.location.hostname.split('.');
-  if (parts.length < 2) return null;
-  var domain = parts.slice(1).join('.');
-  return window.location.protocol + '//api.' + domain;
+    var hostname = window.location.hostname;
+    // Skip IP addresses (IPv4 and IPv6) and localhost
+    if (hostname === "localhost" || /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(hostname) || hostname.indexOf(":") !== -1) {
+        return null;
+    }
+    var parts = hostname.split(".");
+    if (parts.length < 2) return null;
+    var domain = parts.slice(1).join(".");
+    return window.location.protocol + "//api." + domain;
 }
 
 function teeInstanceName() {
@@ -3487,13 +3612,19 @@ function checkTeeStatus() {
   var base = teeApiBase();
   if (!base) return;
   var name = teeInstanceName();
-  fetch(base + '/instances/' + encodeURIComponent(name) + '/attestation').then(function(res) {
-    if (!res.ok) throw new Error(res.status);
-    return res.json();
-  }).then(function(data) {
-    teeInfo = data;
-    document.getElementById('tee-shield').style.display = 'flex';
-  }).catch(function() {});
+  try {
+    fetch(base + '/instances/' + encodeURIComponent(name) + '/attestation').then(function(res) {
+      if (!res.ok) throw new Error(res.status);
+      return res.json();
+    }).then(function(data) {
+      teeInfo = data;
+      document.getElementById('tee-shield').style.display = 'flex';
+    }).catch(function(err) {
+      console.warn('Failed to fetch TEE attestation:', err);
+    });
+  } catch (e) {
+    console.warn("Failed to check TEE status:", e);
+  }
 }
 
 function fetchTeeReport() {

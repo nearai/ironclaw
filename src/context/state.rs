@@ -164,6 +164,8 @@ pub struct JobContext {
     /// previous results by ID via `$tool_call_id` parameter syntax.
     #[serde(skip)]
     pub tool_output_stash: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    /// User's preferred timezone (IANA name, e.g. "America/New_York"). Defaults to "UTC".
+    pub user_timezone: String,
 }
 
 impl JobContext {
@@ -203,7 +205,14 @@ impl JobContext {
             http_interceptor: None,
             metadata: serde_json::Value::Null,
             tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            user_timezone: "UTC".to_string(),
         }
+    }
+
+    /// Set the user timezone on this context.
+    pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
+        self.user_timezone = tz.into();
+        self
     }
 
     /// Transition to a new state.

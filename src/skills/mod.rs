@@ -98,6 +98,10 @@ pub struct ActivationCriteria {
     /// Capped at `MAX_KEYWORDS_PER_SKILL` during loading.
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// Keywords that veto this skill — if any match, score is 0 regardless of
+    /// keyword/pattern matches. Prevents cross-skill interference.
+    #[serde(default)]
+    pub exclude_keywords: Vec<String>,
     /// Regex patterns for more complex matching.
     /// Capped at `MAX_PATTERNS_PER_SKILL` during loading.
     #[serde(default)]
@@ -118,6 +122,9 @@ impl ActivationCriteria {
     pub fn enforce_limits(&mut self) {
         self.keywords.retain(|k| k.len() >= MIN_KEYWORD_TAG_LENGTH);
         self.keywords.truncate(MAX_KEYWORDS_PER_SKILL);
+        self.exclude_keywords
+            .retain(|k| k.len() >= MIN_KEYWORD_TAG_LENGTH);
+        self.exclude_keywords.truncate(MAX_KEYWORDS_PER_SKILL);
         self.patterns.truncate(MAX_PATTERNS_PER_SKILL);
         self.tags.retain(|t| t.len() >= MIN_KEYWORD_TAG_LENGTH);
         self.tags.truncate(MAX_TAGS_PER_SKILL);
@@ -199,6 +206,9 @@ pub struct LoadedSkill {
     /// Pre-computed lowercased keywords for scoring (avoids per-message allocation).
     /// Derived from `manifest.activation.keywords` at load time — do not mutate independently.
     pub lowercased_keywords: Vec<String>,
+    /// Pre-computed lowercased exclude keywords for veto scoring.
+    /// Derived from `manifest.activation.exclude_keywords` at load time.
+    pub lowercased_exclude_keywords: Vec<String>,
     /// Pre-computed lowercased tags for scoring (avoids per-message allocation).
     /// Derived from `manifest.activation.tags` at load time — do not mutate independently.
     pub lowercased_tags: Vec<String>,
@@ -513,6 +523,7 @@ metadata:
             content_hash: "sha256:000".to_string(),
             compiled_patterns: vec![],
             lowercased_keywords: vec![],
+            lowercased_exclude_keywords: vec![],
             lowercased_tags: vec![],
         };
         assert_eq!(skill.name(), "test");

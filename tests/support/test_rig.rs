@@ -545,16 +545,14 @@ impl TestRigBuilder {
             .await
             .expect("AppBuilder::build_all() failed in test rig");
 
+        let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
+            Arc::new(tokio::sync::RwLock::new(None));
+
         // 6. Register job tools, routine tools, and extra tools.
         {
-            use ironclaw::context::ContextManager;
-
-            let ctx_mgr = Arc::new(ContextManager::new(
-                components.config.agent.max_parallel_jobs,
-            ));
             components.tools.register_job_tools(
-                ctx_mgr,
-                None,
+                Arc::clone(&components.context_manager),
+                Some(scheduler_slot.clone()),
                 None,
                 components.db.clone(),
                 None,
@@ -657,9 +655,12 @@ impl TestRigBuilder {
             None, // heartbeat_config
             None, // hygiene_config
             routine_config,
-            None, // context_manager
+            Some(Arc::clone(&components.context_manager)),
             None, // session_manager
         );
+
+        // Match main.rs: fill the scheduler slot once Agent::new has created it.
+        *scheduler_slot.write().await = Some(agent.scheduler());
 
         // 9. Spawn agent in background task.
         let agent_handle = tokio::spawn(async move {
