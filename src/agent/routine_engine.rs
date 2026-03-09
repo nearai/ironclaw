@@ -703,6 +703,40 @@ async fn execute_lightweight_no_tools(
     Ok((RunStatus::Attention, Some(content.to_string()), tokens_used))
 }
 
+/// Handle a text-only LLM response in lightweight routine execution.
+///
+/// Checks for the ROUTINE_OK sentinel, validates content, and returns appropriate status.
+fn handle_text_response(
+    content: &str,
+    finish_reason: FinishReason,
+    total_input_tokens: u32,
+    total_output_tokens: u32,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let content = content.trim();
+
+    // Empty content guard
+    if content.is_empty() {
+        return if finish_reason == FinishReason::Length {
+            Err(RoutineError::TruncatedResponse)
+        } else {
+            Err(RoutineError::EmptyResponse)
+        };
+    }
+
+    // Check for the "nothing to do" sentinel
+    if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
+        let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+        return Ok((RunStatus::Ok, None, total_tokens));
+    }
+
+    let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+    Ok((
+        RunStatus::Attention,
+        Some(content.to_string()),
+        total_tokens,
+    ))
+}
+
 /// Execute a lightweight routine with tool execution support (agentic loop).
 ///
 /// This is a simplified version of the full dispatcher loop:
@@ -731,9 +765,10 @@ async fn execute_lightweight_with_tools(
     let mut total_input_tokens = 0;
     let mut total_output_tokens = 0;
 
-    // Create a minimal job context for tool execution
+    // Create a minimal job context for tool execution with unique run ID
+    let run_id = Uuid::new_v4();
     let job_ctx = JobContext {
-        job_id: routine.id,
+        job_id: run_id,
         user_id: routine.user_id.clone(),
         title: "Lightweight Routine".to_string(),
         description: routine.name.clone(),
@@ -742,12 +777,6 @@ async fn execute_lightweight_with_tools(
 
     loop {
         iteration += 1;
-        if iteration > 5 {
-            // Safety ceiling (should not reach if config is valid)
-            return Err(RoutineError::LlmFailed {
-                reason: "Exceeded maximum tool iterations".to_string(),
-            });
-        }
 
         // Force text-only response at iteration limit
         let force_text = iteration >= max_iterations;
@@ -769,29 +798,12 @@ async fn execute_lightweight_with_tools(
             total_input_tokens += response.input_tokens;
             total_output_tokens += response.output_tokens;
 
-            let content = response.content.trim();
-
-            // Empty content guard
-            if content.is_empty() {
-                return if response.finish_reason == FinishReason::Length {
-                    Err(RoutineError::TruncatedResponse)
-                } else {
-                    Err(RoutineError::EmptyResponse)
-                };
-            }
-
-            // Check for the "nothing to do" sentinel
-            if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
-                let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
-                return Ok((RunStatus::Ok, None, total_tokens));
-            }
-
-            let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
-            return Ok((
-                RunStatus::Attention,
-                Some(content.to_string()),
-                total_tokens,
-            ));
+            return handle_text_response(
+                &response.content,
+                response.finish_reason,
+                total_input_tokens,
+                total_output_tokens,
+            );
         } else {
             // Tool-enabled iteration
             let tool_defs = ctx.tools.tool_definitions().await;
@@ -813,26 +825,13 @@ async fn execute_lightweight_with_tools(
 
             // Check if LLM returned text (no tool calls)
             if response.tool_calls.is_empty() {
-                let content_str = response.content.unwrap_or_default();
-                let content = content_str.trim();
-
-                // Empty content guard
-                if content.is_empty() {
-                    return if response.finish_reason == FinishReason::Length {
-                        Err(RoutineError::TruncatedResponse)
-                    } else {
-                        Err(RoutineError::EmptyResponse)
-                    };
-                }
-
-                // Check for the "nothing to do" sentinel
-                if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
-                    let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
-                    return Ok((RunStatus::Ok, None, total_tokens));
-                }
-
-                let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
-                return Ok((RunStatus::Attention, Some(content.to_string()), total_tokens));
+                let content = response.content.unwrap_or_default();
+                return handle_text_response(
+                    &content,
+                    response.finish_reason,
+                    total_input_tokens,
+                    total_output_tokens,
+                );
             }
 
             // LLM returned tool calls: add assistant message and execute tools
@@ -845,14 +844,19 @@ async fn execute_lightweight_with_tools(
             for tc in response.tool_calls {
                 let result = execute_routine_tool(ctx, &job_ctx, &tc).await;
 
-                // Sanitize and wrap result
+                // Sanitize and wrap result (including errors)
                 let result_content = match result {
                     Ok(output) => {
                         let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &output);
                         ctx.safety
                             .wrap_for_llm(&tc.name, &sanitized.content, sanitized.was_modified)
                     }
-                    Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
+                    Err(e) => {
+                        let error_msg = format!("Tool '{}' failed: {}", tc.name, e);
+                        let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &error_msg);
+                        ctx.safety
+                            .wrap_for_llm(&tc.name, &sanitized.content, sanitized.was_modified)
+                    }
                 };
 
                 // Add tool result to context
@@ -1096,20 +1100,6 @@ mod tests {
 
     #[test]
     fn test_sanitize_routine_name_replaces_special_chars() {
-        // Test the sanitize_routine_name function logic directly
-        fn test_sanitize(input: &str) -> String {
-            input
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect()
-        }
-
         let test_cases = vec![
             ("valid-routine", "valid-routine"),
             ("routine_with_underscore", "routine_with_underscore"),
@@ -1119,7 +1109,7 @@ mod tests {
         ];
 
         for (input, expected) in test_cases {
-            let result = test_sanitize(input);
+            let result = super::sanitize_routine_name(input);
             assert_eq!(
                 result, expected,
                 "sanitize_routine_name({}) should be {}",
@@ -1130,22 +1120,9 @@ mod tests {
 
     #[test]
     fn test_sanitize_routine_name_preserves_alphanumeric_dash_underscore() {
-        fn test_sanitize(input: &str) -> String {
-            input
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect()
-        }
-
         let names = vec!["routine123", "routine-name", "routine_name", "ROUTINE"];
         for name in names {
-            let result = test_sanitize(name);
+            let result = super::sanitize_routine_name(name);
             assert_eq!(result, name, "Should preserve {}", name);
         }
     }
