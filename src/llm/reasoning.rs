@@ -3048,4 +3048,52 @@ That's my plan."#;
         assert!(!has_native_thinking("o3-mini"));
         assert!(!has_native_thinking("o4-mini"));
     }
+
+    // ---- closing_tag_for() unit tests ----
+
+    #[test]
+    fn test_closing_tag_for_standard_tags() {
+        assert_eq!(closing_tag_for("<tool_call>").as_deref(), Some("</tool_call>"));
+        assert_eq!(closing_tag_for("<function_call>").as_deref(), Some("</function_call>"));
+        assert_eq!(closing_tag_for("<tool_calls>").as_deref(), Some("</tool_calls>"));
+    }
+
+    #[test]
+    fn test_closing_tag_for_space_suffixed_patterns() {
+        // Patterns with trailing space (for attribute matching)
+        assert_eq!(closing_tag_for("<tool_call ").as_deref(), Some("</tool_call>"));
+        assert_eq!(closing_tag_for("<function_call ").as_deref(), Some("</function_call>"));
+        assert_eq!(closing_tag_for("<tool_calls ").as_deref(), Some("</tool_calls>"));
+    }
+
+    #[test]
+    fn test_closing_tag_for_pipe_delimited() {
+        assert_eq!(closing_tag_for("<|tool_call|>").as_deref(), Some("<|/tool_call|>"));
+        assert_eq!(closing_tag_for("<|function_call|>").as_deref(), Some("<|/function_call|>"));
+        assert_eq!(closing_tag_for("<|tool_calls|>").as_deref(), Some("<|/tool_calls|>"));
+    }
+
+    #[test]
+    fn test_closing_tag_for_covers_all_patterns() {
+        // Every entry in TOOL_TAG_PATTERNS must produce a closing tag
+        for pattern in TOOL_TAG_PATTERNS {
+            assert!(
+                closing_tag_for(pattern).is_some(),
+                "closing_tag_for({:?}) returned None",
+                pattern
+            );
+        }
+    }
+
+    // ---- truncation with multiple tags: first closed, second unclosed ----
+
+    #[test]
+    fn test_truncate_mixed_closed_then_unclosed_different_types() {
+        let input = "Text <function_call>{}</function_call> middle <tool_call>{\"name\": \"x\"}";
+        // function_call is closed → skipped. tool_call is unclosed → truncated.
+        assert_eq!(
+            truncate_at_tool_tags(input),
+            "Text <function_call>{}</function_call> middle "
+        );
+    }
 }
