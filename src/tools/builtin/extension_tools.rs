@@ -768,11 +768,11 @@ mod tests {
     /// Create a stub manager for schema tests (these don't call execute).
     fn test_manager_stub() -> Arc<ExtensionManager> {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::testing::credentials::TEST_CRYPTO_KEY;
         use crate::tools::ToolRegistry;
         use crate::tools::mcp::session::McpSessionManager;
 
-        let master_key =
-            secrecy::SecretString::from("0123456789abcdef0123456789abcdef".to_string());
+        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
         let crypto = Arc::new(SecretsCrypto::new(master_key).unwrap());
 
         Arc::new(ExtensionManager::new(

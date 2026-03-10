@@ -158,16 +158,13 @@ impl Tool for SecretDeleteTool {
 mod tests {
     use std::sync::Arc;
 
-    use secrecy::SecretString;
-
     use super::*;
     use crate::context::JobContext;
-    use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto};
+    use crate::secrets::CreateSecretParams;
+    use crate::testing::credentials::{TEST_OPENAI_API_KEY_SHORT, test_secrets_store};
 
-    fn test_store() -> Arc<InMemorySecretsStore> {
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        Arc::new(InMemorySecretsStore::new(crypto))
+    fn test_store() -> Arc<crate::secrets::InMemorySecretsStore> {
+        Arc::new(test_secrets_store())
     }
 
     fn test_ctx() -> JobContext {
@@ -183,7 +180,7 @@ mod tests {
         store
             .create(
                 &ctx.user_id,
-                CreateSecretParams::new("openai_key", "sk-test"),
+                CreateSecretParams::new("openai_key", TEST_OPENAI_API_KEY_SHORT),
             )
             .await
             .unwrap();

@@ -694,6 +694,7 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::testing::credentials::{TEST_OAUTH_CLIENT_ID, TEST_OAUTH_CLIENT_SECRET};
     use crate::tools::wasm::loader::{WasmLoadError, check_wit_version_compat, discover_tools};
 
     #[test]
@@ -834,8 +835,8 @@ mod tests {
                 oauth: Some(OAuthConfigSchema {
                     authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
                     token_url: "https://oauth2.googleapis.com/token".to_string(),
-                    client_id: Some("test-client-id".to_string()),
-                    client_secret: Some("test-client-secret".to_string()),
+                    client_id: Some(TEST_OAUTH_CLIENT_ID.to_string()),
+                    client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -848,8 +849,11 @@ mod tests {
 
         let config = config.unwrap();
         assert_eq!(config.token_url, "https://oauth2.googleapis.com/token");
-        assert_eq!(config.client_id, "test-client-id");
-        assert_eq!(config.client_secret, Some("test-client-secret".to_string()));
+        assert_eq!(config.client_id, TEST_OAUTH_CLIENT_ID);
+        assert_eq!(
+            config.client_secret,
+            Some(TEST_OAUTH_CLIENT_SECRET.to_string())
+        );
         assert_eq!(config.secret_name, "google_oauth_token");
         assert_eq!(config.provider, Some("google".to_string()));
     }

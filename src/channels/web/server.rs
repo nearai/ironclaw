@@ -2379,6 +2379,7 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
 
     #[test]
     fn test_build_turns_from_db_messages_complete() {
@@ -2552,7 +2553,7 @@ mod tests {
         // Build an ExtensionManager so the handler can look up flows
         let secrets = Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
             crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                "test-key-at-least-32-chars-long!!".to_string(),
+                TEST_GATEWAY_CRYPTO_KEY.to_string(),
             ))
             .expect("crypto"),
         )));
@@ -2602,7 +2603,7 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "test-key-at-least-32-chars-long!!".to_string(),
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
                 ))
                 .expect("crypto"),
             )));
@@ -2708,7 +2709,7 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "test-key-at-least-32-chars-long!!".to_string(),
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
                 ))
                 .expect("crypto"),
             )));

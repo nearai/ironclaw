@@ -480,6 +480,7 @@ pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::TEST_REDACT_SECRET;
 
     /// A simple no-op tool for testing.
     #[derive(Debug)]
@@ -602,12 +603,12 @@ mod tests {
 
     #[test]
     fn test_redact_params_replaces_sensitive_key() {
-        let params = serde_json::json!({"name": "openai_key", "value": "sk-secret"});
+        let params = serde_json::json!({"name": "openai_key", "value": TEST_REDACT_SECRET});
         let redacted = redact_params(&params, &["value"]);
         assert_eq!(redacted["name"], "openai_key");
         assert_eq!(redacted["value"], "[REDACTED]");
         // Original unchanged
-        assert_eq!(params["value"], "sk-secret");
+        assert_eq!(params["value"], TEST_REDACT_SECRET);
     }
 
     #[test]
