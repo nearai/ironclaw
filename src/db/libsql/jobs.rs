@@ -117,8 +117,8 @@ impl JobStore for LibSqlBackend {
                     estimated_duration: estimated_time_secs
                         .map(|s| std::time::Duration::from_secs(s as u64)),
                     actual_cost: get_decimal(&row, 12),
-                    max_tokens: row.get::<i64>(14).unwrap_or(0) as u64,
-                    total_tokens_used: row.get::<i64>(15).unwrap_or(0) as u64,
+                    max_tokens: get_i64(&row, 14) as u64,
+                    total_tokens_used: get_i64(&row, 15) as u64,
                     repair_attempts: get_i64(&row, 13) as u32,
                     created_at: get_ts(&row, 16),
                     started_at: get_opt_ts(&row, 17),
