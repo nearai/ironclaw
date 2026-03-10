@@ -113,6 +113,13 @@ impl Agent {
         thread_id: Uuid,
         content: &str,
     ) -> Result<SubmissionResult, Error> {
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            content_len = content.len(),
+            "Processing user input"
+        );
+
         // First check thread state without holding lock during I/O
         let thread_state = {
             let sess = session.lock().await;
@@ -123,19 +130,41 @@ impl Agent {
             thread.state
         };
 
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            thread_state = ?thread_state,
+            "Checked thread state"
+        );
+
         // Check thread state
         match thread_state {
             ThreadState::Processing => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    thread_id = %thread_id,
+                    "Thread is processing, rejecting new input"
+                );
                 return Ok(SubmissionResult::error(
                     "Turn in progress. Use /interrupt to cancel.",
                 ));
             }
             ThreadState::AwaitingApproval => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    thread_id = %thread_id,
+                    "Thread awaiting approval, rejecting new input"
+                );
                 return Ok(SubmissionResult::error(
                     "Waiting for approval. Use /interrupt to cancel.",
                 ));
             }
             ThreadState::Completed => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    thread_id = %thread_id,
+                    "Thread completed, rejecting new input"
+                );
                 return Ok(SubmissionResult::error(
                     "Thread completed. Use /thread new.",
                 ));
@@ -269,8 +298,19 @@ impl Agent {
         };
 
         // Persist user message to DB immediately so it survives crashes
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            "Persisting user message to DB"
+        );
         self.persist_user_message(thread_id, &message.user_id, effective_content)
             .await;
+
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            "User message persisted, starting agentic loop"
+        );
 
         // Send thinking status
         let _ = self

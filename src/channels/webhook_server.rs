@@ -24,6 +24,8 @@ pub struct WebhookServerConfig {
 pub struct WebhookServer {
     config: WebhookServerConfig,
     routes: Vec<Router>,
+    /// Merged router saved after start() for restart_with_addr().
+    merged_router: Option<Router>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     handle: Option<JoinHandle<()>>,
 }
@@ -34,6 +36,7 @@ impl WebhookServer {
         Self {
             config,
             routes: Vec::new(),
+            merged_router: None,
             shutdown_tx: None,
             handle: None,
         }
@@ -51,7 +54,13 @@ impl WebhookServer {
         for fragment in self.routes.drain(..) {
             app = app.merge(fragment);
         }
+        self.merged_router = Some(app.clone());
+        self.bind_and_spawn(app).await
+    }
 
+    /// Bind a listener to the configured address and spawn the server task.
+    /// Private helper used by both start() and restart_with_addr().
+    async fn bind_and_spawn(&mut self, app: Router) -> Result<(), ChannelError> {
         let listener = tokio::net::TcpListener::bind(self.config.addr)
             .await
             .map_err(|e| ChannelError::StartupFailed {
@@ -80,6 +89,54 @@ impl WebhookServer {
         Ok(())
     }
 
+    /// Gracefully shut down the current listener and rebind to a new address.
+    /// The merged router from the original `start()` call is reused.
+    ///
+    /// If binding to the new address fails, the old listener remains active and
+    /// state is restored. This prevents a denial-of-service if the new address
+    /// is invalid or already in use.
+    pub async fn restart_with_addr(&mut self, new_addr: SocketAddr) -> Result<(), ChannelError> {
+        let app = self
+            .merged_router
+            .clone()
+            .ok_or_else(|| ChannelError::StartupFailed {
+                name: "webhook_server".to_string(),
+                reason: "restart_with_addr called before start()".to_string(),
+            })?;
+
+        // Save old state for rollback if new bind fails
+        let old_addr = self.config.addr;
+        let old_shutdown_tx = self.shutdown_tx.take();
+        let old_handle = self.handle.take();
+
+        // Update config to new address and try to bind
+        self.config.addr = new_addr;
+        match self.bind_and_spawn(app).await {
+            Ok(()) => {
+                // New listener is running, gracefully shut down the old one
+                if let Some(tx) = old_shutdown_tx {
+                    let _ = tx.send(());
+                }
+                if let Some(handle) = old_handle {
+                    let _ = handle.await;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // Restore old state; old listener remains active
+                self.config.addr = old_addr;
+                self.shutdown_tx = old_shutdown_tx;
+                self.handle = old_handle;
+                Err(e)
+            }
+        }
+    }
+
+    /// Return the current bind address.
+    pub fn current_addr(&self) -> SocketAddr {
+        self.config.addr
+    }
+
     /// Signal graceful shutdown and wait for the server task to finish.
     pub async fn shutdown(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
@@ -88,5 +145,184 @@ impl WebhookServer {
         if let Some(handle) = self.handle.take() {
             let _ = handle.await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Json;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn test_restart_with_addr_rebinds_listener() {
+        use std::net::TcpListener as StdTcpListener;
+
+        // Find two available ports by binding and immediately closing
+        let port1 = {
+            let listener =
+                StdTcpListener::bind("127.0.0.1:0").expect("Failed to find available port 1");
+            listener
+                .local_addr()
+                .expect("Failed to get local addr")
+                .port()
+        };
+
+        let port2 = {
+            let listener =
+                StdTcpListener::bind("127.0.0.1:0").expect("Failed to find available port 2");
+            listener
+                .local_addr()
+                .expect("Failed to get local addr")
+                .port()
+        };
+
+        assert_ne!(port1, port2, "Should have different ports");
+        assert_ne!(port1, 0, "Port 1 should be non-zero");
+        assert_ne!(port2, 0, "Port 2 should be non-zero");
+
+        // Start server on first port
+        let addr1 = format!("127.0.0.1:{}", port1).parse().unwrap();
+        let mut server = WebhookServer::new(WebhookServerConfig { addr: addr1 });
+
+        // Create a test router that responds to health checks
+        let test_router = axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { Json(json!({"status": "ok"})) }),
+        );
+        server.add_routes(test_router);
+
+        // Start the server on first port
+        server.start().await.expect("Failed to start server");
+        assert_eq!(
+            server.current_addr(),
+            addr1,
+            "Server should be bound to initial address"
+        );
+
+        // Verify the first server is actually listening
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{}/health", addr1))
+            .send()
+            .await
+            .expect("Failed to send request to first server");
+        assert_eq!(
+            response.status(),
+            200,
+            "First server should respond to health check"
+        );
+
+        // Restart on second port
+        let addr2 = format!("127.0.0.1:{}", port2).parse().unwrap();
+        server
+            .restart_with_addr(addr2)
+            .await
+            .expect("Failed to restart with new addr");
+
+        // Assert the address changed
+        assert_eq!(
+            server.current_addr(),
+            addr2,
+            "Server address should be updated after restart"
+        );
+        assert_ne!(
+            addr1, addr2,
+            "Address should change after restart_with_addr"
+        );
+
+        // Verify the new server is actually listening on the new address
+        let response = client
+            .get(format!("http://{}/health", addr2))
+            .send()
+            .await
+            .expect("Failed to send request to restarted server");
+        assert_eq!(
+            response.status(),
+            200,
+            "Restarted server should respond to health check on new address"
+        );
+
+        // Verify the old address is no longer responding
+        let old_result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            client.get(format!("http://{}/health", addr1)).send(),
+        )
+        .await;
+        assert!(
+            old_result.is_err() || old_result.as_ref().unwrap().is_err(),
+            "Old address should not respond after server restarts"
+        );
+
+        // Clean up
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_restart_with_addr_rollback_on_bind_failure() {
+        use std::net::TcpListener as StdTcpListener;
+
+        // Find an available port
+        let port1 = {
+            let listener =
+                StdTcpListener::bind("127.0.0.1:0").expect("Failed to find available port");
+            listener
+                .local_addr()
+                .expect("Failed to get local addr")
+                .port()
+        };
+
+        // Start server on first port
+        let addr1 = format!("127.0.0.1:{}", port1).parse().unwrap();
+        let mut server = WebhookServer::new(WebhookServerConfig { addr: addr1 });
+
+        // Create a test router
+        let test_router = axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { Json(json!({"status": "ok"})) }),
+        );
+        server.add_routes(test_router);
+
+        // Start the server on first port
+        server.start().await.expect("Failed to start server");
+
+        // Verify the server is listening
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{}/health", addr1))
+            .send()
+            .await
+            .expect("Failed to send request");
+        assert_eq!(response.status(), 200, "Server should be listening");
+
+        // Try to restart on an invalid address (port 0 is reserved, won't bind)
+        // Use port 1 which typically requires elevated privileges
+        let invalid_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        // Attempt restart (should fail)
+        let result = server.restart_with_addr(invalid_addr).await;
+        assert!(result.is_err(), "Restart with invalid address should fail");
+
+        // Verify the old address is still responding (rollback succeeded)
+        let response = client
+            .get(format!("http://{}/health", addr1))
+            .send()
+            .await
+            .expect("Failed to send request to old address");
+        assert_eq!(
+            response.status(),
+            200,
+            "Old listener should still be running after failed restart"
+        );
+
+        // Verify the server address is unchanged
+        assert_eq!(
+            server.current_addr(),
+            addr1,
+            "Server address should be restored after failed restart"
+        );
+
+        // Clean up
+        server.shutdown().await;
     }
 }
