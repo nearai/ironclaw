@@ -70,7 +70,7 @@ struct CodexAuthJson {
 #[derive(Debug, Deserialize)]
 struct CodexTokens {
     access_token: String,
-    refresh_token: Option<String>,
+    refresh_token: Option<SecretString>,
 }
 
 /// Request body for OAuth token refresh.
@@ -85,7 +85,7 @@ struct RefreshRequest<'a> {
 #[derive(Debug, Deserialize)]
 struct RefreshResponse {
     access_token: String,
-    refresh_token: Option<String>,
+    refresh_token: Option<SecretString>,
 }
 
 /// Default path used by Codex CLI: `~/.codex/auth.json`.
@@ -151,7 +151,7 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
         return Some(CodexCredentials {
             token: tokens.access_token,
             is_chatgpt_mode: true,
-            refresh_token: tokens.refresh_token.map(SecretString::from),
+            refresh_token: tokens.refresh_token,
             auth_path: Some(path.to_path_buf()),
         });
     }
@@ -227,7 +227,10 @@ pub async fn refresh_access_token(
         if let Err(e) = persist_refreshed_tokens(
             path,
             &refresh_resp.access_token,
-            refresh_resp.refresh_token.as_deref(),
+            refresh_resp
+                .refresh_token
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
         ) {
             tracing::warn!(
                 "Failed to persist refreshed tokens to {}: {e}",
@@ -298,6 +301,14 @@ mod tests {
         let creds = load_codex_credentials(f.path()).expect("should load");
         assert_eq!(creds.token, "eyJ-test");
         assert!(creds.is_chatgpt_mode);
+        assert_eq!(
+            creds
+                .refresh_token
+                .as_ref()
+                .expect("refresh token should be present")
+                .expose_secret(),
+            "rt-x"
+        );
         assert_eq!(creds.base_url(), CHATGPT_BACKEND_URL);
     }
 
