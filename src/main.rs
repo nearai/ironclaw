@@ -698,7 +698,7 @@ async fn async_main() -> anyhow::Result<()> {
                 sighup.recv().await;
                 tracing::info!("SIGHUP received — reloading HTTP webhook config");
 
-                // Inject channel secrets from database into environment variables
+                // Inject channel secrets from database into thread-safe overlay
                 // (similar to inject_llm_keys_from_secrets for LLM providers)
                 if let Some(ref secrets_store) = sighup_secrets_store {
                     // Inject HTTP webhook secret from encrypted store
@@ -706,11 +706,12 @@ async fn async_main() -> anyhow::Result<()> {
                         .get_decrypted("default", "http_webhook_secret")
                         .await
                     {
-                        // Safe: Environment variable modification during runtime SIGHUP reload.
-                        // All threads are synchronized via config reload, not reading env vars directly.
-                        unsafe {
-                            std::env::set_var("HTTP_WEBHOOK_SECRET", webhook_secret.expose());
-                        }
+                        // Thread-safe: Uses INJECTED_VARS mutex instead of unsafe std::env::set_var
+                        // Config::from_env() will read from the overlay via optional_env()
+                        ironclaw::config::inject_single_var(
+                            "HTTP_WEBHOOK_SECRET",
+                            webhook_secret.expose(),
+                        );
                         tracing::debug!("Injected HTTP_WEBHOOK_SECRET from secrets store");
                     }
                 }
