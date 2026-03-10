@@ -216,6 +216,7 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
             .build()
             .await;
 
@@ -239,6 +240,14 @@ mod tests {
         assert!(
             emit_result.1.contains("fired_routines"),
             "event_emit should report fired routine count: {:?}",
+            emit_result.1
+        );
+        // Verify at least one routine actually fired (not just that the key exists).
+        let emit_json: serde_json::Value =
+            serde_json::from_str(&emit_result.1).expect("event_emit result should be valid JSON");
+        assert!(
+            emit_json["fired_routines"].as_u64().unwrap_or(0) > 0,
+            "event_emit should have fired at least one routine: {:?}",
             emit_result.1
         );
 
