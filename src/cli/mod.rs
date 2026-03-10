@@ -28,14 +28,14 @@ pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
-#[cfg(feature = "postgres")]
-pub use memory::run_memory_command;
 pub use memory::run_memory_command_with_db;
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use service::{ServiceCommand, run_service_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
+
+use std::sync::Arc;
 
 use clap::{ColorChoice, Parser, Subcommand};
 
@@ -94,12 +94,16 @@ pub enum Command {
         skip_auth: bool,
 
         /// Reconfigure channels only
-        #[arg(long, conflicts_with = "provider_only")]
+        #[arg(long, conflicts_with_all = ["provider_only", "quick"])]
         channels_only: bool,
 
         /// Reconfigure LLM provider and model only
-        #[arg(long, conflicts_with = "channels_only")]
+        #[arg(long, conflicts_with_all = ["channels_only", "quick"])]
         provider_only: bool,
+
+        /// Quick setup: auto-defaults everything except LLM provider and model
+        #[arg(long, conflicts_with_all = ["channels_only", "provider_only"])]
+        quick: bool,
     },
 
     /// Manage configuration settings
@@ -223,6 +227,43 @@ impl Cli {
     pub fn should_run_agent(&self) -> bool {
         matches!(self.command, None | Some(Command::Run))
     }
+}
+
+/// Initialize a secrets store from environment config.
+///
+/// Shared helper for CLI subcommands (`mcp auth`, `tool auth`, etc.) that need
+/// access to encrypted secrets without spinning up the full AppBuilder.
+pub async fn init_secrets_store()
+-> anyhow::Result<Arc<dyn crate::secrets::SecretsStore + Send + Sync>> {
+    let config = crate::config::Config::from_env().await?;
+    let master_key = config.secrets.master_key().ok_or_else(|| {
+        anyhow::anyhow!(
+            "SECRETS_MASTER_KEY not set. Run 'ironclaw onboard' first or set it in .env"
+        )
+    })?;
+
+    let crypto = Arc::new(crate::secrets::SecretsCrypto::new(master_key.clone())?);
+
+    Ok(crate::db::create_secrets_store(&config.database, crypto).await?)
+}
+
+/// Run the Memory CLI subcommand.
+pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
+    let config = crate::config::Config::from_env()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let session = crate::llm::create_session_manager(config.llm.session.clone()).await;
+
+    let embeddings = config
+        .embeddings
+        .create_provider(&config.llm.nearai.base_url, session);
+
+    let db: Arc<dyn crate::db::Database> = crate::db::connect_from_config(&config.database)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
 }
 
 #[cfg(test)]

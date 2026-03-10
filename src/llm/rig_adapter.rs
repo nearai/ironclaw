@@ -3,7 +3,7 @@
 //! This lets us use any rig-core provider (OpenAI, Anthropic, Ollama, etc.) as an
 //! `Arc<dyn LlmProvider>` without changing any of the agent, reasoning, or tool code.
 
-use crate::config::CacheRetention;
+use crate::llm::config::CacheRetention;
 use async_trait::async_trait;
 use rig::OneOrMany;
 use rig::completion::{
@@ -23,8 +23,8 @@ use serde_json::Value as JsonValue;
 
 use std::collections::HashSet;
 
-use crate::error::LlmError;
 use crate::llm::costs;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,

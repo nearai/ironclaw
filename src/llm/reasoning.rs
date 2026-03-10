@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 
 use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, Role, ToolCall, ToolCompletionRequest,

@@ -83,7 +83,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
 
     // Session / Auth
     print!("  Session:     ");
-    let session_path = crate::llm::session::default_session_path();
+    let session_path = crate::config::llm::default_session_path();
     if session_path.exists() {
         println!("found ({})", session_path.display());
     } else {

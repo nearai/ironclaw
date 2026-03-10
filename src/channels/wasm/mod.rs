@@ -86,6 +86,7 @@ mod loader;
 mod router;
 mod runtime;
 mod schema;
+pub mod setup;
 pub(crate) mod signature;
 #[allow(dead_code)]
 pub(crate) mod storage;
@@ -105,4 +106,5 @@ pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeC
 pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
+pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};
