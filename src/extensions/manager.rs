@@ -121,25 +121,17 @@ fn sanitize_url_for_logging(url: &str) -> String {
         return url.to_string();
     }
 
-    // Try to parse and remove query/fragment
-    if let Ok(parsed) = url::Url::parse(url) {
-        // Reconstruct without query and fragment
-        let mut sanitized = format!(
-            "{}://{}{}",
-            parsed.scheme(),
-            parsed.host_str().unwrap_or(""),
-            parsed.path()
-        );
-        if let Some(port) = parsed.port() {
-            sanitized = format!(
-                "{}://{}:{}{}",
-                parsed.scheme(),
-                parsed.host_str().unwrap_or(""),
-                port,
-                parsed.path()
-            );
-        }
-        sanitized
+    // Try to parse and remove sensitive components
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        // Remove query string and fragment
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+
+        // Remove userinfo (username and password) if present
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+
+        parsed.to_string()
     } else {
         // Fallback: strip after ? or #
         url.split(['?', '#']).next().unwrap_or(url).to_string()
