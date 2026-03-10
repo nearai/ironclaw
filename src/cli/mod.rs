@@ -101,7 +101,7 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["channels_only", "quick"])]
         provider_only: bool,
 
-        /// Quick setup: auto-defaults everything except LLM provider
+        /// Quick setup: auto-defaults everything except LLM provider and model
         #[arg(long, conflicts_with_all = ["channels_only", "provider_only"])]
         quick: bool,
     },
