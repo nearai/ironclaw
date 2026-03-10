@@ -14,6 +14,8 @@
 //! convenience and may break without notice.
 
 use async_trait::async_trait;
+use eventsource_stream::Eventsource;
+use futures::{Stream, StreamExt};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
@@ -386,15 +388,7 @@ impl CodexChatGptProvider {
                             ),
                         });
                     }
-                    let sse_text =
-                        retry_resp
-                            .text()
-                            .await
-                            .map_err(|e| LlmError::RequestFailed {
-                                provider: "codex_chatgpt".to_string(),
-                                reason: format!("Failed to read SSE response: {e}"),
-                            })?;
-                    return Self::parse_sse_response(&sse_text);
+                    return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
                 }
 
                 tracing::info!("Received 401, attempting token refresh");
@@ -431,15 +425,7 @@ impl CodexChatGptProvider {
                         });
                     }
 
-                    let sse_text =
-                        retry_resp
-                            .text()
-                            .await
-                            .map_err(|e| LlmError::RequestFailed {
-                                provider: "codex_chatgpt".to_string(),
-                                reason: format!("Failed to read SSE response: {e}"),
-                            })?;
-                    return Self::parse_sse_response(&sse_text);
+                    return Self::parse_sse_response_stream(retry_resp, self.request_timeout).await;
                 } else {
                     tracing::warn!(
                         "Token refresh failed. Please re-authenticate with: codex --login"
@@ -467,13 +453,7 @@ impl CodexChatGptProvider {
             });
         }
 
-        // Read the entire SSE stream
-        let sse_text = resp.text().await.map_err(|e| LlmError::RequestFailed {
-            provider: "codex_chatgpt".to_string(),
-            reason: format!("Failed to read SSE response: {e}"),
-        })?;
-
-        Self::parse_sse_response(&sse_text)
+        Self::parse_sse_response_stream(resp, self.request_timeout).await
     }
 
     /// Low-level HTTP POST to the /responses endpoint.
@@ -499,7 +479,65 @@ impl CodexChatGptProvider {
             })
     }
 
+    async fn parse_sse_response_stream(
+        resp: reqwest::Response,
+        idle_timeout: Duration,
+    ) -> Result<ResponsesResult, LlmError> {
+        let stream = resp
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| e.to_string()));
+        Self::parse_sse_stream(stream, idle_timeout).await
+    }
+
+    async fn parse_sse_stream<S>(
+        stream: S,
+        idle_timeout: Duration,
+    ) -> Result<ResponsesResult, LlmError>
+    where
+        S: Stream<Item = Result<bytes::Bytes, String>> + Unpin,
+    {
+        let mut result = ResponsesResult::default();
+        let mut stream = stream.eventsource();
+
+        loop {
+            match tokio::time::timeout(idle_timeout, stream.next()).await {
+                Ok(Some(Ok(event))) => {
+                    let data = event.data.trim();
+                    if data.is_empty() {
+                        continue;
+                    }
+
+                    let parsed: Value = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    if Self::handle_sse_event(&mut result, event.event.as_str(), &parsed) {
+                        return Ok(result);
+                    }
+                }
+                Ok(Some(Err(e))) => {
+                    return Err(LlmError::RequestFailed {
+                        provider: "codex_chatgpt".to_string(),
+                        reason: format!("Failed to read SSE stream: {e}"),
+                    });
+                }
+                Ok(None) => return Ok(result),
+                Err(_) => {
+                    return Err(LlmError::RequestFailed {
+                        provider: "codex_chatgpt".to_string(),
+                        reason: format!(
+                            "Timed out waiting for SSE event after {}s",
+                            idle_timeout.as_secs()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     /// Parse SSE events from the response text.
+    #[cfg(test)]
     fn parse_sse_response(sse_text: &str) -> Result<ResponsesResult, LlmError> {
         let mut result = ResponsesResult::default();
         let mut current_event_type = String::new();
@@ -521,73 +559,81 @@ impl CodexChatGptProvider {
                     Err(_) => continue,
                 };
 
-                match current_event_type.as_str() {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str()) {
-                            result.text.push_str(delta);
-                        }
-                    }
-                    "response.output_item.added" => {
-                        // Capture function call metadata when the item is first added.
-                        // The item has: id (item_id), call_id, name, type.
-                        let item = parsed.get("item").unwrap_or(&parsed);
-                        if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                            let item_id = item
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let call_id = item
-                                .get("call_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let name = item
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-
-                            result.pending_tool_calls.entry(item_id).or_insert_with(|| {
-                                PendingToolCall {
-                                    call_id,
-                                    name,
-                                    arguments: String::new(),
-                                }
-                            });
-                        }
-                    }
-                    "response.function_call_arguments.delta" => {
-                        // Delta events use `item_id` (not `call_id`)
-                        if let Some(item_id) = parsed.get("item_id").and_then(|v| v.as_str())
-                            && let Some(entry) = result.pending_tool_calls.get_mut(item_id)
-                            && let Some(delta) = parsed.get("delta").and_then(|d| d.as_str())
-                        {
-                            entry.arguments.push_str(delta);
-                        }
-                    }
-                    "response.completed" => {
-                        if let Some(response) = parsed.get("response")
-                            && let Some(usage) = response.get("usage")
-                        {
-                            result.input_tokens = usage
-                                .get("input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0)
-                                as u32;
-                            result.output_tokens = usage
-                                .get("output_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0)
-                                as u32;
-                        }
-                    }
-                    _ => {}
+                if Self::handle_sse_event(&mut result, current_event_type.as_str(), &parsed) {
+                    return Ok(result);
                 }
             }
         }
 
         Ok(result)
+    }
+
+    fn handle_sse_event(result: &mut ResponsesResult, event_type: &str, parsed: &Value) -> bool {
+        match event_type {
+            "response.output_text.delta" => {
+                if let Some(delta) = parsed.get("delta").and_then(|d| d.as_str()) {
+                    result.text.push_str(delta);
+                }
+            }
+            "response.output_item.added" => {
+                // Capture function call metadata when the item is first added.
+                // The item has: id (item_id), call_id, name, type.
+                let item = parsed.get("item").unwrap_or(parsed);
+                if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                    let item_id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    result
+                        .pending_tool_calls
+                        .entry(item_id)
+                        .or_insert_with(|| PendingToolCall {
+                            call_id,
+                            name,
+                            arguments: String::new(),
+                        });
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                // Delta events use `item_id` (not `call_id`)
+                if let Some(item_id) = parsed.get("item_id").and_then(|v| v.as_str())
+                    && let Some(entry) = result.pending_tool_calls.get_mut(item_id)
+                    && let Some(delta) = parsed.get("delta").and_then(|d| d.as_str())
+                {
+                    entry.arguments.push_str(delta);
+                }
+            }
+            "response.completed" => {
+                if let Some(response) = parsed.get("response")
+                    && let Some(usage) = response.get("usage")
+                {
+                    result.input_tokens = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    result.output_tokens = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                }
+                return true;
+            }
+            _ => {}
+        }
+
+        false
     }
 
     /// Remove keys with empty-string values from a JSON object.
@@ -714,6 +760,8 @@ impl LlmProvider for CodexChatGptProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use futures::stream;
 
     #[test]
     fn test_message_conversion_user() {
@@ -845,6 +893,28 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
         assert_eq!(tc.call_id, "call_1");
         assert_eq!(tc.name, "search");
         assert_eq!(tc.arguments, "{\"query\":\"rust\"}");
+    }
+
+    #[tokio::test]
+    async fn test_parse_sse_stream_response() {
+        let stream = stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"event: response.output_text.delta\ndata: {\"delta\":\"Hello\"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: response.output_text.delta\ndata: {\"delta\":\" world\"}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+            )),
+        ]);
+
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(result.text, "Hello world");
+        assert_eq!(result.input_tokens, 3);
+        assert_eq!(result.output_tokens, 2);
     }
 
     #[test]
