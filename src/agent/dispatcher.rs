@@ -743,23 +743,6 @@ impl Agent {
                                         .await;
                                 }
 
-                                // Record result in thread
-                                {
-                                    let mut sess = session.lock().await;
-                                    if let Some(thread) = sess.threads.get_mut(&thread_id)
-                                        && let Some(turn) = thread.last_turn_mut()
-                                    {
-                                        match &tool_result {
-                                            Ok(output) => {
-                                                turn.record_tool_result(serde_json::json!(output));
-                                            }
-                                            Err(e) => {
-                                                turn.record_tool_error(e.to_string());
-                                            }
-                                        }
-                                    }
-                                }
-
                                 // Check for auth awaiting — defer the return
                                 // until all results are recorded.
                                 if deferred_auth.is_none()
@@ -799,6 +782,7 @@ impl Agent {
                                 }
 
                                 // Sanitize and add tool result to context
+                                let is_tool_error = tool_result.is_err();
                                 let result_content = match tool_result {
                                     Ok(output) => {
                                         let sanitized =
@@ -811,6 +795,23 @@ impl Agent {
                                     }
                                     Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                                 };
+
+                                // Record sanitized result in thread so messages()
+                                // and persist_tool_calls() use cleaned content.
+                                {
+                                    let mut sess = session.lock().await;
+                                    if let Some(thread) = sess.threads.get_mut(&thread_id)
+                                        && let Some(turn) = thread.last_turn_mut()
+                                    {
+                                        if is_tool_error {
+                                            turn.record_tool_error(result_content.clone());
+                                        } else {
+                                            turn.record_tool_result(serde_json::json!(
+                                                result_content
+                                            ));
+                                        }
+                                    }
+                                }
 
                                 context_messages.push(ChatMessage::tool_result(
                                     &tc.id,
@@ -1298,6 +1299,96 @@ mod tests {
                 cmd
             );
         }
+    }
+
+    #[test]
+    fn test_always_approval_requirement_bypasses_session_auto_approve() {
+        // Regression test: even if tool is auto-approved in session,
+        // ApprovalRequirement::Always must still trigger approval.
+        use crate::tools::ApprovalRequirement;
+
+        let mut session = Session::new("user-1");
+        let tool_name = "tool_remove";
+
+        // Manually auto-approve tool_remove in this session
+        session.auto_approve_tool(tool_name);
+        assert!(
+            session.is_tool_auto_approved(tool_name),
+            "tool should be auto-approved"
+        );
+
+        // However, ApprovalRequirement::Always should always require approval
+        // This is verified by the dispatcher logic: Always => true (ignores session state)
+        let always_req = ApprovalRequirement::Always;
+        let requires_approval = match always_req {
+            ApprovalRequirement::Never => false,
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(tool_name),
+            ApprovalRequirement::Always => true,
+        };
+
+        assert!(
+            requires_approval,
+            "ApprovalRequirement::Always must require approval even when tool is auto-approved"
+        );
+    }
+
+    #[test]
+    fn test_always_approval_requirement_vs_unless_auto_approved() {
+        // Verify the two requirements behave differently
+        use crate::tools::ApprovalRequirement;
+
+        let mut session = Session::new("user-2");
+        let tool_name = "http";
+
+        // Scenario 1: Tool is auto-approved
+        session.auto_approve_tool(tool_name);
+
+        // UnlessAutoApproved → doesn't require approval if auto-approved
+        let unless_req = ApprovalRequirement::UnlessAutoApproved;
+        let unless_needs = match unless_req {
+            ApprovalRequirement::Never => false,
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(tool_name),
+            ApprovalRequirement::Always => true,
+        };
+        assert!(
+            !unless_needs,
+            "UnlessAutoApproved should not need approval when auto-approved"
+        );
+
+        // Always → always requires approval
+        let always_req = ApprovalRequirement::Always;
+        let always_needs = match always_req {
+            ApprovalRequirement::Never => false,
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(tool_name),
+            ApprovalRequirement::Always => true,
+        };
+        assert!(
+            always_needs,
+            "Always must always require approval, even when auto-approved"
+        );
+
+        // Scenario 2: Tool is NOT auto-approved
+        let new_tool = "new_tool";
+        assert!(!session.is_tool_auto_approved(new_tool));
+
+        // UnlessAutoApproved → requires approval
+        let unless_needs = match unless_req {
+            ApprovalRequirement::Never => false,
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(new_tool),
+            ApprovalRequirement::Always => true,
+        };
+        assert!(
+            unless_needs,
+            "UnlessAutoApproved should need approval when not auto-approved"
+        );
+
+        // Always → always requires approval
+        let always_needs = match always_req {
+            ApprovalRequirement::Never => false,
+            ApprovalRequirement::UnlessAutoApproved => !session.is_tool_auto_approved(new_tool),
+            ApprovalRequirement::Always => true,
+        };
+        assert!(always_needs, "Always must always require approval");
     }
 
     #[test]

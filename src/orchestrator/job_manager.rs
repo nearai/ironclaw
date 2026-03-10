@@ -400,6 +400,14 @@ impl ContainerJobManager {
             ],
         };
 
+        // Add Docker labels for reaper identification and orphan detection
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("ironclaw.job_id".to_string(), job_id.to_string());
+        labels.insert(
+            "ironclaw.created_at".to_string(),
+            chrono::Utc::now().to_rfc3339(),
+        );
+
         let container_config = Config {
             image: Some(self.config.image.clone()),
             cmd: Some(cmd),
@@ -407,6 +415,7 @@ impl ContainerJobManager {
             host_config: Some(host_config),
             user: Some("1000:1000".to_string()),
             working_dir: Some("/workspace".to_string()),
+            labels: Some(labels),
             ..Default::default()
         };
 
