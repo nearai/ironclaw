@@ -113,6 +113,33 @@ impl SetupHint {
     }
 }
 
+/// Validates unsupported_params during deserialization.
+///
+/// Only allows: "temperature", "max_tokens", "stop_sequences".
+/// Invalid parameter names cause a deserialization error.
+mod unsupported_params_de {
+    use serde::{Deserialize, Deserializer};
+
+    const VALID_PARAMS: &[&str] = &["temperature", "max_tokens", "stop_sequences"];
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let params: Vec<String> = Deserialize::deserialize(deserializer)?;
+        for param in &params {
+            if !VALID_PARAMS.contains(&param.as_str()) {
+                return Err(serde::de::Error::custom(format!(
+                    "unsupported parameter name '{}': must be one of: {}",
+                    param,
+                    VALID_PARAMS.join(", ")
+                )));
+            }
+        }
+        Ok(params)
+    }
+}
+
 /// Declarative definition of an LLM provider.
 ///
 /// One JSON object in `providers.json` maps to one `ProviderDefinition`.
@@ -155,7 +182,8 @@ pub struct ProviderDefinition {
     /// Parameter names that this provider does not support (e.g., `["temperature"]`).
     /// Supported keys: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
     /// Listed parameters are stripped from requests before sending to avoid 400 errors.
-    #[serde(default)]
+    /// Invalid parameter names cause a deserialization error.
+    #[serde(default, deserialize_with = "unsupported_params_de::deserialize")]
     pub unsupported_params: Vec<String>,
 }
 
@@ -752,7 +780,8 @@ mod tests {
             "groq should have empty unsupported_params (field absent in JSON)"
         );
 
-        // Every non-empty entry should contain valid param names
+        // All entries should only contain valid param names
+        // (Invalid names should be rejected at deserialization time)
         for def in &providers {
             for param in &def.unsupported_params {
                 assert!(
@@ -760,8 +789,40 @@ mod tests {
                     "{}: unsupported_params contains empty string",
                     def.id
                 );
+                assert!(
+                    matches!(
+                        param.as_str(),
+                        "temperature" | "max_tokens" | "stop_sequences"
+                    ),
+                    "{}: unsupported_params contains invalid parameter '{}'",
+                    def.id,
+                    param
+                );
             }
         }
+    }
+
+    #[test]
+    fn test_unsupported_params_validation_rejects_invalid() {
+        // Invalid parameter names should cause deserialization error
+        let invalid_json = r#"[{
+            "id": "test",
+            "protocol": "open_ai_completions",
+            "model_env": "TEST_MODEL",
+            "default_model": "test-model",
+            "description": "Test provider",
+            "unsupported_params": ["temperrature"]
+        }]"#;
+
+        let result: Result<Vec<ProviderDefinition>, _> = serde_json::from_str(invalid_json);
+        assert!(
+            result.is_err(),
+            "should reject invalid parameter name 'temperrature'"
+        );
+        assert!(
+            result.err().unwrap().to_string().contains("temperrature"),
+            "error message should mention the invalid parameter"
+        );
     }
 
     #[test]
