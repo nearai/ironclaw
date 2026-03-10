@@ -510,9 +510,15 @@ impl Scheduler {
         )
         .await?;
 
-        // Parse back to Value for TaskOutput
-        let result_value: serde_json::Value =
-            serde_json::from_str(&output_str).unwrap_or(serde_json::Value::String(output_str));
+        // Parse back to Value for TaskOutput; this should be infallible given
+        // `execute_tool_with_safety` uses `serde_json::to_string_pretty`, but if it
+        // ever fails we surface a clear error instead of silently changing types.
+        let result_value: serde_json::Value = serde_json::from_str(&output_str).map_err(|e| {
+            Error::Tool(crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: format!("Failed to parse tool output as JSON: {}", e),
+            })
+        })?;
 
         Ok(TaskOutput::new(result_value, start.elapsed()))
     }

@@ -372,6 +372,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let delegate = JobDelegate {
             worker: self,
             rx: tokio::sync::Mutex::new(rx),
+            consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
         };
 
         let config = AgenticLoopConfig {
@@ -993,42 +994,94 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 struct JobDelegate<'a> {
     worker: &'a Worker,
     rx: tokio::sync::Mutex<&'a mut mpsc::Receiver<WorkerMessage>>,
+    /// Tracks consecutive rate-limit errors to fail fast instead of burning iterations.
+    consecutive_rate_limits: std::sync::atomic::AtomicUsize,
+}
+
+impl<'a> JobDelegate<'a> {
+    const MAX_CONSECUTIVE_RATE_LIMITS: usize = 10;
+
+    /// Handle a rate-limit error: back off, increment counter, and fail fast
+    /// if the provider remains rate-limited for too many consecutive attempts.
+    async fn handle_rate_limit(
+        &self,
+        retry_after: Option<Duration>,
+        context: &str,
+    ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let count = self.consecutive_rate_limits.fetch_add(1, Relaxed) + 1;
+        let wait = retry_after.unwrap_or(Duration::from_secs(5));
+        tracing::warn!(
+            job_id = %self.worker.job_id,
+            wait_secs = wait.as_secs(),
+            attempt = count,
+            "LLM rate limited during {}, backing off",
+            context,
+        );
+
+        if count >= Self::MAX_CONSECUTIVE_RATE_LIMITS {
+            self.worker.mark_stuck("Persistent rate limiting").await?;
+            return Ok(crate::llm::RespondOutput {
+                result: RespondResult::Text(String::new()),
+                usage: crate::llm::TokenUsage::default(),
+            });
+        }
+
+        self.worker.log_event(
+            "status",
+            serde_json::json!({
+                "message": format!(
+                    "Rate limited, retrying in {}s... ({}/{})",
+                    wait.as_secs(), count, Self::MAX_CONSECUTIVE_RATE_LIMITS
+                ),
+            }),
+        );
+        tokio::time::sleep(wait).await;
+
+        Ok(crate::llm::RespondOutput {
+            result: RespondResult::Text(String::new()),
+            usage: crate::llm::TokenUsage::default(),
+        })
+    }
 }
 
 #[async_trait]
 impl<'a> LoopDelegate for JobDelegate<'a> {
     async fn check_signals(&self) -> LoopSignal {
-        // Drain the message channel
-        let mut rx: tokio::sync::MutexGuard<'_, &mut mpsc::Receiver<WorkerMessage>> = self.rx.lock().await;
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                WorkerMessage::Stop => {
-                    tracing::debug!(
-                        "Worker for job {} received stop signal",
-                        self.worker.job_id
-                    );
-                    return LoopSignal::Stop;
-                }
-                WorkerMessage::Ping => {
-                    tracing::trace!("Worker for job {} received ping", self.worker.job_id);
-                }
-                WorkerMessage::Start => {}
-                WorkerMessage::UserMessage(content) => {
-                    tracing::info!(
-                        job_id = %self.worker.job_id,
-                        "Worker received follow-up user message"
-                    );
-                    self.worker.log_event(
-                        "message",
-                        serde_json::json!({
-                            "role": "user",
-                            "content": content,
-                        }),
-                    );
-                    return LoopSignal::InjectMessage(content);
+        // Drain the message channel — scope the lock so it's dropped before any .await
+        {
+            let mut rx = self.rx.lock().await;
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    WorkerMessage::Stop => {
+                        tracing::debug!(
+                            "Worker for job {} received stop signal",
+                            self.worker.job_id
+                        );
+                        return LoopSignal::Stop;
+                    }
+                    WorkerMessage::Ping => {
+                        tracing::trace!("Worker for job {} received ping", self.worker.job_id);
+                    }
+                    WorkerMessage::Start => {}
+                    WorkerMessage::UserMessage(content) => {
+                        tracing::info!(
+                            job_id = %self.worker.job_id,
+                            "Worker received follow-up user message"
+                        );
+                        self.worker.log_event(
+                            "message",
+                            serde_json::json!({
+                                "role": "user",
+                                "content": content,
+                            }),
+                        );
+                        return LoopSignal::InjectMessage(content);
+                    }
                 }
             }
-        }
+        } // MutexGuard dropped here, before the cancellation .await
 
         // Check for cancellation
         if let Ok(ctx) = self
@@ -1067,7 +1120,8 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         // Try select_tools first, fall back to respond_with_tools
         match reasoning.select_tools(reason_ctx).await {
             Ok(s) if !s.is_empty() => {
-                // Build a synthetic RespondOutput with ToolCalls
+                // Reset counter after a successful LLM call
+                self.consecutive_rate_limits.store(0, std::sync::atomic::Ordering::Relaxed);
                 let tool_calls: Vec<ToolCall> = selections_to_tool_calls(&s);
                 return Ok(crate::llm::RespondOutput {
                     result: RespondResult::ToolCalls {
@@ -1079,49 +1133,20 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             }
             Ok(_) => {} // empty selections, fall through
             Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
-                let wait = retry_after.unwrap_or(Duration::from_secs(5));
-                tracing::warn!(
-                    job_id = %self.worker.job_id,
-                    wait_secs = wait.as_secs(),
-                    "LLM rate limited during tool selection, backing off"
-                );
-                self.worker.log_event(
-                    "status",
-                    serde_json::json!({
-                        "message": format!("Rate limited, retrying in {}s...", wait.as_secs()),
-                    }),
-                );
-                tokio::time::sleep(wait).await;
-                // Return a text result to continue the loop without action
-                return Ok(crate::llm::RespondOutput {
-                    result: RespondResult::Text(String::new()),
-                    usage: crate::llm::TokenUsage::default(),
-                });
+                return self.handle_rate_limit(retry_after, "tool selection").await;
             }
             Err(e) => return Err(e.into()),
         };
 
         // Fall back to respond_with_tools
         match reasoning.respond_with_tools(reason_ctx).await {
-            Ok(output) => Ok(output),
+            Ok(output) => {
+                // Reset counter after a successful LLM call
+                self.consecutive_rate_limits.store(0, std::sync::atomic::Ordering::Relaxed);
+                Ok(output)
+            }
             Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
-                let wait = retry_after.unwrap_or(Duration::from_secs(5));
-                tracing::warn!(
-                    job_id = %self.worker.job_id,
-                    wait_secs = wait.as_secs(),
-                    "LLM rate limited during respond_with_tools, backing off"
-                );
-                self.worker.log_event(
-                    "status",
-                    serde_json::json!({
-                        "message": format!("Rate limited, retrying in {}s...", wait.as_secs()),
-                    }),
-                );
-                tokio::time::sleep(wait).await;
-                Ok(crate::llm::RespondOutput {
-                    result: RespondResult::Text(String::new()),
-                    usage: crate::llm::TokenUsage::default(),
-                })
+                self.handle_rate_limit(retry_after, "respond_with_tools").await
             }
             Err(e) => Err(e.into()),
         }
