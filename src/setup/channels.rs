@@ -867,12 +867,8 @@ async fn substitute_validation_placeholders(
     secrets: &SecretsContext,
     validation_endpoint: &str,
 ) -> Result<String, ChannelSetupError> {
-    let placeholder_re = regex::Regex::new(r"\{([A-Za-z0-9_]+)\}").map_err(|e| {
-        ChannelSetupError::Validation(format!("Invalid validation placeholder regex: {}", e))
-    })?;
-
     let mut resolved = validation_endpoint.to_string();
-    let placeholder_names: std::collections::BTreeSet<String> = placeholder_re
+    let placeholder_names: std::collections::BTreeSet<String> = validation_placeholder_regex()
         .captures_iter(validation_endpoint)
         .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
         .collect();
@@ -1014,6 +1010,14 @@ fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
 
 fn normalize_validation_domain(host: &str) -> &str {
     host.trim_end_matches('.')
+}
+
+fn validation_placeholder_regex() -> &'static regex::Regex {
+    static PLACEHOLDER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PLACEHOLDER_RE.get_or_init(|| {
+        regex::Regex::new(r"\{([A-Za-z0-9_]+)\}")
+            .expect("validation placeholder regex must compile")
+    })
 }
 
 fn validation_target_display(parsed: &Url) -> String {
