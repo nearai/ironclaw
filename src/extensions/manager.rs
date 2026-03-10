@@ -3504,6 +3504,10 @@ async fn inject_env_credentials(
     channel_name: &str,
     already_injected: &std::collections::HashSet<String>,
 ) -> usize {
+    if channel_name.trim().is_empty() {
+        return 0;
+    }
+
     let caps = channel.capabilities();
     let Some(ref http_cap) = caps.tool_capabilities.http else {
         return 0;
@@ -3534,6 +3538,10 @@ pub(crate) fn resolve_env_credentials(
     channel_name: &str,
     already_injected: &std::collections::HashSet<String>,
 ) -> Vec<(String, String)> {
+    if channel_name.trim().is_empty() {
+        return Vec::new();
+    }
+
     let prefix = format!("{}_", channel_name.to_ascii_uppercase());
     let mut out = Vec::new();
 
@@ -4081,5 +4089,22 @@ mod tests {
         assert!(resolved.is_empty());
 
         unsafe { std::env::remove_var("ICTEST5_TOKEN") };
+    }
+
+    #[test]
+    fn test_empty_channel_name_returns_nothing() {
+        // An empty channel name must never match any env var (prefix would be "_").
+        let placeholders = vec!["_TOKEN".to_string(), "ICTEST6_TOKEN".to_string()];
+        let already_injected = std::collections::HashSet::new();
+
+        unsafe { std::env::set_var("_TOKEN", "bad") };
+        unsafe { std::env::set_var("ICTEST6_TOKEN", "bad") };
+
+        let resolved = super::resolve_env_credentials(&placeholders, "", &already_injected);
+
+        assert!(resolved.is_empty(), "empty channel name must match nothing");
+
+        unsafe { std::env::remove_var("_TOKEN") };
+        unsafe { std::env::remove_var("ICTEST6_TOKEN") };
     }
 }

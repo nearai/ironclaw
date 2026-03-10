@@ -262,6 +262,10 @@ pub async fn inject_channel_credentials(
     secrets: Option<&dyn SecretsStore>,
     channel_name: &str,
 ) -> anyhow::Result<usize> {
+    if channel_name.trim().is_empty() {
+        return Ok(0);
+    }
+
     let mut count = 0;
     let mut injected_placeholders = HashSet::new();
 
