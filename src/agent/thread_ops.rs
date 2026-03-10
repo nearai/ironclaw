@@ -1536,6 +1536,7 @@ fn rebuild_chat_messages_from_db(
                                     .get("parameters")
                                     .cloned()
                                     .unwrap_or(serde_json::json!({})),
+                                signature: None,
                             })
                             .collect();
 

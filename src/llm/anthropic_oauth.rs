@@ -566,6 +566,7 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
                     id: id.clone(),
                     name: name.clone(),
                     arguments: input.clone(),
+                    signature: None,
                 });
             }
         }
@@ -614,6 +615,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            signature: None,
         }];
         let messages = vec![
             ChatMessage::user("Search for test"),

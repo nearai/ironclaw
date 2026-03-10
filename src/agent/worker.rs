@@ -588,6 +588,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         id: s.tool_call_id.clone(),
                         name: s.tool_name.clone(),
                         arguments: s.parameters.clone(),
+                        signature: None,
                     })
                     .collect();
                 reason_ctx
@@ -1126,6 +1127,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         id: selection.tool_call_id.clone(),
                         name: selection.tool_name.clone(),
                         arguments: selection.parameters.clone(),
+                        signature: None,
                     }],
                 ));
 

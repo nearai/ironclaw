@@ -1231,7 +1231,7 @@ async fn inject_channel_credentials(
         .collect();
     let mut injected = HashSet::new();
     let mut count = 0;
-    let mut injected_placeholders = std::collections::HashSet::new();
+
 
     if let Some(secrets) = secrets {
         let all_secrets = secrets
@@ -1293,10 +1293,8 @@ async fn inject_channel_credentials(
             "Injecting credential from environment"
         );
 
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
-        injected_placeholders.insert(placeholder);
+        channel.set_credential(&placeholder, value).await;
+        injected.insert(placeholder);
         count += 1;
     }
 
@@ -1307,7 +1305,7 @@ async fn inject_channel_credentials(
     if let Some(ref http_cap) = caps.tool_capabilities.http {
         for cred_mapping in http_cap.credentials.values() {
             let placeholder = cred_mapping.secret_name.to_uppercase();
-            if injected_placeholders.contains(&placeholder) {
+            if injected.contains(&placeholder) {
                 continue;
             }
             if let Ok(env_value) = std::env::var(&placeholder)
