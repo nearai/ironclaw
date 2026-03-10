@@ -3,7 +3,6 @@
 //! Encapsulates the logic for loading WASM channels, registering their
 //! webhook routes, and injecting credentials from the secrets store.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::channels::wasm::{
@@ -254,71 +253,11 @@ pub async fn inject_channel_credentials(
     secrets: &dyn SecretsStore,
     channel_name: &str,
 ) -> anyhow::Result<usize> {
-    let all_secrets = secrets
-        .list("default")
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
-
-    let prefix = format!("{}_", channel_name);
-    let mut count = 0;
-    let mut injected_placeholders = HashSet::new();
-
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
-            continue;
-        }
-
-        let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
-                );
-                continue;
-            }
-        };
-
-        let placeholder = secret_meta.name.to_uppercase();
-
-        tracing::debug!(
-            channel = %channel_name,
-            secret = %secret_meta.name,
-            placeholder = %placeholder,
-            "Injecting credential"
-        );
-
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
-        injected_placeholders.insert(placeholder);
-        count += 1;
-    }
-
-    // Fall back to environment variables for required secrets not found in the store.
-    // This allows channels to work when configured via env vars (e.g., TELEGRAM_BOT_TOKEN)
-    // without requiring the setup wizard to have run.
-    let caps = channel.capabilities();
-    if let Some(ref http_cap) = caps.tool_capabilities.http {
-        for cred_mapping in http_cap.credentials.values() {
-            let placeholder = cred_mapping.secret_name.to_uppercase();
-            if injected_placeholders.contains(&placeholder) {
-                continue;
-            }
-            if let Ok(env_value) = std::env::var(&placeholder)
-                && !env_value.is_empty()
-            {
-                tracing::debug!(
-                    channel = %channel_name,
-                    placeholder = %placeholder,
-                    "Injecting credential from environment variable"
-                );
-                channel.set_credential(&placeholder, env_value).await;
-                count += 1;
-            }
-        }
-    }
-
-    Ok(count)
+    crate::extensions::manager::inject_channel_credentials_from_secrets(
+        channel,
+        Some(secrets),
+        channel_name,
+        "default",
+    )
+    .await
 }

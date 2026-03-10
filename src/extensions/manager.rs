@@ -73,7 +73,6 @@ pub struct ExtensionManager {
 
     // MCP infrastructure
     mcp_session_manager: Arc<McpSessionManager>,
-    mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
     /// Active MCP clients keyed by server name.
     mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
 
@@ -117,7 +116,6 @@ impl ExtensionManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mcp_session_manager: Arc<McpSessionManager>,
-        mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         tool_registry: Arc<ToolRegistry>,
         hooks: Option<Arc<HookRegistry>>,
@@ -138,7 +136,6 @@ impl ExtensionManager {
             registry,
             discovery: OnlineDiscovery::new(),
             mcp_session_manager,
-            mcp_process_manager,
             mcp_clients: RwLock::new(HashMap::new()),
             wasm_tool_runtime,
             wasm_tools_dir,
@@ -2470,15 +2467,18 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
-        let client = crate::tools::mcp::create_client_from_config(
-            server.clone(),
-            &self.mcp_session_manager,
-            &self.mcp_process_manager,
-            Some(Arc::clone(&self.secrets)),
-            &self.user_id,
-        )
-        .await
-        .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        let has_tokens = is_authenticated(&server, &self.secrets, &self.user_id).await;
+
+        let client = if has_tokens || server.requires_auth() {
+            McpClient::new_authenticated(
+                server.clone(),
+                Arc::clone(&self.mcp_session_manager),
+                Arc::clone(&self.secrets),
+                &self.user_id,
+            )
+        } else {
+            McpClient::new_with_config(server.clone())
+        };
 
         // Try to list and create tools
         let mcp_tools = client
@@ -2777,7 +2777,7 @@ impl ExtensionManager {
         // Inject credentials
         match crate::extensions::manager::inject_channel_credentials_from_secrets(
             &channel_arc,
-            self.secrets.as_ref(),
+            Some(self.secrets.as_ref() as &dyn SecretsStore),
             &channel_name,
             &self.user_id,
         )
@@ -2862,7 +2862,7 @@ impl ExtensionManager {
         // Re-inject credentials from secrets store into the running channel
         let cred_count = match inject_channel_credentials_from_secrets(
             &existing_channel,
-            self.secrets.as_ref(),
+            Some(self.secrets.as_ref() as &dyn SecretsStore),
             name,
             &self.user_id,
         )
@@ -3441,46 +3441,114 @@ impl ExtensionManager {
 /// Looks for secrets matching the pattern `{channel_name}_*` and injects them
 /// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
 ///
-/// Returns the number of credentials injected.
-async fn inject_channel_credentials_from_secrets(
+/// Falls back to environment variables with the uppercase name if not found
+/// in the secrets store (e.g., `TELEGRAM_BOT_TOKEN`).
+pub async fn inject_channel_credentials_from_secrets(
     channel: &Arc<crate::channels::wasm::WasmChannel>,
-    secrets: &dyn SecretsStore,
+    secrets: Option<&dyn SecretsStore>,
     channel_name: &str,
     user_id: &str,
-) -> Result<usize, String> {
-    let all_secrets = secrets
-        .list(user_id)
-        .await
-        .map_err(|e| format!("Failed to list secrets: {}", e))?;
-
-    let prefix = format!("{}_", channel_name);
+) -> anyhow::Result<usize> {
     let mut count = 0;
+    let mut injected_placeholders = std::collections::HashSet::new();
 
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
-            continue;
+    // Standardize channel name for prefix matching (convention is lowercase)
+    let channel_name_lower = channel_name.to_ascii_lowercase();
+    let prefix = format!("{}_", channel_name_lower);
+
+    if let Some(secrets) = secrets {
+        let all_secrets = secrets
+            .list(user_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
+
+        for secret_meta in all_secrets {
+            if !secret_meta.name.to_ascii_lowercase().starts_with(&prefix) {
+                continue;
+            }
+
+            let decrypted = match secrets.get_decrypted(user_id, &secret_meta.name).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        secret = %secret_meta.name,
+                        error = %e,
+                        "Failed to decrypt secret for channel credential injection"
+                    );
+                    continue;
+                }
+            };
+
+            let placeholder = secret_meta.name.to_uppercase();
+            channel
+                .set_credential(&placeholder, decrypted.expose().to_string())
+                .await;
+            tracing::debug!(
+                channel = %channel_name,
+                source = "secrets_store",
+                "Injected credential"
+            );
+            injected_placeholders.insert(placeholder);
+            count += 1;
         }
+    }
 
-        let decrypted = match secrets.get_decrypted(user_id, &secret_meta.name).await {
-            Ok(d) => d,
-            Err(e) => {
+    // Fall back to environment variables for required secrets not found in the store.
+    count += inject_env_credentials(channel, channel_name, &prefix, &injected_placeholders).await;
+
+    Ok(count)
+}
+
+/// Inject credentials from environment variables for a channel.
+///
+/// Only injects credentials that:
+/// 1. Are declared in the channel's HTTP capabilities
+/// 2. Start with the channel's prefix (security check)
+/// 3. Haven't already been injected from the secrets store
+async fn inject_env_credentials(
+    channel: &Arc<crate::channels::wasm::WasmChannel>,
+    channel_name: &str,
+    prefix: &str,
+    injected_placeholders: &std::collections::HashSet<String>,
+) -> usize {
+    let mut count = 0;
+    let caps = channel.capabilities();
+    let prefix_upper = prefix.to_uppercase();
+
+    if let Some(ref http_cap) = caps.tool_capabilities.http {
+        for cred_mapping in http_cap.credentials.values() {
+            let placeholder = cred_mapping.secret_name.to_uppercase();
+            if injected_placeholders.contains(&placeholder) {
+                continue;
+            }
+
+            // Security: Only allow environment variables that start with the channel's prefix
+            // to prevent extensions from reading arbitrary host credentials (e.g., AWS_SECRET_ACCESS_KEY).
+            if !placeholder.starts_with(&prefix_upper) {
                 tracing::warn!(
-                    secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
+                    channel = %channel_name,
+                    placeholder = %placeholder,
+                    "Channel requested environment fallback for credential without channel prefix. Ignoring for security."
                 );
                 continue;
             }
-        };
 
-        let placeholder = secret_meta.name.to_uppercase();
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
-        count += 1;
+            if let Ok(env_value) = std::env::var(&placeholder)
+                && !env_value.is_empty()
+            {
+                tracing::debug!(
+                    channel = %channel_name,
+                    source = "environment",
+                    "Injected credential"
+                );
+                channel.set_credential(&placeholder, env_value).await;
+                count += 1;
+            }
+        }
     }
 
-    Ok(count)
+    count
 }
 
 /// Infer the extension kind from a URL.
@@ -3736,7 +3804,6 @@ mod tests {
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
-        use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
 
         let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
@@ -3748,7 +3815,6 @@ mod tests {
 
         crate::extensions::manager::ExtensionManager::new(
             mcp,
-            Arc::new(McpProcessManager::new()),
             secrets,
             tools,
             None, // hooks
@@ -3897,6 +3963,110 @@ mod tests {
         assert_eq!(result.results[0].status, "not_in_registry");
     }
 
+    #[tokio::test]
+    async fn test_inject_channel_credentials_fallback() {
+        use super::inject_channel_credentials_from_secrets;
+        use crate::channels::wasm::{
+            ChannelCapabilities, PreparedChannelModule, WasmChannel, WasmChannelRuntime,
+            WasmChannelRuntimeConfig,
+        };
+        use crate::pairing::PairingStore;
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+        let prepared = Arc::new(PreparedChannelModule::for_testing("telegram", "Test"));
+
+        let mut caps = ChannelCapabilities::default();
+        caps.tool_capabilities.http = Some(crate::tools::wasm::HttpCapability {
+            allowlist: vec![crate::tools::wasm::EndpointPattern::host(
+                "api.telegram.org",
+            )],
+            credentials: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "bot_token".to_string(),
+                    CredentialMapping {
+                        secret_name: "TELEGRAM_BOT_TOKEN".to_string(),
+                        location: CredentialLocation::AuthorizationBearer,
+                        host_patterns: vec!["api.telegram.org".to_string()],
+                    },
+                );
+                // Add an insecure secret (not prefixed with CHANNEL_)
+                m.insert(
+                    "global_secret".to_string(),
+                    CredentialMapping {
+                        secret_name: "GLOBAL_SYSTEM_TOKEN".to_string(),
+                        location: CredentialLocation::Header {
+                            name: "X-Global".to_string(),
+                            prefix: None,
+                        },
+                        host_patterns: vec!["api.telegram.org".to_string()],
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        });
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let channel = Arc::new(WasmChannel::new(
+            runtime,
+            prepared,
+            caps,
+            "{}".to_string(),
+            Arc::new(PairingStore::with_base_dir(temp_dir.path().to_path_buf())),
+            None,
+        ));
+
+        // Ensure env is clean for the test
+        unsafe {
+            std::env::remove_var("TELEGRAM_BOT_TOKEN");
+            std::env::remove_var("GLOBAL_SYSTEM_TOKEN");
+        }
+
+        // Test 1: No secrets in store, no env var -> Should not inject
+        let count = inject_channel_credentials_from_secrets(&channel, None, "telegram", "default")
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // Test 2: Env var set -> Should inject
+        unsafe {
+            std::env::set_var("TELEGRAM_BOT_TOKEN", "test-token");
+        }
+        let count = inject_channel_credentials_from_secrets(&channel, None, "telegram", "default")
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        let creds = channel.get_credentials().await;
+        assert_eq!(creds.get("TELEGRAM_BOT_TOKEN").unwrap(), "test-token");
+
+        // Test 3: Security - Secret not starting with prefix should NOT be injected from env
+        unsafe {
+            std::env::set_var("GLOBAL_SYSTEM_TOKEN", "sensitive-value");
+        }
+        let count = inject_channel_credentials_from_secrets(&channel, None, "telegram", "default")
+            .await
+            .unwrap();
+        // Should still be 1 (only Telegram bot token injected), GLOBAL_SYSTEM_TOKEN ignored
+        assert_eq!(count, 1);
+        let creds = channel.get_credentials().await;
+        assert!(creds.get("GLOBAL_SYSTEM_TOKEN").is_none());
+
+        // Test 4: Case-insensitive channel name matching
+        // "Telegram" should successfully match "TELEGRAM_" prefix
+        let count = inject_channel_credentials_from_secrets(&channel, None, "Telegram", "default")
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Clean up
+        unsafe {
+            std::env::remove_var("TELEGRAM_BOT_TOKEN");
+            std::env::remove_var("GLOBAL_SYSTEM_TOKEN");
+        }
+    }
     fn make_manager_with_temp_dirs() -> ExtensionManager {
         let dir = tempfile::tempdir().expect("temp dir");
         make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"))
@@ -3908,11 +4078,10 @@ mod tests {
     ) -> ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::ToolRegistry;
-        use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
 
-        std::fs::create_dir_all(&tools_dir).ok();
-        std::fs::create_dir_all(&channels_dir).ok();
+        let _ = std::fs::create_dir_all(&tools_dir);
+        let _ = std::fs::create_dir_all(&channels_dir);
 
         let master_key =
             secrecy::SecretString::from("0123456789abcdef0123456789abcdef".to_string());
@@ -3920,7 +4089,6 @@ mod tests {
 
         ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
-            Arc::new(McpProcessManager::new()),
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,
