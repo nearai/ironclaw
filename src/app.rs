@@ -608,7 +608,6 @@ impl AppBuilder {
         let extension_manager = {
             let manager = Arc::new(ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
-                Arc::clone(&mcp_process_manager),
                 ext_secrets,
                 Arc::clone(tools),
                 Some(Arc::clone(hooks)),
