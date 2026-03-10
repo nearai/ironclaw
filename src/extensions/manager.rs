@@ -4573,10 +4573,7 @@ mod tests {
         mgr.secrets
             .create(
                 "test",
-                crate::secrets::CreateSecretParams::new(
-                    "relay:slack-relay:stream_token",
-                    "tok123",
-                ),
+                crate::secrets::CreateSecretParams::new("relay:slack-relay:stream_token", "tok123"),
             )
             .await
             .expect("store token");
@@ -4590,8 +4587,7 @@ mod tests {
 
         // installed_relay_extensions should be cleared
         assert!(
-            !mgr
-                .installed_relay_extensions
+            !mgr.installed_relay_extensions
                 .read()
                 .await
                 .contains("slack-relay"),

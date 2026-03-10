@@ -344,7 +344,8 @@ impl Channel for RelayChannel {
                 if !team_id.is_empty() {
                     match client.list_connections(&instance_id).await {
                         Ok(conns) => {
-                            let has_team = conns.iter().any(|c| c.team_id == team_id && c.connected);
+                            let has_team =
+                                conns.iter().any(|c| c.team_id == team_id && c.connected);
                             if !has_team {
                                 tracing::warn!(
                                     team_id = %team_id,
