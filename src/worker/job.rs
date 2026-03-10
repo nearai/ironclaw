@@ -750,13 +750,18 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         match &result {
             Ok(raw_output) => {
-                let sanitized = self.deps.safety.sanitize_tool_output(
-                    &selection.tool_name, raw_output);
-                self.log_event("tool_result", serde_json::json!({
-                    "tool_name": selection.tool_name,
-                    "success": true,
-                    "output": truncate_for_preview(&sanitized.content, 500),
-                }));
+                let sanitized = self
+                    .deps
+                    .safety
+                    .sanitize_tool_output(&selection.tool_name, raw_output);
+                self.log_event(
+                    "tool_result",
+                    serde_json::json!({
+                        "tool_name": selection.tool_name,
+                        "success": true,
+                        "output": truncate_for_preview(&sanitized.content, 500),
+                    }),
+                );
                 Ok(false)
             }
             Err(e) => {
@@ -1026,7 +1031,9 @@ impl<'a> JobDelegate<'a> {
         );
 
         if count >= Self::MAX_CONSECUTIVE_RATE_LIMITS {
-            self.worker.mark_failed("Persistent rate limiting: exceeded retry limit").await?;
+            self.worker
+                .mark_failed("Persistent rate limiting: exceeded retry limit")
+                .await?;
             return Ok(crate::llm::RespondOutput {
                 result: RespondResult::Text(String::new()),
                 usage: crate::llm::TokenUsage::default(),
@@ -1127,7 +1134,8 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         match reasoning.select_tools(reason_ctx).await {
             Ok(s) if !s.is_empty() => {
                 // Reset counter after a successful LLM call
-                self.consecutive_rate_limits.store(0, std::sync::atomic::Ordering::Relaxed);
+                self.consecutive_rate_limits
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 let tool_calls: Vec<ToolCall> = selections_to_tool_calls(&s);
                 return Ok(crate::llm::RespondOutput {
                     result: RespondResult::ToolCalls {
@@ -1148,7 +1156,8 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         match reasoning.respond_with_tools(reason_ctx).await {
             Ok(output) => {
                 // Reset counter after a successful LLM call
-                self.consecutive_rate_limits.store(0, std::sync::atomic::Ordering::Relaxed);
+                self.consecutive_rate_limits
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
 
                 // Track token usage against the job budget.
                 // NOTE: select_tools() also makes LLM calls but doesn't expose
@@ -1167,7 +1176,8 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 Ok(output)
             }
             Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
-                self.handle_rate_limit(retry_after, "respond_with_tools").await
+                self.handle_rate_limit(retry_after, "respond_with_tools")
+                    .await
             }
             Err(e) => Err(e.into()),
         }

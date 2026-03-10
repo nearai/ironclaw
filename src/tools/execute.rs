@@ -199,7 +199,9 @@ mod tests {
             _: serde_json::Value,
             _: &JobContext,
         ) -> Result<ToolOutput, ToolError> {
-            Err(ToolError::ExecutionFailed("intentional failure".to_string()))
+            Err(ToolError::ExecutionFailed(
+                "intentional failure".to_string(),
+            ))
         }
         fn requires_sanitization(&self) -> bool {
             false

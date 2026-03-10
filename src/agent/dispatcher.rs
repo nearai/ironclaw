@@ -207,9 +207,7 @@ impl Agent {
             .into()),
             LoopOutcome::MaxIterations => Err(crate::error::LlmError::InvalidResponse {
                 provider: "agent".to_string(),
-                reason: format!(
-                    "Exceeded maximum tool iterations ({max_tool_iterations})"
-                ),
+                reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
             }
             .into()),
             LoopOutcome::NeedApproval(pending) => {
@@ -424,10 +422,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
     ) -> Result<Option<LoopOutcome>, Error> {
         // Add the assistant message with tool_calls to context.
         // OpenAI protocol requires this before tool-result messages.
-        reason_ctx.messages.push(ChatMessage::assistant_with_tool_calls(
-            content,
-            tool_calls.clone(),
-        ));
+        reason_ctx
+            .messages
+            .push(ChatMessage::assistant_with_tool_calls(
+                content,
+                tool_calls.clone(),
+            ));
 
         // Execute tools and add results to context
         let _ = self
@@ -435,18 +435,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .channels
             .send_status(
                 &self.message.channel,
-                StatusUpdate::Thinking(format!(
-                    "Executing {} tool(s)...",
-                    tool_calls.len()
-                )),
+                StatusUpdate::Thinking(format!("Executing {} tool(s)...", tool_calls.len())),
                 &self.message.metadata,
             )
             .await;
 
         // Record tool calls in the thread with sensitive params redacted.
         {
-            let mut redacted_args: Vec<serde_json::Value> =
-                Vec::with_capacity(tool_calls.len());
+            let mut redacted_args: Vec<serde_json::Value> = Vec::with_capacity(tool_calls.len());
             for tc in &tool_calls {
                 let safe = if let Some(tool) = self.agent.tools().get(&tc.name).await {
                     redact_params(&tc.arguments, tool.sensitive_params())
@@ -525,8 +521,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     Ok(mut parsed) => {
                         if let Some(obj) = parsed.as_object_mut() {
                             for key in sensitive {
-                                if let Some(orig_val) = original_tc.arguments.get(*key)
-                                {
+                                if let Some(orig_val) = original_tc.arguments.get(*key) {
                                     obj.insert((*key).to_string(), orig_val.clone());
                                 }
                             }
@@ -670,10 +665,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         if e.is_panic() {
                             tracing::error!("Chat tool execution task panicked: {}", e);
                         } else {
-                            tracing::error!(
-                                "Chat tool execution task cancelled: {}",
-                                e
-                            );
+                            tracing::error!("Chat tool execution task cancelled: {}", e);
                         }
                     }
                 }
@@ -686,12 +678,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         tool = %tc.name,
                         "Filling failed task slot with error"
                     );
-                    exec_results[*pf_idx] =
-                        Some(Err(crate::error::ToolError::ExecutionFailed {
-                            name: tc.name.clone(),
-                            reason: "Task failed during execution".to_string(),
-                        }
-                        .into()));
+                    exec_results[*pf_idx] = Some(Err(crate::error::ToolError::ExecutionFailed {
+                        name: tc.name.clone(),
+                        reason: "Task failed during execution".to_string(),
+                    }
+                    .into()));
                 }
             }
         }
@@ -715,21 +706,19 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         .push(ChatMessage::tool_result(&tc.id, &tc.name, error_msg));
                 }
                 PreflightOutcome::Runnable => {
-                    let tool_result =
-                        exec_results[pf_idx].take().unwrap_or_else(|| {
-                            Err(crate::error::ToolError::ExecutionFailed {
-                                name: tc.name.clone(),
-                                reason: "No result available".to_string(),
-                            }
-                            .into())
-                        });
+                    let tool_result = exec_results[pf_idx].take().unwrap_or_else(|| {
+                        Err(crate::error::ToolError::ExecutionFailed {
+                            name: tc.name.clone(),
+                            reason: "No result available".to_string(),
+                        }
+                        .into())
+                    });
 
                     // Detect image generation sentinel
                     let is_image_sentinel = if let Ok(ref output) = tool_result
                         && matches!(tc.name.as_str(), "image_generate" | "image_edit")
                     {
-                        if let Ok(sentinel) =
-                            serde_json::from_str::<serde_json::Value>(output)
+                        if let Ok(sentinel) = serde_json::from_str::<serde_json::Value>(output)
                             && sentinel.get("type").and_then(|v| v.as_str())
                                 == Some("image_generated")
                         {
@@ -846,9 +835,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             if is_tool_error {
                                 turn.record_tool_error(result_content.clone());
                             } else {
-                                turn.record_tool_result(serde_json::json!(
-                                    result_content
-                                ));
+                                turn.record_tool_result(serde_json::json!(result_content));
                             }
                         }
                     }

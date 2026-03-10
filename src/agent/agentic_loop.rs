@@ -217,8 +217,8 @@ mod tests {
     use super::*;
     use crate::llm::{RespondOutput, TokenUsage, ToolCall};
     use crate::testing::StubLlm;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
     fn stub_reasoning() -> Reasoning {
@@ -337,7 +337,9 @@ mod tests {
             reason_ctx: &mut ReasoningContext,
         ) -> Result<Option<LoopOutcome>, crate::error::Error> {
             self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
-            reason_ctx.messages.push(ChatMessage::user("tool result stub"));
+            reason_ctx
+                .messages
+                .push(ChatMessage::user("tool result stub"));
             let outcome = self.tool_exec_outcome.lock().await.take();
             Ok(outcome)
         }
@@ -434,8 +436,7 @@ mod tests {
         assert!(
             ctx.messages
                 .iter()
-                .any(|m| m.role == crate::llm::Role::User
-                    && m.content.contains("injected prompt")),
+                .any(|m| m.role == crate::llm::Role::User && m.content.contains("injected prompt")),
             "Injected message should appear in context"
         );
     }

@@ -478,8 +478,7 @@ impl LoopDelegate for ContainerDelegate {
             }
 
             // Use shared result processing
-            let (_, message) =
-                process_tool_result(&self.safety, &tc.name, &tc.id, &result);
+            let (_, message) = process_tool_result(&self.safety, &tc.name, &tc.id, &result);
             reason_ctx.messages.push(message);
         }
 

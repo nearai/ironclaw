@@ -9,7 +9,6 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
-use crate::worker::job::{Worker, WorkerDeps};
 use crate::channels::web::types::SseEvent;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
@@ -19,6 +18,7 @@ use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
 use crate::tools::{ApprovalContext, ToolRegistry};
+use crate::worker::job::{Worker, WorkerDeps};
 
 /// Message to send to a worker.
 #[derive(Debug)]

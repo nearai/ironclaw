@@ -26,15 +26,15 @@
 
 pub mod api;
 pub mod claude_bridge;
+pub mod container;
 pub mod job;
 pub mod proxy_llm;
-pub mod container;
 
 pub use api::WorkerHttpClient;
 pub use claude_bridge::ClaudeBridgeRuntime;
+pub use container::WorkerRuntime;
 pub use job::{Worker, WorkerDeps};
 pub use proxy_llm::ProxyLlmProvider;
-pub use container::WorkerRuntime;
 
 /// Run the Worker subcommand (inside Docker containers).
 pub async fn run_worker(
