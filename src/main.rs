@@ -677,12 +677,16 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Prepare SIGHUP handler for hot-reloading HTTP webhook config
+    // Broadcast channel for clean shutdown of background tasks
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
     #[cfg(unix)]
     {
         let sighup_webhook_server = webhook_server.clone();
         let sighup_http_state = http_channel_state.clone();
         let sighup_settings_store_clone = sighup_settings_store.clone();
         let sighup_secrets_store = components.secrets_store.clone();
+        let mut shutdown_rx = shutdown_tx.subscribe();
 
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
@@ -695,7 +699,16 @@ async fn async_main() -> anyhow::Result<()> {
             };
 
             loop {
-                sighup.recv().await;
+                // Exit loop on shutdown signal or when SIGHUP is received
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        tracing::debug!("SIGHUP handler shutting down");
+                        break;
+                    }
+                    _ = sighup.recv() => {
+                        // Handle SIGHUP signal
+                    }
+                }
                 tracing::info!("SIGHUP received — reloading HTTP webhook config");
 
                 // Inject channel secrets from database into thread-safe overlay
@@ -797,6 +810,9 @@ async fn async_main() -> anyhow::Result<()> {
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+
+    // Signal background tasks (SIGHUP handler, etc.) to gracefully shut down
+    let _ = shutdown_tx.send(());
 
     // Shut down all stdio MCP server child processes.
     components.mcp_process_manager.shutdown_all().await;
