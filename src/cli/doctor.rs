@@ -107,7 +107,7 @@ enum CheckResult {
 
 async fn check_nearai_session() -> CheckResult {
     // Check if session file exists
-    let session_path = crate::llm::session::default_session_path();
+    let session_path = crate::config::llm::default_session_path();
     if !session_path.exists() {
         // Check for API key mode
         if std::env::var("NEARAI_API_KEY").is_ok() {

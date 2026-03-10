@@ -51,7 +51,7 @@ pub fn check_onboard_needed() -> Option<&'static str> {
     }
 
     if std::env::var("NEARAI_API_KEY").is_err() {
-        let session_path = crate::llm::session::default_session_path();
+        let session_path = crate::config::default_session_path();
         if !session_path.exists() {
             return Some("First run");
         }
