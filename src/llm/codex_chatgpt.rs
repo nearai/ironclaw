@@ -16,10 +16,11 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
+use secrecy::SecretString;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use super::codex_auth;
 use crate::error::LlmError;
@@ -39,9 +40,13 @@ pub struct CodexChatGptProvider {
     /// Lazily resolved model name (populated on first LLM call).
     resolved_model: tokio::sync::OnceCell<String>,
     /// OAuth refresh token for automatic 401 retry.
-    refresh_token: Option<String>,
+    refresh_token: Option<SecretString>,
     /// Path to auth.json for persisting refreshed tokens.
     auth_path: Option<PathBuf>,
+    /// Timeout for actual `/responses` requests.
+    request_timeout: Duration,
+    /// Prevent concurrent 401 handlers from racing the same refresh token.
+    refresh_lock: Mutex<()>,
 }
 
 impl CodexChatGptProvider {
@@ -54,6 +59,8 @@ impl CodexChatGptProvider {
             resolved_model: tokio::sync::OnceCell::const_new(),
             refresh_token: None,
             auth_path: None,
+            request_timeout: Duration::from_secs(120),
+            refresh_lock: Mutex::new(()),
         }
     }
 
@@ -73,8 +80,9 @@ impl CodexChatGptProvider {
         base_url: &str,
         api_key: &str,
         configured_model: &str,
-        refresh_token: Option<String>,
+        refresh_token: Option<SecretString>,
         auth_path: Option<PathBuf>,
+        request_timeout_secs: u64,
     ) -> Self {
         tracing::warn!(
             "Codex ChatGPT provider uses a private, undocumented API \
@@ -90,6 +98,8 @@ impl CodexChatGptProvider {
             resolved_model: tokio::sync::OnceCell::const_new(),
             refresh_token,
             auth_path,
+            request_timeout: Duration::from_secs(request_timeout_secs),
+            refresh_lock: Mutex::new(()),
         }
     }
 
@@ -327,25 +337,72 @@ impl CodexChatGptProvider {
         );
 
         let api_key = self.api_key.read().await.clone();
-        let resp = Self::send_http_request(&self.client, &url, &api_key, &body).await?;
+        let resp = Self::send_http_request(
+            &self.client,
+            &url,
+            &api_key,
+            &body,
+            self.request_timeout,
+        )
+        .await?;
 
         let status = resp.status();
         if status.as_u16() == 401 {
             // Attempt token refresh if we have a refresh token
             if let Some(ref rt) = self.refresh_token {
+                let _refresh_guard = self.refresh_lock.lock().await;
+                let current_token = self.api_key.read().await.clone();
+
+                if current_token != api_key {
+                    tracing::info!("Received 401, but another request already refreshed the token");
+                    let retry_resp = Self::send_http_request(
+                        &self.client,
+                        &url,
+                        &current_token,
+                        &body,
+                        self.request_timeout,
+                    )
+                    .await?;
+                    let retry_status = retry_resp.status();
+                    if !retry_status.is_success() {
+                        let body_text = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            retry_resp.text(),
+                        )
+                        .await
+                        .unwrap_or(Ok(String::new()))
+                        .unwrap_or_default();
+                        return Err(LlmError::RequestFailed {
+                            provider: "codex_chatgpt".to_string(),
+                            reason: format!(
+                                "HTTP {retry_status} from {url} (after concurrent token refresh): {body_text}"
+                            ),
+                        });
+                    }
+                    let sse_text = retry_resp.text().await.map_err(|e| LlmError::RequestFailed {
+                        provider: "codex_chatgpt".to_string(),
+                        reason: format!("Failed to read SSE response: {e}"),
+                    })?;
+                    return Self::parse_sse_response(&sse_text);
+                }
+
                 tracing::info!("Received 401, attempting token refresh");
-                if let Some(new_token) = codex_auth::refresh_access_token(
-                    rt,
-                    self.auth_path.as_deref(),
-                ).await {
+                if let Some(new_token) =
+                    codex_auth::refresh_access_token(rt, self.auth_path.as_deref()).await
+                {
                     // Update stored api_key
                     *self.api_key.write().await = new_token.clone();
                     tracing::info!("Token refreshed, retrying request");
 
                     // Retry the request with the new token
                     let retry_resp = Self::send_http_request(
-                        &self.client, &url, &new_token, &body,
-                    ).await?;
+                        &self.client,
+                        &url,
+                        &new_token,
+                        &body,
+                        self.request_timeout,
+                    )
+                    .await?;
 
                     let retry_status = retry_resp.status();
                     if !retry_status.is_success() {
@@ -414,6 +471,7 @@ impl CodexChatGptProvider {
         url: &str,
         api_key: &str,
         body: &Value,
+        timeout: Duration,
     ) -> Result<reqwest::Response, LlmError> {
         client
             .post(url)
@@ -421,6 +479,7 @@ impl CodexChatGptProvider {
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .json(body)
+            .timeout(timeout)
             .send()
             .await
             .map_err(|e| LlmError::RequestFailed {

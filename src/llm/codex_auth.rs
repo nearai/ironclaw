@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 /// ChatGPT backend API endpoint used by Codex in ChatGPT auth mode.
@@ -38,7 +39,7 @@ pub struct CodexCredentials {
     /// Whether this is a ChatGPT OAuth token (vs. an OpenAI API key).
     pub is_chatgpt_mode: bool,
     /// OAuth refresh token (only present in ChatGPT mode).
-    pub refresh_token: Option<String>,
+    pub refresh_token: Option<SecretString>,
     /// Path to the auth.json file (for persisting refreshed tokens).
     pub auth_path: Option<PathBuf>,
 }
@@ -153,7 +154,7 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
             return Some(CodexCredentials {
                 token: tokens.access_token,
                 is_chatgpt_mode: true,
-                refresh_token: tokens.refresh_token,
+                refresh_token: tokens.refresh_token.map(SecretString::from),
                 auth_path: Some(path.to_path_buf()),
             });
         }
@@ -175,14 +176,14 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
 /// Returns `None` if the refresh token is missing, the request fails,
 /// or the response is malformed.
 pub async fn refresh_access_token(
-    refresh_token: &str,
+    refresh_token: &SecretString,
     auth_path: Option<&Path>,
 ) -> Option<String> {
     let client = reqwest::Client::new();
     let req = RefreshRequest {
         client_id: CLIENT_ID,
         grant_type: "refresh_token",
-        refresh_token,
+        refresh_token: refresh_token.expose_secret(),
     };
 
     tracing::info!("Attempting to refresh Codex OAuth access token");
@@ -258,7 +259,12 @@ fn persist_refreshed_tokens(
     }
 
     let updated = serde_json::to_string_pretty(&json)?;
-    std::fs::write(path, updated)?;
+    let tmp_path = path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, updated)?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(Box::new(e));
+    }
     Ok(())
 }
 

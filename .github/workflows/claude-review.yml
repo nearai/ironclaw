@@ -1,0 +1,99 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, labeled]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Claude Code Review
+    if: contains(github.event.pull_request.labels.*.name, 'staging-promotion')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Code review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--max-turns 50 --model claude-haiku-4-5-20251001 --allowedTools 'Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*)'"
+          prompt: |
+            Code review this pull request. Follow these steps precisely:
+
+            1. Use a Haiku agent to find relevant CLAUDE.md files: the root CLAUDE.md
+               and any CLAUDE.md files in directories whose files this PR modifies.
+
+            2. Use a Haiku agent to summarize the PR change (use `gh pr diff`).
+
+            3. Launch 4 parallel agents to review the change independently. Each agent should
+               read the PR diff with `gh pr diff` and the full source files for changed
+               code, then return a list of issues found:
+
+               Agent 1 — Security & Safety
+               Check for: command injection, path traversal, SSRF, XSS, auth bypass,
+               secrets in logs, .unwrap()/.expect() in production code (not tests),
+               race conditions, TOCTOU, unsafe blocks, panics in async, unbounded allocations.
+
+               Agent 2 — Architecture & Patterns
+               Check for: extensible design (traits/enums over nested conditionals),
+               clean abstractions, proper error types (thiserror), CLAUDE.md compliance,
+               type-driven design over stringly-typed code, DRY violations.
+
+               Agent 3 — Bug Scan
+               Shallow diff-only scan for obvious bugs: logic errors, off-by-one,
+               missing error handling, division by zero, incorrect return values.
+               Ignore nitpicks and likely false positives. Do NOT read extra context
+               beyond the diff — focus only on the changes.
+
+               Agent 4 — Performance & Production
+               Check for: blocking in async, N+1 queries, unbounded loops, missing
+               timeouts, resource leaks (file handles, connections), large allocations
+               in hot paths.
+
+            4. For each issue found, launch a parallel Haiku agent to:
+               a. Assign a severity:
+                  - CRITICAL: security vulns, panics in prod (.unwrap/.expect), data exfiltration, race conditions
+                  - HIGH: logic bugs, missing error handling, breaking API/schema changes
+                  - MEDIUM: missing tests, unnecessary complexity, performance issues
+                  - LOW: documentation gaps, naming suggestions
+               b. Score confidence 0-100 (give this rubric verbatim):
+                  0: False positive, doesn't stand up to scrutiny, or pre-existing issue.
+                  25: Might be real, but may be false positive. Stylistic issues not in CLAUDE.md.
+                  50: Real issue but nitpick or rare in practice. Not very important.
+                  75: Verified real issue, will be hit in practice. Directly impacts functionality
+                      or explicitly mentioned in CLAUDE.md.
+                  100: Certain, confirmed, will happen frequently. Evidence directly confirms.
+
+            5. Post a single comment on the PR using `gh pr comment` with this format.
+               If no issues were found, post "No issues found." instead:
+
+            ### Code review
+
+            Found N issues:
+
+            1. [SEVERITY:CONFIDENCE] <brief description>
+
+            <permalink to file:line using full SHA, eg https://github.com/owner/repo/blob/abc123def/src/file.rs#L10-L15>
+
+            Example: [CRITICAL:92] `.unwrap()` can panic in production when config is missing
+
+            You MUST use the full git SHA in links (not HEAD or branch name).
+            Provide 1 line of context before and after each linked range.
+
+            Notes:
+            - Use `gh` for all GitHub interactions, not web fetch
+            - Do NOT check build signal or attempt to build/test the code
+            - Ignore pre-existing issues not introduced by this PR
+            - Ignore issues a linter/compiler would catch (formatting, imports, types)

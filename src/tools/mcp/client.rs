@@ -527,7 +527,7 @@ mod tests {
     fn test_mcp_request_list_tools() {
         let req = McpRequest::list_tools(1);
         assert_eq!(req.method, "tools/list");
-        assert_eq!(req.id, 1);
+        assert_eq!(req.id, Some(1));
     }
 
     #[test]
@@ -777,7 +777,7 @@ mod tests {
     async fn test_non_http_transport_skips_401_retry() {
         let response = McpResponse {
             jsonrpc: "2.0".to_string(),
-            id: 1,
+            id: Some(1),
             result: Some(serde_json::json!({"tools": []})),
             error: None,
         };
