@@ -752,19 +752,29 @@ async fn async_main() -> anyhow::Result<()> {
 
                 // Restart listener if addr changed
                 if let Some(ref ws_arc) = sighup_webhook_server {
-                    let mut ws = ws_arc.lock().await;
-                    let old_addr = ws.current_addr();
+                    // Read old address while holding lock, then drop immediately
+                    let old_addr = {
+                        let ws = ws_arc.lock().await;
+                        ws.current_addr()
+                    }; // Lock released here
+
                     if old_addr != new_addr {
                         tracing::info!(
                             "SIGHUP: HTTP addr {} -> {}, restarting listener",
                             old_addr,
                             new_addr
                         );
-                        if let Err(e) = ws.restart_with_addr(new_addr).await {
-                            tracing::error!("SIGHUP: listener restart failed: {}", e);
-                        } else {
-                            tracing::info!("SIGHUP: webhook server restarted on {}", new_addr);
-                        }
+                        // Spawn background task to avoid holding lock across async I/O boundary
+                        // This prevents blocking webhook processing while listener restarts
+                        let ws_clone = ws_arc.clone();
+                        tokio::spawn(async move {
+                            let mut ws = ws_clone.lock().await;
+                            if let Err(e) = ws.restart_with_addr(new_addr).await {
+                                tracing::error!("SIGHUP: listener restart failed: {}", e);
+                            } else {
+                                tracing::info!("SIGHUP: webhook server restarted on {}", new_addr);
+                            }
+                        });
                     } else {
                         tracing::debug!("SIGHUP: addr unchanged ({})", old_addr);
                     }
