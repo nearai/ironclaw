@@ -505,8 +505,9 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         println!();
         return Ok(());
     } else {
-        // No OAuth and no tokens - try unauthenticated
-        McpClient::new_with_config(server.clone())
+        // No OAuth and no tokens — try unauthenticated, but still attach the
+        // session manager so Streamable HTTP servers get Mcp-Session-Id tracking.
+        McpClient::new_with_config(server.clone()).with_session_manager(session_manager)
     };
 
     // Test connection

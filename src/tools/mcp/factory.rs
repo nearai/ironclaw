@@ -98,3 +98,28 @@ pub async fn create_client_from_config(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::mcp::config::McpServerConfig;
+
+    /// Regression: non-OAuth HTTP clients must have a session manager so
+    /// Streamable HTTP servers receive `Mcp-Session-Id` headers.
+    #[tokio::test]
+    async fn test_factory_non_oauth_http_has_session_manager() {
+        let server = McpServerConfig::new("test-server", "http://localhost:9999");
+        let sm = Arc::new(McpSessionManager::new());
+        let pm = Arc::new(McpProcessManager::new());
+
+        // No secrets → non-OAuth path
+        let client = create_client_from_config(server, &sm, &pm, None, "test-user")
+            .await
+            .expect("factory should succeed for HTTP config");
+
+        assert!(
+            client.has_session_manager(),
+            "Non-OAuth HTTP client must have session manager attached"
+        );
+    }
+}

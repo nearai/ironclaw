@@ -219,6 +219,11 @@ impl McpClient {
         &self.server_url
     }
 
+    /// Whether this client has a session manager attached.
+    pub fn has_session_manager(&self) -> bool {
+        self.session_manager.is_some()
+    }
+
     /// Get the next request ID.
     fn next_request_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::SeqCst)
