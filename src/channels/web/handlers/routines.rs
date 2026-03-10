@@ -108,6 +108,7 @@ pub async fn routines_detail_handler(
             status: format!("{:?}", run.status),
             result_summary: run.result_summary.clone(),
             tokens_used: run.tokens_used,
+            job_id: run.job_id,
         })
         .collect();
 
@@ -252,6 +253,7 @@ pub async fn routines_runs_handler(
             status: format!("{:?}", run.status),
             result_summary: run.result_summary.clone(),
             tokens_used: run.tokens_used,
+            job_id: run.job_id,
         })
         .collect();
 
