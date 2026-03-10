@@ -395,9 +395,14 @@ async fn process_message(
         None
     };
 
-    // Send message to the channel
-    let tx_guard = state.tx.read().await;
-    if let Some(tx) = tx_guard.as_ref() {
+    // Clone sender while holding read lock, then release lock before async send.
+    // This prevents blocking other webhook handlers during the async I/O.
+    let tx = {
+        let guard = state.tx.read().await;
+        guard.as_ref().cloned()
+    };
+
+    if let Some(tx) = tx {
         if tx.send(msg).await.is_err() {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -418,7 +423,6 @@ async fn process_message(
             }),
         );
     }
-    drop(tx_guard);
 
     // Wait for response if requested
     let response = if let Some(rx) = response_rx {

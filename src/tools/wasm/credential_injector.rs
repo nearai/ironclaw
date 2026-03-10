@@ -365,22 +365,18 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use secrecy::SecretString;
 
     use crate::secrets::{
         CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-        SecretsCrypto, SecretsStore,
+        SecretsStore,
     };
+    use crate::testing::credentials::{TEST_OPENAI_API_KEY, test_secrets_store};
     use crate::tools::wasm::credential_injector::{
         CredentialInjector, base64_encode, host_matches_pattern,
     };
 
     fn test_store() -> InMemorySecretsStore {
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        InMemorySecretsStore::new(crypto)
+        test_secrets_store()
     }
 
     #[test]
@@ -406,7 +402,10 @@ mod tests {
     async fn test_inject_bearer() {
         let store = test_store();
         store
-            .create("user1", CreateSecretParams::new("openai_key", "sk-test123"))
+            .create(
+                "user1",
+                CreateSecretParams::new("openai_key", TEST_OPENAI_API_KEY),
+            )
             .await
             .unwrap();
 
@@ -428,7 +427,7 @@ mod tests {
 
         assert_eq!(
             result.headers.get("Authorization"),
-            Some(&"Bearer sk-test123".to_string())
+            Some(&format!("Bearer {TEST_OPENAI_API_KEY}"))
         );
     }
 

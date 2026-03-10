@@ -765,7 +765,7 @@ impl Agent {
 
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
-        tracing::debug!(
+        tracing::trace!(
             "[agent_loop] Parsed submission: {:?}",
             std::any::type_name_of_val(&submission)
         );
@@ -798,7 +798,7 @@ impl Agent {
 
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(ref external_thread_id) = message.thread_id {
-            tracing::debug!(
+            tracing::trace!(
                 message_id = %message.id,
                 thread_id = %external_thread_id,
                 "Hydrating thread from DB"
@@ -819,7 +819,7 @@ impl Agent {
                 message.thread_id.as_deref(),
             )
             .await;
-        tracing::info!(
+        tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
             "Resolved session and thread"
@@ -853,7 +853,7 @@ impl Agent {
             }
         }
 
-        tracing::debug!(
+        tracing::trace!(
             "Received message from {} on {} ({} chars)",
             message.user_id,
             message.channel,

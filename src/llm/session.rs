@@ -627,6 +627,9 @@ pub async fn create_session_manager(config: SessionConfig) -> Arc<SessionManager
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::{
+        TEST_SESSION_NEARAI_ABC, TEST_SESSION_NEARAI_XYZ, TEST_SESSION_TOKEN,
+    };
     use secrecy::ExposeSecret;
     use tempfile::tempdir;
 
@@ -647,28 +650,28 @@ mod tests {
 
         // Save a token
         manager
-            .save_session("test_token_123", Some("near"))
+            .save_session(TEST_SESSION_TOKEN, Some("near"))
             .await
             .unwrap();
         manager
-            .set_token(SecretString::from("test_token_123"))
+            .set_token(SecretString::from(TEST_SESSION_TOKEN))
             .await;
 
         // Verify it's set
         assert!(manager.has_token().await);
         let token = manager.get_token().await.unwrap();
-        assert_eq!(token.expose_secret(), "test_token_123");
+        assert_eq!(token.expose_secret(), TEST_SESSION_TOKEN);
 
         // Create new manager and verify it loads the token
         let manager2 = SessionManager::new_async(config).await;
         assert!(manager2.has_token().await);
         let token2 = manager2.get_token().await.unwrap();
-        assert_eq!(token2.expose_secret(), "test_token_123");
+        assert_eq!(token2.expose_secret(), TEST_SESSION_TOKEN);
 
         // Verify file contents
         let data: SessionData =
             serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
-        assert_eq!(data.session_token, "test_token_123");
+        assert_eq!(data.session_token, TEST_SESSION_TOKEN);
         assert_eq!(data.auth_provider, Some("near".to_string()));
     }
 
@@ -689,7 +692,7 @@ mod tests {
     #[test]
     fn test_session_data_serde_roundtrip_with_auth_provider() {
         let original = SessionData {
-            session_token: "sess_abc123".to_string(),
+            session_token: TEST_SESSION_NEARAI_ABC.to_string(),
             created_at: Utc::now(),
             auth_provider: Some("github".to_string()),
         };
@@ -703,7 +706,7 @@ mod tests {
     #[test]
     fn test_session_data_serde_roundtrip_without_auth_provider() {
         let original = SessionData {
-            session_token: "sess_xyz789".to_string(),
+            session_token: TEST_SESSION_NEARAI_XYZ.to_string(),
             created_at: Utc::now(),
             auth_provider: None,
         };
