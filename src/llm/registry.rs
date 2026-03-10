@@ -152,6 +152,11 @@ pub struct ProviderDefinition {
     /// Setup wizard hints.
     #[serde(default)]
     pub setup: Option<SetupHint>,
+    /// Parameter names that this provider does not support (e.g., `["temperature"]`).
+    /// Supported keys: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
+    /// Listed parameters are stripped from requests before sending to avoid 400 errors.
+    #[serde(default)]
+    pub unsupported_params: Vec<String>,
 }
 
 /// Registry of known LLM providers.
@@ -378,6 +383,7 @@ mod tests {
             description: "Custom tinfoil".to_string(),
             extra_headers_env: None,
             setup: None,
+            unsupported_params: vec![],
         });
         let registry = ProviderRegistry::new(all);
         let tf = registry.find("tinfoil").expect("tinfoil should exist");
@@ -517,6 +523,7 @@ mod tests {
             description: "No setup".to_string(),
             extra_headers_env: None,
             setup: None, // no setup hint
+            unsupported_params: vec![],
         }];
 
         let registry = ProviderRegistry::new(providers.clone());
@@ -546,6 +553,7 @@ mod tests {
                 can_list_models: false,
                 models_filter: None,
             }),
+            unsupported_params: vec![],
         });
 
         let registry = ProviderRegistry::new(providers);
@@ -587,6 +595,7 @@ mod tests {
                     can_list_models: false,
                     models_filter: None,
                 }),
+                unsupported_params: vec![],
             },
             // User override removes setup
             ProviderDefinition {
@@ -603,6 +612,7 @@ mod tests {
                 description: "No setup now".to_string(),
                 extra_headers_env: None,
                 setup: None,
+                unsupported_params: vec![],
             },
         ];
 
@@ -640,6 +650,7 @@ mod tests {
                     display_name: "A".to_string(),
                     can_list_models: false,
                 }),
+                unsupported_params: vec![],
             },
             ProviderDefinition {
                 id: "bbb".to_string(),
@@ -658,6 +669,7 @@ mod tests {
                     display_name: "B".to_string(),
                     can_list_models: false,
                 }),
+                unsupported_params: vec![],
             },
             ProviderDefinition {
                 id: "ccc".to_string(),
@@ -676,6 +688,7 @@ mod tests {
                     display_name: "C".to_string(),
                     can_list_models: false,
                 }),
+                unsupported_params: vec![],
             },
             // User override for B
             ProviderDefinition {
@@ -695,6 +708,7 @@ mod tests {
                     display_name: "B".to_string(),
                     can_list_models: false,
                 }),
+                unsupported_params: vec![],
             },
         ];
 
@@ -706,6 +720,48 @@ mod tests {
             selectable[1].description, "B-override",
             "should use the overridden definition"
         );
+    }
+
+    #[test]
+    fn test_unsupported_params_deserialized() {
+        let providers: Vec<ProviderDefinition> =
+            serde_json::from_str(include_str!("../../providers.json")).unwrap();
+
+        // Tinfoil should have temperature in unsupported_params
+        let tinfoil = providers.iter().find(|p| p.id == "tinfoil").unwrap();
+        assert!(
+            tinfoil
+                .unsupported_params
+                .contains(&"temperature".to_string()),
+            "tinfoil should have 'temperature' in unsupported_params"
+        );
+
+        // OpenAI should also have temperature in unsupported_params
+        let openai = providers.iter().find(|p| p.id == "openai").unwrap();
+        assert!(
+            openai
+                .unsupported_params
+                .contains(&"temperature".to_string()),
+            "openai should have 'temperature' in unsupported_params"
+        );
+
+        // Providers without the field in JSON should deserialize to empty vec
+        let groq = providers.iter().find(|p| p.id == "groq").unwrap();
+        assert!(
+            groq.unsupported_params.is_empty(),
+            "groq should have empty unsupported_params (field absent in JSON)"
+        );
+
+        // Every non-empty entry should contain valid param names
+        for def in &providers {
+            for param in &def.unsupported_params {
+                assert!(
+                    !param.is_empty(),
+                    "{}: unsupported_params contains empty string",
+                    def.id
+                );
+            }
+        }
     }
 
     #[test]

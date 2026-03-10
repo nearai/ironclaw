@@ -18,7 +18,7 @@
   "artifacts": {
     "wasm32-wasip2": {
       "url": "https://github.com/nearai/ironclaw/releases/latest/download/slack-tool-wasm32-wasip2.tar.gz",
-      "sha256": "6ed36077b67ac70a041f06f760f93ba79b33269885413c3c3f2c8c87ee60807e"
+      "sha256": "9190b8250bd20c22a8c97b1ea19a6590624a69d6c63a5f5c240a7840a4966286"
     }
   },
   "auth_summary": {
