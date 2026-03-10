@@ -51,6 +51,29 @@ use crate::workspace::{SearchConfig, SearchResult};
 pub async fn connect_from_config(
     config: &crate::config::DatabaseConfig,
 ) -> Result<Arc<dyn Database>, DatabaseError> {
+    let (db, _handles) = connect_with_handles(config).await?;
+    Ok(db)
+}
+
+/// Backend-specific handles retained after database connection.
+///
+/// These are needed by satellite stores (e.g., `SecretsStore`) that require
+/// a backend-specific handle rather than the generic `Arc<dyn Database>`.
+#[derive(Default)]
+pub struct DatabaseHandles {
+    #[cfg(feature = "postgres")]
+    pub pg_pool: Option<deadpool_postgres::Pool>,
+    #[cfg(feature = "libsql")]
+    pub libsql_db: Option<Arc<::libsql::Database>>,
+}
+
+/// Connect to the database, run migrations, and return both the generic
+/// `Database` trait object and the backend-specific handles.
+pub async fn connect_with_handles(
+    config: &crate::config::DatabaseConfig,
+) -> Result<(Arc<dyn Database>, DatabaseHandles), DatabaseError> {
+    let mut handles = DatabaseHandles::default();
+
     match config.backend {
         #[cfg(feature = "libsql")]
         crate::config::DatabaseBackend::LibSql => {
@@ -74,7 +97,11 @@ pub async fn connect_from_config(
                     .map_err(|e| DatabaseError::Pool(e.to_string()))?
             };
             backend.run_migrations().await?;
-            Ok(Arc::new(backend))
+            tracing::info!("libSQL database connected and migrations applied");
+
+            handles.libsql_db = Some(backend.shared_db());
+
+            Ok((Arc::new(backend) as Arc<dyn Database>, handles))
         }
         #[cfg(feature = "postgres")]
         _ => {
@@ -82,7 +109,11 @@ pub async fn connect_from_config(
                 .await
                 .map_err(|e| DatabaseError::Pool(e.to_string()))?;
             pg.run_migrations().await?;
-            Ok(Arc::new(pg))
+            tracing::info!("PostgreSQL database connected and migrations applied");
+
+            handles.pg_pool = Some(pg.pool());
+
+            Ok((Arc::new(pg) as Arc<dyn Database>, handles))
         }
         #[cfg(not(feature = "postgres"))]
         _ => Err(DatabaseError::Pool(

@@ -73,6 +73,7 @@ pub struct ExtensionManager {
 
     // MCP infrastructure
     mcp_session_manager: Arc<McpSessionManager>,
+    mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
     /// Active MCP clients keyed by server name.
     mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
 
@@ -116,6 +117,7 @@ impl ExtensionManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mcp_session_manager: Arc<McpSessionManager>,
+        mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         tool_registry: Arc<ToolRegistry>,
         hooks: Option<Arc<HookRegistry>>,
@@ -136,6 +138,7 @@ impl ExtensionManager {
             registry,
             discovery: OnlineDiscovery::new(),
             mcp_session_manager,
+            mcp_process_manager,
             mcp_clients: RwLock::new(HashMap::new()),
             wasm_tool_runtime,
             wasm_tools_dir,
@@ -2467,18 +2470,15 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
-        let has_tokens = is_authenticated(&server, &self.secrets, &self.user_id).await;
-
-        let client = if has_tokens || server.requires_auth() {
-            McpClient::new_authenticated(
-                server.clone(),
-                Arc::clone(&self.mcp_session_manager),
-                Arc::clone(&self.secrets),
-                &self.user_id,
-            )
-        } else {
-            McpClient::new_with_config(server.clone())
-        };
+        let client = crate::tools::mcp::create_client_from_config(
+            server.clone(),
+            &self.mcp_session_manager,
+            &self.mcp_process_manager,
+            Some(Arc::clone(&self.secrets)),
+            &self.user_id,
+        )
+        .await
+        .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
         // Try to list and create tools
         let mcp_tools = client
@@ -3736,6 +3736,7 @@ mod tests {
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
 
         let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
@@ -3747,6 +3748,7 @@ mod tests {
 
         crate::extensions::manager::ExtensionManager::new(
             mcp,
+            Arc::new(McpProcessManager::new()),
             secrets,
             tools,
             None, // hooks
@@ -3906,6 +3908,7 @@ mod tests {
     ) -> ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::ToolRegistry;
+        use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
 
         std::fs::create_dir_all(&tools_dir).ok();
@@ -3917,6 +3920,7 @@ mod tests {
 
         ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,
