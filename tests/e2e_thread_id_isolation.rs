@@ -73,7 +73,7 @@ mod tests {
         let before_len = before_messages.len();
 
         let forged = IncomingMessage::new("test", "test-user", "attacker turn")
-            .with_thread(&foreign_thread_id.to_string());
+            .with_thread(foreign_thread_id.to_string());
         rig.send_incoming(forged).await;
         let responses = rig.wait_for_responses(1, Duration::from_secs(20)).await;
         assert_eq!(
@@ -139,7 +139,7 @@ mod tests {
         let store = rig.database();
 
         let forged = IncomingMessage::new("test", "test-user", "attacker turn")
-            .with_thread(&forged_thread_id.to_string());
+            .with_thread(forged_thread_id.to_string());
         rig.send_incoming(forged).await;
         let responses = rig.wait_for_responses(1, Duration::from_secs(20)).await;
         assert_eq!(

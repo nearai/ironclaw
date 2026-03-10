@@ -464,7 +464,7 @@ impl Agent {
                     turn_number,
                     &tool_calls,
                 )
-                    .await;
+                .await;
                 self.persist_assistant_response(
                     thread_id,
                     &message.channel,
