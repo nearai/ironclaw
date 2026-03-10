@@ -195,8 +195,7 @@ async fn extension_manager_with_process_manager_constructs() {
     use ironclaw::tools::mcp::McpSessionManager;
 
     let crypto = test_crypto();
-    let secrets: Arc<dyn SecretsStore + Send + Sync> =
-        Arc::new(InMemorySecretsStore::new(crypto));
+    let secrets: Arc<dyn SecretsStore + Send + Sync> = Arc::new(InMemorySecretsStore::new(crypto));
     let tools = Arc::new(ToolRegistry::new());
     let tools_dir = tempfile::tempdir().expect("tools_dir");
     let channels_dir = tempfile::tempdir().expect("channels_dir");
