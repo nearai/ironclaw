@@ -189,7 +189,7 @@ impl HeartbeatRunner {
 
             // Skip during quiet hours
             if self.config.is_quiet_hours() {
-                tracing::debug!("Heartbeat skipped: quiet hours");
+                tracing::trace!("Heartbeat skipped: quiet hours");
                 continue;
             }
 
@@ -212,7 +212,7 @@ impl HeartbeatRunner {
 
             match self.check_heartbeat().await {
                 HeartbeatResult::Ok => {
-                    tracing::debug!("Heartbeat OK");
+                    tracing::trace!("Heartbeat OK");
                     self.consecutive_failures = 0;
                 }
                 HeartbeatResult::NeedsAttention(message) => {
@@ -221,7 +221,7 @@ impl HeartbeatRunner {
                     self.send_notification(&message).await;
                 }
                 HeartbeatResult::Skipped => {
-                    tracing::debug!("Heartbeat skipped");
+                    tracing::trace!("Heartbeat skipped");
                 }
                 HeartbeatResult::Failed(error) => {
                     tracing::error!("Heartbeat failed: {}", error);
