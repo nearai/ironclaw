@@ -219,7 +219,10 @@ impl RoutineEngine {
 
             let mut matched = true;
             for (key, expected) in filters {
-                let Some(actual) = payload.get(key).and_then(crate::agent::routine::json_value_as_filter_string) else {
+                let Some(actual) = payload
+                    .get(key)
+                    .and_then(crate::agent::routine::json_value_as_filter_string)
+                else {
                     tracing::debug!(routine = %routine.name, filter_key = %key, "Filter key not found in payload");
                     matched = false;
                     break;

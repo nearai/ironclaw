@@ -9,7 +9,6 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
-use crate::agent::worker::{Worker, WorkerDeps};
 use crate::channels::web::types::SseEvent;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
@@ -19,6 +18,7 @@ use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
 use crate::tools::{ApprovalContext, ToolRegistry};
+use crate::worker::job::{Worker, WorkerDeps};
 
 /// Message to send to a worker.
 #[derive(Debug)]
@@ -462,6 +462,9 @@ impl Scheduler {
     }
 
     /// Execute a single tool as a subtask.
+    ///
+    /// Performs scheduler-specific checks (approval, cancellation) then
+    /// delegates to the shared `execute_tool_with_safety` pipeline.
     async fn execute_tool_task(
         tools: Arc<ToolRegistry>,
         context_manager: Arc<ContextManager>,
@@ -473,7 +476,7 @@ impl Scheduler {
     ) -> Result<TaskOutput, Error> {
         let start = std::time::Instant::now();
 
-        // Get the tool
+        // Get the tool for approval check
         let tool = tools.get(tool_name).await.ok_or_else(|| {
             Error::Tool(crate::error::ToolError::NotFound {
                 name: tool_name.to_string(),
@@ -490,6 +493,7 @@ impl Scheduler {
             .into());
         }
 
+        // Scheduler-specific approval check
         let requirement = tool.requires_approval(&params);
         let blocked =
             ApprovalContext::is_blocked_or_default(&approval_context, tool_name, requirement);
@@ -500,41 +504,23 @@ impl Scheduler {
             .into());
         }
 
-        // Validate tool parameters
-        let validation = safety.validator().validate_tool_params(&params);
-        if !validation.is_valid {
-            let details = validation
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(crate::error::ToolError::InvalidParameters {
+        // Delegate to shared tool execution pipeline
+        let output_str = crate::tools::execute::execute_tool_with_safety(
+            &tools, &safety, tool_name, &params, &job_ctx,
+        )
+        .await?;
+
+        // Parse back to Value for TaskOutput; this should be infallible given
+        // `execute_tool_with_safety` uses `serde_json::to_string_pretty`, but if it
+        // ever fails we surface a clear error instead of silently changing types.
+        let result_value: serde_json::Value = serde_json::from_str(&output_str).map_err(|e| {
+            Error::Tool(crate::error::ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
-                reason: format!("Invalid tool parameters: {}", details),
-            }
-            .into());
-        }
+                reason: format!("Failed to parse tool output as JSON: {}", e),
+            })
+        })?;
 
-        // Execute with per-tool timeout
-        let tool_timeout = tool.execution_timeout();
-        let result =
-            tokio::time::timeout(tool_timeout, async { tool.execute(params, &job_ctx).await })
-                .await
-                .map_err(|_| {
-                    Error::Tool(crate::error::ToolError::Timeout {
-                        name: tool_name.to_string(),
-                        timeout: tool_timeout,
-                    })
-                })?
-                .map_err(|e| {
-                    Error::Tool(crate::error::ToolError::ExecutionFailed {
-                        name: tool_name.to_string(),
-                        reason: e.to_string(),
-                    })
-                })?;
-
-        Ok(TaskOutput::new(result.result, start.elapsed()))
+        Ok(TaskOutput::new(result_value, start.elapsed()))
     }
 
     /// Stop a running job.
