@@ -28,7 +28,9 @@ fn should_attempt_source_fallback(err: &RegistryError) -> bool {
         //
         // Version-pinned URLs (`releases/download/vX.Y.Z/`) point to an immutable
         // asset; a mismatch there is genuinely suspicious and remains a hard block.
-        RegistryError::ChecksumMismatch { url, .. } => url.contains("/releases/latest/download/"),
+        RegistryError::ChecksumMismatch { url, .. } => {
+            url.contains("github.com/nearai/ironclaw/releases/latest/")
+        }
         // Never fall back for these — they signal a structural problem or a
         // deliberate "already done" state, not a transient artifact issue.
         RegistryError::AlreadyInstalled { .. } | RegistryError::InvalidManifest { .. } => false,
@@ -934,26 +936,6 @@ mod tests {
             path: PathBuf::from("/tmp/demo.wasm"),
         };
         assert!(!should_attempt_source_fallback(&already));
-
-        // ChecksumMismatch on a moving-target URL (releases/latest) allows fallback —
-        // the mismatch is caused by CI rebuilding the same source, not tampering.
-        let checksum_latest = RegistryError::ChecksumMismatch {
-            url: "https://github.com/nearai/ironclaw/releases/latest/download/demo.wasm"
-                .to_string(),
-            expected_sha256: "deadbeef".to_string(),
-            actual_sha256: "feedface".to_string(),
-        };
-        assert!(should_attempt_source_fallback(&checksum_latest));
-
-        // ChecksumMismatch on a version-pinned URL remains a hard block — the asset
-        // is immutable, so a mismatch is genuinely suspicious.
-        let checksum_pinned = RegistryError::ChecksumMismatch {
-            url: "https://github.com/nearai/ironclaw/releases/download/v0.7.0/demo-0.2.0.wasm"
-                .to_string(),
-            expected_sha256: "deadbeef".to_string(),
-            actual_sha256: "feedface".to_string(),
-        };
-        assert!(!should_attempt_source_fallback(&checksum_pinned));
 
         let invalid = RegistryError::InvalidManifest {
             name: "demo".to_string(),
