@@ -37,6 +37,9 @@ pub enum ProviderProtocol {
     Anthropic,
     /// Ollama API (OpenAI-ish, no API key required).
     Ollama,
+    /// Google Gemini native API (`generateContent`).
+    /// Supports `thought_signature` for Gemini 2.5+/3 function calling.
+    Gemini,
 }
 
 /// How the setup wizard should collect credentials for this provider.

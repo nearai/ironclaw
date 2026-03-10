@@ -41,6 +41,25 @@
     }
   },
   {
+    "id": "gemini",
+    "aliases": ["google", "google_gemini"],
+    "protocol": "gemini",
+    "api_key_env": "GEMINI_API_KEY",
+    "api_key_required": true,
+    "base_url_env": "GEMINI_BASE_URL",
+    "model_env": "LLM_MODEL",
+    "default_model": "gemini-2.5-flash",
+    "default_base_url": "https://generativelanguage.googleapis.com",
+    "description": "Google Gemini native API (supports thought_signature)",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_gemini_api_key",
+      "key_url": "https://aistudio.google.com/app/apikey",
+      "display_name": "Google Gemini",
+      "can_list_models": false
+    }
+  },
+  {
     "id": "ollama",
     "aliases": [],
     "protocol": "ollama",

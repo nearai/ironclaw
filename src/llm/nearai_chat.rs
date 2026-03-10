@@ -579,6 +579,7 @@ impl LlmProvider for NearAiChatProvider {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    signature: None,
                 }
             })
             .collect();
@@ -1170,11 +1171,13 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "list_issues".to_string(),
                 arguments: serde_json::json!({"owner": "foo", "repo": "bar"}),
+                signature: None,
             },
             ToolCall {
                 id: "call_2".to_string(),
                 name: "search".to_string(),
                 arguments: serde_json::json!({"query": "test"}),
+                signature: None,
             },
         ];
 
@@ -1207,6 +1210,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "test".to_string(),
             arguments: serde_json::json!({"key": "value"}),
+            signature: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();
@@ -1450,6 +1454,7 @@ mod tests {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    signature: None,
                 }
             })
             .collect();
@@ -1499,6 +1504,7 @@ mod tests {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
+                    signature: None,
                 }
             })
             .collect();
@@ -2119,6 +2125,7 @@ mod tests {
                 id: "call_1".to_string(),
                 name: "test".to_string(),
                 arguments: serde_json::json!({}),
+                signature: None,
             }],
         );
         let chat_msg: ChatCompletionMessage = msg.into();

@@ -143,6 +143,7 @@ fn create_registry_provider(
         ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
         ProviderProtocol::Ollama => create_ollama_from_registry(config),
+        ProviderProtocol::Gemini => create_gemini_from_registry(config),
     }
 }
 
@@ -302,6 +303,45 @@ fn create_anthropic_from_registry(
             .with_cache_retention(cache_retention)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
+}
+
+fn create_gemini_from_registry(
+    config: &RegistryProviderConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    use rig::providers::gemini;
+
+    let api_key = config
+        .api_key
+        .as_ref()
+        .map(|k| k.expose_secret().to_string())
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                provider = %config.provider_id,
+                "No API key configured for Gemini. Requests will likely fail. \
+                 Set GEMINI_API_KEY in your .env or secrets store.",
+            );
+            "no-key".to_string()
+        });
+
+    let mut builder = gemini::Client::builder().api_key(&api_key);
+    if !config.base_url.is_empty() {
+        builder = builder.base_url(&config.base_url);
+    }
+
+    let client: gemini::Client = builder.build().map_err(|e| LlmError::RequestFailed {
+        provider: config.provider_id.clone(),
+        reason: format!("Failed to create Gemini client: {e}"),
+    })?;
+
+    let model = client.completion_model(&config.model);
+
+    tracing::info!(
+        provider = %config.provider_id,
+        model = %config.model,
+        "Using Gemini native provider (thought_signature supported)"
+    );
+
+    Ok(Arc::new(RigAdapter::new(model, &config.model)))
 }
 
 fn create_ollama_from_registry(

@@ -659,9 +659,16 @@ Respond in JSON format:
                 });
             }
 
+            let has_content = response.content.is_some();
             let content = response
                 .content
                 .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string());
+            tracing::debug!(
+                has_content,
+                content_len = content.len(),
+                tool_calls = response.tool_calls.len(),
+                "reasoning: LLM tool-completion response before cleanup"
+            );
 
             // Some models (e.g. GLM-4.7) emit tool calls as XML tags in content
             // instead of using the structured tool_calls field. Try to recover
@@ -1302,6 +1309,7 @@ fn recover_tool_calls_from_content(
                     id: format!("recovered_{}", calls.len()),
                     name: name.to_string(),
                     arguments,
+                    signature: None,
                 });
                 continue;
             }
@@ -1313,6 +1321,7 @@ fn recover_tool_calls_from_content(
                     id: format!("recovered_{}", calls.len()),
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
+                    signature: None,
                 });
             }
         }
@@ -1347,6 +1356,7 @@ fn recover_tool_calls_from_content(
                         id: format!("recovered_{}", calls.len()),
                         name: name.to_string(),
                         arguments,
+                        signature: None,
                     });
                     remaining = &args_start[bracket_end + 1..];
                     continue;
@@ -1358,6 +1368,7 @@ fn recover_tool_calls_from_content(
                 id: format!("recovered_{}", calls.len()),
                 name: name.to_string(),
                 arguments: serde_json::Value::Object(Default::default()),
+                signature: None,
             });
             remaining = after_name;
         }

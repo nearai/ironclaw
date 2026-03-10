@@ -152,6 +152,11 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
         None => return,
     };
 
+    // Ensure every schema node has a valid, non-empty scalar "type".
+    // Strict providers (Gemini native) reject empty strings and may not
+    // handle type arrays like ["string", "null"].
+    sanitize_type_field(obj);
+
     // Recurse into combinators: anyOf, oneOf, allOf
     for key in &["anyOf", "oneOf", "allOf"] {
         if let Some(JsonValue::Array(variants)) = obj.get_mut(*key) {
@@ -246,43 +251,83 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
     obj.insert("required".to_string(), JsonValue::Array(required_value));
 }
 
-/// Make a property schema nullable for OpenAI strict mode.
+/// Make a property schema nullable.
 ///
-/// If it has a simple `"type": "<T>"`, converts to `"type": ["<T>", "null"]`.
-/// If it already has an array type, adds "null" if not present.
-/// Otherwise, wraps with `anyOf: [<existing>, {"type": "null"}]`.
+/// Uses `"nullable": true` (Gemini-compatible) instead of type arrays.
+/// For schemas without a `type` key, adds a default before marking nullable.
 fn make_nullable(schema: &mut JsonValue) {
     let obj = match schema.as_object_mut() {
         Some(o) => o,
         None => return,
     };
 
-    if let Some(type_val) = obj.get("type").cloned() {
-        match type_val {
-            // "type": "string" → "type": ["string", "null"]
-            JsonValue::String(ref t) if t != "null" => {
-                obj.insert("type".to_string(), serde_json::json!([t, "null"]));
-            }
-            // "type": ["string", "integer"] → add "null" if missing
-            JsonValue::Array(ref arr) => {
-                let has_null = arr.iter().any(|v| v.as_str() == Some("null"));
-                if !has_null {
-                    let mut new_arr = arr.clone();
-                    new_arr.push(JsonValue::String("null".to_string()));
-                    obj.insert("type".to_string(), JsonValue::Array(new_arr));
-                }
-            }
-            _ => {}
+    // Ensure there's a scalar type before marking nullable.
+    if !obj.contains_key("type") {
+        let inferred = infer_type_from_context(obj);
+        obj.insert("type".to_string(), JsonValue::String(inferred));
+    }
+
+    obj.insert("nullable".to_string(), JsonValue::Bool(true));
+}
+
+/// Ensure a schema object has a valid, non-empty, scalar `type` field.
+///
+/// Handles:
+/// - `"type": ""` → infer from context or default to `"string"`
+/// - `"type": ["string", "null"]` → flatten to `"type": "string"` + `"nullable": true`
+/// - Missing `type` on non-object schemas → add `"string"` default
+///
+/// This prevents rig-core's `infer_type()` from ever producing an empty string
+/// that Gemini's native API rejects.
+fn sanitize_type_field(obj: &mut serde_json::Map<String, JsonValue>) {
+    match obj.get("type").cloned() {
+        Some(JsonValue::String(ref t)) if t.is_empty() => {
+            let inferred = infer_type_from_context(obj);
+            obj.insert("type".to_string(), JsonValue::String(inferred));
         }
+        Some(JsonValue::Array(arr)) => {
+            // ["string", "null"] → "string" + nullable: true
+            let non_null: Vec<&str> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty() && *s != "null")
+                .collect();
+            let has_null = arr.iter().any(|v| v.as_str() == Some("null"));
+
+            let scalar = non_null
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| infer_type_from_context(obj));
+
+            obj.insert("type".to_string(), JsonValue::String(scalar));
+            if has_null {
+                obj.insert("nullable".to_string(), JsonValue::Bool(true));
+            }
+        }
+        None => {
+            // No type at all — infer from context if not an object/combinator.
+            if !obj.contains_key("properties")
+                && !obj.contains_key("anyOf")
+                && !obj.contains_key("oneOf")
+                && !obj.contains_key("allOf")
+            {
+                let inferred = infer_type_from_context(obj);
+                obj.insert("type".to_string(), JsonValue::String(inferred));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn infer_type_from_context(obj: &serde_json::Map<String, JsonValue>) -> String {
+    if obj.contains_key("properties") {
+        "object".to_string()
+    } else if obj.contains_key("items") {
+        "array".to_string()
+    } else if obj.contains_key("enum") {
+        "string".to_string()
     } else {
-        // No "type" key — wrap with anyOf including null
-        // (handles enum-only, $ref, or combinator schemas)
-        let existing = JsonValue::Object(obj.clone());
-        obj.clear();
-        obj.insert(
-            "anyOf".to_string(),
-            serde_json::json!([existing, {"type": "null"}]),
-        );
+        "string".to_string()
     }
 }
 
@@ -358,7 +403,8 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                                 tool_call_id.clone(),
                                 ToolFunction::new(tc.name.clone(), tc.arguments.clone()),
                             )
-                            .with_call_id(tool_call_id),
+                            .with_call_id(tool_call_id)
+                            .with_signature(tc.signature.clone()),
                         ));
                     }
                     if let Ok(many) = OneOrMany::many(contents) {
@@ -406,12 +452,53 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
 fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
     tools
         .iter()
-        .map(|t| RigToolDefinition {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            parameters: normalize_schema_strict(&t.parameters),
+        .enumerate()
+        .map(|(idx, t)| {
+            check_empty_types(&t.parameters, &t.name, idx, "RAW.");
+            let params = normalize_schema_strict(&t.parameters);
+            check_empty_types(&params, &t.name, idx, "NORM.");
+            RigToolDefinition {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: params,
+            }
         })
         .collect()
+}
+
+fn check_empty_types(val: &JsonValue, tool_name: &str, tool_idx: usize, path: &str) {
+    if let Some(obj) = val.as_object() {
+        if let Some(t) = obj.get("type") {
+            let is_empty = match t {
+                JsonValue::String(s) => s.is_empty(),
+                JsonValue::Array(arr) => arr.iter().any(|v| v.as_str() == Some("")),
+                _ => false,
+            };
+            if is_empty {
+                tracing::warn!(
+                    tool_idx,
+                    tool_name,
+                    path,
+                    type_val = %t,
+                    "EMPTY TYPE DETECTED in tool schema after normalization"
+                );
+            }
+        }
+        if let Some(JsonValue::Object(props)) = obj.get("properties") {
+            for (k, v) in props {
+                let child_path = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                check_empty_types(v, tool_name, tool_idx, &child_path);
+            }
+        }
+        if let Some(items) = obj.get("items") {
+            let child_path = format!("{path}[items]");
+            check_empty_types(items, tool_name, tool_idx, &child_path);
+        }
+    }
 }
 
 /// Convert IronClaw tool_choice string to rig-core ToolChoice.
@@ -435,19 +522,23 @@ fn extract_response(
     for content in choice.iter() {
         match content {
             AssistantContent::Text(t) => {
+                tracing::debug!(text_len = t.text.len(), "extract_response: Text part");
                 if !t.text.is_empty() {
                     text_parts.push(t.text.clone());
                 }
             }
             AssistantContent::ToolCall(tc) => {
+                tracing::debug!(name = %tc.function.name, "extract_response: ToolCall part");
                 tool_calls.push(IronToolCall {
                     id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
+                    signature: tc.signature.clone(),
                 });
             }
-            // Reasoning and Image variants are not mapped to IronClaw types
-            _ => {}
+            other => {
+                tracing::debug!("extract_response: non-Text/ToolCall content: {:?}", std::mem::discriminant(other));
+            }
         }
     }
 
@@ -821,6 +912,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            signature: None,
         };
         let msg = ChatMessage::assistant_with_tool_calls(Some("thinking".to_string()), vec![tc]);
         let messages = vec![msg];
@@ -931,6 +1023,7 @@ mod tests {
             id: "".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            signature: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -960,6 +1053,7 @@ mod tests {
             id: "   ".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            signature: None,
         };
         let messages = vec![ChatMessage::assistant_with_tool_calls(None, vec![tc])];
         let (_preamble, history) = convert_messages(&messages);
@@ -990,6 +1084,7 @@ mod tests {
             id: "".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "test"}),
+            signature: None,
         };
         let assistant_msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let tool_result_msg = ChatMessage {
