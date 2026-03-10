@@ -272,7 +272,12 @@ impl NearAiChatProvider {
 
         if tracing::enabled!(tracing::Level::DEBUG) {
             tracing::debug!("NEAR AI Chat response status: {}", status);
-            tracing::debug!("NEAR AI Chat response body: {}", response_text);
+        }
+
+        // Log response body only at TRACE level to avoid exposing sensitive content
+        // (user-generated data, tool outputs, leaked secrets) in DEBUG logs
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!("NEAR AI Chat response body: {}", response_text);
         }
 
         if !status.is_success() {
