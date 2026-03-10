@@ -7,7 +7,7 @@
 //! - `routine_delete` - Remove a routine
 //! - `routine_fire` - Manually trigger a routine
 //! - `routine_history` - View past runs
-//! - `event_emit` - Emit a structured event to event-driven routines
+//! - `event_emit` - Emit a structured system event to `system_event`-triggered routines
 
 use std::sync::Arc;
 use std::time::Duration;

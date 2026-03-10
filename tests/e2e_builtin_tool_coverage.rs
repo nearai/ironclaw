@@ -269,15 +269,12 @@ mod tests {
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
             .with_skills()
+            .with_auto_approve_tools(true)
             .build()
             .await;
 
         rig.send_message("Install the workflow skill template and simulate a webhook routine run")
             .await;
-        // `skill_install` is approval-gated in the interactive loop.
-        // Approve once so the trace can proceed through the remaining steps.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        rig.send_message("always").await;
         let responses = rig.wait_for_responses(1, Duration::from_secs(20)).await;
         rig.verify_trace_expects(&trace, &responses);
 
