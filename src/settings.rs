@@ -386,6 +386,10 @@ pub struct AgentSettings {
     /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
     #[serde(default = "default_timezone")]
     pub default_timezone: String,
+
+    /// Maximum tokens per job (0 = unlimited).
+    #[serde(default)]
+    pub max_tokens_per_job: u64,
 }
 
 fn default_agent_name() -> String {
@@ -442,6 +446,7 @@ impl Default for AgentSettings {
             max_tool_iterations: default_max_tool_iterations(),
             auto_approve_tools: false,
             default_timezone: default_timezone(),
+            max_tokens_per_job: 0,
         }
     }
 }
