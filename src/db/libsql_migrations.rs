@@ -702,7 +702,7 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
         })?;
 
         applied_count += 1;
-        tracing::trace!(version, name, "libSQL: migration applied");
+        tracing::debug!(version, name, "libSQL: migration applied");
     }
 
     if applied_count > 0 {
