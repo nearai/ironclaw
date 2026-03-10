@@ -216,7 +216,6 @@ required-features = ["html-to-markdown"]
 
 [profile.release]
 strip = true          # Remove debug symbols from release binaries
-panic = "abort"       # No unwind tables, smaller + faster (lose backtraces on panic)
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
