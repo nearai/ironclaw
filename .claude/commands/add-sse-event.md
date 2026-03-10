@@ -64,7 +64,7 @@ If the event needs custom UI (cards, badges, etc.), add styles. Follow the exist
 
 Identify where in the backend this event should be triggered. Common locations:
 - `src/agent/agent_loop.rs` - During message processing or tool execution
-- `src/agent/worker.rs` - During job execution
+- `src/worker/job.rs` - During job execution
 - `src/agent/heartbeat.rs` - During periodic execution
 
 Use the existing pattern:
