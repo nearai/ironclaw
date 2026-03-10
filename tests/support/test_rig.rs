@@ -604,17 +604,15 @@ impl TestRigBuilder {
         components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
         components.config.agent.allow_local_tools = true;
 
+        let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
+            Arc::new(tokio::sync::RwLock::new(None));
+
         // 6. Register job tools, routine tools, and extra tools.
         {
-            use ironclaw::context::ContextManager;
-
             // Ensure filesystem/shell dev tools are always available in the
             // test rig, even if upstream builder flags/config disable local tools.
             components.tools.register_dev_tools();
 
-            let ctx_mgr = Arc::new(ContextManager::new(
-                components.config.agent.max_parallel_jobs,
-            ));
             components.tools.register_job_tools(
                 Arc::clone(&components.context_manager),
                 Some(scheduler_slot.clone()),

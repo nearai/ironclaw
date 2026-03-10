@@ -452,9 +452,6 @@ pub struct WebhookCapabilitySchema {
     /// Optional signature prefix for body-only HMAC mode (default sha256=).
     #[serde(default)]
     pub hmac_prefix: Option<String>,
-    /// Optional tolerance (seconds) for timestamped HMAC validation.
-    #[serde(default)]
-    pub hmac_timestamp_tolerance_secs: Option<i64>,
 }
 
 impl WebhookCapabilitySchema {
@@ -467,7 +464,6 @@ impl WebhookCapabilitySchema {
             hmac_signature_header: self.hmac_signature_header.clone(),
             hmac_timestamp_header: self.hmac_timestamp_header.clone(),
             hmac_prefix: self.hmac_prefix.clone(),
-            hmac_timestamp_tolerance_secs: self.hmac_timestamp_tolerance_secs,
         }
     }
 }

@@ -138,7 +138,6 @@ async fn tool_webhook_handler_inner(
         state.secrets_store.as_deref(),
         &state.user_id,
         &headers,
-        &query,
         &body,
     )
     .await
@@ -186,20 +185,21 @@ async fn tool_webhook_handler_inner(
     let output = match tool_impl.execute(params, &ctx).await {
         Ok(out) => out,
         Err(e) => {
+            tracing::warn!(tool = %tool, error = %e, "Webhook tool execution failed");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("Tool execution failed: {e}") })),
+                Json(serde_json::json!({ "error": "Tool execution failed" })),
             );
         }
     };
 
     let parsed: ToolWebhookOutput = match serde_json::from_value(output.result) {
         Ok(v) => v,
-        Err(e) => {
+        Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": format!("Tool webhook response must include valid 'emit_events': {e}")
+                    "error": "Tool webhook response must be a JSON object (optionally with 'emit_events' array)"
                 })),
             );
         }
@@ -237,14 +237,8 @@ async fn tool_webhook_handler_inner(
 }
 
 fn header_value<'a>(headers: &'a HeaderMap, key: &str) -> Option<&'a str> {
-    if let Some(v) = headers.get(key).and_then(|v| v.to_str().ok()) {
-        return Some(v);
-    }
-    let key_lower = key.to_ascii_lowercase();
-    headers
-        .iter()
-        .find(|(name, _)| name.as_str().eq_ignore_ascii_case(&key_lower))
-        .and_then(|(_, v)| v.to_str().ok())
+    // HeaderMap::get() already performs case-insensitive lookup per HTTP spec.
+    headers.get(key).and_then(|v| v.to_str().ok())
 }
 
 async fn validate_webhook_auth(
@@ -252,11 +246,12 @@ async fn validate_webhook_auth(
     secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
     user_id: &str,
     headers: &HeaderMap,
-    query: &HashMap<String, String>,
     body: &[u8],
 ) -> Result<(), String> {
     let Some(cfg) = tool.webhook_capability() else {
-        return Ok(());
+        return Err(
+            "Tool does not declare a webhook capability; webhook access denied".to_string(),
+        );
     };
     let Some(store) = secrets_store else {
         return Err("Secrets store not available for webhook verification".to_string());
@@ -269,10 +264,7 @@ async fn validate_webhook_auth(
             .map_err(|_| format!("Missing webhook secret '{secret_name}'"))?;
         let expected = expected.expose();
         let secret_header = cfg.secret_header.as_deref().unwrap_or("x-webhook-secret");
-        let provided = query
-            .get("secret")
-            .map(String::as_str)
-            .or_else(|| header_value(headers, secret_header))
+        let provided = header_value(headers, secret_header)
             .or_else(|| {
                 if secret_header != "x-webhook-secret" {
                     header_value(headers, "x-webhook-secret")
@@ -487,7 +479,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_when_tool_returns_no_events() {
+    async fn rejects_tool_without_webhook_capability() {
         let tools = Arc::new(ToolRegistry::new());
         tools.register(Arc::new(TestWebhookTool)).await;
         let app = routes(ToolWebhookState {
@@ -506,7 +498,7 @@ mod tests {
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
             .await
             .expect("response");
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
