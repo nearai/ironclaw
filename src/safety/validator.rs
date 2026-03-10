@@ -117,8 +117,6 @@ impl Validator {
 
     /// Validate input text.
     pub fn validate(&self, input: &str) -> ValidationResult {
-        let mut result = ValidationResult::ok();
-
         // Check empty
         if input.is_empty() {
             return ValidationResult::error(ValidationError {
@@ -128,10 +126,16 @@ impl Validator {
             });
         }
 
+        self.validate_non_empty_input(input, "input")
+    }
+
+    fn validate_non_empty_input(&self, input: &str, field: &str) -> ValidationResult {
+        let mut result = ValidationResult::ok();
+
         // Check length
         if input.len() > self.max_length {
             result = result.merge(ValidationResult::error(ValidationError {
-                field: "input".to_string(),
+                field: field.to_string(),
                 message: format!(
                     "Input too long: {} bytes (max {})",
                     input.len(),
@@ -143,7 +147,7 @@ impl Validator {
 
         if input.len() < self.min_length {
             result = result.merge(ValidationResult::error(ValidationError {
-                field: "input".to_string(),
+                field: field.to_string(),
                 message: format!(
                     "Input too short: {} bytes (min {})",
                     input.len(),
@@ -156,7 +160,7 @@ impl Validator {
         // Check for valid UTF-8 (should always pass since we have a &str, but check for weird chars)
         if input.chars().any(|c| c == '\x00') {
             result = result.merge(ValidationResult::error(ValidationError {
-                field: "input".to_string(),
+                field: field.to_string(),
                 message: "Input contains null bytes".to_string(),
                 code: ValidationErrorCode::InvalidEncoding,
             }));
@@ -167,7 +171,7 @@ impl Validator {
         for pattern in &self.forbidden_patterns {
             if lower_input.contains(pattern) {
                 result = result.merge(ValidationResult::error(ValidationError {
-                    field: "input".to_string(),
+                    field: field.to_string(),
                     message: format!("Input contains forbidden pattern: {}", pattern),
                     code: ValidationErrorCode::ForbiddenContent,
                 }));
@@ -201,7 +205,11 @@ impl Validator {
         ) {
             match value {
                 serde_json::Value::String(s) => {
-                    let string_result = validator.validate(s);
+                    let string_result = if s.is_empty() {
+                        ValidationResult::ok()
+                    } else {
+                        validator.validate_non_empty_input(s, "input")
+                    };
                     *result = std::mem::take(result).merge(string_result);
                 }
                 serde_json::Value::Array(arr) => {
@@ -311,5 +319,52 @@ mod tests {
             validator.validate(&format!("Start of message{}End of message", "a".repeat(30)));
         assert!(result.is_valid); // Still valid, just a warning
         assert!(!result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_tool_params_allow_empty_strings() {
+        let validator = Validator::new();
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "path": "",
+            "nested": {
+                "label": ""
+            },
+            "items": [""]
+        }));
+
+        assert!(result.is_valid);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_tool_params_still_block_null_bytes() {
+        let validator = Validator::new();
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "path": "bad\u{0000}path"
+        }));
+
+        assert!(!result.is_valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == ValidationErrorCode::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn test_tool_params_still_block_forbidden_patterns() {
+        let validator = Validator::new().forbid_pattern("forbidden");
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "path": "contains forbidden content"
+        }));
+
+        assert!(!result.is_valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == ValidationErrorCode::ForbiddenContent)
+        );
     }
 }
