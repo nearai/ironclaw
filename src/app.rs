@@ -77,10 +77,7 @@ pub struct AppBuilder {
     llm_override: Option<Arc<dyn LlmProvider>>,
 
     // Backend-specific handles needed by secrets store
-    #[cfg(feature = "postgres")]
-    pg_pool: Option<deadpool_postgres::Pool>,
-    #[cfg(feature = "libsql")]
-    libsql_db: Option<Arc<libsql::Database>>,
+    handles: Option<crate::db::DatabaseHandles>,
 }
 
 impl AppBuilder {
@@ -105,10 +102,7 @@ impl AppBuilder {
             db: None,
             secrets_store: None,
             llm_override: None,
-            #[cfg(feature = "postgres")]
-            pg_pool: None,
-            #[cfg(feature = "libsql")]
-            libsql_db: None,
+            handles: None,
         }
     }
 
@@ -137,71 +131,10 @@ impl AppBuilder {
             return Ok(());
         }
 
-        let db: Arc<dyn Database> = match self.config.database.backend {
-            #[cfg(feature = "libsql")]
-            crate::config::DatabaseBackend::LibSql => {
-                use crate::db::Database as _;
-                use crate::db::libsql::LibSqlBackend;
-                use secrecy::ExposeSecret as _;
-
-                let default_path = crate::config::default_libsql_path();
-                let db_path = self
-                    .config
-                    .database
-                    .libsql_path
-                    .as_deref()
-                    .unwrap_or(&default_path);
-
-                let backend = if let Some(ref url) = self.config.database.libsql_url {
-                    let token =
-                        self.config
-                            .database
-                            .libsql_auth_token
-                            .as_ref()
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set"
-                                )
-                            })?;
-                    LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret()).await?
-                } else {
-                    LibSqlBackend::new_local(db_path).await?
-                };
-                backend.run_migrations().await?;
-                tracing::info!("libSQL database connected and migrations applied");
-
-                #[cfg(feature = "libsql")]
-                {
-                    self.libsql_db = Some(backend.shared_db());
-                }
-
-                Arc::new(backend) as Arc<dyn Database>
-            }
-            #[cfg(feature = "postgres")]
-            _ => {
-                use crate::db::Database as _;
-                let pg = crate::db::postgres::PgBackend::new(&self.config.database)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-                pg.run_migrations()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
-                tracing::info!("PostgreSQL database connected and migrations applied");
-
-                #[cfg(feature = "postgres")]
-                {
-                    self.pg_pool = Some(pg.pool());
-                }
-
-                Arc::new(pg) as Arc<dyn Database>
-            }
-            #[cfg(not(feature = "postgres"))]
-            _ => {
-                anyhow::bail!(
-                    "No database backend available. Enable 'postgres' or 'libsql' feature."
-                );
-            }
-        };
+        let (db, handles) = crate::db::connect_with_handles(&self.config.database)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        self.handles = Some(handles);
 
         // Post-init: migrate disk config, reload config from DB, attach session, cleanup
         if let Err(e) = crate::bootstrap::migrate_disk_to_db(db.as_ref(), "default").await {
@@ -212,7 +145,7 @@ impl AppBuilder {
         match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
             Ok(db_config) => {
                 self.config = db_config;
-                tracing::info!("Configuration reloaded from database");
+                tracing::debug!("Configuration reloaded from database");
             }
             Err(e) => {
                 tracing::warn!(
@@ -251,10 +184,7 @@ impl AppBuilder {
                 crate::config::inject_os_credentials();
 
                 // Consume unused handles
-                #[cfg(feature = "libsql")]
-                {
-                    self.libsql_db.take();
-                }
+                self.handles.take();
 
                 // Re-resolve only the LLM config with OS credentials.
                 let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
@@ -278,35 +208,16 @@ impl AppBuilder {
             Ok(c) => Arc::new(c),
             Err(e) => {
                 tracing::warn!("Failed to initialize secrets crypto: {}", e);
-                #[cfg(feature = "libsql")]
-                {
-                    self.libsql_db.take();
-                }
+                self.handles.take();
                 return Ok(());
             }
         };
 
-        let store: Option<Arc<dyn SecretsStore + Send + Sync>> = None;
-
-        #[cfg(feature = "libsql")]
-        let store = store.or_else(|| {
-            self.libsql_db.take().map(|db| {
-                Arc::new(crate::secrets::LibSqlSecretsStore::new(
-                    db,
-                    Arc::clone(&crypto),
-                )) as Arc<dyn SecretsStore + Send + Sync>
-            })
-        });
-
-        #[cfg(feature = "postgres")]
-        let store = store.or_else(|| {
-            self.pg_pool.as_ref().map(|pool| {
-                Arc::new(crate::secrets::PostgresSecretsStore::new(
-                    pool.clone(),
-                    Arc::clone(&crypto),
-                )) as Arc<dyn SecretsStore + Send + Sync>
-            })
-        });
+        // Fallback covers the no-database path where `init_database` returned
+        // early before populating `self.handles`.
+        let empty_handles = crate::db::DatabaseHandles::default();
+        let handles = self.handles.as_ref().unwrap_or(&empty_handles);
+        let store = crate::secrets::create_secrets_store(crypto, handles);
 
         if let Some(ref secrets) = store {
             // Inject LLM API keys from encrypted storage
@@ -363,7 +274,7 @@ impl AppBuilder {
         anyhow::Error,
     > {
         let safety = Arc::new(SafetyLayer::new(&self.config.safety));
-        tracing::info!("Safety layer initialized");
+        tracing::debug!("Safety layer initialized");
 
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
@@ -450,7 +361,7 @@ impl AppBuilder {
             tools
                 .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
-            tracing::info!("Builder mode enabled");
+            tracing::debug!("Builder mode enabled");
         }
 
         Ok((safety, tools, embeddings, workspace))
@@ -472,9 +383,7 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::tools::mcp::{
-            McpClient, McpTransport, config::load_mcp_servers_from_db, is_authenticated,
-        };
+        use crate::tools::mcp::config::load_mcp_servers_from_db;
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
@@ -510,7 +419,7 @@ impl AppBuilder {
                     match loader.load_from_dir(&wasm_config.tools_dir).await {
                         Ok(results) => {
                             if !results.loaded.is_empty() {
-                                tracing::info!(
+                                tracing::debug!(
                                     "Loaded {} WASM tools from {}",
                                     results.loaded.len(),
                                     wasm_config.tools_dir.display()
@@ -533,7 +442,7 @@ impl AppBuilder {
                         Ok(results) => {
                             dev_loaded_tool_names.extend(results.loaded.iter().cloned());
                             if !dev_loaded_tool_names.is_empty() {
-                                tracing::info!(
+                                tracing::debug!(
                                     "Loaded {} dev WASM tools from build artifacts",
                                     dev_loaded_tool_names.len()
                                 );
@@ -565,7 +474,10 @@ impl AppBuilder {
                     Ok(servers) => {
                         let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
                         if !enabled.is_empty() {
-                            tracing::info!("Loading {} configured MCP server(s)...", enabled.len());
+                            tracing::debug!(
+                                "Loading {} configured MCP server(s)...",
+                                enabled.len()
+                            );
                         }
 
                         let mut join_set = tokio::task::JoinSet::new();
@@ -578,94 +490,23 @@ impl AppBuilder {
                             join_set.spawn(async move {
                                 let server_name = server.name.clone();
 
-                                let client: McpClient = match server.effective_transport() {
-                                    crate::tools::mcp::config::EffectiveTransport::Stdio {
-                                        command,
-                                        args,
-                                        env,
-                                    } => {
-                                        match pm
-                                            .spawn_stdio(
-                                                &server_name,
-                                                command,
-                                                args.to_vec(),
-                                                env.clone(),
-                                            )
-                                            .await
-                                        {
-                                            Ok(transport) => McpClient::new_with_transport(
-                                                &server_name,
-                                                transport as Arc<dyn McpTransport>,
-                                                None,
-                                                secrets,
-                                                "default",
-                                                Some(server),
-                                            ),
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Failed to spawn stdio MCP server '{}': {}",
-                                                    server_name,
-                                                    e
-                                                );
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    #[cfg(unix)]
-                                    crate::tools::mcp::config::EffectiveTransport::Unix {
-                                        socket_path,
-                                    } => {
-                                        match crate::tools::mcp::unix_transport::UnixMcpTransport::connect(
-                                            &server_name,
-                                            socket_path,
-                                        )
-                                        .await
-                                        {
-                                            Ok(transport) => McpClient::new_with_transport(
-                                                &server_name,
-                                                Arc::new(transport) as Arc<dyn McpTransport>,
-                                                None,
-                                                secrets,
-                                                "default",
-                                                Some(server),
-                                            ),
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Failed to connect to Unix MCP server '{}': {}",
-                                                    server_name,
-                                                    e
-                                                );
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    #[cfg(not(unix))]
-                                    crate::tools::mcp::config::EffectiveTransport::Unix { .. } => {
+                                let client = match crate::tools::mcp::create_client_from_config(
+                                    server,
+                                    &mcp_sm,
+                                    &pm,
+                                    secrets,
+                                    "default",
+                                )
+                                .await
+                                {
+                                    Ok(c) => c,
+                                    Err(e) => {
                                         tracing::warn!(
-                                            "Unix socket transport is not supported on this platform (server '{}')",
-                                            server_name
+                                            "Failed to create MCP client for '{}': {}",
+                                            server_name,
+                                            e
                                         );
                                         return;
-                                    }
-                                    crate::tools::mcp::config::EffectiveTransport::Http => {
-                                        if let Some(ref secrets) = secrets {
-                                            let has_tokens =
-                                                is_authenticated(&server, secrets, "default")
-                                                    .await;
-
-                                            if has_tokens || server.requires_auth() {
-                                                McpClient::new_authenticated(
-                                                    server,
-                                                    Arc::clone(&mcp_sm),
-                                                    Arc::clone(secrets),
-                                                    "default",
-                                                )
-                                            } else {
-                                                McpClient::new_with_config(server)
-                                            }
-                                        } else {
-                                            McpClient::new_with_config(server)
-                                        }
                                     }
                                 };
 
@@ -677,7 +518,7 @@ impl AppBuilder {
                                                 for tool in tool_impls {
                                                     tools.register(tool).await;
                                                 }
-                                                tracing::info!(
+                                                tracing::debug!(
                                                     "Loaded {} tools from MCP server '{}'",
                                                     tool_count,
                                                     server_name
@@ -738,7 +579,7 @@ impl AppBuilder {
                     .iter()
                     .map(|m| m.to_registry_entry())
                     .collect();
-                tracing::info!(
+                tracing::debug!(
                     count = entries.len(),
                     "Loaded registry catalog entries for extension discovery"
                 );
@@ -767,6 +608,7 @@ impl AppBuilder {
         let extension_manager = {
             let manager = Arc::new(ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
+                Arc::clone(&mcp_process_manager),
                 ext_secrets,
                 Arc::clone(tools),
                 Some(Arc::clone(hooks)),
@@ -779,7 +621,7 @@ impl AppBuilder {
                 catalog_entries.clone(),
             ));
             tools.register_extension_tools(Arc::clone(&manager));
-            tracing::info!("Extension manager initialized with in-chat discovery tools");
+            tracing::debug!("Extension manager initialized with in-chat discovery tools");
             Some(manager)
         };
 
@@ -850,7 +692,7 @@ impl AppBuilder {
                 let import_path = std::path::Path::new(&import_dir);
                 match ws.import_from_directory(import_path).await {
                     Ok(count) if count > 0 => {
-                        tracing::info!("Imported {} workspace file(s) from {}", count, import_dir);
+                        tracing::debug!("Imported {} workspace file(s) from {}", count, import_dir);
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -875,7 +717,7 @@ impl AppBuilder {
                 tokio::spawn(async move {
                     match ws_bg.backfill_embeddings().await {
                         Ok(count) if count > 0 => {
-                            tracing::info!("Backfilled embeddings for {} chunks", count);
+                            tracing::debug!("Backfilled embeddings for {} chunks", count);
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -892,7 +734,7 @@ impl AppBuilder {
                 .with_installed_dir(self.config.skills.installed_dir.clone());
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
-                tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
+                tracing::debug!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
             }
             let registry = Arc::new(std::sync::RwLock::new(registry));
             let catalog = crate::skills::catalog::shared_catalog();
@@ -910,7 +752,7 @@ impl AppBuilder {
             },
         ));
 
-        tracing::info!(
+        tracing::debug!(
             "Tool registry initialized with {} total tools",
             tools.count()
         );

@@ -68,7 +68,7 @@ impl WebhookServer {
             if let Err(e) = axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
-                    tracing::info!("Webhook server shutting down");
+                    tracing::debug!("Webhook server shutting down");
                 })
                 .await
             {

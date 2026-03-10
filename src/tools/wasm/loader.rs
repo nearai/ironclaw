@@ -193,18 +193,31 @@ impl WasmToolLoader {
     ///
     /// Tools without a capabilities file get no permissions (default deny).
     pub async fn load_from_dir(&self, dir: &Path) -> Result<LoadResults, WasmLoadError> {
-        if !dir.is_dir() {
-            return Err(WasmLoadError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotADirectory,
-                format!("{} is not a directory", dir.display()),
-            )));
+        match fs::metadata(dir).await {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(WasmLoadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("{} is not a directory", dir.display()),
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmLoadError::Io(e)),
         }
 
-        let mut results = LoadResults::default();
+        // Handle TOCTOU: if read_dir fails with NotFound, treat as empty
+        let mut entries = match fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmLoadError::Io(e)),
+        };
 
-        // Collect all .wasm entries first, then load in parallel
+        let mut results = LoadResults::default();
         let mut tool_entries = Vec::new();
-        let mut entries = fs::read_dir(dir).await?;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -1076,5 +1089,20 @@ mod tests {
             !tools.contains_key("nested"),
             "nested.wasm inside subdir should NOT be discovered"
         );
+    }
+
+    #[tokio::test]
+    async fn load_from_dir_returns_empty_when_dir_missing() {
+        let loader = make_loader();
+
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent_tools_dir");
+
+        let results = loader.load_from_dir(&missing).await;
+
+        // Must succeed with empty results, not error
+        let results = results.expect("missing dir should return Ok, not Err");
+        assert!(results.loaded.is_empty());
+        assert!(results.errors.is_empty());
     }
 }
