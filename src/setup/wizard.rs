@@ -1403,7 +1403,9 @@ impl SetupWizard {
 
         let config = OpenAiCodexConfig::default();
 
-        let mgr = OpenAiCodexSessionManager::new(config);
+        let mgr = OpenAiCodexSessionManager::new(config).map_err(|e| {
+            SetupError::Config(format!("OpenAI Codex session manager init failed: {}", e))
+        })?;
         mgr.device_code_login().await.map_err(|e| {
             SetupError::Config(format!("OpenAI Codex authentication failed: {}", e))
         })?;

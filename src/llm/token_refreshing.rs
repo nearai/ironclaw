@@ -127,11 +127,8 @@ impl LlmProvider for TokenRefreshingProvider {
         self.inner.effective_model_name(requested_model)
     }
 
-    fn set_model(&self, _model: &str) -> Result<(), LlmError> {
-        Err(LlmError::RequestFailed {
-            provider: "openai_codex".to_string(),
-            reason: "Cannot change model on Codex provider at runtime".to_string(),
-        })
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        self.inner.set_model(model)
     }
 
     fn calculate_cost(&self, _input_tokens: u32, _output_tokens: u32) -> Decimal {
@@ -144,14 +141,15 @@ mod tests {
     use super::*;
     use crate::config::OpenAiCodexConfig;
     use crate::llm::openai_codex_session::OpenAiCodexSessionManager;
+    use tempfile::tempdir;
 
-    fn test_codex_config() -> OpenAiCodexConfig {
+    fn test_codex_config(session_path: std::path::PathBuf) -> OpenAiCodexConfig {
         OpenAiCodexConfig {
             model: "gpt-5.3-codex".to_string(),
             auth_endpoint: "https://auth.openai.com".to_string(),
             api_base_url: "https://chatgpt.com/backend-api/codex".to_string(),
             client_id: "test_client_id".to_string(),
-            session_path: std::path::PathBuf::from("/tmp/test-codex-session.json"),
+            session_path,
             token_refresh_margin_secs: 300,
         }
     }
@@ -172,26 +170,27 @@ mod tests {
         format!("{header}.{payload}.{sig}")
     }
 
-    fn make_provider_and_session() -> TokenRefreshingProvider {
-        let config = test_codex_config();
+    fn make_provider_and_session() -> (TokenRefreshingProvider, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let config = test_codex_config(dir.path().join("session.json"));
         let jwt = make_test_jwt("acct_test");
         let inner = Arc::new(
-            OpenAiCodexProvider::new(&config.model, &config.api_base_url, &jwt)
+            OpenAiCodexProvider::new(&config.model, &config.api_base_url, &jwt, 300)
                 .expect("provider creation should succeed"),
         );
-        let session = Arc::new(OpenAiCodexSessionManager::new(config));
-        TokenRefreshingProvider::new(inner, session)
+        let session = Arc::new(OpenAiCodexSessionManager::new(config).unwrap());
+        (TokenRefreshingProvider::new(inner, session), dir)
     }
 
     #[test]
     fn test_model_name_delegates() {
-        let provider = make_provider_and_session();
+        let (provider, _dir) = make_provider_and_session();
         assert_eq!(provider.model_name(), "gpt-5.3-codex");
     }
 
     #[test]
     fn test_cost_per_token_zero() {
-        let provider = make_provider_and_session();
+        let (provider, _dir) = make_provider_and_session();
         let (input, output) = provider.cost_per_token();
         assert_eq!(input, Decimal::ZERO);
         assert_eq!(output, Decimal::ZERO);
@@ -199,13 +198,13 @@ mod tests {
 
     #[test]
     fn test_calculate_cost_zero() {
-        let provider = make_provider_and_session();
+        let (provider, _dir) = make_provider_and_session();
         assert_eq!(provider.calculate_cost(1000, 500), Decimal::ZERO);
     }
 
     #[test]
     fn test_active_model_name_delegates() {
-        let provider = make_provider_and_session();
+        let (provider, _dir) = make_provider_and_session();
         assert_eq!(provider.active_model_name(), "gpt-5.3-codex");
     }
 }

@@ -20,12 +20,12 @@ use crate::error::LlmError;
 /// Persisted OAuth session data.
 ///
 /// Note: `Debug` is manually implemented to redact tokens.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct OpenAiCodexSession {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: String,
+    pub(crate) expires_at: DateTime<Utc>,
+    pub(crate) created_at: DateTime<Utc>,
 }
 
 impl std::fmt::Debug for OpenAiCodexSession {
@@ -156,21 +156,28 @@ pub struct OpenAiCodexSessionManager {
 
 impl OpenAiCodexSessionManager {
     /// Create a new session manager. Tries to load existing session from disk.
-    pub fn new(config: OpenAiCodexConfig) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns `LlmError` if the HTTP client cannot be constructed.
+    pub fn new(config: OpenAiCodexConfig) -> Result<Self, LlmError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(concat!("ironclaw/", env!("CARGO_PKG_VERSION"))),
+        );
+        let client = Client::builder()
+            .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "openai_codex".into(),
+                reason: format!("HTTP client build failed: {e}"),
+            })?;
+
         let mgr = Self {
             config,
-            client: {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    USER_AGENT,
-                    HeaderValue::from_static(concat!("ironclaw/", env!("CARGO_PKG_VERSION"))),
-                );
-                Client::builder()
-                    .default_headers(headers)
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .unwrap_or_else(|_| Client::new())
-            },
+            client,
             session: RwLock::new(None),
             renewal_lock: Mutex::new(()),
         };
@@ -187,7 +194,7 @@ impl OpenAiCodexSessionManager {
             );
         }
 
-        mgr
+        Ok(mgr)
     }
 
     /// Check if we have a session (may be expired).
@@ -310,13 +317,14 @@ impl OpenAiCodexSessionManager {
                 provider: "openai_codex".to_string(),
                 reason: format!("Failed to read device code response: {}", e),
             })?;
-        tracing::debug!("Device code response: {}", body_text);
+        tracing::debug!("Device code response received ({} bytes)", body_text.len());
         let device: UserCodeResponse =
             serde_json::from_str(&body_text).map_err(|e| LlmError::SessionRenewalFailed {
                 provider: "openai_codex".to_string(),
                 reason: format!(
-                    "Failed to parse device code response: {} -- body: {}",
-                    e, body_text
+                    "Failed to parse device code response: {} ({} bytes)",
+                    e,
+                    body_text.len()
                 ),
             })?;
 
@@ -486,11 +494,11 @@ impl OpenAiCodexSessionManager {
         let resp = self
             .client
             .post(&token_url)
-            .json(&serde_json::json!({
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": self.config.client_id,
-            }))
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token.as_str()),
+                ("client_id", self.config.client_id.as_str()),
+            ])
             .send()
             .await
             .map_err(|e| LlmError::SessionRenewalFailed {
@@ -613,29 +621,6 @@ impl OpenAiCodexSessionManager {
     }
 }
 
-/// Generate a PKCE code verifier and challenge (S256).
-///
-/// Used for browser-based PKCE OAuth flow.
-pub fn generate_pkce() -> (String, String) {
-    use rand::Rng;
-    use sha2::{Digest, Sha256};
-
-    let verifier: String = rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
-        .take(64)
-        .map(char::from)
-        .collect();
-
-    let mut hasher = Sha256::new();
-    hasher.update(verifier.as_bytes());
-    let hash = hasher.finalize();
-
-    use base64::Engine;
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash);
-
-    (verifier, challenge)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,7 +643,7 @@ mod tests {
         let path = dir.path().join("session.json");
         let config = test_config(path.clone());
 
-        let mgr = OpenAiCodexSessionManager::new(config);
+        let mgr = OpenAiCodexSessionManager::new(config).unwrap();
 
         // No session initially
         assert!(!mgr.has_session().await);
@@ -677,7 +662,7 @@ mod tests {
 
         // Load from disk in a new manager
         let config2 = test_config(path);
-        let mgr2 = OpenAiCodexSessionManager::new(config2);
+        let mgr2 = OpenAiCodexSessionManager::new(config2).unwrap();
         mgr2.load_session().await.unwrap();
         assert!(mgr2.has_session().await);
     }
@@ -686,7 +671,7 @@ mod tests {
     async fn test_needs_refresh_when_near_expiry() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().join("session.json"));
-        let mgr = OpenAiCodexSessionManager::new(config);
+        let mgr = OpenAiCodexSessionManager::new(config).unwrap();
 
         // Token expiring in 2 minutes (margin is 300s = 5 min)
         let session = OpenAiCodexSession {
@@ -700,11 +685,34 @@ mod tests {
         assert!(mgr.needs_refresh().await);
     }
 
+    #[test]
+    fn device_code_parse_error_redacts_body() {
+        // Regression: the parse error used to include raw body_text which could
+        // contain sensitive auth data. Now it only shows byte count.
+        let body_text = r#"{"secret_token":"sk-12345","error":"unexpected"}"#;
+        let err: Result<UserCodeResponse, _> = serde_json::from_str(body_text);
+        assert!(err.is_err());
+        let e = err.unwrap_err();
+        let error_msg = format!(
+            "Failed to parse device code response: {} ({} bytes)",
+            e,
+            body_text.len()
+        );
+        assert!(
+            !error_msg.contains("sk-12345"),
+            "error message must not contain raw body: {error_msg}"
+        );
+        assert!(
+            error_msg.contains("bytes"),
+            "error message should show byte count"
+        );
+    }
+
     #[tokio::test]
     async fn test_no_refresh_when_fresh() {
         let dir = tempdir().unwrap();
         let config = test_config(dir.path().join("session.json"));
-        let mgr = OpenAiCodexSessionManager::new(config);
+        let mgr = OpenAiCodexSessionManager::new(config).unwrap();
 
         // Token expiring in 30 minutes (margin is 300s = 5 min)
         let session = OpenAiCodexSession {
@@ -716,15 +724,5 @@ mod tests {
         mgr.set_session(session).await;
 
         assert!(!mgr.needs_refresh().await);
-    }
-
-    #[test]
-    fn test_generate_pkce() {
-        let (verifier, challenge) = generate_pkce();
-        assert!(verifier.len() >= 43);
-        assert!(!challenge.is_empty());
-        // Challenge should be base64url-encoded SHA256
-        assert!(!challenge.contains('+'));
-        assert!(!challenge.contains('/'));
     }
 }

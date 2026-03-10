@@ -76,10 +76,7 @@ impl LlmConfig {
             || backend_lower == "openai-codex"
             || backend_lower == "codex";
 
-        if !is_nearai
-            && !is_bedrock
-            && !is_openai_codex
-            && registry.find(&backend_lower).is_none()
+        if !is_nearai && !is_bedrock && !is_openai_codex && registry.find(&backend_lower).is_none()
         {
             tracing::warn!(
                 "Unknown LLM backend '{}'. Will attempt as openai_compatible fallback.",
@@ -1058,7 +1055,10 @@ mod tests {
         assert_eq!(cfg.backend, "openai_codex");
         let codex = cfg.openai_codex.expect("codex config should be present");
         assert_eq!(codex.model, "gpt-5.3-codex"); // default
-        assert!(cfg.provider.is_none(), "codex should not use registry provider");
+        assert!(
+            cfg.provider.is_none(),
+            "codex should not use registry provider"
+        );
     }
 
     #[test]

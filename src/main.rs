@@ -123,7 +123,8 @@ async fn async_main() -> anyhow::Result<()> {
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
                 let codex_config = config.llm.openai_codex.unwrap_or_default();
-                let mgr = ironclaw::llm::OpenAiCodexSessionManager::new(codex_config);
+                let mgr = ironclaw::llm::OpenAiCodexSessionManager::new(codex_config)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
                 mgr.device_code_login()
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e))?;

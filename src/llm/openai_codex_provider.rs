@@ -14,8 +14,8 @@ use tokio::sync::RwLock;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
+    ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
 
 /// OpenAI Codex Responses API provider.
@@ -39,11 +39,17 @@ impl OpenAiCodexProvider {
     /// Create a new provider.
     ///
     /// Extracts the `chatgpt_account_id` from the JWT token.
-    pub fn new(model: &str, api_base_url: &str, token: &str) -> Result<Self, LlmError> {
+    /// `request_timeout_secs` controls the HTTP client timeout (falls back to 300s).
+    pub fn new(
+        model: &str,
+        api_base_url: &str,
+        token: &str,
+        request_timeout_secs: u64,
+    ) -> Result<Self, LlmError> {
         let account_id = extract_account_id(token)?;
         Ok(Self {
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
+                .timeout(std::time::Duration::from_secs(request_timeout_secs))
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: "openai_codex".to_string(),
@@ -140,6 +146,7 @@ impl OpenAiCodexProvider {
             "stream": true,
             "input": input,
             "text": { "verbosity": "medium" },
+            // Safe for non-reasoning models — API ignores unrecognized include values
             "include": ["reasoning.encrypted_content"],
         });
 
@@ -185,6 +192,26 @@ impl OpenAiCodexProvider {
 
         let status = response.status();
         if !status.is_success() {
+            // Extract Retry-After header before consuming the response body.
+            // Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date formats.
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    if let Ok(secs) = v.trim().parse::<u64>() {
+                        return Some(std::time::Duration::from_secs(secs));
+                    }
+                    if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v.trim()) {
+                        let now = chrono::Utc::now();
+                        let delta = dt.signed_duration_since(now);
+                        return Some(std::time::Duration::from_secs(
+                            delta.num_seconds().max(0) as u64
+                        ));
+                    }
+                    None
+                });
+
             let body_text = response.text().await.unwrap_or_default();
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(LlmError::AuthFailed {
@@ -194,7 +221,7 @@ impl OpenAiCodexProvider {
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 return Err(LlmError::RateLimited {
                     provider: "openai_codex".to_string(),
-                    retry_after: None,
+                    retry_after,
                 });
             }
             return Err(LlmError::RequestFailed {
@@ -273,6 +300,8 @@ impl LlmProvider for OpenAiCodexProvider {
         })
     }
 
+    /// Returns empty — Codex uses subscription-based access with a fixed model,
+    /// no model enumeration API is available.
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         Ok(vec![])
     }
@@ -358,6 +387,17 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
             vec![]
         }
         Role::User => {
+            let image_count = msg
+                .content_parts
+                .iter()
+                .filter(|p| matches!(p, ContentPart::ImageUrl { .. }))
+                .count();
+            if image_count > 0 {
+                tracing::warn!(
+                    "OpenAI Codex: {} image attachment(s) dropped — Responses API image support not yet implemented",
+                    image_count
+                );
+            }
             vec![serde_json::json!({
                 "role": "user",
                 "content": [{
@@ -413,12 +453,17 @@ fn convert_message(msg: &ChatMessage, index: usize) -> Vec<serde_json::Value> {
 }
 
 /// Convert a `ToolDefinition` to Responses API tool format.
+///
+/// Applies strict-mode schema normalization (same as OpenAI Chat Completions):
+/// `additionalProperties: false`, all properties required, optional fields nullable.
 fn convert_tool_definition(tool: &ToolDefinition) -> serde_json::Value {
+    use crate::llm::rig_adapter::normalize_schema_strict;
+
     serde_json::json!({
         "type": "function",
         "name": tool.name,
         "description": tool.description,
-        "parameters": tool.parameters,
+        "parameters": normalize_schema_strict(&tool.parameters),
     })
 }
 
@@ -945,6 +990,7 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
             "gpt-5.3-codex",
             "https://chatgpt.com/backend-api/codex",
             &jwt,
+            300,
         );
         assert!(provider.is_ok());
         let provider = provider.unwrap();
@@ -960,6 +1006,7 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
             "gpt-5.3-codex",
             "https://chatgpt.com/backend-api/codex",
             &jwt1,
+            300,
         )
         .unwrap();
 
@@ -979,6 +1026,7 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
             "gpt-5.3-codex",
             "https://chatgpt.com/backend-api/codex",
             &jwt,
+            300,
         )
         .unwrap();
 
@@ -1008,6 +1056,7 @@ data: {"type":"response.output_text.delta","delta":" ignored"}
             "gpt-5.3-codex",
             "https://chatgpt.com/backend-api/codex",
             &jwt,
+            300,
         )
         .unwrap();
 

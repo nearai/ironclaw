@@ -37,8 +37,8 @@ pub mod vision_models;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use config::{
-    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
-    OpenAiCodexConfig, RegistryProviderConfig,
+    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER, OpenAiCodexConfig,
+    RegistryProviderConfig,
 };
 pub use error::LlmError;
 pub use failover::{CooldownConfig, FailoverProvider};
@@ -104,7 +104,7 @@ pub async fn create_llm_provider(
         return Err(LlmError::RequestFailed {
             provider: "openai_codex".to_string(),
             reason:
-                "OpenAI Codex requires async initialization. Use build_provider_chain() instead."
+                "OpenAI Codex uses a dedicated factory path. Use build_provider_chain() instead of create_llm_provider()."
                     .to_string(),
         });
     }
@@ -366,7 +366,7 @@ async fn create_openai_codex_provider(
             provider: "openai_codex".to_string(),
         })?;
 
-    let session_mgr = Arc::new(OpenAiCodexSessionManager::new(codex.clone()));
+    let session_mgr = Arc::new(OpenAiCodexSessionManager::new(codex.clone())?);
     session_mgr.ensure_authenticated().await?;
 
     let token = session_mgr.get_access_token().await?;
@@ -375,6 +375,7 @@ async fn create_openai_codex_provider(
         &codex.model,
         &codex.api_base_url,
         token.expose_secret(),
+        config.request_timeout_secs,
     )?);
 
     tracing::info!(
@@ -451,7 +452,7 @@ pub async fn build_provider_chain(
     } else {
         create_llm_provider(config, session.clone()).await?
     };
-    tracing::debug!("LLM provider initialized: {}", llm.model_name());
+    tracing::info!("LLM provider initialized: {}", llm.model_name());
 
     // 1. Retry
     let retry_config = RetryConfig {
