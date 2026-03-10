@@ -3217,10 +3217,10 @@ async fn discover_wasm_channels(dir: &std::path::Path) -> Vec<(String, ChannelCa
 /// Reads `NEARAI_API_KEY` from the environment so that users who authenticated
 /// via Cloud API key (option 4) don't get re-prompted during model selection.
 fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
-    let base_url = std::env::var("NEARAI_BASE_URL")
-        .unwrap_or_else(|_| "https://private.near.ai".to_string());
-    let auth_base_url = std::env::var("NEARAI_AUTH_URL")
-        .unwrap_or_else(|_| "https://private.near.ai".to_string());
+    let base_url =
+        std::env::var("NEARAI_BASE_URL").unwrap_or_else(|_| "https://private.near.ai".to_string());
+    let auth_base_url =
+        std::env::var("NEARAI_AUTH_URL").unwrap_or_else(|_| "https://private.near.ai".to_string());
 
     // If the user authenticated via API key (option 4), the key is stored
     // as an env var. Pass it through so `resolve_bearer_token()` doesn't
