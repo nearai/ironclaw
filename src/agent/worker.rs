@@ -487,16 +487,17 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 };
 
                 // Track token usage from LLM call against the job budget.
+                // NOTE: select_tools() also makes LLM calls but doesn't expose
+                // TokenUsage; only respond_with_tools() usage is tracked here.
                 let total_tokens = respond_output.usage.total() as u64;
-                if total_tokens > 0 {
-                    let budget_result = self
+                if total_tokens > 0
+                    && let Err(msg) = self
                         .context_manager()
                         .update_context(self.job_id, |ctx| ctx.add_tokens(total_tokens))
-                        .await?;
-                    if let Err(msg) = budget_result {
-                        self.mark_failed(&msg).await?;
-                        return Ok(());
-                    }
+                        .await?
+                {
+                    self.mark_failed(&msg).await?;
+                    return Ok(());
                 }
 
                 match respond_output.result {
