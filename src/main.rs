@@ -659,6 +659,13 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Ensure the relay channel manager is always set (even without WASM runtime).
+    if let Some(ref ext_mgr) = components.extension_manager {
+        ext_mgr
+            .set_relay_channel_manager(Arc::clone(&channels))
+            .await;
+    }
+
     // Wire SSE sender into extension manager for broadcasting status events.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some(ref sender) = sse_sender

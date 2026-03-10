@@ -224,8 +224,8 @@ fn score_entry(entry: &RegistryEntry, tokens: &[String]) -> u32 {
 }
 
 /// Well-known extensions that ship with ironclaw.
-fn builtin_entries() -> Vec<RegistryEntry> {
-    vec![
+pub fn builtin_entries() -> Vec<RegistryEntry> {
+    let mut entries = vec![
         // -- MCP Servers --
         RegistryEntry {
             name: "notion".to_string(),
@@ -415,7 +415,30 @@ fn builtin_entries() -> Vec<RegistryEntry> {
         // WASM channels (telegram, slack, discord, whatsapp) come from the embedded
         // registry catalog (registry/channels/*.json) with WasmDownload URLs pointing
         // to GitHub release artifacts. See new_with_catalog() for merging.
-    ]
+    ];
+
+    // Conditionally add channel-relay entries when relay URL is configured
+    if let Ok(relay_url) = std::env::var("CHANNEL_RELAY_URL") {
+        entries.push(RegistryEntry {
+            name: crate::channels::relay::DEFAULT_RELAY_NAME.to_string(),
+            display_name: "Slack".to_string(),
+            kind: ExtensionKind::ChannelRelay,
+            description: "Connect Slack workspace via channel relay".to_string(),
+            keywords: vec![
+                "slack".into(),
+                "chat".into(),
+                "messaging".into(),
+                "relay".into(),
+            ],
+            source: ExtensionSource::ChannelRelay { relay_url },
+            fallback_source: None,
+            auth_hint: AuthHint::ChannelRelayOAuth,
+            version: None,
+        });
+
+    }
+
+    entries
 }
 
 #[cfg(test)]
