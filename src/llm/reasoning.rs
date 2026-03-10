@@ -2580,7 +2580,10 @@ That's my plan."#;
         // <function_call>...</function_call> is closed — skipped.
         // <tool_call>second is unclosed — truncated here.
         let input = "Text before <function_call>first</function_call> and <tool_call>second";
-        assert_eq!(truncate_at_tool_tags(input), "Text before <function_call>first</function_call> and ");
+        assert_eq!(
+            truncate_at_tool_tags(input),
+            "Text before <function_call>first</function_call> and "
+        );
     }
 
     #[test]
@@ -2658,7 +2661,10 @@ That's my plan."#;
         // preserving any text after the tag.
         let model_output = "Info here.\n<tool_call>{\"name\": \"x\"}</tool_call>\nMore text.";
         let pre_truncated = truncate_at_tool_tags(model_output);
-        assert_eq!(pre_truncated, model_output, "Closed tag should not be truncated");
+        assert_eq!(
+            pre_truncated, model_output,
+            "Closed tag should not be truncated"
+        );
         let cleaned = clean_response(&pre_truncated);
         assert_eq!(cleaned, "Info here.\n\nMore text.");
     }
@@ -2827,13 +2833,12 @@ That's my plan."#;
     #[tokio::test]
     async fn test_respond_with_tools_force_text_truncates_tool_tags() {
         use crate::testing::StubLlm;
-        let response =
-            "Here is my analysis of the code.\n<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"main.rs\"}}";
+        let response = "Here is my analysis of the code.\n<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"main.rs\"}}";
         let llm = Arc::new(StubLlm::new(response));
         let reasoning = Reasoning::new(llm);
 
-        let mut context = ReasoningContext::new()
-            .with_message(ChatMessage::user("analyze the code"));
+        let mut context =
+            ReasoningContext::new().with_message(ChatMessage::user("analyze the code"));
         context.force_text = true;
 
         let output = reasoning.respond_with_tools(&context).await.unwrap();
@@ -2854,8 +2859,7 @@ That's my plan."#;
         let llm = Arc::new(StubLlm::new(response));
         let reasoning = Reasoning::new(llm);
 
-        let mut context = ReasoningContext::new()
-            .with_message(ChatMessage::user("hi"));
+        let mut context = ReasoningContext::new().with_message(ChatMessage::user("hi"));
         context.force_text = true;
 
         let output = reasoning.respond_with_tools(&context).await.unwrap();
@@ -2974,8 +2978,7 @@ That's my plan."#;
         use crate::testing::StubLlm;
         // StubLlm returns empty tool_calls + content with XML tool tags.
         // The recovery path should parse the tool call AND preserve text before it.
-        let response =
-            "Let me search for that.\n<tool_call>{\"name\": \"tool_list\", \"arguments\": {}}</tool_call>";
+        let response = "Let me search for that.\n<tool_call>{\"name\": \"tool_list\", \"arguments\": {}}</tool_call>";
         let llm = Arc::new(StubLlm::new(response));
         let reasoning = Reasoning::new(llm);
 
@@ -3008,8 +3011,7 @@ That's my plan."#;
     async fn test_respond_with_tools_recovered_only_tag_content_is_none() {
         use crate::testing::StubLlm;
         // Content is ONLY a tool call tag — after truncation+cleaning, content should be None
-        let response =
-            "<tool_call>{\"name\": \"tool_list\", \"arguments\": {}}</tool_call>";
+        let response = "<tool_call>{\"name\": \"tool_list\", \"arguments\": {}}</tool_call>";
         let llm = Arc::new(StubLlm::new(response));
         let reasoning = Reasoning::new(llm);
 
@@ -3029,7 +3031,10 @@ That's my plan."#;
             } => {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].name, "tool_list");
-                assert!(content.is_none(), "Content should be None when only tool tags present");
+                assert!(
+                    content.is_none(),
+                    "Content should be None when only tool tags present"
+                );
             }
             RespondResult::Text(_) => {
                 panic!("Expected recovered tool calls, got text");
@@ -3053,24 +3058,51 @@ That's my plan."#;
 
     #[test]
     fn test_closing_tag_for_standard_tags() {
-        assert_eq!(closing_tag_for("<tool_call>").as_deref(), Some("</tool_call>"));
-        assert_eq!(closing_tag_for("<function_call>").as_deref(), Some("</function_call>"));
-        assert_eq!(closing_tag_for("<tool_calls>").as_deref(), Some("</tool_calls>"));
+        assert_eq!(
+            closing_tag_for("<tool_call>").as_deref(),
+            Some("</tool_call>")
+        );
+        assert_eq!(
+            closing_tag_for("<function_call>").as_deref(),
+            Some("</function_call>")
+        );
+        assert_eq!(
+            closing_tag_for("<tool_calls>").as_deref(),
+            Some("</tool_calls>")
+        );
     }
 
     #[test]
     fn test_closing_tag_for_space_suffixed_patterns() {
         // Patterns with trailing space (for attribute matching)
-        assert_eq!(closing_tag_for("<tool_call ").as_deref(), Some("</tool_call>"));
-        assert_eq!(closing_tag_for("<function_call ").as_deref(), Some("</function_call>"));
-        assert_eq!(closing_tag_for("<tool_calls ").as_deref(), Some("</tool_calls>"));
+        assert_eq!(
+            closing_tag_for("<tool_call ").as_deref(),
+            Some("</tool_call>")
+        );
+        assert_eq!(
+            closing_tag_for("<function_call ").as_deref(),
+            Some("</function_call>")
+        );
+        assert_eq!(
+            closing_tag_for("<tool_calls ").as_deref(),
+            Some("</tool_calls>")
+        );
     }
 
     #[test]
     fn test_closing_tag_for_pipe_delimited() {
-        assert_eq!(closing_tag_for("<|tool_call|>").as_deref(), Some("<|/tool_call|>"));
-        assert_eq!(closing_tag_for("<|function_call|>").as_deref(), Some("<|/function_call|>"));
-        assert_eq!(closing_tag_for("<|tool_calls|>").as_deref(), Some("<|/tool_calls|>"));
+        assert_eq!(
+            closing_tag_for("<|tool_call|>").as_deref(),
+            Some("<|/tool_call|>")
+        );
+        assert_eq!(
+            closing_tag_for("<|function_call|>").as_deref(),
+            Some("<|/function_call|>")
+        );
+        assert_eq!(
+            closing_tag_for("<|tool_calls|>").as_deref(),
+            Some("<|/tool_calls|>")
+        );
     }
 
     #[test]
