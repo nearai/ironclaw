@@ -405,7 +405,8 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm().clone());
+        let reasoning = Reasoning::new(self.llm().clone())
+            .with_model_name(self.llm().active_model_name());
         match reasoning.complete(request).await {
             Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
                 "Thread Summary:\n\n{}",
@@ -453,7 +454,8 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.5);
 
-        let reasoning = Reasoning::new(self.llm().clone());
+        let reasoning = Reasoning::new(self.llm().clone())
+            .with_model_name(self.llm().active_model_name());
         match reasoning.complete(request).await {
             Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
                 "Suggested Next Steps:\n\n{}",

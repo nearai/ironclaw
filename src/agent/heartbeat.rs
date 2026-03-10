@@ -303,7 +303,8 @@ impl HeartbeatRunner {
             .with_max_tokens(max_tokens)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm.clone());
+        let reasoning = Reasoning::new(self.llm.clone())
+            .with_model_name(self.llm.active_model_name());
         let (content, _usage) = match reasoning.complete(request).await {
             Ok(r) => r,
             Err(e) => return HeartbeatResult::Failed(format!("LLM call failed: {}", e)),
