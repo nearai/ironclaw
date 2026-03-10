@@ -113,6 +113,7 @@ async fn async_main() -> anyhow::Result<()> {
             skip_auth,
             channels_only,
             provider_only,
+            quick,
         }) => {
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
@@ -120,13 +121,14 @@ async fn async_main() -> anyhow::Result<()> {
                     skip_auth: *skip_auth,
                     channels_only: *channels_only,
                     provider_only: *provider_only,
+                    quick: *quick,
                 };
                 let mut wizard = SetupWizard::with_config(config);
                 wizard.run().await?;
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
             {
-                let _ = (skip_auth, channels_only, provider_only);
+                let _ = (skip_auth, channels_only, provider_only, quick);
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
             }
             return Ok(());
@@ -163,7 +165,10 @@ async fn async_main() -> anyhow::Result<()> {
     {
         println!("Onboarding needed: {}", reason);
         println!();
-        let mut wizard = SetupWizard::new();
+        let mut wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
         wizard.run().await?;
     }
 
@@ -196,9 +201,9 @@ async fn async_main() -> anyhow::Result<()> {
     let log_level_handle =
         ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
 
-    tracing::info!("Starting IronClaw...");
-    tracing::info!("Loaded configuration for agent: {}", config.agent.name);
-    tracing::info!("LLM backend: {}", config.llm.backend);
+    tracing::debug!("Starting IronClaw...");
+    tracing::debug!("Loaded configuration for agent: {}", config.agent.name);
+    tracing::debug!("LLM backend: {}", config.llm.backend);
 
     // ── Phase 1-5: Build all core components via AppBuilder ────────────
 
@@ -259,10 +264,10 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some(repl) = repl_channel {
         channels.add(Box::new(repl)).await;
         if cli.message.is_some() {
-            tracing::info!("Single message mode");
+            tracing::debug!("Single message mode");
         } else {
             channel_names.push("repl".to_string());
-            tracing::info!("REPL mode enabled");
+            tracing::debug!("REPL mode enabled");
         }
     }
 
@@ -304,7 +309,7 @@ async fn async_main() -> anyhow::Result<()> {
         channel_names.push("signal".to_string());
         channels.add(Box::new(signal_channel)).await;
         let safe_url = SignalChannel::redact_url(&signal_config.http_url);
-        tracing::info!(
+        tracing::debug!(
             url = %safe_url,
             "Signal channel enabled"
         );
@@ -330,7 +335,7 @@ async fn async_main() -> anyhow::Result<()> {
         );
         channel_names.push("http".to_string());
         channels.add(Box::new(http_channel)).await;
-        tracing::info!(
+        tracing::debug!(
             "HTTP channel enabled on {}:{}",
             http_config.host,
             http_config.port
@@ -371,7 +376,7 @@ async fn async_main() -> anyhow::Result<()> {
         &components.dev_loaded_tool_names,
     )
     .await;
-    tracing::info!(
+    tracing::debug!(
         bundled = hook_bootstrap.bundled_hooks,
         plugin = hook_bootstrap.plugin_hooks,
         workspace = hook_bootstrap.workspace_hooks,
@@ -464,7 +469,7 @@ async fn async_main() -> anyhow::Result<()> {
             gw.auth_token()
         ));
 
-        tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
+        tracing::debug!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
         // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
@@ -549,7 +554,7 @@ async fn async_main() -> anyhow::Result<()> {
                 config.channels.wasm_channel_owner_ids.clone(),
             )
             .await;
-        tracing::info!("Channel runtime wired into extension manager for hot-activation");
+        tracing::debug!("Channel runtime wired into extension manager for hot-activation");
 
         // Auto-activate channels that were active in a previous session.
         let persisted = ext_mgr.load_persisted_active_channels().await;
@@ -557,7 +562,7 @@ async fn async_main() -> anyhow::Result<()> {
             if !active_at_startup.contains(name) {
                 match ext_mgr.activate(name).await {
                     Ok(result) => {
-                        tracing::info!(
+                        tracing::debug!(
                             channel = %name,
                             message = %result.message,
                             "Auto-activated persisted channel"
@@ -675,13 +680,13 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     if let Some(tunnel) = active_tunnel {
-        tracing::info!("Stopping {} tunnel...", tunnel.name());
+        tracing::debug!("Stopping {} tunnel...", tunnel.name());
         if let Err(e) = tunnel.stop().await {
             tracing::warn!("Failed to stop tunnel cleanly: {}", e);
         }
     }
 
-    tracing::info!("Agent shutdown complete");
+    tracing::debug!("Agent shutdown complete");
 
     Ok(())
 }

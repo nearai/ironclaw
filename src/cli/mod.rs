@@ -94,12 +94,16 @@ pub enum Command {
         skip_auth: bool,
 
         /// Reconfigure channels only
-        #[arg(long, conflicts_with = "provider_only")]
+        #[arg(long, conflicts_with_all = ["provider_only", "quick"])]
         channels_only: bool,
 
         /// Reconfigure LLM provider and model only
-        #[arg(long, conflicts_with = "channels_only")]
+        #[arg(long, conflicts_with_all = ["channels_only", "quick"])]
         provider_only: bool,
+
+        /// Quick setup: auto-defaults everything except LLM provider and model
+        #[arg(long, conflicts_with_all = ["channels_only", "provider_only"])]
+        quick: bool,
     },
 
     /// Manage configuration settings
