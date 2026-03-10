@@ -6,94 +6,24 @@
 
 #![allow(dead_code)] // Public API consumed by later test modules (Task 4+).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use async_trait::async_trait;
 
 use ironclaw::agent::{Agent, AgentDeps};
 use ironclaw::app::{AppBuilder, AppBuilderFlags};
 use ironclaw::channels::web::log_layer::LogBroadcaster;
-use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use ironclaw::channels::{OutgoingResponse, StatusUpdate};
 use ironclaw::config::Config;
 use ironclaw::db::Database;
-use ironclaw::error::ChannelError;
 use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
 use ironclaw::tools::Tool;
 
 use crate::support::instrumented_llm::InstrumentedLlm;
 use crate::support::metrics::{ToolInvocation, TraceMetrics};
-use crate::support::test_channel::TestChannel;
+use crate::support::test_channel::{TestChannel, TestChannelHandle};
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
 use ironclaw::llm::recording::{HttpExchange, ReplayingHttpInterceptor};
-
-// ---------------------------------------------------------------------------
-// TestChannelHandle -- wraps Arc<TestChannel> as Box<dyn Channel>
-// ---------------------------------------------------------------------------
-
-/// A thin wrapper around `Arc<TestChannel>` that implements `Channel`.
-///
-/// This lets us hand a `Box<dyn Channel>` to `ChannelManager::add()` while
-/// keeping an `Arc<TestChannel>` in the `TestRig` for sending messages and
-/// reading captures.
-struct TestChannelHandle {
-    inner: Arc<TestChannel>,
-}
-
-impl TestChannelHandle {
-    fn new(inner: Arc<TestChannel>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl Channel for TestChannelHandle {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    async fn start(&self) -> Result<MessageStream, ChannelError> {
-        self.inner.start().await
-    }
-
-    async fn respond(
-        &self,
-        msg: &IncomingMessage,
-        response: OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        self.inner.respond(msg, response).await
-    }
-
-    async fn send_status(
-        &self,
-        status: StatusUpdate,
-        metadata: &serde_json::Value,
-    ) -> Result<(), ChannelError> {
-        self.inner.send_status(status, metadata).await
-    }
-
-    async fn broadcast(
-        &self,
-        user_id: &str,
-        response: OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        self.inner.broadcast(user_id, response).await
-    }
-
-    async fn health_check(&self) -> Result<(), ChannelError> {
-        self.inner.health_check().await
-    }
-
-    fn conversation_context(&self, metadata: &serde_json::Value) -> HashMap<String, String> {
-        self.inner.conversation_context(metadata)
-    }
-
-    async fn shutdown(&self) -> Result<(), ChannelError> {
-        self.inner.shutdown().await
-    }
-}
 
 // ---------------------------------------------------------------------------
 // TestRig

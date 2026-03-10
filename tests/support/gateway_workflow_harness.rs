@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,76 +16,17 @@ use ironclaw::channels::web::log_layer::LogBroadcaster;
 use ironclaw::channels::web::server::{GatewayState, RateLimiter, start_server};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::ws::WsConnectionTracker;
-use ironclaw::channels::{Channel, IncomingMessage, MessageStream};
+use ironclaw::channels::IncomingMessage;
 use ironclaw::config::{Config, RegistryProviderConfig, RoutineConfig};
-use ironclaw::context::ContextManager;
 use ironclaw::db::Database;
 use ironclaw::db::libsql::LibSqlBackend;
-use ironclaw::error::ChannelError;
 use ironclaw::llm::registry::ProviderProtocol;
 use ironclaw::llm::{
     SessionConfig as LlmSessionConfig, SessionManager as LlmSessionManager, create_llm_provider,
 };
 use ironclaw::tools::{Tool, ToolError, ToolOutput};
 
-use crate::support::test_channel::TestChannel;
-
-struct TestChannelHandle {
-    inner: Arc<TestChannel>,
-}
-
-impl TestChannelHandle {
-    fn new(inner: Arc<TestChannel>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl Channel for TestChannelHandle {
-    fn name(&self) -> &str {
-        "gateway"
-    }
-
-    async fn start(&self) -> Result<MessageStream, ChannelError> {
-        self.inner.start().await
-    }
-
-    async fn respond(
-        &self,
-        msg: &IncomingMessage,
-        response: ironclaw::channels::OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        self.inner.respond(msg, response).await
-    }
-
-    async fn send_status(
-        &self,
-        status: ironclaw::channels::StatusUpdate,
-        metadata: &serde_json::Value,
-    ) -> Result<(), ChannelError> {
-        self.inner.send_status(status, metadata).await
-    }
-
-    async fn broadcast(
-        &self,
-        user_id: &str,
-        response: ironclaw::channels::OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        self.inner.broadcast(user_id, response).await
-    }
-
-    async fn health_check(&self) -> Result<(), ChannelError> {
-        self.inner.health_check().await
-    }
-
-    fn conversation_context(&self, metadata: &serde_json::Value) -> HashMap<String, String> {
-        self.inner.conversation_context(metadata)
-    }
-
-    async fn shutdown(&self) -> Result<(), ChannelError> {
-        self.inner.shutdown().await
-    }
-}
+use crate::support::test_channel::{TestChannel, TestChannelHandle};
 
 struct MockGithubWebhookTool;
 
@@ -220,11 +160,8 @@ impl GatewayWorkflowHarness {
             .register(Arc::new(MockGithubWebhookTool))
             .await;
 
-        let ctx_mgr = Arc::new(ContextManager::new(
-            components.config.agent.max_parallel_jobs,
-        ));
         components.tools.register_job_tools(
-            ctx_mgr,
+            Arc::clone(&components.context_manager),
             None,
             None,
             components.db.clone(),
@@ -234,26 +171,12 @@ impl GatewayWorkflowHarness {
             None,
         );
 
+        // Agent::run() creates its own RoutineEngine and populates this slot.
         let routine_slot: Arc<tokio::sync::RwLock<Option<Arc<RoutineEngine>>>> =
             Arc::new(tokio::sync::RwLock::new(None));
 
-        if let (Some(db_arc), Some(ws)) = (&components.db, &components.workspace) {
-            let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
-            let engine = Arc::new(RoutineEngine::new(
-                RoutineConfig::default(),
-                Arc::clone(db_arc),
-                components.llm.clone(),
-                Arc::clone(ws),
-                notify_tx,
-                None,
-            ));
-            components
-                .tools
-                .register_routine_tools(Arc::clone(db_arc), engine);
-        }
-
         let test_channel = Arc::new(TestChannel::new());
-        let handle = TestChannelHandle::new(Arc::clone(&test_channel));
+        let handle = TestChannelHandle::with_name(Arc::clone(&test_channel), "gateway");
         let channel_manager = ironclaw::channels::ChannelManager::new();
         channel_manager.add(Box::new(handle)).await;
         let channels = Arc::new(channel_manager);

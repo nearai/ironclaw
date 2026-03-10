@@ -121,12 +121,18 @@ mod tests {
             "expected webhook to fire at least one routine"
         );
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let runs_after = harness.routine_runs(routine_id).await;
-        let after_count = runs_after["runs"]
-            .as_array()
-            .map(|a| a.len())
-            .unwrap_or_default();
+        let mut after_count = before_count;
+        for _ in 0..50 {
+            let runs_after = harness.routine_runs(routine_id).await;
+            after_count = runs_after["runs"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or_default();
+            if after_count > before_count {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         assert!(
             after_count > before_count,
             "expected routine runs to increase after webhook; before={before_count}, after={after_count}"
