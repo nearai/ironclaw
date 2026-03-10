@@ -1021,7 +1021,7 @@ impl<'a> JobDelegate<'a> {
         );
 
         if count >= Self::MAX_CONSECUTIVE_RATE_LIMITS {
-            self.worker.mark_stuck("Persistent rate limiting").await?;
+            self.worker.mark_failed("Persistent rate limiting: exceeded retry limit").await?;
             return Ok(crate::llm::RespondOutput {
                 result: RespondResult::Text(String::new()),
                 usage: crate::llm::TokenUsage::default(),
@@ -1143,6 +1143,21 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             Ok(output) => {
                 // Reset counter after a successful LLM call
                 self.consecutive_rate_limits.store(0, std::sync::atomic::Ordering::Relaxed);
+
+                // Track token usage against the job budget.
+                // NOTE: select_tools() also makes LLM calls but doesn't expose
+                // TokenUsage; only respond_with_tools() usage is tracked here.
+                let total_tokens = output.usage.total() as u64;
+                if total_tokens > 0
+                    && let Err(msg) = self
+                        .worker
+                        .context_manager()
+                        .update_context(self.worker.job_id, |ctx| ctx.add_tokens(total_tokens))
+                        .await?
+                {
+                    self.worker.mark_failed(&msg).await?;
+                }
+
                 Ok(output)
             }
             Err(crate::error::LlmError::RateLimited { retry_after, .. }) => {
