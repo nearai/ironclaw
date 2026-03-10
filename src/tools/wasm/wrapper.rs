@@ -283,15 +283,22 @@ impl near::agent::host::Host for StoreData {
         // This prevents false positives where the host-injected Bearer token
         // (e.g., xoxb- Slack token) triggers the leak detector — WASM never saw
         // the real value, so scanning the pre-injection state is correct.
+        // Inline the scan to avoid allocating a Vec of cloned headers.
         let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = raw_headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
         leak_detector
-            .scan_http_request(&injected_url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+            .scan_and_clean(&injected_url)
+            .map_err(|e| format!("Potential secret leak in URL blocked: {}", e))?;
+        for (name, value) in &raw_headers {
+            leak_detector
+                .scan_and_clean(value)
+                .map_err(|e| format!("Potential secret leak in header '{}' blocked: {}", name, e))?;
+        }
+        if let Some(body_bytes) = body.as_deref() {
+            let body_str = String::from_utf8_lossy(body_bytes);
+            leak_detector
+                .scan_and_clean(&body_str)
+                .map_err(|e| format!("Potential secret leak in body blocked: {}", e))?;
+        }
 
         let mut headers: HashMap<String, String> = raw_headers
             .into_iter()
