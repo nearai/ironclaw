@@ -218,24 +218,30 @@ async fn register_channel(
     }
 
     // Inject credentials from secrets store / environment.
-    if let Some(secrets) = secrets_store {
-        match inject_channel_credentials(&channel_arc, secrets.as_ref(), &channel_name).await {
-            Ok(count) => {
-                if count > 0 {
-                    tracing::info!(
-                        channel = %channel_name,
-                        credentials_injected = count,
-                        "Channel credentials injected"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!(
+    match inject_channel_credentials(
+        &channel_arc,
+        secrets_store
+            .as_ref()
+            .map(|s| s.as_ref() as &dyn SecretsStore),
+        &channel_name,
+    )
+    .await
+    {
+        Ok(count) => {
+            if count > 0 {
+                tracing::info!(
                     channel = %channel_name,
-                    error = %e,
-                    "Failed to inject channel credentials"
+                    credentials_injected = count,
+                    "Channel credentials injected"
                 );
             }
+        }
+        Err(e) => {
+            tracing::error!(
+                channel = %channel_name,
+                error = %e,
+                "Failed to inject channel credentials"
+            );
         }
     }
 
@@ -247,63 +253,79 @@ async fn register_channel(
 /// Looks for secrets matching the pattern `{channel_name}_*` and injects them
 /// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
 ///
-/// Falls back to environment variables with the uppercase name if not found
-/// in the secrets store (e.g., `TELEGRAM_BOT_TOKEN`).
+/// Falls back to environment variables starting with the uppercase channel name
+/// prefix (e.g., `TELEGRAM_` for channel `telegram`) for missing credentials.
+///
+/// Returns the number of credentials injected.
 pub async fn inject_channel_credentials(
     channel: &Arc<WasmChannel>,
-    secrets: &dyn SecretsStore,
+    secrets: Option<&dyn SecretsStore>,
     channel_name: &str,
 ) -> anyhow::Result<usize> {
-    let all_secrets = secrets
-        .list("default")
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
-
-    let prefix = format!("{}_", channel_name);
     let mut count = 0;
     let mut injected_placeholders = HashSet::new();
 
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
-            continue;
-        }
+    // 1. Try injecting from persistent secrets store if available
+    if let Some(secrets) = secrets {
+        let all_secrets = secrets
+            .list("default")
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
 
-        let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
-                );
+        let prefix = format!("{}_", channel_name.to_ascii_lowercase());
+
+        for secret_meta in all_secrets {
+            if !secret_meta.name.to_ascii_lowercase().starts_with(&prefix) {
                 continue;
             }
-        };
 
-        let placeholder = secret_meta.name.to_uppercase();
+            let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        secret = %secret_meta.name,
+                        error = %e,
+                        "Failed to decrypt secret for channel credential injection"
+                    );
+                    continue;
+                }
+            };
 
-        tracing::debug!(
-            channel = %channel_name,
-            secret = %secret_meta.name,
-            placeholder = %placeholder,
-            "Injecting credential"
-        );
+            let placeholder = secret_meta.name.to_uppercase();
 
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
-        injected_placeholders.insert(placeholder);
-        count += 1;
+            tracing::debug!(
+                channel = %channel_name,
+                secret = %secret_meta.name,
+                placeholder = %placeholder,
+                "Injecting credential"
+            );
+
+            channel
+                .set_credential(&placeholder, decrypted.expose().to_string())
+                .await;
+            injected_placeholders.insert(placeholder);
+            count += 1;
+        }
     }
 
-    // Fall back to environment variables for required secrets not found in the store.
-    // This allows channels to work when configured via env vars (e.g., TELEGRAM_BOT_TOKEN)
-    // without requiring the setup wizard to have run.
+    // 2. Fall back to environment variables for credentials not in the secrets store.
+    // Only env vars starting with the channel's uppercase prefix are allowed
+    // (e.g., TELEGRAM_ for channel "telegram") to prevent reading unrelated host
+    // credentials like AWS_SECRET_ACCESS_KEY.
+    let prefix = format!("{}_", channel_name.to_ascii_uppercase());
     let caps = channel.capabilities();
     if let Some(ref http_cap) = caps.tool_capabilities.http {
         for cred_mapping in http_cap.credentials.values() {
             let placeholder = cred_mapping.secret_name.to_uppercase();
             if injected_placeholders.contains(&placeholder) {
+                continue;
+            }
+            if !placeholder.starts_with(&prefix) {
+                tracing::warn!(
+                    channel = %channel_name,
+                    placeholder = %placeholder,
+                    "Ignoring non-prefixed credential placeholder in environment fallback"
+                );
                 continue;
             }
             if let Ok(env_value) = std::env::var(&placeholder)
