@@ -223,8 +223,8 @@ impl Worker {
         let job_ctx = self.context_manager().get_context(self.job_id).await?;
 
         // Create reasoning engine
-        let reasoning = Reasoning::new(self.llm().clone())
-            .with_model_name(self.llm().active_model_name());
+        let reasoning =
+            Reasoning::new(self.llm().clone()).with_model_name(self.llm().active_model_name());
 
         // Build initial reasoning context (tool definitions refreshed each iteration in execution_loop)
         let mut reason_ctx = ReasoningContext::new().with_job(&job_ctx.description);

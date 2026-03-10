@@ -227,8 +227,8 @@ Be brief but capture all important details. Use bullet points."#,
             .with_max_tokens(1024)
             .with_temperature(0.3);
 
-        let reasoning = Reasoning::new(self.llm.clone())
-            .with_model_name(self.llm.active_model_name());
+        let reasoning =
+            Reasoning::new(self.llm.clone()).with_model_name(self.llm.active_model_name());
         let (text, _) = reasoning.complete(request).await?;
         Ok(text)
     }
