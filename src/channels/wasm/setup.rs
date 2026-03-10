@@ -70,8 +70,7 @@ pub async fn setup_wasm_channels(
     let mut channel_names: Vec<String> = Vec::new();
 
     for loaded in results.loaded {
-        let (name, channel) =
-            register_channel(loaded, config, secrets_store, &wasm_router).await;
+        let (name, channel) = register_channel(loaded, config, secrets_store, &wasm_router).await;
         channel_names.push(name.clone());
         channels.push((name, channel));
     }
