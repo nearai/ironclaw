@@ -160,24 +160,29 @@ impl Scheduler {
             .create_job_for_user(user_id, title, description)
             .await?;
 
-        // Apply token budget from config, allowing per-job metadata override.
-        let max_tokens = metadata
+        // Apply metadata and token budget in a single atomic update.
+        // This prevents concurrent workers from observing partial state.
+        // Cap user-supplied max_tokens at the configured limit (Issue #815).
+        let user_max_tokens = metadata
             .as_ref()
             .and_then(|m| m.get("max_tokens"))
-            .and_then(|v| v.as_u64())
+            .and_then(|v| v.as_u64());
+
+        let max_tokens = user_max_tokens
+            .map(|user_val| std::cmp::min(user_val, self.config.max_tokens_per_job))
             .unwrap_or(self.config.max_tokens_per_job);
 
-        // Apply metadata if provided
+        // Apply both metadata and token budget in one closure (Issue #813: atomic update)
         if let Some(meta) = metadata {
             self.context_manager
                 .update_context(job_id, |ctx| {
                     ctx.metadata = meta;
+                    if max_tokens > 0 {
+                        ctx.max_tokens = max_tokens;
+                    }
                 })
                 .await?;
-        }
-
-        // Set token budget (separate update to avoid overwriting metadata)
-        if max_tokens > 0 {
+        } else if max_tokens > 0 {
             self.context_manager
                 .update_context(job_id, |ctx| {
                     ctx.max_tokens = max_tokens;
