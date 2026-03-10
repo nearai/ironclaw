@@ -35,9 +35,10 @@ pub struct HttpChannelState {
     /// Pending responses keyed by message ID.
     pending_responses: RwLock<std::collections::HashMap<Uuid, oneshot::Sender<String>>>,
     /// Expected webhook secret for authentication (if configured).
-    /// Wrapped in RwLock for hot-swapping on SIGHUP.
+    /// Stored in a separate Arc<RwLock<>> to avoid contending with other state operations.
+    /// Rarely changes (only on SIGHUP), so isolated from hot-path state accesses.
     /// Uses SecretString to prevent accidental logging and memory dump exposure.
-    webhook_secret: RwLock<Option<SecretString>>,
+    webhook_secret: Arc<RwLock<Option<SecretString>>>,
     /// Fixed user ID for this HTTP channel.
     user_id: String,
     /// Rate limiting state.
@@ -85,7 +86,7 @@ impl HttpChannel {
             state: Arc::new(HttpChannelState {
                 tx: RwLock::new(None),
                 pending_responses: RwLock::new(std::collections::HashMap::new()),
-                webhook_secret: RwLock::new(webhook_secret),
+                webhook_secret: Arc::new(RwLock::new(webhook_secret)),
                 user_id,
                 rate_limit: tokio::sync::Mutex::new(RateLimitState {
                     window_start: std::time::Instant::now(),
