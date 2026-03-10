@@ -19,7 +19,8 @@ use crate::llm::costs;
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
+    strip_unsupported_tool_params,
 };
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -80,28 +81,12 @@ impl AnthropicOAuthProvider {
 
     /// Strip unsupported fields from a `CompletionRequest` in place.
     fn strip_unsupported_completion_params(&self, req: &mut CompletionRequest) {
-        if self.unsupported_params.is_empty() {
-            return;
-        }
-        if self.unsupported_params.contains("temperature") {
-            req.temperature = None;
-        }
-        if self.unsupported_params.contains("max_tokens") {
-            req.max_tokens = None;
-        }
+        strip_unsupported_completion_params(&self.unsupported_params, req);
     }
 
     /// Strip unsupported fields from a `ToolCompletionRequest` in place.
     fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
-        if self.unsupported_params.is_empty() {
-            return;
-        }
-        if self.unsupported_params.contains("temperature") {
-            req.temperature = None;
-        }
-        if self.unsupported_params.contains("max_tokens") {
-            req.max_tokens = None;
-        }
+        strip_unsupported_tool_params(&self.unsupported_params, req);
     }
 
     fn api_url(&self) -> String {

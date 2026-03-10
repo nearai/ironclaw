@@ -28,7 +28,8 @@ use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
-    ToolDefinition as IronToolDefinition,
+    ToolDefinition as IronToolDefinition, strip_unsupported_completion_params,
+    strip_unsupported_tool_params,
 };
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
@@ -100,31 +101,12 @@ impl<M: CompletionModel> RigAdapter<M> {
 
     /// Strip unsupported fields from a `CompletionRequest` in place.
     fn strip_unsupported_completion_params(&self, req: &mut CompletionRequest) {
-        if self.unsupported_params.is_empty() {
-            return;
-        }
-        if self.unsupported_params.contains("temperature") {
-            req.temperature = None;
-        }
-        if self.unsupported_params.contains("max_tokens") {
-            req.max_tokens = None;
-        }
-        if self.unsupported_params.contains("stop_sequences") {
-            req.stop_sequences = None;
-        }
+        strip_unsupported_completion_params(&self.unsupported_params, req);
     }
 
     /// Strip unsupported fields from a `ToolCompletionRequest` in place.
     fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
-        if self.unsupported_params.is_empty() {
-            return;
-        }
-        if self.unsupported_params.contains("temperature") {
-            req.temperature = None;
-        }
-        if self.unsupported_params.contains("max_tokens") {
-            req.max_tokens = None;
-        }
+        strip_unsupported_tool_params(&self.unsupported_params, req);
     }
 }
 

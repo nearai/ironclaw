@@ -455,6 +455,69 @@ pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
     }
 }
 
+/// Represents a request parameter that may not be supported by all LLM providers.
+///
+/// This typed enum replaces stringly-typed parameter names across the codebase,
+/// providing type safety and single-point-of-maintenance for parameter handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnsupportedParam {
+    Temperature,
+    MaxTokens,
+    StopSequences,
+}
+
+impl UnsupportedParam {
+    /// Get the string name of this parameter for config/error messages.
+    pub fn name(&self) -> &'static str {
+        match self {
+            UnsupportedParam::Temperature => "temperature",
+            UnsupportedParam::MaxTokens => "max_tokens",
+            UnsupportedParam::StopSequences => "stop_sequences",
+        }
+    }
+}
+
+/// Strip unsupported parameters from a `CompletionRequest` in place.
+///
+/// This is the single helper function used by all providers to remove
+/// parameters they don't support, replacing duplicate stringly-typed logic.
+pub fn strip_unsupported_completion_params(
+    unsupported: &std::collections::HashSet<String>,
+    req: &mut CompletionRequest,
+) {
+    if unsupported.is_empty() {
+        return;
+    }
+    if unsupported.contains(UnsupportedParam::Temperature.name()) {
+        req.temperature = None;
+    }
+    if unsupported.contains(UnsupportedParam::MaxTokens.name()) {
+        req.max_tokens = None;
+    }
+    if unsupported.contains(UnsupportedParam::StopSequences.name()) {
+        req.stop_sequences = None;
+    }
+}
+
+/// Strip unsupported parameters from a `ToolCompletionRequest` in place.
+///
+/// This is the single helper function used by all providers to remove
+/// parameters they don't support from tool calls, replacing duplicate stringly-typed logic.
+pub fn strip_unsupported_tool_params(
+    unsupported: &std::collections::HashSet<String>,
+    req: &mut ToolCompletionRequest,
+) {
+    if unsupported.is_empty() {
+        return;
+    }
+    if unsupported.contains(UnsupportedParam::Temperature.name()) {
+        req.temperature = None;
+    }
+    if unsupported.contains(UnsupportedParam::MaxTokens.name()) {
+        req.max_tokens = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
