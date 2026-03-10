@@ -852,18 +852,22 @@ impl SetupWizard {
         if let Some(ref backend) = env_backend
             && (backend == "postgres" || backend == "postgresql")
         {
-            if std::env::var("DATABASE_URL").is_ok() {
+            if let Ok(url) = std::env::var("DATABASE_URL") {
                 print_info("Using existing PostgreSQL configuration");
-                return self.step_database_postgres().await;
+                self.settings.database_backend = Some("postgres".to_string());
+                self.settings.database_url = Some(url);
+                return Ok(());
             }
             // Postgres configured but no URL — fall through to interactive
             return self.step_database().await;
         }
 
         #[cfg(feature = "postgres")]
-        if std::env::var("DATABASE_URL").is_ok() {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
             print_info("Using existing PostgreSQL configuration");
-            return self.step_database_postgres().await;
+            self.settings.database_backend = Some("postgres".to_string());
+            self.settings.database_url = Some(url);
+            return Ok(());
         }
 
         // Auto-default to libsql if the feature is compiled

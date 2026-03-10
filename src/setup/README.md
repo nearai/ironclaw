@@ -67,12 +67,11 @@ Step 2/2: Model Selection     ← only interactive step
    save_and_summarize()      → includes tip to run `ironclaw onboard`
 ```
 
-**`auto_setup_database()`:** Uses existing env vars if set. If
-`DATABASE_URL` is already configured, it may prompt to confirm using the
-existing URL. Otherwise defaults to libsql at `~/.ironclaw/ironclaw.db`,
-creates the database, and runs migrations silently. Falls back to
-interactive mode when just the postgres feature is compiled (can't
-auto-default postgres).
+**`auto_setup_database()`:** Uses existing env vars if set (`DATABASE_URL`
+for postgres, `LIBSQL_PATH` for libsql) without prompting. Otherwise
+defaults to libsql at `~/.ironclaw/ironclaw.db`, creates the database,
+and runs migrations silently. Falls back to interactive mode only when
+just the postgres feature is compiled and no `DATABASE_URL` is set.
 
 **`auto_setup_security()`:** Checks for existing `SECRETS_MASTER_KEY`
 env var or OS keychain key. If neither exists, generates a new key and
