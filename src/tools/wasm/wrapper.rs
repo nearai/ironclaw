@@ -289,9 +289,9 @@ impl near::agent::host::Host for StoreData {
             .scan_and_clean(&injected_url)
             .map_err(|e| format!("Potential secret leak in URL blocked: {}", e))?;
         for (name, value) in &raw_headers {
-            leak_detector
-                .scan_and_clean(value)
-                .map_err(|e| format!("Potential secret leak in header '{}' blocked: {}", name, e))?;
+            leak_detector.scan_and_clean(value).map_err(|e| {
+                format!("Potential secret leak in header '{}' blocked: {}", name, e)
+            })?;
         }
         if let Some(body_bytes) = body.as_deref() {
             let body_str = String::from_utf8_lossy(body_bytes);
