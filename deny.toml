@@ -5,7 +5,19 @@ targets = []
 unmaintained = "workspace"
 yanked = "deny"
 ignore = [
-    # Add specific RUSTSEC IDs with justification comments as needed
+    # Pre-existing advisories — tracked for upgrade in separate PRs
+    # serde_yml unsound/unmaintained — transitive dep, no direct usage
+    "RUSTSEC-2025-0068",
+    # tokio-tar PAX header parsing — sandbox containers only
+    "RUSTSEC-2025-0111",
+    # wasmtime fd_renumber host panic — WASIp1, mitigated by fuel limits
+    "RUSTSEC-2025-0046",
+    # wasmtime shared linear memory unsoundness — no shared memory in our guests
+    "RUSTSEC-2025-0118",
+    # wasmtime guest-controlled resource exhaustion — mitigated by fuel/memory limits
+    "RUSTSEC-2026-0020",
+    # wasmtime wasi:http/types.fields panic — mitigated by fuel limits
+    "RUSTSEC-2026-0021",
 ]
 
 [licenses]
