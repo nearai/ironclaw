@@ -12,8 +12,9 @@ use tempfile::tempdir;
 
 use ironclaw::bootstrap::{save_bootstrap_env_to, upsert_bootstrap_var_to};
 
-/// Fake OpenAI API key for test use only. Mirrors `TEST_OPENAI_API_KEY_LONG`
-/// from `crate::testing::credentials` (unavailable in integration tests).
+/// Fake OpenAI API key for test use only. Mirrors the internal
+/// `TEST_OPENAI_API_KEY_LONG` constant from the main crate, which is not
+/// directly available to integration tests due to `#[cfg(test)]`.
 const TEST_OPENAI_API_KEY_LONG: &str = "sk-test-key-1234567890";
 
 /// Parse a .env file into a HashMap using dotenvy.

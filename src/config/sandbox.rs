@@ -408,10 +408,10 @@ mod tests {
     fn parse_oauth_token_valid() {
         let json = format!(
             r#"{{"claudeAiOauth": {{"accessToken": "{}"}}}}"#,
-            TEST_ANTHROPIC_OAUTH_FAKE
+            TEST_ANTHROPIC_OAUTH_BASIC
         );
         let token = parse_oauth_access_token(&json);
-        assert_eq!(token, Some(TEST_ANTHROPIC_OAUTH_FAKE.to_string()));
+        assert_eq!(token, Some(TEST_ANTHROPIC_OAUTH_BASIC.to_string()));
     }
 
     #[test]
@@ -446,11 +446,11 @@ mod tests {
                 "expiresAt": 1700000000
             }}
         }}"#,
-            TEST_ANTHROPIC_OAUTH_REAL
+            TEST_ANTHROPIC_OAUTH_NESTED
         );
         assert_eq!(
             parse_oauth_access_token(&json),
-            Some(TEST_ANTHROPIC_OAUTH_REAL.to_string())
+            Some(TEST_ANTHROPIC_OAUTH_NESTED.to_string())
         );
     }
 

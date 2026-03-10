@@ -38,13 +38,13 @@ pub const TEST_OPENAI_API_KEY_ISSUE_129: &str = "sk-test-key-for-issue-129";
 pub const TEST_ANTHROPIC_OAUTH_TOKEN: &str = "sk-ant-oat01-test-token";
 
 /// Anthropic API key for priority tests.
-pub const TEST_ANTHROPIC_API_KEY: &str = "sk-ant-real-key";
+pub const TEST_ANTHROPIC_API_KEY: &str = "sk-ant-priority-key";
 
 /// Anthropic OAuth token for sandbox config parse tests.
-pub const TEST_ANTHROPIC_OAUTH_FAKE: &str = "sk-ant-oat01-fake";
+pub const TEST_ANTHROPIC_OAUTH_BASIC: &str = "sk-ant-oat01-basic";
 
 /// Anthropic OAuth token in nested JSON parse test.
-pub const TEST_ANTHROPIC_OAUTH_REAL: &str = "sk-ant-oat01-real-token";
+pub const TEST_ANTHROPIC_OAUTH_NESTED: &str = "sk-ant-oat01-primary-token";
 
 // ── Google OAuth ─────────────────────────────────────────────────────────
 
@@ -89,7 +89,7 @@ pub const TEST_AUTH_SECRET_TOKEN: &str = "secret-token";
 // ── Stripe ──────────────────────────────────────────────────────────────
 
 /// Stripe-style test key.
-pub const TEST_STRIPE_KEY: &str = "sk-live";
+pub const TEST_STRIPE_KEY: &str = "sk_test_fake123";
 
 // ── Redaction test values ───────────────────────────────────────────────
 
