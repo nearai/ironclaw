@@ -370,7 +370,7 @@ pub async fn start_server(
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
-                tracing::info!("Web gateway shutting down");
+                tracing::debug!("Web gateway shutting down");
             })
             .await
         {
@@ -2609,6 +2609,7 @@ mod tests {
 
         let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets,
             tool_registry,
             None,
@@ -2658,6 +2659,7 @@ mod tests {
 
         let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets.clone(),
             tool_registry,
             None,
@@ -2763,6 +2765,7 @@ mod tests {
 
         let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets.clone(),
             tool_registry,
             None,

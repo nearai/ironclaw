@@ -10,7 +10,7 @@ file first, then adjust the code to match.
 ## Entry Points
 
 ```
-ironclaw onboard [--skip-auth] [--channels-only]
+ironclaw onboard [--skip-auth] [--channels-only] [--provider-only] [--quick]
 ```
 
 Explicit invocation. Loads `.env` files, runs the wizard, exits.
@@ -25,6 +25,8 @@ the wizard). Otherwise triggers when no database is configured:
 - `DATABASE_URL` env var is set
 - `LIBSQL_PATH` env var is set
 - `~/.ironclaw/ironclaw.db` exists on disk
+
+Auto-triggered onboarding uses **quick mode** by default.
 
 The `--no-onboard` CLI flag suppresses auto-detection.
 
@@ -50,7 +52,41 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 ---
 
-## The 8-Step Wizard
+## Quick Mode
+
+Quick mode (`--quick` flag, or auto-triggered on first run) provides a
+near-instant onboarding experience by auto-defaulting everything except
+the LLM provider and model selection.
+
+```
+auto_setup_database()    → libsql at ~/.ironclaw/ironclaw.db (zero prompts)
+auto_setup_security()    → keychain or env var (zero prompts)
+Step 1/2: Inference Provider  ← only interactive step
+Step 2/2: Model Selection     ← only interactive step
+       ↓
+   save_and_summarize()      → includes tip to run `ironclaw onboard`
+```
+
+**`auto_setup_database()`:** Uses existing env vars if set (`DATABASE_URL`
+for postgres, `LIBSQL_PATH` for libsql) without prompting. Otherwise
+defaults to libsql at `~/.ironclaw/ironclaw.db`, creates the database,
+and runs migrations silently. Falls back to interactive mode only when
+just the postgres feature is compiled and no `DATABASE_URL` is set.
+
+**`auto_setup_security()`:** Checks for existing `SECRETS_MASTER_KEY`
+env var or OS keychain key. If neither exists, generates a new key and
+stores it in the keychain (macOS) or env var (Linux/other). Zero prompts
+except unavoidable macOS keychain dialogs.
+
+**`.env` preservation (fix for #751):** `write_bootstrap_env()` now uses
+`upsert_bootstrap_vars()` instead of `save_bootstrap_env()`, preserving
+user-added variables like `HTTP_HOST` across re-onboarding.
+
+The full 9-step wizard remains available via `ironclaw onboard`.
+
+---
+
+## The 9-Step Wizard
 
 ### Overview
 
@@ -62,7 +98,8 @@ Step 4: Model Selection
 Step 5: Embeddings
 Step 6: Channel Configuration
 Step 7: Extensions (tools)
-Step 8: Background Tasks (heartbeat)
+Step 8: Docker Sandbox
+Step 9: Background Tasks (heartbeat)
        ↓
    save_and_summarize()
 ```

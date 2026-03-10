@@ -10,8 +10,7 @@ use clap::Subcommand;
 use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::Config;
-use crate::secrets::{CreateSecretParams, SecretsCrypto, SecretsStore};
+use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
 /// Default tools directory.
@@ -552,16 +551,7 @@ fn validate_tool_name(name: &str) -> anyhow::Result<()> {
 
 /// Initialize the secrets store from environment config.
 async fn init_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
-    let config = Config::from_env().await?;
-    let master_key = config.secrets.master_key().ok_or_else(|| {
-        anyhow::anyhow!(
-            "SECRETS_MASTER_KEY not set. Run 'ironclaw onboard' first or set it in .env"
-        )
-    })?;
-
-    let crypto = Arc::new(SecretsCrypto::new(master_key.clone())?);
-
-    Ok(crate::db::create_secrets_store(&config.database, crypto).await?)
+    crate::cli::init_secrets_store().await
 }
 
 /// Configure authentication for a tool.

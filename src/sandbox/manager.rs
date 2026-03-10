@@ -185,7 +185,7 @@ impl SandboxManager {
         self.initialized
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        tracing::info!("Sandbox shut down");
+        tracing::debug!("Sandbox shut down");
     }
 
     /// Execute a command in the sandbox.
