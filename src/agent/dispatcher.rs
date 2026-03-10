@@ -554,6 +554,35 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 };
 
                 if needs_approval {
+                    // In non-DM relay channels, auto-deny approval-
+                    // requiring tools to prevent stuck AwaitingApproval
+                    // state and prompt injection from other users.
+                    let is_relay = self.message.channel.ends_with("-relay");
+                    let is_dm = self
+                        .message
+                        .metadata
+                        .get("event_type")
+                        .and_then(|v| v.as_str())
+                        == Some("direct_message");
+                    if is_relay && !is_dm {
+                        tracing::info!(
+                            tool = %tc.name,
+                            channel = %self.message.channel,
+                            "Auto-denying approval-requiring tool in non-DM relay channel"
+                        );
+                        let result_msg = format!(
+                            "Tool '{}' requires approval and cannot run in shared channels. \
+                             Ask the user to message me directly (DM) to use this tool.",
+                            tc.name
+                        );
+                        reason_ctx.messages.push(ChatMessage::tool_result(
+                            &tc.id,
+                            &tc.name,
+                            &result_msg,
+                        ));
+                        continue;
+                    }
+
                     approval_needed = Some((idx, tc, tool));
                     break;
                 }

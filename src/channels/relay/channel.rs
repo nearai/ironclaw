@@ -253,6 +253,7 @@ impl Channel for RelayChannel {
                             "sender_id": event.sender_id,
                             "thread_id": event.thread_id,
                             "provider": event.provider,
+                            "event_type": event.event_type,
                         }));
 
                     let msg = if let Some(ref thread_id) = event.thread_id {
@@ -402,12 +403,116 @@ impl Channel for RelayChannel {
         Ok(())
     }
 
-    /// Status updates are not forwarded to messaging providers to avoid noise.
+    /// Forward approval-needed status updates as Slack Block Kit messages with
+    /// interactive Approve/Deny buttons. Only sends buttons in DM contexts;
+    /// other status updates remain no-ops.
     async fn send_status(
         &self,
-        _status: StatusUpdate,
-        _metadata: &serde_json::Value,
+        status: StatusUpdate,
+        metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
+        let StatusUpdate::ApprovalNeeded {
+            request_id,
+            tool_name,
+            description,
+            parameters,
+        } = status
+        else {
+            return Ok(());
+        };
+
+        // Only send approval buttons in DMs — channels are gated upstream
+        // by the dispatcher, but guard here too as a safety net.
+        let event_type = metadata
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if event_type != "direct_message" {
+            tracing::warn!(
+                tool = %tool_name,
+                event_type = %event_type,
+                "Relay: approval requested in non-DM context, skipping buttons"
+            );
+            return Ok(());
+        }
+
+        let channel_id = metadata
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ChannelError::SendFailed {
+                name: self.name().to_string(),
+                reason: "Missing channel_id for approval buttons".into(),
+            })?;
+        let thread_id = metadata.get("thread_id").and_then(|v| v.as_str());
+        let team_id = metadata
+            .get("team_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&self.team_id);
+        let sender_id = metadata
+            .get("sender_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let value_payload = serde_json::json!({
+            "instance_id": self.instance_id,
+            "team_id": team_id,
+            "channel_id": channel_id,
+            "thread_ts": thread_id,
+            "request_id": request_id,
+            "sender_id": sender_id,
+        });
+        let value_str = value_payload.to_string();
+
+        let params_display =
+            serde_json::to_string_pretty(&parameters).unwrap_or_else(|_| parameters.to_string());
+
+        let blocks = serde_json::json!([
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format!(
+                        "*Tool approval required*\n`{tool_name}`: {description}\n```{params_display}```"
+                    )
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "Approve" },
+                        "style": "primary",
+                        "action_id": "approve_tool",
+                        "value": value_str,
+                    },
+                    {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "Deny" },
+                        "style": "danger",
+                        "action_id": "deny_tool",
+                        "value": value_str,
+                    }
+                ]
+            }
+        ]);
+
+        let mut body = serde_json::json!({
+            "channel": channel_id,
+            "text": format!("Tool approval required: {tool_name} - {description}"),
+            "blocks": blocks,
+        });
+        if let Some(tid) = thread_id {
+            body["thread_ts"] = serde_json::Value::String(tid.to_string());
+        }
+
+        self.proxy_send(team_id, "chat.postMessage", body)
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: self.name().to_string(),
+                reason: e.to_string(),
+            })?;
+
         Ok(())
     }
 
