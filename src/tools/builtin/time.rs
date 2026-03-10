@@ -534,4 +534,44 @@ mod tests {
 
         assert_eq!(dt.to_rfc3339(), "2026-03-08T07:30:00+00:00");
     }
+
+    #[tokio::test]
+    async fn test_now_with_empty_string_optional_params() {
+        // Regression: strict-mode LLMs (e.g. Qwen) emit "" for optional nullable
+        // parameters. The time tool must handle these gracefully — they should be
+        // treated as absent, not cause parse errors.
+        // normalize_tool_params (in dispatcher) converts "" to null before reaching
+        // here, but we also test that null params work correctly end-to-end.
+        let tool = TimeTool;
+        let ctx = JobContext::with_user("test", "chat", "test");
+
+        // null optional params (what normalize_tool_params produces from "")
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "operation": "now",
+                    "timezone": null,
+                    "format": null
+                }),
+                &ctx,
+            )
+            .await
+            .expect("null optional params must not fail");
+
+        assert!(output.result.get("iso").is_some(), "should have iso field");
+    }
+
+    #[tokio::test]
+    async fn test_now_missing_optional_params_succeeds() {
+        // Baseline: when optional params are simply absent, tool succeeds.
+        let tool = TimeTool;
+        let ctx = JobContext::with_user("test", "chat", "test");
+
+        let output = tool
+            .execute(serde_json::json!({"operation": "now"}), &ctx)
+            .await
+            .expect("missing optional params must not fail");
+
+        assert!(output.result.get("iso").is_some());
+    }
 }

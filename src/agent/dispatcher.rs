@@ -863,6 +863,39 @@ impl Agent {
     }
 }
 
+/// Normalize tool parameters from LLM output.
+///
+/// Some OpenAI-compatible providers (e.g. Qwen via DashScope) return empty
+/// strings `""` for optional parameters instead of `null` when the tool schema
+/// uses strict-mode nullable types (`["string","null"]`). An empty string is
+/// semantically equivalent to absent for optional tool parameters, but
+/// `validate_tool_params` rejects empty strings and tools like `time` pass
+/// them directly to parsers (e.g. `parse_timezone("")` → error).
+///
+/// This function converts all empty string values to `null` in the parameter
+/// object before validation and execution. Non-string values are left unchanged.
+fn normalize_tool_params(params: &serde_json::Value) -> serde_json::Value {
+    match params {
+        serde_json::Value::Object(obj) => {
+            let cleaned = obj
+                .iter()
+                .map(|(k, v)| {
+                    let normalized = match v {
+                        serde_json::Value::String(s) if s.is_empty() => serde_json::Value::Null,
+                        other => normalize_tool_params(other),
+                    };
+                    (k.clone(), normalized)
+                })
+                .collect();
+            serde_json::Value::Object(cleaned)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(normalize_tool_params).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 /// Execute a chat tool without requiring `&Agent`.
 ///
 /// This standalone function enables parallel invocation from spawned JoinSet
@@ -875,6 +908,11 @@ pub(super) async fn execute_chat_tool_standalone(
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
 ) -> Result<String, Error> {
+    // Normalize params: convert empty strings to null so optional parameters
+    // left blank by strict-mode LLMs (e.g. Qwen) are treated as absent.
+    let params = normalize_tool_params(params);
+    let params = &params;
+
     let tool = tools
         .get(tool_name)
         .await
@@ -926,7 +964,7 @@ pub(super) async fn execute_chat_tool_standalone(
             );
         }
         Ok(Err(e)) => {
-            tracing::debug!(
+            tracing::warn!(
                 tool = %tool_name,
                 elapsed_ms = elapsed.as_millis() as u64,
                 error = %e,
@@ -2262,6 +2300,71 @@ mod tests {
             formatted.contains("connection refused"),
             "Error should include the underlying reason, got: {formatted}"
         );
+    }
+
+    #[test]
+    fn test_normalize_tool_params_empty_strings_become_null() {
+        // Regression: strict-mode LLMs (e.g. Qwen via DashScope) return empty
+        // strings for optional nullable parameters instead of null.
+        // normalize_tool_params must convert these to null so optional_param
+        // helpers like `params.get("timezone").and_then(|v| v.as_str())` return
+        // None and tools treat the parameter as absent.
+        let params = serde_json::json!({
+            "operation": "now",
+            "timezone": "",
+            "format": "",
+            "input": "2026-01-01"
+        });
+        let normalized = super::normalize_tool_params(&params);
+        assert_eq!(
+            normalized["operation"].as_str(),
+            Some("now"),
+            "non-empty string must be preserved"
+        );
+        assert!(
+            normalized["timezone"].is_null(),
+            "empty string must become null"
+        );
+        assert!(
+            normalized["format"].is_null(),
+            "empty string must become null"
+        );
+        assert_eq!(
+            normalized["input"].as_str(),
+            Some("2026-01-01"),
+            "non-empty string must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_normalize_tool_params_nested_objects() {
+        // Nested objects (e.g. tool params with nested config) should also have
+        // their empty string values converted to null.
+        let params = serde_json::json!({
+            "config": { "key": "", "other": "value" },
+            "items": ["hello", "world"]
+        });
+        let normalized = super::normalize_tool_params(&params);
+        assert!(normalized["config"]["key"].is_null(), "nested empty string must become null");
+        assert_eq!(normalized["config"]["other"].as_str(), Some("value"));
+        // Array string elements are preserved as-is (arrays are passed through)
+        let items = normalized["items"].as_array().unwrap();
+        assert_eq!(items[0].as_str(), Some("hello"));
+        assert_eq!(items[1].as_str(), Some("world"));
+    }
+
+    #[test]
+    fn test_normalize_tool_params_non_string_values_unchanged() {
+        let params = serde_json::json!({
+            "count": 42,
+            "flag": false,
+            "ratio": 3.14,
+            "nothing": null
+        });
+        let normalized = super::normalize_tool_params(&params);
+        assert_eq!(normalized["count"].as_i64(), Some(42));
+        assert_eq!(normalized["flag"].as_bool(), Some(false));
+        assert!(normalized["nothing"].is_null());
     }
 
     #[test]

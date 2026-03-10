@@ -201,6 +201,13 @@ impl Validator {
         ) {
             match value {
                 serde_json::Value::String(s) => {
+                    // Empty strings are treated as absent optional parameters —
+                    // some strict-mode LLMs (e.g. Qwen) emit "" instead of null
+                    // for nullable fields. Skipping them here avoids spurious
+                    // Empty errors on valid tool calls.
+                    if s.is_empty() {
+                        return;
+                    }
                     let string_result = validator.validate(s);
                     *result = std::mem::take(result).merge(string_result);
                 }
@@ -311,5 +318,35 @@ mod tests {
             validator.validate(&format!("Start of message{}End of message", "a".repeat(30)));
         assert!(result.is_valid); // Still valid, just a warning
         assert!(!result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_validate_tool_params_empty_string_is_valid() {
+        // Regression: strict-mode LLMs (e.g. Qwen) emit "" for optional nullable
+        // parameters. validate_tool_params must not reject these as Empty errors.
+        let validator = Validator::new();
+        let params = serde_json::json!({
+            "operation": "now",
+            "timezone": "",
+            "format": ""
+        });
+        let result = validator.validate_tool_params(&params);
+        assert!(
+            result.is_valid,
+            "Empty optional params should not fail validation: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_validate_tool_params_non_empty_strings_still_validated() {
+        // Ensure actual string content continues to be validated.
+        let validator = Validator::new().forbid_pattern("injection_test");
+        let params = serde_json::json!({
+            "operation": "now",
+            "timezone": "injection_test"
+        });
+        let result = validator.validate_tool_params(&params);
+        assert!(!result.is_valid, "Forbidden patterns should still be caught");
     }
 }

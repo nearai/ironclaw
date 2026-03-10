@@ -481,11 +481,17 @@ impl Channel for ReplChannel {
             StatusUpdate::ToolStarted { name } => {
                 eprintln!("  \x1b[33m\u{25CB} {name}\x1b[0m");
             }
-            StatusUpdate::ToolCompleted { name, success, .. } => {
+            StatusUpdate::ToolCompleted {
+                name,
+                success,
+                error,
+                ..
+            } => {
                 if success {
                     eprintln!("  \x1b[32m\u{25CF} {name}\x1b[0m");
                 } else {
-                    eprintln!("  \x1b[31m\u{2717} {name} (failed)\x1b[0m");
+                    let detail = error.as_deref().unwrap_or("unknown error");
+                    eprintln!("  \x1b[31m\u{2717} {name}: {detail}\x1b[0m");
                 }
             }
             StatusUpdate::ToolResult { name: _, preview } => {
