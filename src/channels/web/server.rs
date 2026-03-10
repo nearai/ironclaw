@@ -1418,11 +1418,17 @@ async fn chat_new_thread_handler(
     // Persist the empty conversation row with thread_type metadata synchronously
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
-        if let Err(e) = store
+        match store
             .ensure_conversation(thread_id, "gateway", &state.user_id, None)
             .await
         {
-            tracing::warn!("Failed to persist new thread: {}", e);
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                user = %state.user_id,
+                thread_id = %thread_id,
+                "Skipped persisting new thread due to ownership/channel conflict"
+            ),
+            Err(e) => tracing::warn!("Failed to persist new thread: {}", e),
         }
         let metadata_val = serde_json::json!("thread");
         if let Err(e) = store

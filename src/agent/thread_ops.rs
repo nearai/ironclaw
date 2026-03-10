@@ -23,6 +23,14 @@ use crate::error::Error;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 
+const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
+
+fn requires_preexisting_uuid_thread(channel: &str) -> bool {
+    // Gateway-style channels send server-issued conversation UUIDs.
+    // Unknown UUIDs should be rejected instead of silently creating a new thread.
+    matches!(channel, "gateway" | "test")
+}
+
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
@@ -37,11 +45,11 @@ impl Agent {
         &self,
         message: &IncomingMessage,
         external_thread_id: &str,
-    ) {
+    ) -> Option<String> {
         // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
         let thread_uuid = match Uuid::parse_str(external_thread_id) {
             Ok(id) => id,
-            Err(_) => return,
+            Err(_) => return None,
         };
 
         // Check if already in memory
@@ -52,7 +60,7 @@ impl Agent {
         {
             let sess = session.lock().await;
             if sess.threads.contains_key(&thread_uuid) {
-                return;
+                return None;
             }
         }
 
@@ -74,16 +82,47 @@ impl Agent {
                         thread_uuid,
                         e
                     );
-                    false
+                    if requires_preexisting_uuid_thread(&message.channel) {
+                        return Some(FORGED_THREAD_ID_ERROR.to_string());
+                    }
+                    return None;
                 }
             };
             if !owned {
+                let exists = match store.get_conversation_metadata(thread_uuid).await {
+                    Ok(Some(_)) => true,
+                    Ok(None) => false,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to inspect conversation metadata for hydration {}: {}",
+                            thread_uuid,
+                            e
+                        );
+                        if requires_preexisting_uuid_thread(&message.channel) {
+                            return Some(FORGED_THREAD_ID_ERROR.to_string());
+                        }
+                        return None;
+                    }
+                };
+
+                if requires_preexisting_uuid_thread(&message.channel) {
+                    tracing::warn!(
+                        user = %message.user_id,
+                        channel = %message.channel,
+                        thread_id = %thread_uuid,
+                        exists,
+                        "Rejected message for unavailable thread id"
+                    );
+                    return Some(FORGED_THREAD_ID_ERROR.to_string());
+                }
+
                 tracing::warn!(
                     user = %message.user_id,
                     thread_id = %thread_uuid,
-                    "Rejected hydration for unowned thread id"
+                    exists,
+                    "Skipped hydration for thread id not owned by sender"
                 );
-                return;
+                return None;
             }
 
             let db_messages = store
@@ -129,6 +168,8 @@ impl Agent {
             thread_uuid,
             msg_count
         );
+
+        None
     }
 
     pub(super) async fn process_user_input(
@@ -328,8 +369,13 @@ impl Agent {
             thread_id = %thread_id,
             "Persisting user message to DB"
         );
-        self.persist_user_message(thread_id, &message.user_id, effective_content)
-            .await;
+        self.persist_user_message(
+            thread_id,
+            &message.channel,
+            &message.user_id,
+            effective_content,
+        )
+        .await;
 
         tracing::debug!(
             message_id = %message.id,
@@ -411,10 +457,21 @@ impl Agent {
                     .await;
 
                 // Persist tool calls then assistant response (user message already persisted at turn start)
-                self.persist_tool_calls(thread_id, &message.user_id, turn_number, &tool_calls)
+                self.persist_tool_calls(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    turn_number,
+                    &tool_calls,
+                )
                     .await;
-                self.persist_assistant_response(thread_id, &message.user_id, &response)
-                    .await;
+                self.persist_assistant_response(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    &response,
+                )
+                .await;
 
                 Ok(SubmissionResult::response(response))
             }
@@ -448,74 +505,33 @@ impl Agent {
         }
     }
 
-    /// Ensure a thread UUID is safe to persist under this user.
-    ///
-    /// Returns `true` when:
-    /// - the conversation already belongs to `user_id`, or
-    /// - no conversation row exists yet and we can create one for `user_id`.
+    /// Ensure a thread UUID is writable for `(channel, user_id)`.
     ///
     /// Returns `false` for foreign/unowned conversation IDs or DB errors.
     async fn ensure_writable_conversation(
         &self,
         store: &Arc<dyn crate::db::Database>,
         thread_id: Uuid,
+        channel: &str,
         user_id: &str,
     ) -> bool {
-        match store.conversation_belongs_to_user(thread_id, user_id).await {
-            Ok(true) => return true,
-            Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to verify conversation ownership for write {}: {}",
-                    thread_id,
-                    e
-                );
-                return false;
-            }
-        }
-
-        // Distinguish "missing conversation" from "existing but foreign".
-        match store.get_conversation_metadata(thread_id).await {
-            Ok(Some(_)) => {
-                tracing::warn!(
-                    user = %user_id,
-                    thread_id = %thread_id,
-                    "Rejected write for unowned thread id"
-                );
-                return false;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to inspect conversation metadata {}: {}",
-                    thread_id,
-                    e
-                );
-                return false;
-            }
-        }
-
-        if let Err(e) = store
-            .ensure_conversation(thread_id, "gateway", user_id, None)
+        match store
+            .ensure_conversation(thread_id, channel, user_id, None)
             .await
         {
-            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
-            return false;
-        }
-
-        match store.conversation_belongs_to_user(thread_id, user_id).await {
             Ok(true) => true,
             Ok(false) => {
                 tracing::warn!(
                     user = %user_id,
+                    channel = %channel,
                     thread_id = %thread_id,
-                    "Conversation remained unowned after ensure; skipping persistence"
+                    "Rejected write for unavailable thread id"
                 );
                 false
             }
             Err(e) => {
                 tracing::warn!(
-                    "Failed to re-check conversation ownership {}: {}",
+                    "Failed to ensure writable conversation {}: {}",
                     thread_id,
                     e
                 );
@@ -531,6 +547,7 @@ impl Agent {
     pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
+        channel: &str,
         user_id: &str,
         user_input: &str,
     ) {
@@ -540,7 +557,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
             .await
         {
             return;
@@ -562,6 +579,7 @@ impl Agent {
     pub(super) async fn persist_assistant_response(
         &self,
         thread_id: Uuid,
+        channel: &str,
         user_id: &str,
         response: &str,
     ) {
@@ -571,7 +589,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
             .await
         {
             return;
@@ -593,6 +611,7 @@ impl Agent {
     pub(super) async fn persist_tool_calls(
         &self,
         thread_id: Uuid,
+        channel: &str,
         user_id: &str,
         turn_number: usize,
         tool_calls: &[crate::agent::session::TurnToolCall],
@@ -643,7 +662,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
             .await
         {
             return;
@@ -1306,10 +1325,21 @@ impl Agent {
                         .map(|t| (t.turn_number, t.tool_calls.clone()))
                         .unwrap_or_default();
                     // User message already persisted at turn start; save tool calls then assistant response
-                    self.persist_tool_calls(thread_id, &message.user_id, turn_number, &tool_calls)
-                        .await;
-                    self.persist_assistant_response(thread_id, &message.user_id, &response)
-                        .await;
+                    self.persist_tool_calls(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        turn_number,
+                        &tool_calls,
+                    )
+                    .await;
+                    self.persist_assistant_response(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        &response,
+                    )
+                    .await;
                     let _ = self
                         .channels
                         .send_status(
@@ -1362,8 +1392,13 @@ impl Agent {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
                     // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(thread_id, &message.user_id, &rejection)
-                        .await;
+                    self.persist_assistant_response(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        &rejection,
+                    )
+                    .await;
                 }
             }
 
@@ -1401,8 +1436,13 @@ impl Agent {
                 thread.enter_auth_mode(ext_name.clone());
                 thread.complete_turn(&instructions);
                 // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(thread_id, &message.user_id, &instructions)
-                    .await;
+                self.persist_assistant_response(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    &instructions,
+                )
+                .await;
             }
         }
         let _ = self

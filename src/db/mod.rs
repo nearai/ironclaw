@@ -207,7 +207,7 @@ pub trait ConversationStore: Send + Sync {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
-    ) -> Result<(), DatabaseError>;
+    ) -> Result<bool, DatabaseError>;
     async fn list_conversations_with_preview(
         &self,
         user_id: &str,
