@@ -228,7 +228,9 @@ fn create_openai_compat_from_registry(
         "Using OpenAI-compatible provider"
     );
 
-    Ok(Arc::new(RigAdapter::new(model, &config.model)))
+    let adapter = RigAdapter::new(model, &config.model)
+        .with_unsupported_params(config.unsupported_params.clone());
+    Ok(Arc::new(adapter))
 }
 
 fn create_anthropic_from_registry(
@@ -296,7 +298,9 @@ fn create_anthropic_from_registry(
     );
 
     Ok(Arc::new(
-        RigAdapter::new(model, &config.model).with_cache_retention(cache_retention),
+        RigAdapter::new(model, &config.model)
+            .with_cache_retention(cache_retention)
+            .with_unsupported_params(config.unsupported_params.clone()),
     ))
 }
 
@@ -324,7 +328,9 @@ fn create_ollama_from_registry(
         "Using Ollama provider"
     );
 
-    Ok(Arc::new(RigAdapter::new(model, &config.model)))
+    let adapter = RigAdapter::new(model, &config.model)
+        .with_unsupported_params(config.unsupported_params.clone());
+    Ok(Arc::new(adapter))
 }
 
 /// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).

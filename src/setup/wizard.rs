@@ -3996,6 +3996,7 @@ mod tests {
             description: "Custom provider with no setup wizard".to_string(),
             extra_headers_env: None,
             setup: None,
+            unsupported_params: vec![],
         });
         let registry = crate::llm::ProviderRegistry::new(providers);
 
