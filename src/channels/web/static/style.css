@@ -3863,6 +3863,61 @@ mark {
   display: block;
 }
 
+/* Language Switcher */
+.language-switcher {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.language-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 8px;
+  font-size: 16px;
+  border-radius: var(--radius);
+  transition: all 0.2s;
+}
+
+.language-btn:hover {
+  color: var(--text);
+  background: var(--bg-tertiary);
+}
+
+.language-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+  min-width: 140px;
+  z-index: 1000;
+  box-shadow: var(--shadow);
+}
+
+.language-option {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.language-option:hover {
+  background: var(--bg-tertiary);
+}
+
+.language-option.active {
+  background: var(--accent);
+  color: var(--bg);
+}
+
 .generated-image-path {
   font-size: 12px;
   color: var(--text-secondary);

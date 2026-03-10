@@ -1,0 +1,367 @@
+// English Language Pack for IronClaw
+
+I18n.register('en', {
+  // Auth Page
+  'auth.title': 'IronClaw',
+  'auth.tagline': 'Secure AI Assistant',
+  'auth.tokenLabel': 'Gateway Token',
+  'auth.tokenPlaceholder': 'Paste your gateway token',
+  'auth.connect': 'Connect',
+  'auth.errorRequired': 'Token required',
+  'auth.errorInvalid': 'Invalid token',
+  'auth.hint': 'Enter the GATEWAY_AUTH_TOKEN from your .env file',
+  
+  // Chat
+  'chat.inputPlaceholder': 'Message or / for commands...',
+  
+  // Restart Modal
+  'restart.title': 'Restart IronClaw Instance',
+  'restart.description': 'Are you sure you want to restart IronClaw? This will gracefully restart the process.',
+  'restart.warning': 'Running tasks may be interrupted. Restart will complete in a few seconds.',
+  'restart.cancel': 'Cancel',
+  'restart.confirm': 'Confirm Restart',
+  'restart.progressTitle': 'Restarting IronClaw',
+  'restart.progressSubtitle': 'Please wait for the process to restart...',
+  'restart.checkLogs': 'Check the Logs tab for details after restart completes.',
+  
+  // Tabs
+  'tab.chat': 'Chat',
+  'tab.memory': 'Memory',
+  'tab.jobs': 'Jobs',
+  'tab.routines': 'Routines',
+  'tab.extensions': 'Extensions',
+  'tab.skills': 'Skills',
+  'tab.logs': 'Logs',
+  
+  // Status
+  'status.connected': 'Connected',
+  'status.disconnected': 'Disconnected',
+  'status.connecting': 'Connecting...',
+  'status.reconnecting': 'Reconnecting...',
+  'status.teeVerified': 'TEE Verified',
+  'status.restart': 'Restart',
+  'status.active': 'Active',
+  'status.installed': 'Installed',
+  'status.awaitingPairing': 'Awaiting Pairing',
+  
+  // Dashboard
+  'dashboard.connections': 'Connections',
+  'dashboard.uptime': 'Uptime',
+  'dashboard.costToday': 'Cost Today',
+  'dashboard.spent': 'Spent',
+  'dashboard.actionsPerHour': 'Actions/hr',
+  'dashboard.sse': 'SSE',
+  'dashboard.websocket': 'WebSocket',
+  
+  // Chat Tab
+  'chat.newThread': 'New Thread',
+  'chat.toggleSidebar': 'Toggle Sidebar',
+  'chat.assistant': 'Assistant',
+  'chat.conversations': 'Conversations',
+  'chat.inputPlaceholder': 'Type a message or / for commands...',
+  'chat.send': 'Send',
+  'chat.attachImages': 'Attach Images',
+  'chat.empty': 'Select a file to view content',
+  'chat.loading': 'Loading...',
+  'chat.loadingOlder': 'Loading older messages...',
+  'chat.noFiles': 'No files in workspace',
+  'chat.noResults': 'No results',
+  
+  // Thread Sidebar
+  'thread.assistant': 'Assistant',
+  'thread.new': 'New Thread',
+  
+  // Memory Tab
+  'memory.searchPlaceholder': 'Search memory...',
+  'memory.workspace': 'workspace',
+  'memory.edit': 'Edit',
+  'memory.save': 'Save',
+  'memory.cancel': 'Cancel',
+  'memory.selectFile': 'Select a file to view content',
+  
+  // Jobs Tab
+  'jobs.summary': 'Jobs Summary',
+  'jobs.id': 'ID',
+  'jobs.title': 'Title',
+  'jobs.source': 'Source',
+  'jobs.status': 'Status',
+  'jobs.created': 'Created',
+  'jobs.actions': 'Actions',
+  'jobs.empty': 'No jobs',
+  'jobs.statusRunning': 'Running',
+  'jobs.statusCompleted': 'Completed',
+  'jobs.statusFailed': 'Failed',
+  'jobs.statusPending': 'Pending',
+  'jobs.jobId': 'Job ID',
+  'jobs.description': 'Description',
+  'jobs.stateTransitions': 'State Transitions',
+  'jobs.projectFiles': 'Project Files',
+  'jobs.noProjectFiles': 'No project files',
+  'jobs.viewJob': 'View Job',
+  'jobs.browse': 'Browse',
+  
+  // Routines Tab
+  'routines.summary': 'Routines Summary',
+  'routines.name': 'Name',
+  'routines.trigger': 'Trigger',
+  'routines.action': 'Action',
+  'routines.lastRun': 'Last Run',
+  'routines.nextRun': 'Next Run',
+  'routines.runs': 'Runs',
+  'routines.status': 'Status',
+  'routines.actions': 'Actions',
+  'routines.runsToday': 'Runs Today',
+  'routines.empty': 'No routines',
+  'routines.noConfigured': 'No routines configured. Ask the assistant to create one.',
+  'routines.triggerFailed': 'Trigger failed: {message}',
+  
+  // Logs Tab
+  'logs.serverLevel': 'Server: ERROR',
+  'logs.clientLevel': 'Client Log Level',
+  'logs.clear': 'Clear',
+  'logs.autoScroll': 'Auto-scroll',
+  'logs.filter': 'Filter logs...',
+  'logs.empty': 'No logs',
+  'logs.allLevels': 'All Levels',
+  'logs.error': 'Error',
+  'logs.warn': 'Warn',
+  'logs.info': 'Info',
+  'logs.debug': 'Debug',
+  
+  // Extensions Tab
+  'extensions.installed': 'Installed Extensions',
+  'extensions.available': 'Available WASM Extensions',
+  'extensions.installWasm': 'Install WASM Extension',
+  'extensions.noInstalled': 'No extensions installed',
+  'extensions.noAvailable': 'No additional WASM extensions available',
+  'extensions.loading': 'Loading...',
+  'extensions.install': 'Install',
+  'extensions.installing': 'Installing...',
+  'extensions.installedSuccess': 'Installed {name}',
+  'extensions.remove': 'Remove',
+  'extensions.activate': 'Activate',
+  'extensions.reconfigure': 'Reconfigure',
+  'extensions.tools': 'Tools',
+  'extensions.noConfigNeeded': 'No configuration needed for {name}',
+  'extensions.configure': 'Configure {name}',
+  'extensions.optional': ' (optional)',
+  'extensions.autoGenerated': 'Auto-generated if empty',
+  'extensions.pendingPairing': 'Pending pairing requests',
+  'extensions.from': 'from',
+  
+  // MCP Servers
+  'mcp.servers': 'MCP Servers',
+  'mcp.noServers': 'No MCP servers available',
+  'mcp.addCustom': 'Add Custom MCP Server',
+  'mcp.add': 'Add',
+  'mcp.addedSuccess': 'Added MCP server {name}',
+  
+  // Registered Tools
+  'tools.registered': 'Registered Tools',
+  'tools.name': 'Name',
+  'tools.description': 'Description',
+  
+  // Skills Tab
+  'skills.installed': 'Installed Skills',
+  'skills.noInstalled': 'No skills installed',
+  'skills.searchClawHub': 'Search ClawHub',
+  'skills.searchPlaceholder': 'Search...',
+  'skills.installByUrl': 'Install Skill by URL',
+  'skills.namePlaceholder': 'Skill name or slug',
+  'skills.urlPlaceholder': 'HTTPS URL to SKILL.md (optional)',
+  'skills.search': 'Search',
+  'skills.searching': 'Searching...',
+  'skills.noResults': 'No skills found for "{query}"',
+  'skills.searchFailed': 'Search failed: {message}',
+  'skills.install': 'Install',
+  'skills.installing': 'Installing...',
+  'skills.installedSuccess': 'Installed skill "{name}"',
+  'skills.remove': 'Remove',
+  'skills.activatesOn': 'Activates on',
+  'skills.registryError': 'Could not reach ClawHub registry: {message}',
+  'skills.by': 'by',
+  'skills.updated': 'updated',
+  'skills.loading': 'Loading skills...',
+  'skills.loadFailed': 'Failed to load skills: {message}',
+  
+  // Jobs Summary
+  'jobs.summary.total': 'Total',
+  'jobs.summary.inProgress': 'In Progress',
+  'jobs.summary.completed': 'Completed',
+  'jobs.summary.failed': 'Failed',
+  'jobs.summary.stuck': 'Stuck',
+  
+  // Routines Summary
+  'routines.summary.total': 'Total',
+  'routines.summary.enabled': 'Enabled',
+  'routines.summary.disabled': 'Disabled',
+  'routines.summary.failing': 'Failing',
+  'routines.summary.runsToday': 'Runs Today',
+  
+  // Buttons
+  'btn.close': 'Close',
+  'btn.cancel': 'Cancel',
+  'btn.save': 'Save',
+  'btn.edit': 'Edit',
+  'btn.confirm': 'Confirm',
+  'btn.send': 'Send',
+  'btn.refresh': 'Refresh',
+  'btn.loadMore': 'Load More',
+  'btn.copy': 'Copy',
+  'btn.copied': 'Copied!',
+  'btn.submit': 'Submit',
+  'btn.setup': 'Setup',
+  
+  // Time
+  'time.lessThan1MinuteAgo': '<1m ago',
+  'time.lessThan1MinuteFromNow': 'in <1m',
+  'time.minutesAgo': '{n}m ago',
+  'time.minutesFromNow': 'in {n}m',
+  'time.hoursAgo': '{n}h ago',
+  'time.hoursFromNow': 'in {n}h',
+  'time.daysAgo': '{n}d ago',
+  'time.daysFromNow': 'in {n}d',
+  
+  // Tool Approval
+  'approval.title': 'Tool requires approval',
+  'approval.description': 'A tool is requesting permission to run.',
+  'approval.approve': 'Approve',
+  'approval.deny': 'Deny',
+  'approval.always': 'Always',
+  'approval.approved': 'Approved',
+  'approval.alwaysApproved': 'Always approved',
+  'approval.denied': 'Denied',
+  'approval.showParams': 'Show parameters',
+  'approval.hideParams': 'Hide parameters',
+  
+  // Authentication Required
+  'authRequired.title': 'Authentication required for {name}',
+  'authRequired.authenticateWith': 'Authenticate with {name}',
+  'authRequired.getToken': 'Get your token',
+  'authRequired.instructions': 'Instructions',
+  
+  // Sandbox Jobs
+  'sandbox.job': 'Sandbox Job',
+  'sandbox.doneSignal': 'Done signal sent',
+  
+  // Error Messages
+  'error.startConversation': 'Please start a conversation first',
+  'error.restartFailed': 'Restart failed: {message}',
+  'error.tokenRequired': 'Token required',
+  'error.tokenInvalid': 'Invalid token',
+  'error.connectionFailed': 'Connection failed',
+  'error.unknown': 'Unknown error',
+  'error.loadFailed': 'Failed to load: {message}',
+  
+  // Success Messages
+  'success.restartInitiated': 'Restart initiated',
+  'success.saved': 'Saved successfully',
+  
+  // Slash Commands
+  'cmd.status.desc': 'Show all jobs, or /status <id> for a specific job',
+  'cmd.list.desc': 'List all jobs',
+  'cmd.cancel.desc': '/cancel <job-id> — Cancel a running job',
+  'cmd.undo.desc': 'Undo last action',
+  'cmd.redo.desc': 'Redo undone action',
+  'cmd.compact.desc': 'Compact context window',
+  'cmd.clear.desc': 'Clear conversation and start fresh',
+  'cmd.interrupt.desc': 'Stop current operation',
+  'cmd.heartbeat.desc': 'Trigger manual heartbeat check',
+  'cmd.summarize.desc': 'Summarize current conversation',
+  'cmd.suggest.desc': 'Suggest next actions',
+  'cmd.help.desc': 'Show help',
+  'cmd.version.desc': 'Show version info',
+  'cmd.tools.desc': 'List available tools',
+  'cmd.skills.desc': 'List installed skills',
+  'cmd.model.desc': 'Show or switch LLM model',
+  'cmd.threadNew.desc': 'Create new conversation thread',
+  
+  // Language Switcher
+  'language.title': 'Language',
+  'language.en': 'English',
+  'language.zhCN': '简体中文',
+  'language.switch': 'Switch Language',
+  
+  // Tool Activity
+  'tool.thinking': 'Thinking...',
+  'tool.completed': 'Completed',
+  'tool.failed': 'Failed',
+  'tool.running': 'Running',
+  'tool.used': '{count} tool(s) used',
+  'tool.requiresApproval': 'Tool requires approval',
+  
+  // Time
+  'time.justNow': 'just now',
+  'time.minutesAgo': '{count} minutes ago',
+  'time.hoursAgo': '{count} hours ago',
+  'time.daysAgo': '{count} days ago',
+  
+  // TEE
+  'tee.loadingReport': 'Loading attestation report...',
+  'tee.loadFailed': 'Could not load attestation report',
+  
+  // Common
+  'common.loading': 'Loading...',
+  'common.noData': 'No data',
+  'common.search': 'Search',
+  'common.add': 'Add',
+  'common.remove': 'Remove',
+  'common.install': 'Install',
+  'common.activate': 'Activate',
+  'common.deactivate': 'Deactivate',
+  'common.configure': 'Configure',
+  'common.save': 'Save',
+  'common.cancel': 'Cancel',
+  'common.confirm': 'Confirm',
+  'common.close': 'Close',
+  'common.edit': 'Edit',
+  'common.delete': 'Delete',
+  'common.refresh': 'Refresh',
+  'common.searchPlaceholder': 'Search...',
+  'common.name': 'Name',
+  'common.description': 'Description',
+  'common.status': 'Status',
+  'common.actions': 'Actions',
+  'common.version': 'Version',
+  'common.owner': 'Owner',
+  'common.tags': 'Tags',
+  
+  // Extensions
+  'ext.active': 'Active',
+  'ext.remove': 'Remove',
+  'ext.install': 'Install',
+  'ext.installing': 'Installing...',
+  'ext.installed': 'Installed',
+  'ext.reconfigure': 'Reconfigure',
+  'ext.configure': 'Configure',
+  'ext.confirmRemove': 'Remove extension "{name}"?',
+  'ext.removeFailed': 'Remove failed: {message}',
+  'ext.removed': 'Removed {name}',
+  'ext.installFailed': 'Install failed: {message}',
+  
+  // Skills
+  'skills.confirmRemove': 'Remove skill "{name}"?',
+  'skills.removeFailed': 'Remove failed: {message}',
+  'skills.removed': 'Removed skill "{name}"',
+  'skills.installed': 'Installed Skills',
+  'skills.noInstalled': 'No skills installed',
+  'skills.loading': 'Loading skills...',
+  'skills.searchClawHub': 'Search ClawHub',
+  'skills.remove': 'Remove',
+  'skills.activatesOn': 'Activates on',
+  'skills.searching': 'Searching...',
+  'skills.registryError': 'Catalog error: {message}',
+  
+  // MCP Servers
+  'mcp.noServers': 'No MCP servers available',
+  'mcp.addCustom': 'Add Custom MCP Server',
+  
+  // Configure
+  'config.title': 'Configure {name}',
+  'config.optional': ' (optional)',
+  'config.alreadySet': '(already set — leave empty to keep)',
+  'config.alreadyConfigured': 'Already configured',
+  'config.autoGenerate': 'Auto-generated if empty',
+  'config.save': 'Save',
+  'config.cancel': 'Cancel',
+});
