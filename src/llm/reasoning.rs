@@ -1492,50 +1492,83 @@ const TOOL_TAG_PATTERNS: &[&str] = &[
     "<|tool_calls|>",
 ];
 
-/// Truncate text at the first tool-call XML tag, preserving content before it.
+/// Truncate text at the first **unclosed** tool-call XML tag, preserving content
+/// before it.
 ///
 /// Local models (Qwen3, DeepSeek, etc.) often emit `<tool_call>` XML in text
 /// responses even when no tools are available. The downstream `clean_response()`
 /// → `strip_xml_tag()` pipeline discards everything from an unclosed opening
 /// tag onward, which can leave an empty string and trigger the fallback message.
 ///
-/// This function truncates at the first tool tag BEFORE `clean_response()` runs,
-/// so the useful text before the tag is preserved. Tags inside markdown code
-/// blocks (fenced or indented) are ignored. See issue #789.
+/// This function truncates at the first *unclosed* tool tag BEFORE
+/// `clean_response()` runs, so the useful text before the tag is preserved.
+/// Properly closed tags (e.g. `<tool_call>...</tool_call>`) are left intact for
+/// `clean_response()` to strip normally. Tags inside fenced markdown code blocks
+/// or inline code spans are ignored. See issue #789.
 fn truncate_at_tool_tags(text: &str) -> String {
     let code_regions = find_code_regions(text);
-    // Use a lowercased copy for case-insensitive matching (models may emit
-    // <Tool_Call>, <TOOL_CALL>, etc.) while preserving original byte offsets.
-    let lower = text.to_lowercase();
-    let first_pos = TOOL_TAG_PATTERNS
+    // Use ASCII-only lowercasing so byte offsets stay valid for the original
+    // string. Full `to_lowercase()` can change byte lengths for non-ASCII
+    // chars (e.g. the Kelvin sign), making positions unreliable.
+    let lower = text.to_ascii_lowercase();
+    let first_unclosed = TOOL_TAG_PATTERNS
         .iter()
         .filter_map(|p| {
-            // Find first occurrence outside a code block
             let mut search_from = 0;
             loop {
                 match lower[search_from..].find(p) {
                     Some(offset) => {
                         let pos = search_from + offset;
-                        if !is_inside_code(pos, &code_regions) {
-                            return Some(pos);
+                        if is_inside_code(pos, &code_regions) {
+                            search_from = pos + 1;
+                            continue;
                         }
-                        search_from = pos + 1;
+                        // Check if this tag has a matching closing tag after it.
+                        // If so, clean_response() can handle it — skip to next.
+                        let after_open = pos + p.len();
+                        if closing_tag_for(p)
+                            .is_some_and(|close| lower[after_open..].contains(close.as_str()))
+                        {
+                            search_from = after_open;
+                            continue;
+                        }
+                        // Unclosed tag — truncate here
+                        return Some(pos);
                     }
                     None => return None,
                 }
             }
         })
         .min();
-    match first_pos {
+    match first_unclosed {
         Some(pos) => {
             tracing::debug!(
                 original_len = text.len(),
                 truncated_at = pos,
-                "Truncated response at tool-call XML tag (issue #789)"
+                "Truncated response at unclosed tool-call XML tag (issue #789)"
             );
             text[..pos].to_string()
         }
         None => text.to_string(),
+    }
+}
+
+/// Derive the closing tag for a tool-call opening pattern.
+///
+/// Examples: `<tool_call>` → `</tool_call>`, `<|tool_call|>` → `<|/tool_call|>`.
+fn closing_tag_for(open_pattern: &str) -> Option<String> {
+    if let Some(name) = open_pattern
+        .strip_prefix("<|")
+        .and_then(|s| s.strip_suffix("|>"))
+    {
+        // Pipe-delimited: <|tool_call|> → <|/tool_call|>
+        Some(format!("<|/{name}|>"))
+    } else if let Some(rest) = open_pattern.strip_prefix('<') {
+        // Standard XML: <tool_call> or <tool_call  → </tool_call>
+        let name = rest.trim_end_matches('>').trim();
+        Some(format!("</{name}>"))
+    } else {
+        None
     }
 }
 
@@ -2543,9 +2576,11 @@ That's my plan."#;
     }
 
     #[test]
-    fn test_truncate_picks_earliest_tag() {
+    fn test_truncate_picks_earliest_unclosed_tag() {
+        // <function_call>...</function_call> is closed — skipped.
+        // <tool_call>second is unclosed — truncated here.
         let input = "Text before <function_call>first</function_call> and <tool_call>second";
-        assert_eq!(truncate_at_tool_tags(input), "Text before ");
+        assert_eq!(truncate_at_tool_tags(input), "Text before <function_call>first</function_call> and ");
     }
 
     #[test]
@@ -2555,8 +2590,15 @@ That's my plan."#;
     }
 
     #[test]
-    fn test_truncate_tag_with_attributes() {
+    fn test_truncate_closed_tag_with_attributes_preserved() {
+        // Closed tag (even with attributes) is left for clean_response()
         let input = "Some text <tool_call id=\"123\">{\"name\": \"test\"}</tool_call>";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_unclosed_tag_with_attributes() {
+        let input = "Some text <tool_call id=\"123\">{\"name\": \"test\"}";
         assert_eq!(truncate_at_tool_tags(input), "Some text ");
     }
 
@@ -2611,10 +2653,14 @@ That's my plan."#;
     }
 
     #[test]
-    fn test_issue_789_closed_tool_tag_truncated_before_clean() {
+    fn test_issue_789_closed_tool_tag_preserved_for_clean_response() {
+        // Closed tags are left intact — clean_response() strips them normally,
+        // preserving any text after the tag.
         let model_output = "Info here.\n<tool_call>{\"name\": \"x\"}</tool_call>\nMore text.";
         let pre_truncated = truncate_at_tool_tags(model_output);
-        assert_eq!(pre_truncated, "Info here.\n");
+        assert_eq!(pre_truncated, model_output, "Closed tag should not be truncated");
+        let cleaned = clean_response(&pre_truncated);
+        assert_eq!(cleaned, "Info here.\n\nMore text.");
     }
 
     // ---- Issue #789: conditional system prompt tests ----
@@ -2719,14 +2765,27 @@ That's my plan."#;
     }
 
     #[test]
-    fn test_truncate_tool_calls_plural_tag() {
+    fn test_truncate_closed_tool_calls_plural_preserved() {
+        // Closed <tool_calls>...</tool_calls> left for clean_response()
         let input = "Answer.\n<tool_calls>[{\"name\": \"a\"}, {\"name\": \"b\"}]</tool_calls>";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_unclosed_tool_calls_plural() {
+        let input = "Answer.\n<tool_calls>[{\"name\": \"a\"}, {\"name\": \"b\"}]";
         assert_eq!(truncate_at_tool_tags(input), "Answer.\n");
     }
 
     #[test]
-    fn test_truncate_pipe_function_call_tag() {
+    fn test_truncate_closed_pipe_function_call_preserved() {
         let input = "Done!\n<|function_call|>{\"name\": \"x\"}<|/function_call|>";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_unclosed_pipe_function_call() {
+        let input = "Done!\n<|function_call|>{\"name\": \"x\"}";
         assert_eq!(truncate_at_tool_tags(input), "Done!\n");
     }
 
@@ -2868,8 +2927,24 @@ That's my plan."#;
     }
 
     #[test]
-    fn test_truncate_case_insensitive_function_call() {
+    fn test_truncate_unicode_before_case_insensitive_tag_no_panic() {
+        // Regression: to_lowercase() can change byte lengths for non-ASCII chars
+        // (e.g. Kelvin sign U+212A is 3 bytes, lowercases to 'k' which is 1 byte).
+        // Using to_ascii_lowercase() keeps byte offsets stable.
+        let input = "Ответ: 42\n<TOOL_CALL>{\"name\": \"x\"}";
+        assert_eq!(truncate_at_tool_tags(input), "Ответ: 42\n");
+    }
+
+    #[test]
+    fn test_truncate_case_insensitive_function_call_closed() {
+        // Closed tag (case-insensitive) preserved for clean_response()
         let input = "Done.\n<FUNCTION_CALL>{\"name\": \"y\"}</FUNCTION_CALL>";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_case_insensitive_function_call_unclosed() {
+        let input = "Done.\n<FUNCTION_CALL>{\"name\": \"y\"}";
         assert_eq!(truncate_at_tool_tags(input), "Done.\n");
     }
 
