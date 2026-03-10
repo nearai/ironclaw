@@ -342,7 +342,7 @@ impl RepairTask {
                         tracing::debug!(job = %job.job_id, status = "retry", "Stuck job repair needs retry: {}", message);
                     }
                     Ok(RepairResult::Failed { message }) => {
-                        tracing::warn!(job = %job.job_id, status = "failed", "Stuck job repair failed: {}", message);
+                        tracing::error!(job = %job.job_id, status = "failed", "Stuck job repair failed: {}", message);
                     }
                     Ok(RepairResult::ManualRequired { message }) => {
                         tracing::warn!(job = %job.job_id, status = "manual", "Stuck job repair requires manual intervention: {}", message);
