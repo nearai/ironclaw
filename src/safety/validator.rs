@@ -200,6 +200,7 @@ impl Validator {
         // Recursively check all string values in the JSON
         fn check_strings(
             value: &serde_json::Value,
+            path: &str,
             validator: &Validator,
             result: &mut ValidationResult,
         ) {
@@ -208,25 +209,31 @@ impl Validator {
                     let string_result = if s.is_empty() {
                         ValidationResult::ok()
                     } else {
-                        validator.validate_non_empty_input(s, "input")
+                        validator.validate_non_empty_input(s, path)
                     };
                     *result = std::mem::take(result).merge(string_result);
                 }
                 serde_json::Value::Array(arr) => {
-                    for item in arr {
-                        check_strings(item, validator, result);
+                    for (i, item) in arr.iter().enumerate() {
+                        let child_path = format!("{path}[{i}]");
+                        check_strings(item, &child_path, validator, result);
                     }
                 }
                 serde_json::Value::Object(obj) => {
-                    for (_, v) in obj {
-                        check_strings(v, validator, result);
+                    for (k, v) in obj {
+                        let child_path = if path.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{path}.{k}")
+                        };
+                        check_strings(v, &child_path, validator, result);
                     }
                 }
                 _ => {}
             }
         }
 
-        check_strings(params, self, &mut result);
+        check_strings(params, "", self, &mut result);
         result
     }
 }
@@ -366,5 +373,60 @@ mod tests {
                 .iter()
                 .any(|e| e.code == ValidationErrorCode::ForbiddenContent)
         );
+    }
+
+    #[test]
+    fn test_tool_params_still_warn_on_repetition() {
+        let validator = Validator::new();
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "content": format!("prefix{}suffix", "x".repeat(50))
+        }));
+
+        assert!(result.is_valid);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("repetition")),
+            "expected repetition warning for tool params, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_tool_params_still_warn_on_whitespace_ratio() {
+        let validator = Validator::new();
+        // >100 chars, >90% whitespace
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "content": format!("a{}b", " ".repeat(200))
+        }));
+
+        assert!(result.is_valid);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("whitespace")),
+            "expected whitespace warning for tool params, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_tool_params_error_field_contains_json_path() {
+        let validator = Validator::new().forbid_pattern("evil");
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "metadata": {
+                "tags": ["good", "evil"]
+            }
+        }));
+
+        assert!(!result.is_valid);
+        let error = result
+            .errors
+            .iter()
+            .find(|e| e.code == ValidationErrorCode::ForbiddenContent)
+            .expect("expected forbidden content error");
+        assert_eq!(error.field, "metadata.tags[1]");
     }
 }
