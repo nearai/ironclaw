@@ -3038,8 +3038,10 @@ mod tests {
     ) -> Arc<ExtensionManager> {
         let tool_registry = Arc::new(ToolRegistry::new());
         let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+        let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
         Arc::new(ExtensionManager::new(
             mcp_sm,
+            mcp_pm,
             secrets,
             tool_registry,
             None,

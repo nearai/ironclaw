@@ -251,6 +251,8 @@ impl Channel for RelayChannel {
                             "team_id": event.team_id(),
                             "channel_id": event.channel_id,
                             "sender_id": event.sender_id,
+                            "sender_name": event.display_name(),
+                            "event_type": event.event_type,
                             "thread_id": event.thread_id,
                             "provider": event.provider,
                         }));
@@ -518,6 +520,31 @@ mod tests {
         assert_eq!(ctx.get("sender"), Some(&"bob".to_string()));
         assert_eq!(ctx.get("sender_uuid"), Some(&"U123".to_string()));
         assert_eq!(ctx.get("platform"), Some(&"slack".to_string()));
+    }
+
+    #[test]
+    fn metadata_shape_includes_event_type_and_sender_name() {
+        // Regression: metadata JSON must include event_type and sender_name
+        // for downstream routing (DM vs channel) and conversation_context().
+        let metadata = serde_json::json!({
+            "team_id": "T123",
+            "channel_id": "C456",
+            "sender_id": "U789",
+            "sender_name": "alice",
+            "event_type": "direct_message",
+            "thread_id": null,
+            "provider": "slack",
+        });
+        // event_type must be present for DM-vs-channel routing
+        assert_eq!(
+            metadata.get("event_type").and_then(|v| v.as_str()),
+            Some("direct_message")
+        );
+        // sender_name must be present for conversation_context
+        assert_eq!(
+            metadata.get("sender_name").and_then(|v| v.as_str()),
+            Some("alice")
+        );
     }
 
     #[test]

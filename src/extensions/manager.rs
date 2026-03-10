@@ -115,6 +115,9 @@ pub struct ExtensionManager {
     /// Gateway auth token for authenticating with the platform token exchange proxy.
     /// Read once at construction from `GATEWAY_AUTH_TOKEN` env var.
     gateway_token: Option<String>,
+    /// Relay config captured at startup. Used by `auth_channel_relay` and
+    /// `activate_channel_relay` instead of re-reading env vars.
+    relay_config: Option<crate::config::RelayConfig>,
 }
 
 impl ExtensionManager {
@@ -162,7 +165,17 @@ impl ExtensionManager {
             sse_sender: RwLock::new(None),
             pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
             gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
+            relay_config: crate::config::RelayConfig::from_env(),
         }
+    }
+
+    /// Get the relay config stored at startup.
+    fn relay_config(&self) -> Result<&crate::config::RelayConfig, ExtensionError> {
+        self.relay_config.as_ref().ok_or_else(|| {
+            ExtensionError::Config(
+                "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
+            )
+        })
     }
 
     /// Configure the channel runtime infrastructure for hot-activating WASM channels.
@@ -3146,21 +3159,17 @@ impl ExtensionManager {
             return Ok(AuthResult::authenticated(name, ExtensionKind::ChannelRelay));
         }
 
-        // Get the relay config
-        let relay_config = crate::config::RelayConfig::from_env().ok_or_else(|| {
-            ExtensionError::Config(
-                "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
-            )
-        })?;
+        // Use relay config captured at startup
+        let relay_config = self.relay_config()?;
 
-        let instance_id = self.relay_instance_id(&relay_config);
+        let instance_id = self.relay_instance_id(relay_config);
         let user_id_uuid = std::env::var("IRONCLAW_USER_ID").unwrap_or_else(|_| {
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, self.user_id.as_bytes()).to_string()
         });
 
         let client = crate::channels::relay::RelayClient::new(
-            relay_config.url,
-            relay_config.api_key,
+            relay_config.url.clone(),
+            relay_config.api_key.clone(),
             relay_config.request_timeout_secs,
         )
         .map_err(|e| ExtensionError::Config(e.to_string()))?;
@@ -3234,17 +3243,13 @@ impl ExtensionManager {
             String::new()
         };
 
-        // Get relay config
-        let relay_config = crate::config::RelayConfig::from_env().ok_or_else(|| {
-            ExtensionError::Config(
-                "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
-            )
-        })?;
+        // Use relay config captured at startup
+        let relay_config = self.relay_config()?;
 
-        let instance_id = self.relay_instance_id(&relay_config);
+        let instance_id = self.relay_instance_id(relay_config);
 
         let client = crate::channels::relay::RelayClient::new(
-            relay_config.url,
+            relay_config.url.clone(),
             relay_config.api_key.clone(),
             relay_config.request_timeout_secs,
         )
@@ -3306,6 +3311,10 @@ impl ExtensionManager {
     }
 
     /// Determine what kind of installed extension this is.
+    ///
+    /// This is a read-only check — it never modifies `installed_relay_extensions`.
+    /// To mark a relay extension as installed, use `activate_stored_relay()` or
+    /// the explicit install flow.
     async fn determine_installed_kind(&self, name: &str) -> Result<ExtensionKind, ExtensionError> {
         // Check MCP servers first
         if self.get_mcp_server(name).await.is_ok() {
@@ -3335,28 +3344,7 @@ impl ExtensionManager {
             .await
             .unwrap_or(false)
         {
-            // Re-populate the installed set
-            self.installed_relay_extensions
-                .write()
-                .await
-                .insert(name.to_string());
             return Ok(ExtensionKind::ChannelRelay);
-        }
-        // Check if there's a ChannelRelay registry entry with this name
-        if let Some(entry) = self
-            .registry
-            .get_with_kind(name, Some(ExtensionKind::ChannelRelay))
-            .await
-        {
-            // ChannelRelay entries from the registry are always "installable"
-            // (no artifact needed). Mark as installed if config is available.
-            if matches!(entry.source, ExtensionSource::ChannelRelay { .. }) {
-                self.installed_relay_extensions
-                    .write()
-                    .await
-                    .insert(name.to_string());
-                return Ok(ExtensionKind::ChannelRelay);
-            }
         }
 
         Err(ExtensionError::NotInstalled(format!(
@@ -4441,5 +4429,30 @@ mod tests {
 
         unsafe { std::env::remove_var("_TOKEN") };
         unsafe { std::env::remove_var("ICTEST6_TOKEN") };
+    }
+
+    #[tokio::test]
+    async fn test_determine_installed_kind_does_not_auto_install_relay() {
+        // Regression: determine_installed_kind used to auto-insert into
+        // installed_relay_extensions when a ChannelRelay registry entry existed,
+        // even though the user never installed it. It should be read-only.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        // The manager has no relay extensions installed
+        assert!(
+            mgr.installed_relay_extensions.read().await.is_empty(),
+            "Should start with no installed relay extensions"
+        );
+
+        // Calling determine_installed_kind for a non-installed name returns NotInstalled
+        let result = mgr.determine_installed_kind("slack-relay").await;
+        assert!(result.is_err(), "Should return NotInstalled");
+
+        // Crucially: installed_relay_extensions must still be empty
+        assert!(
+            mgr.installed_relay_extensions.read().await.is_empty(),
+            "determine_installed_kind must not modify installed_relay_extensions"
+        );
     }
 }

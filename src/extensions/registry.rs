@@ -224,7 +224,15 @@ fn score_entry(entry: &RegistryEntry, tokens: &[String]) -> u32 {
 }
 
 /// Well-known extensions that ship with ironclaw.
+///
+/// If `relay_url` is provided, a channel-relay Slack entry is included in the list.
+/// Pass `None` when the relay is not configured.
 pub fn builtin_entries() -> Vec<RegistryEntry> {
+    builtin_entries_with_relay(std::env::var("CHANNEL_RELAY_URL").ok())
+}
+
+/// Well-known extensions, with an optional relay URL for the channel-relay entry.
+pub fn builtin_entries_with_relay(relay_url: Option<String>) -> Vec<RegistryEntry> {
     let mut entries = vec![
         // -- MCP Servers --
         RegistryEntry {
@@ -418,7 +426,7 @@ pub fn builtin_entries() -> Vec<RegistryEntry> {
     ];
 
     // Conditionally add channel-relay entries when relay URL is configured
-    if let Ok(relay_url) = std::env::var("CHANNEL_RELAY_URL") {
+    if let Some(relay_url) = relay_url {
         entries.push(RegistryEntry {
             name: crate::channels::relay::DEFAULT_RELAY_NAME.to_string(),
             display_name: "Slack".to_string(),
@@ -956,5 +964,31 @@ mod tests {
         assert!(entry.is_some());
         // The first catalog entry added is the channel.
         assert_eq!(entry.unwrap().kind, ExtensionKind::WasmChannel);
+    }
+
+    #[test]
+    fn test_builtin_entries_with_relay_none_excludes_relay() {
+        let entries = super::builtin_entries_with_relay(None);
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.kind == ExtensionKind::ChannelRelay),
+            "No ChannelRelay entry when relay URL is None"
+        );
+    }
+
+    #[test]
+    fn test_builtin_entries_with_relay_some_includes_relay() {
+        let entries =
+            super::builtin_entries_with_relay(Some("http://relay.example.com".to_string()));
+        let relay = entries
+            .iter()
+            .find(|e| e.kind == ExtensionKind::ChannelRelay);
+        assert!(relay.is_some(), "ChannelRelay entry should be present");
+        if let ExtensionSource::ChannelRelay { relay_url } = &relay.unwrap().source {
+            assert_eq!(relay_url, "http://relay.example.com");
+        } else {
+            panic!("Expected ChannelRelay source");
+        }
     }
 }
