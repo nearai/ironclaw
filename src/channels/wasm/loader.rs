@@ -184,22 +184,32 @@ impl WasmChannelLoader {
     /// └── telegram.capabilities.json
     /// ```
     pub async fn load_from_dir(&self, dir: &Path) -> Result<LoadResults, WasmChannelError> {
-        if !dir.exists() {
-            // Directory not created yet (e.g. quick setup skips channels).
-            return Ok(LoadResults::default());
-        }
-        if !dir.is_dir() {
-            return Err(WasmChannelError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotADirectory,
-                format!("{} is not a directory", dir.display()),
-            )));
+        match fs::metadata(dir).await {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(WasmChannelError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("{} is not a directory", dir.display()),
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmChannelError::Io(e)),
         }
 
         let mut results = LoadResults::default();
 
         // Collect all .wasm entries first, then load in parallel
         let mut channel_entries = Vec::new();
-        let mut entries = fs::read_dir(dir).await?;
+        // Handle TOCTOU: if read_dir fails with NotFound, treat as empty
+        let mut entries = match fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmChannelError::Io(e)),
+        };
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();

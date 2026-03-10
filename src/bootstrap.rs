@@ -219,7 +219,11 @@ pub fn upsert_bootstrap_vars_to(
     let keys_being_written: std::collections::HashSet<&str> =
         vars.iter().map(|(k, _)| *k).collect();
 
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let existing = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
 
     let mut result = String::new();
     for line in existing.lines() {

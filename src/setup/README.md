@@ -56,7 +56,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 Quick mode (`--quick` flag, or auto-triggered on first run) provides a
 near-instant onboarding experience by auto-defaulting everything except
-the LLM provider choice.
+the LLM provider and model selection.
 
 ```
 auto_setup_database()    → libsql at ~/.ironclaw/ironclaw.db (zero prompts)
@@ -67,10 +67,12 @@ Step 2/2: Model Selection     ← only interactive step
    save_and_summarize()      → includes tip to run `ironclaw onboard`
 ```
 
-**`auto_setup_database()`:** Uses existing env vars if set. Otherwise
-defaults to libsql at `~/.ironclaw/ironclaw.db`, creates the database,
-and runs migrations silently. Falls back to interactive mode only when
-just the postgres feature is compiled (can't auto-default postgres).
+**`auto_setup_database()`:** Uses existing env vars if set. If
+`DATABASE_URL` is already configured, it may prompt to confirm using the
+existing URL. Otherwise defaults to libsql at `~/.ironclaw/ironclaw.db`,
+creates the database, and runs migrations silently. Falls back to
+interactive mode when just the postgres feature is compiled (can't
+auto-default postgres).
 
 **`auto_setup_security()`:** Checks for existing `SECRETS_MASTER_KEY`
 env var or OS keychain key. If neither exists, generates a new key and

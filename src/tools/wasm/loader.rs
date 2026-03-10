@@ -193,22 +193,31 @@ impl WasmToolLoader {
     ///
     /// Tools without a capabilities file get no permissions (default deny).
     pub async fn load_from_dir(&self, dir: &Path) -> Result<LoadResults, WasmLoadError> {
-        if !dir.exists() {
-            // Directory not created yet (e.g. quick setup skips extensions).
-            return Ok(LoadResults::default());
+        match fs::metadata(dir).await {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(WasmLoadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("{} is not a directory", dir.display()),
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmLoadError::Io(e)),
         }
-        if !dir.is_dir() {
-            return Err(WasmLoadError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotADirectory,
-                format!("{} is not a directory", dir.display()),
-            )));
-        }
+
+        // Handle TOCTOU: if read_dir fails with NotFound, treat as empty
+        let mut entries = match fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmLoadError::Io(e)),
+        };
 
         let mut results = LoadResults::default();
-
-        // Collect all .wasm entries first, then load in parallel
         let mut tool_entries = Vec::new();
-        let mut entries = fs::read_dir(dir).await?;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();

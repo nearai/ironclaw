@@ -681,6 +681,9 @@ impl SetupWizard {
             use refinery::embed_migrations;
             embed_migrations!("migrations");
 
+            if !self.config.quick {
+                print_info("Running migrations...");
+            }
             tracing::debug!("Running PostgreSQL migrations...");
 
             let mut client = pool
@@ -693,6 +696,9 @@ impl SetupWizard {
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
+            if !self.config.quick {
+                print_success("Migrations applied");
+            }
             tracing::debug!("PostgreSQL migrations applied");
         }
         Ok(())
@@ -704,6 +710,9 @@ impl SetupWizard {
         if let Some(ref backend) = self.db_backend {
             use crate::db::Database;
 
+            if !self.config.quick {
+                print_info("Running migrations...");
+            }
             tracing::debug!("Running libSQL migrations...");
 
             backend
@@ -711,6 +720,9 @@ impl SetupWizard {
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
+            if !self.config.quick {
+                print_success("Migrations applied");
+            }
             tracing::debug!("libSQL migrations applied");
         }
         Ok(())
@@ -3627,14 +3639,11 @@ async fn install_selected_bundled_channels(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::Mutex;
 
     use tempfile::tempdir;
 
     use super::*;
-
-    /// Mutex to serialize tests that mutate env vars (NEARAI_API_KEY, etc.).
-    static NEARAI_ENV_MUTEX: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::ENV_MUTEX;
 
     #[test]
     fn test_wizard_creation() {
@@ -4030,7 +4039,7 @@ mod tests {
     fn test_build_nearai_model_fetch_config_picks_up_api_key_env() {
         use secrecy::ExposeSecret;
 
-        let _lock = NEARAI_ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap();
         let _guard = EnvGuard::set("NEARAI_API_KEY", "test-cloud-api-key-12345");
         let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
 
@@ -4054,7 +4063,7 @@ mod tests {
     /// the config should have `api_key: None` (session token path).
     #[test]
     fn test_build_nearai_model_fetch_config_none_when_no_api_key() {
-        let _lock = NEARAI_ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap();
         let _guard = EnvGuard::clear("NEARAI_API_KEY");
         let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
 
@@ -4073,7 +4082,7 @@ mod tests {
     /// Regression test for #799: empty NEARAI_API_KEY should be treated as absent.
     #[test]
     fn test_build_nearai_model_fetch_config_none_when_empty_api_key() {
-        let _lock = NEARAI_ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap();
         let _guard = EnvGuard::set("NEARAI_API_KEY", "");
 
         let config = build_nearai_model_fetch_config();
