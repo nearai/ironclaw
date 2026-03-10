@@ -15,7 +15,7 @@ use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
+    ApplyPatchTool, CancelJobTool, ComposioTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
     MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
     ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
@@ -34,6 +34,7 @@ use crate::workspace::Workspace;
 /// This prevents a dynamically built or installed tool from replacing a
 /// security-critical built-in like "shell" or "memory_write".
 const PROTECTED_TOOL_NAMES: &[&str] = &[
+    "composio",
     "echo",
     "time",
     "json",
@@ -524,6 +525,15 @@ impl ToolRegistry {
             base_dir,
         )));
         tracing::debug!("Registered 1 vision tool (analyze)");
+    }
+
+    /// Register the Composio tool for third-party app integrations.
+    ///
+    /// Enabled when `COMPOSIO_API_KEY` env var is set. Provides OAuth connection
+    /// and action execution for 250+ apps via Composio's REST API.
+    pub fn register_composio_tools(&self, api_key: String, entity_id: String) {
+        self.register_sync(Arc::new(ComposioTool::new(api_key, entity_id)));
+        tracing::info!("Registered composio tool");
     }
 
     /// Register the software builder tool.
