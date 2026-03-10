@@ -5,157 +5,10 @@ use secrecy::SecretString;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{optional_env, parse_optional_env};
 use crate::error::ConfigError;
+use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
-
-/// Sentinel value used as `api_key` when only an OAuth token is present.
-///
-/// When we only have an OAuth token the provider factory in `llm/mod.rs`
-/// checks for this value and routes to `AnthropicOAuthProvider`, so this
-/// placeholder is never sent over the wire.
-pub const OAUTH_PLACEHOLDER: &str = "oauth-placeholder";
-
-/// Prompt cache retention policy for Anthropic.
-///
-/// Controls Anthropic's automatic prompt caching via a top-level
-/// `cache_control` field injected through rig-core's `additional_params`.
-/// - `None` — caching disabled, no `cache_control` injected.
-/// - `Short` — 5-minute TTL (default), `{"type": "ephemeral"}`, 1.25× write surcharge.
-/// - `Long` — 1-hour TTL, `{"type": "ephemeral", "ttl": "1h"}`, 2× write surcharge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CacheRetention {
-    /// No prompt caching.
-    None,
-    /// 5-minute TTL (default). Write cost: 1.25× base input.
-    #[default]
-    Short,
-    /// 1-hour TTL. Write cost: 2× base input.
-    Long,
-}
-
-impl std::str::FromStr for CacheRetention {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "none" | "off" | "disabled" => Ok(Self::None),
-            "short" | "5m" | "ephemeral" => Ok(Self::Short),
-            "long" | "1h" => Ok(Self::Long),
-            _ => Err(format!(
-                "invalid cache retention '{}', expected one of: none, short, long",
-                s
-            )),
-        }
-    }
-}
-
-impl std::fmt::Display for CacheRetention {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::None => write!(f, "none"),
-            Self::Short => write!(f, "short"),
-            Self::Long => write!(f, "long"),
-        }
-    }
-}
-
-/// Resolved configuration for a registry-based provider.
-///
-/// This single struct replaces what used to be five separate config types
-/// (`OpenAiDirectConfig`, `AnthropicDirectConfig`, `OllamaConfig`,
-/// `OpenAiCompatibleConfig`, `TinfoilConfig`). The `protocol` field
-/// determines which rig-core client constructor to use.
-#[derive(Debug, Clone)]
-pub struct RegistryProviderConfig {
-    /// Which API protocol to use (determines the rig-core client).
-    pub protocol: ProviderProtocol,
-    /// Provider identifier (e.g., "groq", "openai", "tinfoil").
-    pub provider_id: String,
-    /// API key (optional for some providers like Ollama).
-    /// For Anthropic OAuth, this is set to `OAUTH_PLACEHOLDER`.
-    pub api_key: Option<SecretString>,
-    /// Base URL for the API endpoint.
-    pub base_url: String,
-    /// Model identifier.
-    pub model: String,
-    /// Extra HTTP headers injected into every request.
-    pub extra_headers: Vec<(String, String)>,
-    /// OAuth token for providers that support Bearer auth (e.g. Anthropic via `claude login`).
-    /// When set, the provider factory routes to the OAuth-specific provider implementation.
-    pub oauth_token: Option<SecretString>,
-}
-
-/// Configuration for AWS Bedrock (native Converse API).
-#[derive(Debug, Clone)]
-pub struct BedrockConfig {
-    /// AWS region (e.g. "us-east-1").
-    pub region: String,
-    /// Bedrock model ID (e.g. "anthropic.claude-opus-4-6-v1").
-    pub model: String,
-    /// Cross-region inference prefix: "us", "eu", "apac", "global", or None.
-    pub cross_region: Option<String>,
-    /// AWS named profile (for SSO / assume-role workflows).
-    pub profile: Option<String>,
-}
-
-/// LLM provider configuration.
-///
-/// NearAI remains the default backend with its own config struct (session auth).
-/// All other providers are resolved through the provider registry, producing
-/// a generic `RegistryProviderConfig`.
-#[derive(Debug, Clone)]
-pub struct LlmConfig {
-    /// Backend identifier (e.g., "nearai", "openai", "groq", "tinfoil").
-    pub backend: String,
-    /// Session manager configuration (auth URL, token persistence path).
-    /// Used by the NearAI provider for OAuth/session-token auth.
-    pub session: SessionConfig,
-    /// NEAR AI config (always populated, also used for embeddings).
-    pub nearai: NearAiConfig,
-    /// Resolved provider config for registry-based providers.
-    /// `None` when backend is "nearai" or "bedrock".
-    pub provider: Option<RegistryProviderConfig>,
-    /// AWS Bedrock config (populated when backend=bedrock, requires --features bedrock).
-    pub bedrock: Option<BedrockConfig>,
-    /// HTTP request timeout in seconds for LLM API calls.
-    /// Default: 120. Increase for local LLMs (Ollama, vLLM, LM Studio) that
-    /// need more time for prompt evaluation on consumer hardware.
-    pub request_timeout_secs: u64,
-}
-
-/// NEAR AI configuration.
-#[derive(Debug, Clone)]
-pub struct NearAiConfig {
-    /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
-    pub model: String,
-    /// Cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
-    pub cheap_model: Option<String>,
-    /// Base URL for the NEAR AI API.
-    pub base_url: String,
-    /// API key for NEAR AI Cloud.
-    pub api_key: Option<SecretString>,
-    /// Optional fallback model for failover.
-    pub fallback_model: Option<String>,
-    /// Maximum number of retries for transient errors (default: 3).
-    pub max_retries: u32,
-    /// Consecutive failures before circuit breaker opens. None = disabled.
-    pub circuit_breaker_threshold: Option<u32>,
-    /// Seconds the circuit stays open before probing (default: 30).
-    pub circuit_breaker_recovery_secs: u64,
-    /// Enable in-memory response caching. Default: false.
-    pub response_cache_enabled: bool,
-    /// TTL in seconds for cached responses (default: 3600).
-    pub response_cache_ttl_secs: u64,
-    /// Max cached responses before LRU eviction (default: 1000).
-    pub response_cache_max_entries: usize,
-    /// Cooldown duration in seconds for failover (default: 300).
-    pub failover_cooldown_secs: u64,
-    /// Consecutive failures before failover cooldown (default: 3).
-    pub failover_cooldown_threshold: u32,
-    /// Enable cascade mode for smart routing. Default: true.
-    pub smart_routing_cascade: bool,
-}
 
 impl LlmConfig {
     /// Create a test-friendly config without reading env vars.
@@ -356,6 +209,7 @@ impl LlmConfig {
             extra_headers_env,
             api_key_required,
             base_url_required,
+            unsupported_params,
         ) = if let Some(def) = def {
             (
                 def.id.as_str(),
@@ -368,6 +222,7 @@ impl LlmConfig {
                 def.extra_headers_env.as_deref(),
                 def.api_key_required,
                 def.base_url_required,
+                def.unsupported_params.clone(),
             )
         } else {
             // Absolute fallback: treat as generic openai_completions
@@ -382,6 +237,7 @@ impl LlmConfig {
                 Some("LLM_EXTRA_HEADERS"),
                 false,
                 true,
+                Vec::new(),
             )
         };
 
@@ -459,6 +315,23 @@ impl LlmConfig {
             api_key
         };
 
+        // Resolve Anthropic prompt cache retention from env (default: Short).
+        let cache_retention: CacheRetention = if canonical_id == "anthropic" {
+            optional_env("ANTHROPIC_CACHE_RETENTION")?
+                .and_then(|val| match val.parse::<CacheRetention>() {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Invalid ANTHROPIC_CACHE_RETENTION: {e}; defaulting to short"
+                        );
+                        None
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            CacheRetention::default()
+        };
+
         Ok(RegistryProviderConfig {
             protocol,
             provider_id: canonical_id.to_string(),
@@ -467,6 +340,8 @@ impl LlmConfig {
             model,
             extra_headers,
             oauth_token,
+            cache_retention,
+            unsupported_params,
         })
     }
 }
@@ -505,7 +380,7 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
 }
 
 /// Get the default session file path (~/.ironclaw/session.json).
-fn default_session_path() -> PathBuf {
+pub fn default_session_path() -> PathBuf {
     ironclaw_base_dir().join("session.json")
 }
 
@@ -514,6 +389,7 @@ mod tests {
     use super::*;
     use crate::config::helpers::ENV_MUTEX;
     use crate::settings::Settings;
+    use crate::testing::credentials::*;
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
@@ -753,6 +629,12 @@ mod tests {
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.base_url, "https://inference.tinfoil.sh/v1");
         assert_eq!(provider.model, "kimi-k2-5");
+        assert!(
+            provider
+                .unsupported_params
+                .contains(&"temperature".to_string()),
+            "tinfoil should propagate unsupported_params from registry"
+        );
     }
 
     #[test]
@@ -776,7 +658,7 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_BACKEND", "open_ai");
-            std::env::set_var("OPENAI_API_KEY", "test-key");
+            std::env::set_var("OPENAI_API_KEY", TEST_API_KEY);
         }
 
         let settings = Settings::default();
@@ -910,7 +792,7 @@ mod tests {
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
-            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-test-token");
+            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", TEST_ANTHROPIC_OAUTH_TOKEN);
         }
 
         let settings = Settings {
@@ -934,7 +816,7 @@ mod tests {
         );
         assert_eq!(
             provider.oauth_token.as_ref().unwrap().expose_secret(),
-            "sk-ant-oat01-test-token"
+            TEST_ANTHROPIC_OAUTH_TOKEN
         );
 
         clear_anthropic_env();
@@ -948,8 +830,8 @@ mod tests {
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
-            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-real-key");
-            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-test-token");
+            std::env::set_var("ANTHROPIC_API_KEY", TEST_ANTHROPIC_API_KEY);
+            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", TEST_ANTHROPIC_OAUTH_TOKEN);
         }
 
         let settings = Settings {
@@ -964,7 +846,7 @@ mod tests {
                 .api_key
                 .as_ref()
                 .map(|k| k.expose_secret().to_string()),
-            Some("sk-ant-real-key".to_string()),
+            Some(TEST_ANTHROPIC_API_KEY.to_string()),
             "real API key should take priority over OAuth placeholder"
         );
         assert!(
@@ -981,7 +863,7 @@ mod tests {
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
-            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-test-token");
+            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", TEST_ANTHROPIC_OAUTH_TOKEN);
         }
 
         let settings = Settings {

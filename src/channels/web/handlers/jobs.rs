@@ -276,11 +276,25 @@ pub async fn jobs_cancel_handler(
         })));
     }
 
-    // Fall back to agent job cancellation via DB status update.
+    // Fall back to agent job cancellation: stop the worker via the scheduler
+    // (which updates the in-memory ContextManager AND aborts the task handle),
+    // then persist the status to the DB as a fallback.
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_job(job_id).await
     {
         if job.state.is_active() {
+            // Try to stop via scheduler (aborts the worker task + updates
+            // in-memory ContextManager). This is best-effort — the job may
+            // not be in the scheduler map if it already finished.
+            if let Some(ref slot) = state.scheduler
+                && let Some(ref scheduler) = *slot.read().await
+            {
+                let _ = scheduler.stop(job_id).await;
+            }
+
+            // Always persist cancellation to the DB so the state is
+            // consistent even if the scheduler wasn't available or the
+            // job wasn't in its in-memory map.
             store
                 .update_job_status(
                     job_id,

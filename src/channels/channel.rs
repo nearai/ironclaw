@@ -344,9 +344,28 @@ pub trait Channel: Send + Sync {
     }
 }
 
+/// Trait for channels that support hot-secret-swapping during SIGHUP reload.
+///
+/// This allows channels to update authentication credentials without restarting,
+/// enabling zero-downtime configuration reloads. Channels that don't support
+/// secret updates can simply not implement this trait.
+#[async_trait]
+pub trait ChannelSecretUpdater: Send + Sync {
+    /// Update the secret for this channel.
+    ///
+    /// Called during SIGHUP configuration reload. Implementation should:
+    /// - Apply the new secret atomically
+    /// - Not fail the entire reload if secret update fails
+    /// - Log appropriate errors/info messages
+    ///
+    /// The secret is optional (may be None if secret is no longer configured).
+    async fn update_secret(&self, new_secret: Option<secrecy::SecretString>);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::TEST_REDACT_SECRET_123;
 
     /// Stub tool that marks `"value"` as sensitive.
     struct SecretTool;
@@ -376,7 +395,7 @@ mod tests {
 
     #[test]
     fn tool_completed_redacts_sensitive_params_on_failure() {
-        let params = serde_json::json!({"name": "api_key", "value": "sk-secret-123"});
+        let params = serde_json::json!({"name": "api_key", "value": TEST_REDACT_SECRET_123});
         let err: Result<String, crate::error::Error> =
             Err(crate::error::ToolError::ExecutionFailed {
                 name: "secret_save".into(),
@@ -411,7 +430,7 @@ mod tests {
                 param_str
             );
             assert!(
-                !param_str.contains("sk-secret-123"),
+                !param_str.contains(TEST_REDACT_SECRET_123),
                 "raw secret should not appear: {}",
                 param_str
             );

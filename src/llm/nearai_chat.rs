@@ -16,8 +16,8 @@ use rust_decimal::prelude::MathematicalOps;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
-use crate::config::NearAiConfig;
-use crate::error::LlmError;
+use crate::llm::config::NearAiConfig;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -110,7 +110,7 @@ impl NearAiChatProvider {
             handle.spawn(async move {
                 match fetch_pricing(&client, &base_url, api_key.as_ref(), &session).await {
                     Ok(map) if !map.is_empty() => {
-                        tracing::info!("Loaded NEAR AI pricing for {} model(s)", map.len());
+                        tracing::debug!("Loaded NEAR AI pricing for {} model(s)", map.len());
                         match pricing.write() {
                             Ok(mut guard) => *guard = map,
                             Err(poisoned) => *poisoned.into_inner() = map,

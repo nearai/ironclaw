@@ -7,8 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::bootstrap::ironclaw_base_dir;
-use crate::cli::oauth_defaults::OAUTH_CALLBACK_PORT;
+use crate::llm::oauth_helpers::OAUTH_CALLBACK_PORT;
 
 use chrono::{DateTime, Utc};
 use reqwest::Client;
@@ -16,7 +15,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 
 /// Session data persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,14 +39,11 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             auth_base_url: "https://private.near.ai".to_string(),
-            session_path: default_session_path(),
+            // Real path is set by LlmConfig::resolve() via config/llm.rs.
+            // This default is only used in tests.
+            session_path: PathBuf::from("session.json"),
         }
     }
-}
-
-/// Get the default session file path (~/.ironclaw/session.json).
-pub fn default_session_path() -> PathBuf {
-    ironclaw_base_dir().join("session.json")
 }
 
 /// Manages NEAR AI session tokens with persistence and automatic renewal.
@@ -236,10 +232,10 @@ impl SessionManager {
     /// 2. Set NEARAI_API_KEY env var and save to bootstrap .env
     /// 3. No session token saved (different auth model)
     async fn initiate_login(&self) -> Result<(), LlmError> {
-        use crate::cli::oauth_defaults;
+        use crate::llm::oauth_helpers;
 
-        let cb_url = oauth_defaults::callback_url();
-        let host = oauth_defaults::callback_host();
+        let cb_url = oauth_helpers::callback_url();
+        let host = oauth_helpers::callback_host();
 
         // Show auth provider menu BEFORE binding the listener
         println!();
@@ -292,7 +288,7 @@ impl SessionManager {
 
         // Warn about plain-HTTP token transmission only for OAuth paths (1, 2)
         // where the callback URL actually carries the session token.
-        if !oauth_defaults::is_loopback_host(&host) {
+        if !oauth_helpers::is_loopback_host(&host) {
             println!();
             println!("Warning: OAuth callback is using plain HTTP to a remote host ({host}).");
             println!("         The session token will be transmitted unencrypted.");
@@ -303,12 +299,12 @@ impl SessionManager {
         }
 
         // OAuth paths: bind the callback listener now
-        let listener = oauth_defaults::bind_callback_listener()
-            .await
-            .map_err(|e| LlmError::SessionRenewalFailed {
+        let listener = oauth_helpers::bind_callback_listener().await.map_err(|e| {
+            LlmError::SessionRenewalFailed {
                 provider: "nearai".to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         let (auth_provider, auth_url) = match choice.trim() {
             "2" => {
@@ -348,7 +344,7 @@ impl SessionManager {
 
         // The NEAR AI API redirects to: {frontend_callback}/auth/callback?token=X&...
         let session_token =
-            oauth_defaults::wait_for_callback(listener, "/auth/callback", "token", "NEAR AI", None)
+            oauth_helpers::wait_for_callback(listener, "/auth/callback", "token", "NEAR AI", None)
                 .await
                 .map_err(|e| LlmError::SessionRenewalFailed {
                     provider: "nearai".to_string(),
@@ -631,6 +627,9 @@ pub async fn create_session_manager(config: SessionConfig) -> Arc<SessionManager
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::{
+        TEST_SESSION_NEARAI_ABC, TEST_SESSION_NEARAI_XYZ, TEST_SESSION_TOKEN,
+    };
     use secrecy::ExposeSecret;
     use tempfile::tempdir;
 
@@ -651,28 +650,28 @@ mod tests {
 
         // Save a token
         manager
-            .save_session("test_token_123", Some("near"))
+            .save_session(TEST_SESSION_TOKEN, Some("near"))
             .await
             .unwrap();
         manager
-            .set_token(SecretString::from("test_token_123"))
+            .set_token(SecretString::from(TEST_SESSION_TOKEN))
             .await;
 
         // Verify it's set
         assert!(manager.has_token().await);
         let token = manager.get_token().await.unwrap();
-        assert_eq!(token.expose_secret(), "test_token_123");
+        assert_eq!(token.expose_secret(), TEST_SESSION_TOKEN);
 
         // Create new manager and verify it loads the token
         let manager2 = SessionManager::new_async(config).await;
         assert!(manager2.has_token().await);
         let token2 = manager2.get_token().await.unwrap();
-        assert_eq!(token2.expose_secret(), "test_token_123");
+        assert_eq!(token2.expose_secret(), TEST_SESSION_TOKEN);
 
         // Verify file contents
         let data: SessionData =
             serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
-        assert_eq!(data.session_token, "test_token_123");
+        assert_eq!(data.session_token, TEST_SESSION_TOKEN);
         assert_eq!(data.auth_provider, Some("near".to_string()));
     }
 
@@ -691,16 +690,9 @@ mod tests {
     }
 
     #[test]
-    fn test_default_session_path() {
-        let path = default_session_path();
-        assert!(path.ends_with("session.json"));
-        assert!(path.to_string_lossy().contains(".ironclaw"));
-    }
-
-    #[test]
     fn test_session_data_serde_roundtrip_with_auth_provider() {
         let original = SessionData {
-            session_token: "sess_abc123".to_string(),
+            session_token: TEST_SESSION_NEARAI_ABC.to_string(),
             created_at: Utc::now(),
             auth_provider: Some("github".to_string()),
         };
@@ -714,7 +706,7 @@ mod tests {
     #[test]
     fn test_session_data_serde_roundtrip_without_auth_provider() {
         let original = SessionData {
-            session_token: "sess_xyz789".to_string(),
+            session_token: TEST_SESSION_NEARAI_XYZ.to_string(),
             created_at: Utc::now(),
             auth_provider: None,
         };
@@ -737,7 +729,6 @@ mod tests {
         let config = SessionConfig::default();
         assert_eq!(config.auth_base_url, "https://private.near.ai");
         assert!(config.session_path.ends_with("session.json"));
-        assert!(config.session_path.to_string_lossy().contains(".ironclaw"));
     }
 
     #[tokio::test]

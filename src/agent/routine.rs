@@ -8,7 +8,7 @@
 //! ┌──────────┐     ┌─────────┐     ┌──────────────────┐
 //! │  Trigger  │────▶│ Engine  │────▶│  Execution Mode  │
 //! │ cron/event│     │guardrail│     │lightweight│full_job│
-//! │ webhook   │     │ check   │     └──────────────────┘
+//! │ system    │     │ check   │     └──────────────────┘
 //! │ manual    │     └─────────┘              │
 //! └──────────┘                               ▼
 //!                                     ┌──────────────┐
@@ -69,12 +69,15 @@ pub enum Trigger {
         /// Regex pattern to match against message content.
         pattern: String,
     },
-    /// Fire on incoming webhook POST to /hooks/routine/{id}.
-    Webhook {
-        /// Optional webhook path suffix (defaults to routine id).
-        path: Option<String>,
-        /// Optional shared secret for HMAC validation.
-        secret: Option<String>,
+    /// Fire when a structured system event is emitted.
+    SystemEvent {
+        /// Event source namespace (e.g. "github", "workflow", "tool").
+        source: String,
+        /// Event type within the source (e.g. "issue.opened").
+        event_type: String,
+        /// Optional exact-match filters against payload top-level fields.
+        #[serde(default)]
+        filters: std::collections::HashMap<String, String>,
     },
     /// Only fires via tool call or CLI.
     Manual,
@@ -86,7 +89,7 @@ impl Trigger {
         match self {
             Trigger::Cron { .. } => "cron",
             Trigger::Event { .. } => "event",
-            Trigger::Webhook { .. } => "webhook",
+            Trigger::SystemEvent { .. } => "system_event",
             Trigger::Manual => "manual",
         }
     }
@@ -134,16 +137,39 @@ impl Trigger {
                     .map(String::from);
                 Ok(Trigger::Event { channel, pattern })
             }
-            "webhook" => {
-                let path = config
-                    .get("path")
+            "system_event" => {
+                let source = config
+                    .get("source")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
-                let secret = config
-                    .get("secret")
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "system_event trigger".into(),
+                        field: "source".into(),
+                    })?
+                    .to_string();
+                let event_type = config
+                    .get("event_type")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
-                Ok(Trigger::Webhook { path, secret })
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "system_event trigger".into(),
+                        field: "event_type".into(),
+                    })?
+                    .to_string();
+                let filters = config
+                    .get("filters")
+                    .and_then(|v| v.as_object())
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| {
+                                json_value_as_filter_string(v).map(|s| (k.clone(), s))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(Trigger::SystemEvent {
+                    source,
+                    event_type,
+                    filters,
+                })
             }
             "manual" => Ok(Trigger::Manual),
             other => Err(RoutineError::UnknownTriggerType {
@@ -163,9 +189,14 @@ impl Trigger {
                 "pattern": pattern,
                 "channel": channel,
             }),
-            Trigger::Webhook { path, secret } => serde_json::json!({
-                "path": path,
-                "secret": secret,
+            Trigger::SystemEvent {
+                source,
+                event_type,
+                filters,
+            } => serde_json::json!({
+                "source": source,
+                "event_type": event_type,
+                "filters": filters,
             }),
             Trigger::Manual => serde_json::json!({}),
         }
@@ -428,6 +459,19 @@ pub struct RoutineRun {
     pub created_at: DateTime<Utc>,
 }
 
+/// Convert a JSON value to a string for filter storage.
+///
+/// Handles strings, numbers, and booleans — consistent with the matching
+/// logic in `routine_engine::json_value_as_string`.
+pub fn json_value_as_filter_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// Compute a content hash for event dedup.
 pub fn content_hash(content: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -484,6 +528,24 @@ mod tests {
         let parsed = Trigger::from_db("event", json).expect("parse event");
         assert!(matches!(parsed, Trigger::Event { channel, pattern }
             if channel == Some("telegram".to_string()) && pattern == r"deploy\s+\w+"));
+    }
+
+    #[test]
+    fn test_system_event_trigger_roundtrip() {
+        let mut filters = std::collections::HashMap::new();
+        filters.insert("repo".to_string(), "nearai/ironclaw".to_string());
+        filters.insert("action".to_string(), "opened".to_string());
+        let trigger = Trigger::SystemEvent {
+            source: "github".to_string(),
+            event_type: "issue".to_string(),
+            filters: filters.clone(),
+        };
+        let json = trigger.to_config_json();
+        let parsed = Trigger::from_db("system_event", json).expect("parse system_event");
+        assert!(
+            matches!(parsed, Trigger::SystemEvent { source, event_type, filters: f }
+            if source == "github" && event_type == "issue" && f == filters)
+        );
     }
 
     #[test]
@@ -623,12 +685,13 @@ mod tests {
             "event"
         );
         assert_eq!(
-            Trigger::Webhook {
-                path: None,
-                secret: None
+            Trigger::SystemEvent {
+                source: String::new(),
+                event_type: String::new(),
+                filters: std::collections::HashMap::new(),
             }
             .type_tag(),
-            "webhook"
+            "system_event"
         );
         assert_eq!(Trigger::Manual.type_tag(), "manual");
     }

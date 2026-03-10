@@ -193,18 +193,31 @@ impl WasmToolLoader {
     ///
     /// Tools without a capabilities file get no permissions (default deny).
     pub async fn load_from_dir(&self, dir: &Path) -> Result<LoadResults, WasmLoadError> {
-        if !dir.is_dir() {
-            return Err(WasmLoadError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotADirectory,
-                format!("{} is not a directory", dir.display()),
-            )));
+        match fs::metadata(dir).await {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(WasmLoadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("{} is not a directory", dir.display()),
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmLoadError::Io(e)),
         }
 
-        let mut results = LoadResults::default();
+        // Handle TOCTOU: if read_dir fails with NotFound, treat as empty
+        let mut entries = match fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmLoadError::Io(e)),
+        };
 
-        // Collect all .wasm entries first, then load in parallel
+        let mut results = LoadResults::default();
         let mut tool_entries = Vec::new();
-        let mut entries = fs::read_dir(dir).await?;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -681,6 +694,7 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::testing::credentials::{TEST_OAUTH_CLIENT_ID, TEST_OAUTH_CLIENT_SECRET};
     use crate::tools::wasm::loader::{WasmLoadError, check_wit_version_compat, discover_tools};
 
     #[test]
@@ -821,8 +835,8 @@ mod tests {
                 oauth: Some(OAuthConfigSchema {
                     authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
                     token_url: "https://oauth2.googleapis.com/token".to_string(),
-                    client_id: Some("test-client-id".to_string()),
-                    client_secret: Some("test-client-secret".to_string()),
+                    client_id: Some(TEST_OAUTH_CLIENT_ID.to_string()),
+                    client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -835,8 +849,11 @@ mod tests {
 
         let config = config.unwrap();
         assert_eq!(config.token_url, "https://oauth2.googleapis.com/token");
-        assert_eq!(config.client_id, "test-client-id");
-        assert_eq!(config.client_secret, Some("test-client-secret".to_string()));
+        assert_eq!(config.client_id, TEST_OAUTH_CLIENT_ID);
+        assert_eq!(
+            config.client_secret,
+            Some(TEST_OAUTH_CLIENT_SECRET.to_string())
+        );
         assert_eq!(config.secret_name, "google_oauth_token");
         assert_eq!(config.provider, Some("google".to_string()));
     }
@@ -1076,5 +1093,20 @@ mod tests {
             !tools.contains_key("nested"),
             "nested.wasm inside subdir should NOT be discovered"
         );
+    }
+
+    #[tokio::test]
+    async fn load_from_dir_returns_empty_when_dir_missing() {
+        let loader = make_loader();
+
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent_tools_dir");
+
+        let results = loader.load_from_dir(&missing).await;
+
+        // Must succeed with empty results, not error
+        let results = results.expect("missing dir should return Ok, not Err");
+        assert!(results.loaded.is_empty());
+        assert!(results.errors.is_empty());
     }
 }

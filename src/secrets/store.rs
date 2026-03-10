@@ -802,30 +802,25 @@ pub mod in_memory {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use secrecy::SecretString;
-
-    use crate::secrets::crypto::SecretsCrypto;
     use crate::secrets::store::SecretsStore;
-    use crate::secrets::store::in_memory::InMemorySecretsStore;
     use crate::secrets::types::CreateSecretParams;
+    use crate::testing::credentials::{
+        TEST_OPENAI_API_KEY_SHORT, TEST_SECRET_VALUE, TEST_STRIPE_KEY, test_secrets_store,
+    };
 
-    fn test_store() -> InMemorySecretsStore {
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        InMemorySecretsStore::new(crypto)
+    fn test_store() -> crate::secrets::store::in_memory::InMemorySecretsStore {
+        test_secrets_store()
     }
 
     #[tokio::test]
     async fn test_create_and_get() {
         let store = test_store();
-        let params = CreateSecretParams::new("api_key", "sk-test-12345");
+        let params = CreateSecretParams::new("api_key", TEST_SECRET_VALUE);
 
         store.create("user1", params).await.unwrap();
 
         let decrypted = store.get_decrypted("user1", "api_key").await.unwrap();
-        assert_eq!(decrypted.expose(), "sk-test-12345");
+        assert_eq!(decrypted.expose(), TEST_SECRET_VALUE);
     }
 
     #[tokio::test]
@@ -878,11 +873,17 @@ mod tests {
     async fn test_is_accessible() {
         let store = test_store();
         store
-            .create("user1", CreateSecretParams::new("openai_key", "sk-test"))
+            .create(
+                "user1",
+                CreateSecretParams::new("openai_key", TEST_OPENAI_API_KEY_SHORT),
+            )
             .await
             .unwrap();
         store
-            .create("user1", CreateSecretParams::new("stripe_key", "sk-live"))
+            .create(
+                "user1",
+                CreateSecretParams::new("stripe_key", TEST_STRIPE_KEY),
+            )
             .await
             .unwrap();
 

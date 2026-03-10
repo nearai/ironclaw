@@ -370,7 +370,7 @@ pub async fn start_server(
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
-                tracing::info!("Web gateway shutting down");
+                tracing::debug!("Web gateway shutting down");
             })
             .await
         {
@@ -1936,7 +1936,7 @@ async fn routines_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let items: Vec<RoutineInfo> = routines.iter().map(routine_to_info).collect();
+    let items: Vec<RoutineInfo> = routines.iter().map(RoutineInfo::from_routine).collect();
 
     Ok(Json(RoutineListResponse { routines: items }))
 }
@@ -2017,6 +2017,7 @@ async fn routines_detail_handler(
             status: format!("{:?}", run.status),
             result_summary: run.result_summary.clone(),
             tokens_used: run.tokens_used,
+            job_id: run.job_id,
         })
         .collect();
 
@@ -2169,6 +2170,7 @@ async fn routines_runs_handler(
             status: format!("{:?}", run.status),
             result_summary: run.result_summary.clone(),
             tokens_used: run.tokens_used,
+            job_id: run.job_id,
         })
         .collect();
 
@@ -2176,54 +2178,6 @@ async fn routines_runs_handler(
         "routine_id": routine_id,
         "runs": run_infos,
     })))
-}
-
-/// Convert a Routine to the trimmed RoutineInfo for list display.
-fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
-    let (trigger_type, trigger_summary) = match &r.trigger {
-        crate::agent::routine::Trigger::Cron { schedule, .. } => {
-            ("cron".to_string(), format!("cron: {}", schedule))
-        }
-        crate::agent::routine::Trigger::Event {
-            pattern, channel, ..
-        } => {
-            let ch = channel.as_deref().unwrap_or("any");
-            ("event".to_string(), format!("on {} /{}/", ch, pattern))
-        }
-        crate::agent::routine::Trigger::Webhook { path, .. } => {
-            let p = path.as_deref().unwrap_or("/");
-            ("webhook".to_string(), format!("webhook: {}", p))
-        }
-        crate::agent::routine::Trigger::Manual => ("manual".to_string(), "manual only".to_string()),
-    };
-
-    let action_type = match &r.action {
-        crate::agent::routine::RoutineAction::Lightweight { .. } => "lightweight",
-        crate::agent::routine::RoutineAction::FullJob { .. } => "full_job",
-    };
-
-    let status = if !r.enabled {
-        "disabled"
-    } else if r.consecutive_failures > 0 {
-        "failing"
-    } else {
-        "active"
-    };
-
-    RoutineInfo {
-        id: r.id,
-        name: r.name.clone(),
-        description: r.description.clone(),
-        enabled: r.enabled,
-        trigger_type,
-        trigger_summary,
-        action_type: action_type.to_string(),
-        last_run_at: r.last_run_at.map(|dt| dt.to_rfc3339()),
-        next_fire_at: r.next_fire_at.map(|dt| dt.to_rfc3339()),
-        run_count: r.run_count,
-        consecutive_failures: r.consecutive_failures,
-        status: status.to_string(),
-    }
 }
 
 // --- Settings handlers ---
@@ -2425,6 +2379,7 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
 
     #[test]
     fn test_build_turns_from_db_messages_complete() {
@@ -2598,7 +2553,7 @@ mod tests {
         // Build an ExtensionManager so the handler can look up flows
         let secrets = Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
             crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                "test-key-at-least-32-chars-long!!".to_string(),
+                TEST_GATEWAY_CRYPTO_KEY.to_string(),
             ))
             .expect("crypto"),
         )));
@@ -2607,6 +2562,7 @@ mod tests {
 
         let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets,
             tool_registry,
             None,
@@ -2647,7 +2603,7 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "test-key-at-least-32-chars-long!!".to_string(),
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
                 ))
                 .expect("crypto"),
             )));
@@ -2656,6 +2612,7 @@ mod tests {
 
         let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets.clone(),
             tool_registry,
             None,
@@ -2752,7 +2709,7 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "test-key-at-least-32-chars-long!!".to_string(),
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
                 ))
                 .expect("crypto"),
             )));
@@ -2761,6 +2718,7 @@ mod tests {
 
         let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             secrets.clone(),
             tool_registry,
             None,

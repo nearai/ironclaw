@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use rust_decimal::Decimal;
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -944,6 +944,10 @@ impl LlmProvider for SmartRoutingProvider {
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         self.primary.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.primary.effective_model_name(requested_model)
     }
 
     fn active_model_name(&self) -> String {

@@ -6,18 +6,21 @@
 //!
 //! Pattern follows `nearai_chat.rs`: direct HTTP calls via `reqwest::Client`.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
-use crate::config::RegistryProviderConfig;
-use crate::error::LlmError;
+use crate::llm::config::RegistryProviderConfig;
 use crate::llm::costs;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
+    strip_unsupported_tool_params,
 };
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -35,6 +38,8 @@ pub struct AnthropicOAuthProvider {
     model: String,
     base_url: Option<String>,
     active_model: std::sync::RwLock<String>,
+    /// Parameter names that this provider does not support.
+    unsupported_params: HashSet<String>,
 }
 
 impl AnthropicOAuthProvider {
@@ -61,13 +66,27 @@ impl AnthropicOAuthProvider {
             Some(config.base_url.clone())
         };
 
+        let unsupported_params: HashSet<String> =
+            config.unsupported_params.iter().cloned().collect();
+
         Ok(Self {
             client,
             token,
             model: config.model.clone(),
             base_url,
             active_model,
+            unsupported_params,
         })
+    }
+
+    /// Strip unsupported fields from a `CompletionRequest` in place.
+    fn strip_unsupported_completion_params(&self, req: &mut CompletionRequest) {
+        strip_unsupported_completion_params(&self.unsupported_params, req);
+    }
+
+    /// Strip unsupported fields from a `ToolCompletionRequest` in place.
+    fn strip_unsupported_tool_params(&self, req: &mut ToolCompletionRequest) {
+        strip_unsupported_tool_params(&self.unsupported_params, req);
     }
 
     fn api_url(&self) -> String {
@@ -197,8 +216,9 @@ impl AnthropicOAuthProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicOAuthProvider {
-    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let model = req.model.unwrap_or_else(|| self.active_model_name());
+    async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let model = req.model.take().unwrap_or_else(|| self.active_model_name());
+        self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
         let request = AnthropicRequest {
@@ -233,9 +253,10 @@ impl LlmProvider for AnthropicOAuthProvider {
 
     async fn complete_with_tools(
         &self,
-        req: ToolCompletionRequest,
+        mut req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let model = req.model.take().unwrap_or_else(|| self.active_model_name());
+        self.strip_unsupported_tool_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
 
         let tools: Vec<AnthropicTool> = req

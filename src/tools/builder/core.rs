@@ -509,7 +509,8 @@ Create alongside the .wasm file to grant capabilities:
         let mut iteration = 0;
 
         // Create reasoning engine
-        let reasoning = Reasoning::new(self.llm.clone());
+        let reasoning =
+            Reasoning::new(self.llm.clone()).with_model_name(self.llm.active_model_name());
 
         // Build initial context
         let tool_defs = self.get_build_tools().await;
@@ -810,7 +811,8 @@ Create alongside the .wasm file to grant capabilities:
 impl SoftwareBuilder for LlmSoftwareBuilder {
     async fn analyze(&self, description: &str) -> Result<BuildRequirement, AgentToolError> {
         // Use LLM to parse the description
-        let reasoning = Reasoning::new(self.llm.clone());
+        let reasoning =
+            Reasoning::new(self.llm.clone()).with_model_name(self.llm.active_model_name());
 
         let prompt = format!(
             r#"Analyze this software requirement and extract structured information.

@@ -149,14 +149,16 @@ impl Store {
             r#"
             INSERT INTO agent_jobs (
                 id, conversation_id, title, description, category, status, source,
+                user_id,
                 budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
                 actual_cost, repair_attempts, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title,
                 description = EXCLUDED.description,
                 category = EXCLUDED.category,
                 status = EXCLUDED.status,
+                user_id = EXCLUDED.user_id,
                 estimated_cost = EXCLUDED.estimated_cost,
                 estimated_time_secs = EXCLUDED.estimated_time_secs,
                 actual_cost = EXCLUDED.actual_cost,
@@ -172,6 +174,7 @@ impl Store {
                 &ctx.category,
                 &status,
                 &"direct", // source
+                &ctx.user_id,
                 &ctx.budget,
                 &ctx.budget_token,
                 &ctx.bid_amount,
@@ -1084,7 +1087,7 @@ impl Store {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT * FROM routines WHERE enabled AND trigger_type = 'event'",
+                "SELECT * FROM routines WHERE enabled AND trigger_type IN ('event', 'system_event')",
                 &[],
             )
             .await?;
@@ -2132,5 +2135,37 @@ mod tests {
             };
             assert_eq!(summary.channel, ch);
         }
+    }
+
+    /// Regression test: save_job must persist user_id and get_job must return it.
+    /// Requires a running PostgreSQL instance (integration tier).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_save_job_persists_user_id() {
+        use crate::config::Config;
+        use crate::context::JobContext;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        let ctx = JobContext::with_user("test-user-42", "PG user_id test", "regression test");
+        store.save_job(&ctx).await.unwrap();
+
+        let loaded = store.get_job(ctx.job_id).await.unwrap().unwrap();
+        assert_eq!(loaded.user_id, "test-user-42");
+
+        // Clean up
+        let conn = store.conn().await.unwrap();
+        conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&ctx.job_id])
+            .await
+            .unwrap();
     }
 }
