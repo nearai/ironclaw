@@ -63,12 +63,12 @@ These files account for the vast majority of the coverage gap:
 | `src/main.rs` | 740 | 522 | 29.4% | 485 |
 | `src/channels/web/handlers/jobs.rs` | 513 | 456 | 11.1% | 430 |
 | `src/tools/builder/core.rs` | 524 | 456 | 13.0% | 429 |
-| `src/agent/worker.rs` | 1,078 | 467 | 56.7% | 413 |
+| `src/worker/job.rs` | 1,078 | 467 | 56.7% | 413 |
 | `src/channels/web/handlers/chat.rs` | 564 | 417 | 26.1% | 388 |
 | `src/tools/wasm/wrapper.rs` | 1,005 | 436 | 56.6% | 385 |
 | `src/channels/signal.rs` | 1,814 | 472 | 74.0% | 381 |
 | `src/tools/mcp/auth.rs` | 472 | 378 | 19.9% | 354 |
-| `src/worker/runtime.rs` | 350 | 330 | 5.7% | 312 |
+| `src/worker/container.rs` | 350 | 330 | 5.7% | 312 |
 | `src/tools/builtin/job.rs` | 1,014 | 359 | 64.6% | 308 |
 | `src/cli/mcp.rs` | 322 | 319 | 0.9% | 302 |
 | `src/cli/oauth_defaults.rs` | 730 | 335 | 54.1% | 298 |
@@ -346,7 +346,7 @@ Test slash commands through the agent loop.
 
 ### Trace: Worker Multi-Turn Execution
 
-**Covers:** `agent/worker.rs` (+413 lines), `agent/agent_loop.rs` (+207 lines)
+**Covers:** `worker/job.rs` (+413 lines), `agent/agent_loop.rs` (+207 lines)
 
 Test multi-turn tool calling, error recovery, and completion flows.
 
@@ -769,7 +769,7 @@ HTTP proxy for container network access.
 - `test_proxy_connect_tunnel` -- HTTPS CONNECT method handling
 - `test_proxy_logging` -- request/response logging
 
-### `src/worker/runtime.rs` -- 5.7% -> 95% (+312 lines)
+### `src/worker/container.rs` -- 5.7% -> 95% (+312 lines)
 
 Worker execution loop (runs inside containers).
 

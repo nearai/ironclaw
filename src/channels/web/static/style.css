@@ -1277,6 +1277,8 @@ body {
   gap: 8px;
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  min-height: 56px;
 }
 
 .chat-input textarea {
@@ -3719,6 +3721,21 @@ mark {
 
   .ext-install-form input {
     width: 100%;
+  }
+
+  /* Chat input: ensure visibility on mobile */
+  .chat-input {
+    min-height: 52px;
+  }
+
+  .chat-input textarea {
+    min-height: 36px;
+    max-height: 100px;
+  }
+
+  .chat-input button {
+    padding: 6px 16px;
+    font-size: 14px;
   }
 }
 

@@ -255,7 +255,151 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 3: routine_cooldown
+    // Test 3: system_event_trigger_matches_and_filters
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn system_event_trigger_matches_and_filters() {
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        let trace = LlmTrace::single_turn(
+            "test-system-event-match",
+            "event",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "System event handled".to_string(),
+                    input_tokens: 40,
+                    output_tokens: 8,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+
+        // Create minimal ToolRegistry and SafetyLayer for test.
+        let tools = Arc::new(ToolRegistry::new());
+        let safety_config = SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        };
+        let safety = Arc::new(SafetyLayer::new(&safety_config));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        let mut filters = std::collections::HashMap::new();
+        filters.insert("repository".to_string(), "nearai/ironclaw".to_string());
+
+        let routine = make_routine(
+            "github-issue-opened",
+            Trigger::SystemEvent {
+                source: "github".to_string(),
+                event_type: "issue.opened".to_string(),
+                filters,
+            },
+            "Summarize the issue and propose an implementation plan.",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        // Matching event should fire.
+        let fired = engine
+            .emit_system_event(
+                "github",
+                "issue.opened",
+                &serde_json::json!({
+                    "repository": "nearai/ironclaw",
+                    "issue_number": 42
+                }),
+                Some("default"),
+            )
+            .await;
+        assert_eq!(fired, 1, "Expected one routine to fire for matching event");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list runs");
+        assert!(
+            !runs.is_empty(),
+            "Expected run history after matching event"
+        );
+
+        // Wrong event type should not fire.
+        let fired_wrong_type = engine
+            .emit_system_event(
+                "github",
+                "issue.closed",
+                &serde_json::json!({"repository": "nearai/ironclaw"}),
+                Some("default"),
+            )
+            .await;
+        assert_eq!(
+            fired_wrong_type, 0,
+            "Expected no routine for wrong event type"
+        );
+
+        // Wrong filter value should not fire.
+        let fired_wrong_filter = engine
+            .emit_system_event(
+                "github",
+                "issue.opened",
+                &serde_json::json!({"repository": "other/repo"}),
+                Some("default"),
+            )
+            .await;
+        assert_eq!(
+            fired_wrong_filter, 0,
+            "Expected no routine for filter mismatch"
+        );
+
+        // Case-insensitive source/event_type should still match.
+        let fired_case = engine
+            .emit_system_event(
+                "GitHub",
+                "Issue.Opened",
+                &serde_json::json!({
+                    "repository": "nearai/ironclaw",
+                    "issue_number": 99
+                }),
+                Some("default"),
+            )
+            .await;
+        assert_eq!(
+            fired_case, 1,
+            "Expected case-insensitive match on source/event_type"
+        );
+
+        // Case-insensitive filter values should match.
+        let fired_filter_case = engine
+            .emit_system_event(
+                "github",
+                "issue.opened",
+                &serde_json::json!({"repository": "NearAI/IronClaw"}),
+                Some("default"),
+            )
+            .await;
+        assert_eq!(
+            fired_filter_case, 1,
+            "Expected case-insensitive match on filter values"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: routine_cooldown
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -345,7 +489,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 4: heartbeat_findings
+    // Test 5: heartbeat_findings
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -407,7 +551,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 5: heartbeat_empty_skip
+    // Test 6: heartbeat_empty_skip
     // -----------------------------------------------------------------------
 
     #[tokio::test]

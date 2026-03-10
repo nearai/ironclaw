@@ -450,7 +450,8 @@ impl Reasoning {
             cache_read_input_tokens: response.cache_read_input_tokens,
             cache_creation_input_tokens: response.cache_creation_input_tokens,
         };
-        Ok((clean_response(&response.content), usage))
+        let pre_truncated = truncate_at_tool_tags(&response.content);
+        Ok((clean_response(&pre_truncated), usage))
     }
 
     /// Generate a plan for completing a goal.
@@ -480,8 +481,11 @@ impl Reasoning {
 
         let response = self.llm.complete(request).await?;
 
-        // Clean reasoning model artifacts before parsing JSON
-        let cleaned = clean_response(&response.content);
+        // Clean reasoning model artifacts before parsing JSON.
+        // Pre-truncate at tool tags to avoid strip_xml_tag discarding
+        // content after unclosed tags (issue #789).
+        let pre_truncated = truncate_at_tool_tags(&response.content);
+        let cleaned = clean_response(&pre_truncated);
         self.parse_plan(&cleaned)
     }
 
@@ -575,8 +579,11 @@ Respond in JSON format:
 
         let response = self.llm.complete(request).await?;
 
-        // Clean reasoning model artifacts before parsing JSON
-        let cleaned = clean_response(&response.content);
+        // Clean reasoning model artifacts before parsing JSON.
+        // Pre-truncate at tool tags to avoid strip_xml_tag discarding
+        // content after unclosed tags (issue #789).
+        let pre_truncated = truncate_at_tool_tags(&response.content);
+        let cleaned = clean_response(&pre_truncated);
         self.parse_evaluation(&cleaned)
     }
 
@@ -653,7 +660,10 @@ Respond in JSON format:
                 return Ok(RespondOutput {
                     result: RespondResult::ToolCalls {
                         tool_calls: response.tool_calls,
-                        content: response.content.map(|c| clean_response(&c)),
+                        content: response.content.map(|c| {
+                            let pre_truncated = truncate_at_tool_tags(&c);
+                            clean_response(&pre_truncated)
+                        }),
                     },
                     usage,
                 });
@@ -666,9 +676,13 @@ Respond in JSON format:
             // Some models (e.g. GLM-4.7) emit tool calls as XML tags in content
             // instead of using the structured tool_calls field. Try to recover
             // them before giving up and returning plain text.
+            // NOTE: Recovery runs on the raw content (before truncation) so it can
+            // parse tool-call JSON from the XML tags. Truncation only applies to the
+            // remaining *text* content returned alongside the recovered tool calls.
             let recovered = recover_tool_calls_from_content(&content, &context.available_tools);
             if !recovered.is_empty() {
-                let cleaned = clean_response(&content);
+                let pre_truncated = truncate_at_tool_tags(&content);
+                let cleaned = clean_response(&pre_truncated);
                 return Ok(RespondOutput {
                     result: RespondResult::ToolCalls {
                         tool_calls: recovered,
@@ -682,12 +696,16 @@ Respond in JSON format:
                 });
             }
 
-            // Guard against empty text after cleaning. This can happen
-            // when reasoning models (e.g. GLM-5) return chain-of-thought
-            // in reasoning_content wrapped in <think> tags and content is
-            // null — the .or(reasoning_content) fallback picks it up, then
-            // clean_response strips the think tags leaving an empty string.
-            let cleaned = clean_response(&content);
+            // Guard against empty text after cleaning. This can happen when:
+            // 1. Reasoning models (e.g. GLM-5) return chain-of-thought in
+            //    reasoning_content wrapped in <think> tags — clean_response
+            //    strips the think tags leaving an empty string.
+            // 2. Local models (Qwen3, DeepSeek) emit <tool_call> XML in text
+            //    responses even in force_text mode — strip_xml_tag discards
+            //    from unclosed opening tag onward (issue #789).
+            // Pre-truncate at tool tags to preserve text before the tag.
+            let pre_truncated = truncate_at_tool_tags(&content);
+            let cleaned = clean_response(&pre_truncated);
             let final_text = if cleaned.trim().is_empty() {
                 tracing::warn!(
                     "LLM response was empty after cleaning (original len={}), using fallback",
@@ -709,7 +727,8 @@ Respond in JSON format:
             request.metadata = context.metadata.clone();
 
             let response = self.llm.complete(request).await?;
-            let cleaned = clean_response(&response.content);
+            let pre_truncated = truncate_at_tool_tags(&response.content);
+            let cleaned = clean_response(&pre_truncated);
             let final_text = if cleaned.trim().is_empty() {
                 tracing::warn!(
                     "LLM response was empty after cleaning (original len={}), using fallback",
@@ -847,10 +866,22 @@ Respond with a JSON plan in this format:
                 .to_string()
         };
 
-        format!(
-            r#"You are IronClaw Agent, a secure autonomous assistant.
+        // Models with native thinking (Qwen3, DeepSeek-R1, etc.) produce their
+        // own <think> tags or reasoning_content. Injecting our <think>/<final>
+        // format collides with their native behavior, causing thinking-only
+        // responses that clean to empty strings. See issue #789.
+        let has_native_thinking = self
+            .model_name
+            .as_ref()
+            .is_some_and(|n| crate::llm::reasoning_models::has_native_thinking(n));
 
-## Response Format — CRITICAL
+        let response_format = if has_native_thinking {
+            r#"## Response Format
+
+Respond directly with your answer. Do not wrap your response in any special tags.
+Your reasoning process is handled natively — just provide the final user-facing answer."#
+        } else {
+            r#"## Response Format — CRITICAL
 
 ALL internal reasoning MUST be inside <think>...</think> tags.
 Do not output any analysis, planning, or self-talk outside <think>.
@@ -860,7 +891,13 @@ Only text inside <final> is shown to the user; everything else is discarded.
 
 Example:
 <think>The user is asking about X.</think>
-<final>Here is the answer about X.</final>
+<final>Here is the answer about X.</final>"#
+        };
+
+        format!(
+            r#"You are IronClaw Agent, a secure autonomous assistant.
+
+{response_format}
 
 ## Guidelines
 - Be concise and direct
@@ -1441,6 +1478,99 @@ fn strip_bracket_tool_calls(text: &str) -> String {
 
 /// Tool-related tags stripped with simple string matching (no code-awareness needed).
 const TOOL_TAGS: &[&str] = &["tool_call", "function_call", "tool_calls"];
+
+/// Patterns that indicate tool-call XML in model output.
+const TOOL_TAG_PATTERNS: &[&str] = &[
+    "<tool_call>",
+    "<tool_call ",
+    "<function_call>",
+    "<function_call ",
+    "<tool_calls>",
+    "<tool_calls ",
+    "<|tool_call|>",
+    "<|function_call|>",
+    "<|tool_calls|>",
+];
+
+/// Truncate text at the first **unclosed** tool-call XML tag, preserving content
+/// before it.
+///
+/// Local models (Qwen3, DeepSeek, etc.) often emit `<tool_call>` XML in text
+/// responses even when no tools are available. The downstream `clean_response()`
+/// → `strip_xml_tag()` pipeline discards everything from an unclosed opening
+/// tag onward, which can leave an empty string and trigger the fallback message.
+///
+/// This function truncates at the first *unclosed* tool tag BEFORE
+/// `clean_response()` runs, so the useful text before the tag is preserved.
+/// Properly closed tags (e.g. `<tool_call>...</tool_call>`) are left intact for
+/// `clean_response()` to strip normally. Tags inside fenced markdown code blocks
+/// or inline code spans are ignored. See issue #789.
+fn truncate_at_tool_tags(text: &str) -> String {
+    let code_regions = find_code_regions(text);
+    // Use ASCII-only lowercasing so byte offsets stay valid for the original
+    // string. Full `to_lowercase()` can change byte lengths for non-ASCII
+    // chars (e.g. the Kelvin sign), making positions unreliable.
+    let lower = text.to_ascii_lowercase();
+    let first_unclosed = TOOL_TAG_PATTERNS
+        .iter()
+        .filter_map(|p| {
+            let mut search_from = 0;
+            loop {
+                match lower[search_from..].find(p) {
+                    Some(offset) => {
+                        let pos = search_from + offset;
+                        if is_inside_code(pos, &code_regions) {
+                            search_from = pos + 1;
+                            continue;
+                        }
+                        // Check if this tag has a matching closing tag after it.
+                        // If so, clean_response() can handle it — skip to next.
+                        let after_open = pos + p.len();
+                        if closing_tag_for(p)
+                            .is_some_and(|close| lower[after_open..].contains(close.as_str()))
+                        {
+                            search_from = after_open;
+                            continue;
+                        }
+                        // Unclosed tag — truncate here
+                        return Some(pos);
+                    }
+                    None => return None,
+                }
+            }
+        })
+        .min();
+    match first_unclosed {
+        Some(pos) => {
+            tracing::debug!(
+                original_len = text.len(),
+                truncated_at = pos,
+                "Truncated response at unclosed tool-call XML tag (issue #789)"
+            );
+            text[..pos].to_string()
+        }
+        None => text.to_string(),
+    }
+}
+
+/// Derive the closing tag for a tool-call opening pattern.
+///
+/// Examples: `<tool_call>` → `</tool_call>`, `<|tool_call|>` → `<|/tool_call|>`.
+fn closing_tag_for(open_pattern: &str) -> Option<String> {
+    if let Some(name) = open_pattern
+        .strip_prefix("<|")
+        .and_then(|s| s.strip_suffix("|>"))
+    {
+        // Pipe-delimited: <|tool_call|> → <|/tool_call|>
+        Some(format!("<|/{name}|>"))
+    } else if let Some(rest) = open_pattern.strip_prefix('<') {
+        // Standard XML: <tool_call> or <tool_call  → </tool_call>
+        let name = rest.trim_end_matches('>').trim();
+        Some(format!("</{name}>"))
+    } else {
+        None
+    }
+}
 
 /// Strip thinking/reasoning tags using regex, respecting code regions.
 ///
@@ -2413,5 +2543,589 @@ That's my plan."#;
         // But without an exclusion phrase, multiple prefixes should be checked.
         let text = "I said let me be clear, then let me fetch the data.";
         assert!(llm_signals_tool_intent(text));
+    }
+
+    // ---- Issue #789: truncate_at_tool_tags tests ----
+
+    #[test]
+    fn test_truncate_preserves_text_before_tool_tag() {
+        let input = "Here is my answer about the topic.\n<tool_call>{\"name\": \"search\"}";
+        assert_eq!(
+            truncate_at_tool_tags(input),
+            "Here is my answer about the topic.\n"
+        );
+    }
+
+    #[test]
+    fn test_truncate_no_tool_tags_unchanged() {
+        let input = "Just a normal response with no tool tags.";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_empty_string() {
+        assert_eq!(truncate_at_tool_tags(""), "");
+    }
+
+    #[test]
+    fn test_truncate_tool_tag_at_start() {
+        assert_eq!(
+            truncate_at_tool_tags("<tool_call>{\"name\": \"search\"}"),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_truncate_picks_earliest_unclosed_tag() {
+        // <function_call>...</function_call> is closed — skipped.
+        // <tool_call>second is unclosed — truncated here.
+        let input = "Text before <function_call>first</function_call> and <tool_call>second";
+        assert_eq!(
+            truncate_at_tool_tags(input),
+            "Text before <function_call>first</function_call> and "
+        );
+    }
+
+    #[test]
+    fn test_truncate_pipe_delimited_tags() {
+        let input = "Answer here\n<|tool_call|>{\"name\": \"fetch\"}";
+        assert_eq!(truncate_at_tool_tags(input), "Answer here\n");
+    }
+
+    #[test]
+    fn test_truncate_closed_tag_with_attributes_preserved() {
+        // Closed tag (even with attributes) is left for clean_response()
+        let input = "Some text <tool_call id=\"123\">{\"name\": \"test\"}</tool_call>";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_unclosed_tag_with_attributes() {
+        let input = "Some text <tool_call id=\"123\">{\"name\": \"test\"}";
+        assert_eq!(truncate_at_tool_tags(input), "Some text ");
+    }
+
+    #[test]
+    fn test_truncate_whitespace_only_before_tag() {
+        assert_eq!(truncate_at_tool_tags("   \n\n<tool_call>{}"), "   \n\n");
+    }
+
+    #[test]
+    fn test_truncate_ignores_tags_inside_code_blocks() {
+        let input = "Here's the XML format:\n\n```xml\n<tool_call>{\"name\": \"search\"}</tool_call>\n```\n\nYou can use this to call tools.";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_finds_tag_after_code_block() {
+        let input = "Example:\n\n```\n<tool_call>example</tool_call>\n```\n\nReal output:\n<tool_call>{\"name\": \"x\"}";
+        assert_eq!(
+            truncate_at_tool_tags(input),
+            "Example:\n\n```\n<tool_call>example</tool_call>\n```\n\nReal output:\n"
+        );
+    }
+
+    // ---- Issue #789: full pipeline (truncate + clean_response) tests ----
+
+    #[test]
+    fn test_issue_789_force_text_unclosed_tool_tag() {
+        let model_output = "The file contains a main function that initializes the server.\n<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"src/main.rs\"}}";
+        let pre_truncated = truncate_at_tool_tags(model_output);
+        let cleaned = clean_response(&pre_truncated);
+        assert_eq!(
+            cleaned,
+            "The file contains a main function that initializes the server."
+        );
+    }
+
+    #[test]
+    fn test_issue_789_only_tool_tag_produces_empty() {
+        let model_output = "<tool_call>{\"name\": \"search\", \"arguments\": {\"q\": \"test\"}}";
+        let pre_truncated = truncate_at_tool_tags(model_output);
+        let cleaned = clean_response(&pre_truncated);
+        assert!(cleaned.trim().is_empty());
+    }
+
+    #[test]
+    fn test_issue_789_thinking_then_tool_tag() {
+        let model_output =
+            "<think>I should search for this</think>Let me help you.\n<tool_call>{\"name\": \"s\"}";
+        let pre_truncated = truncate_at_tool_tags(model_output);
+        let cleaned = clean_response(&pre_truncated);
+        assert_eq!(cleaned, "Let me help you.");
+    }
+
+    #[test]
+    fn test_issue_789_closed_tool_tag_preserved_for_clean_response() {
+        // Closed tags are left intact — clean_response() strips them normally,
+        // preserving any text after the tag.
+        let model_output = "Info here.\n<tool_call>{\"name\": \"x\"}</tool_call>\nMore text.";
+        let pre_truncated = truncate_at_tool_tags(model_output);
+        assert_eq!(
+            pre_truncated, model_output,
+            "Closed tag should not be truncated"
+        );
+        let cleaned = clean_response(&pre_truncated);
+        assert_eq!(cleaned, "Info here.\n\nMore text.");
+    }
+
+    // ---- Issue #789: conditional system prompt tests ----
+
+    fn make_reasoning_with_model(model: &str) -> Reasoning {
+        use crate::testing::StubLlm;
+        Reasoning::new(Arc::new(StubLlm::new("test"))).with_model_name(model.to_string())
+    }
+
+    #[test]
+    fn test_system_prompt_skips_think_final_for_native_thinking() {
+        let reasoning = make_reasoning_with_model("qwen3-8b");
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            !prompt.contains("<think>"),
+            "Native thinking model should NOT have <think> in system prompt"
+        );
+        assert!(prompt.contains("Respond directly with your answer"));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_think_final_for_regular_model() {
+        let reasoning = make_reasoning_with_model("llama-3.1-70b");
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(prompt.contains("<think>"));
+        assert!(prompt.contains("<final>"));
+    }
+
+    #[test]
+    fn test_system_prompt_defaults_to_think_final_when_no_model() {
+        use crate::testing::StubLlm;
+        let reasoning = Reasoning::new(Arc::new(StubLlm::new("test")));
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(prompt.contains("<think>"));
+        assert!(prompt.contains("<final>"));
+    }
+
+    #[test]
+    fn test_system_prompt_deepseek_r1_skips_think_final() {
+        let reasoning = make_reasoning_with_model("deepseek-r1-distill-qwen-32b");
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(!prompt.contains("CRITICAL"));
+        assert!(prompt.contains("Respond directly"));
+    }
+
+    // ---- Issue #789: additional edge case tests for truncate_at_tool_tags ----
+
+    #[test]
+    fn test_truncate_unicode_content_before_tool_tag() {
+        let input = "こんにちは世界！素晴らしい結果です。\n<tool_call>{\"name\": \"search\"}";
+        assert_eq!(
+            truncate_at_tool_tags(input),
+            "こんにちは世界！素晴らしい結果です。\n"
+        );
+    }
+
+    #[test]
+    fn test_truncate_emoji_content_preserved() {
+        let input = "The answer is 42 🎉🚀\n<function_call>{\"name\": \"x\"}";
+        assert_eq!(truncate_at_tool_tags(input), "The answer is 42 🎉🚀\n");
+    }
+
+    #[test]
+    fn test_truncate_very_long_text_before_tag() {
+        let long_text = "A".repeat(10_000);
+        let input = format!("{}\n<tool_call>{{\"name\": \"x\"}}", long_text);
+        let result = truncate_at_tool_tags(&input);
+        assert_eq!(result.len(), long_text.len() + 1); // +1 for \n
+        assert!(result.starts_with("AAAA"));
+    }
+
+    #[test]
+    fn test_truncate_multiple_code_blocks_with_tags() {
+        let input = "Explanation:\n\n```python\n# <tool_call> in comment\nprint('hi')\n```\n\nAnd also:\n\n```xml\n<function_call>example</function_call>\n```\n\nFinal answer here.";
+        // Both tags are inside code blocks, so nothing is truncated
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_inline_code_with_tool_tag() {
+        let input = "Use `<tool_call>` to invoke tools.\n<tool_call>{\"name\": \"real\"}";
+        // First occurrence is in inline code, second is real
+        assert_eq!(
+            truncate_at_tool_tags(input),
+            "Use `<tool_call>` to invoke tools.\n"
+        );
+    }
+
+    #[test]
+    fn test_truncate_tag_immediately_after_code_block() {
+        let input = "```\nexample\n```\n<tool_call>{\"name\": \"x\"}";
+        assert_eq!(truncate_at_tool_tags(input), "```\nexample\n```\n");
+    }
+
+    #[test]
+    fn test_truncate_interleaved_thinking_and_tool_tags() {
+        // Simulate: thinking tag + text + tool tag
+        let input = "<think>reasoning</think>Here's the answer.\n<tool_call>{\"name\": \"y\"}";
+        let truncated = truncate_at_tool_tags(input);
+        let cleaned = clean_response(&truncated);
+        assert_eq!(cleaned, "Here's the answer.");
+    }
+
+    #[test]
+    fn test_truncate_closed_tool_calls_plural_preserved() {
+        // Closed <tool_calls>...</tool_calls> left for clean_response()
+        let input = "Answer.\n<tool_calls>[{\"name\": \"a\"}, {\"name\": \"b\"}]</tool_calls>";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_unclosed_tool_calls_plural() {
+        let input = "Answer.\n<tool_calls>[{\"name\": \"a\"}, {\"name\": \"b\"}]";
+        assert_eq!(truncate_at_tool_tags(input), "Answer.\n");
+    }
+
+    #[test]
+    fn test_truncate_closed_pipe_function_call_preserved() {
+        let input = "Done!\n<|function_call|>{\"name\": \"x\"}<|/function_call|>";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_unclosed_pipe_function_call() {
+        let input = "Done!\n<|function_call|>{\"name\": \"x\"}";
+        assert_eq!(truncate_at_tool_tags(input), "Done!\n");
+    }
+
+    #[test]
+    fn test_truncate_adversarial_nested_code_blocks() {
+        // Adversarial: code block inside another structure
+        let input = "```\nouter\n```\n\nReal text.\n\n```\n<tool_call>inside</tool_call>\n```\n\n<tool_call>{\"name\": \"real\"}";
+        let result = truncate_at_tool_tags(input);
+        assert!(result.contains("Real text."));
+        assert!(!result.contains("{\"name\": \"real\"}"));
+    }
+
+    // ---- Issue #789: StubLlm integration tests ----
+
+    #[tokio::test]
+    async fn test_complete_truncates_tool_tags_from_response() {
+        use crate::testing::StubLlm;
+        let response = "The server has 3 endpoints.\n<tool_call>{\"name\": \"read_file\"}";
+        let llm = Arc::new(StubLlm::new(response));
+        let reasoning = Reasoning::new(llm);
+
+        let request = CompletionRequest::new(vec![ChatMessage::user("describe the server")]);
+        let (result, _usage) = reasoning.complete(request).await.unwrap();
+        assert_eq!(result, "The server has 3 endpoints.");
+    }
+
+    #[tokio::test]
+    async fn test_complete_with_only_tool_tag_returns_empty() {
+        use crate::testing::StubLlm;
+        let response = "<tool_call>{\"name\": \"search\", \"arguments\": {}}";
+        let llm = Arc::new(StubLlm::new(response));
+        let reasoning = Reasoning::new(llm);
+
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")]);
+        let (result, _usage) = reasoning.complete(request).await.unwrap();
+        assert!(result.trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_respond_with_tools_force_text_truncates_tool_tags() {
+        use crate::testing::StubLlm;
+        let response = "Here is my analysis of the code.\n<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"main.rs\"}}";
+        let llm = Arc::new(StubLlm::new(response));
+        let reasoning = Reasoning::new(llm);
+
+        let mut context =
+            ReasoningContext::new().with_message(ChatMessage::user("analyze the code"));
+        context.force_text = true;
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        match output.result {
+            RespondResult::Text(text) => {
+                assert_eq!(text, "Here is my analysis of the code.");
+            }
+            RespondResult::ToolCalls { .. } => {
+                panic!("Expected text result in force_text mode");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_respond_with_tools_force_text_only_tag_uses_fallback() {
+        use crate::testing::StubLlm;
+        let response = "<tool_call>{\"name\": \"search\"}";
+        let llm = Arc::new(StubLlm::new(response));
+        let reasoning = Reasoning::new(llm);
+
+        let mut context = ReasoningContext::new().with_message(ChatMessage::user("hi"));
+        context.force_text = true;
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        match output.result {
+            RespondResult::Text(text) => {
+                assert_eq!(text, "I'm not sure how to respond to that.");
+            }
+            RespondResult::ToolCalls { .. } => {
+                panic!("Expected fallback text, not tool calls");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plan_truncates_tool_tags_before_json() {
+        use crate::testing::StubLlm;
+        let response = r#"<think>Let me plan</think>{"goal": "Test goal", "actions": [{"tool_name": "search", "parameters": {}, "reasoning": "find files", "expected_outcome": "results"}], "confidence": 0.9}
+<tool_call>{"name": "search"}"#;
+        let llm = Arc::new(StubLlm::new(response));
+        let reasoning = Reasoning::new(llm);
+
+        let context = ReasoningContext::new()
+            .with_message(ChatMessage::user("plan a search"))
+            .with_job("Search for relevant files");
+
+        let plan = reasoning.plan(&context).await.unwrap();
+        assert_eq!(plan.goal, "Test goal");
+        assert!(!plan.actions.is_empty());
+    }
+
+    // ---- Issue #789: model name propagation test ----
+
+    #[tokio::test]
+    async fn test_with_model_name_affects_system_prompt() {
+        use crate::testing::StubLlm;
+        // StubLlm model_name is "stub-model" by default, but Reasoning.model_name
+        // is what matters for system prompt building.
+        let llm = Arc::new(StubLlm::new("test").with_model_name("qwen3-8b"));
+        let reasoning = Reasoning::new(llm.clone()).with_model_name("qwen3-8b".to_string());
+
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            !prompt.contains("<think>"),
+            "Qwen3 model should get native thinking system prompt"
+        );
+        assert!(prompt.contains("Respond directly"));
+
+        // Now create reasoning WITHOUT with_model_name — should get default prompt
+        let reasoning_no_model = Reasoning::new(llm);
+        let prompt2 = reasoning_no_model.build_system_prompt_with_tools(&[]);
+        assert!(
+            prompt2.contains("<think>"),
+            "Without model name, should get default think/final prompt"
+        );
+    }
+
+    // ---- Issue #789: case-insensitive truncation ----
+
+    #[test]
+    fn test_truncate_case_insensitive_upper() {
+        let input = "Some answer.\n<TOOL_CALL>{\"name\": \"search\"}";
+        assert_eq!(truncate_at_tool_tags(input), "Some answer.\n");
+    }
+
+    #[test]
+    fn test_truncate_case_insensitive_mixed() {
+        let input = "Result here.\n<Tool_Call>{\"name\": \"x\"}";
+        assert_eq!(truncate_at_tool_tags(input), "Result here.\n");
+    }
+
+    #[test]
+    fn test_truncate_unicode_before_case_insensitive_tag_no_panic() {
+        // Regression: to_lowercase() can change byte lengths for non-ASCII chars
+        // (e.g. Kelvin sign U+212A is 3 bytes, lowercases to 'k' which is 1 byte).
+        // Using to_ascii_lowercase() keeps byte offsets stable.
+        let input = "Ответ: 42\n<TOOL_CALL>{\"name\": \"x\"}";
+        assert_eq!(truncate_at_tool_tags(input), "Ответ: 42\n");
+    }
+
+    #[test]
+    fn test_truncate_case_insensitive_function_call_closed() {
+        // Closed tag (case-insensitive) preserved for clean_response()
+        let input = "Done.\n<FUNCTION_CALL>{\"name\": \"y\"}</FUNCTION_CALL>";
+        assert_eq!(truncate_at_tool_tags(input), input);
+    }
+
+    #[test]
+    fn test_truncate_case_insensitive_function_call_unclosed() {
+        let input = "Done.\n<FUNCTION_CALL>{\"name\": \"y\"}";
+        assert_eq!(truncate_at_tool_tags(input), "Done.\n");
+    }
+
+    // ---- Issue #789: evaluate_success integration test ----
+
+    #[tokio::test]
+    async fn test_evaluate_success_truncates_tool_tags() {
+        use crate::testing::StubLlm;
+        let response = r#"<think>evaluating</think>{"success": true, "confidence": 0.85, "reasoning": "Task completed", "issues": [], "suggestions": []}
+<tool_call>{"name": "verify"}"#;
+        let llm = Arc::new(StubLlm::new(response));
+        let reasoning = Reasoning::new(llm);
+
+        let context = ReasoningContext::new().with_job("Test task");
+        let eval = reasoning
+            .evaluate_success(&context, "The job is done")
+            .await
+            .unwrap();
+        assert!(eval.success);
+        assert_eq!(eval.confidence, 0.85);
+    }
+
+    // ---- Issue #789: respond_with_tools recovered tool calls path ----
+
+    #[tokio::test]
+    async fn test_respond_with_tools_recovered_tool_calls_preserves_text() {
+        use crate::testing::StubLlm;
+        // StubLlm returns empty tool_calls + content with XML tool tags.
+        // The recovery path should parse the tool call AND preserve text before it.
+        let response = "Let me search for that.\n<tool_call>{\"name\": \"tool_list\", \"arguments\": {}}</tool_call>";
+        let llm = Arc::new(StubLlm::new(response));
+        let reasoning = Reasoning::new(llm);
+
+        let context = ReasoningContext::new()
+            .with_message(ChatMessage::user("list tools"))
+            .with_tools(vec![ToolDefinition {
+                name: "tool_list".to_string(),
+                description: "Lists tools".to_string(),
+                parameters: serde_json::json!({}),
+            }]);
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        match output.result {
+            RespondResult::ToolCalls {
+                tool_calls,
+                content,
+            } => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].name, "tool_list");
+                // Text before the tag should be preserved
+                assert_eq!(content.as_deref(), Some("Let me search for that."));
+            }
+            RespondResult::Text(_) => {
+                panic!("Expected recovered tool calls, got text");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_respond_with_tools_recovered_only_tag_content_is_none() {
+        use crate::testing::StubLlm;
+        // Content is ONLY a tool call tag — after truncation+cleaning, content should be None
+        let response = "<tool_call>{\"name\": \"tool_list\", \"arguments\": {}}</tool_call>";
+        let llm = Arc::new(StubLlm::new(response));
+        let reasoning = Reasoning::new(llm);
+
+        let context = ReasoningContext::new()
+            .with_message(ChatMessage::user("list tools"))
+            .with_tools(vec![ToolDefinition {
+                name: "tool_list".to_string(),
+                description: "Lists tools".to_string(),
+                parameters: serde_json::json!({}),
+            }]);
+
+        let output = reasoning.respond_with_tools(&context).await.unwrap();
+        match output.result {
+            RespondResult::ToolCalls {
+                tool_calls,
+                content,
+            } => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].name, "tool_list");
+                assert!(
+                    content.is_none(),
+                    "Content should be None when only tool tags present"
+                );
+            }
+            RespondResult::Text(_) => {
+                panic!("Expected recovered tool calls, got text");
+            }
+        }
+    }
+
+    // ---- Issue #789: OpenAI reasoning models negative test ----
+
+    #[test]
+    fn test_openai_reasoning_models_not_detected() {
+        use crate::llm::reasoning_models::has_native_thinking;
+        assert!(!has_native_thinking("o1"));
+        assert!(!has_native_thinking("o1-mini"));
+        assert!(!has_native_thinking("o1-preview"));
+        assert!(!has_native_thinking("o3-mini"));
+        assert!(!has_native_thinking("o4-mini"));
+    }
+
+    // ---- closing_tag_for() unit tests ----
+
+    #[test]
+    fn test_closing_tag_for_standard_tags() {
+        assert_eq!(
+            closing_tag_for("<tool_call>").as_deref(),
+            Some("</tool_call>")
+        );
+        assert_eq!(
+            closing_tag_for("<function_call>").as_deref(),
+            Some("</function_call>")
+        );
+        assert_eq!(
+            closing_tag_for("<tool_calls>").as_deref(),
+            Some("</tool_calls>")
+        );
+    }
+
+    #[test]
+    fn test_closing_tag_for_space_suffixed_patterns() {
+        // Patterns with trailing space (for attribute matching)
+        assert_eq!(
+            closing_tag_for("<tool_call ").as_deref(),
+            Some("</tool_call>")
+        );
+        assert_eq!(
+            closing_tag_for("<function_call ").as_deref(),
+            Some("</function_call>")
+        );
+        assert_eq!(
+            closing_tag_for("<tool_calls ").as_deref(),
+            Some("</tool_calls>")
+        );
+    }
+
+    #[test]
+    fn test_closing_tag_for_pipe_delimited() {
+        assert_eq!(
+            closing_tag_for("<|tool_call|>").as_deref(),
+            Some("<|/tool_call|>")
+        );
+        assert_eq!(
+            closing_tag_for("<|function_call|>").as_deref(),
+            Some("<|/function_call|>")
+        );
+        assert_eq!(
+            closing_tag_for("<|tool_calls|>").as_deref(),
+            Some("<|/tool_calls|>")
+        );
+    }
+
+    #[test]
+    fn test_closing_tag_for_covers_all_patterns() {
+        // Every entry in TOOL_TAG_PATTERNS must produce a closing tag
+        for pattern in TOOL_TAG_PATTERNS {
+            assert!(
+                closing_tag_for(pattern).is_some(),
+                "closing_tag_for({:?}) returned None",
+                pattern
+            );
+        }
+    }
+
+    // ---- truncation with multiple tags: first closed, second unclosed ----
+
+    #[test]
+    fn test_truncate_mixed_closed_then_unclosed_different_types() {
+        let input = "Text <function_call>{}</function_call> middle <tool_call>{\"name\": \"x\"}";
+        // function_call is closed → skipped. tool_call is unclosed → truncated.
+        assert_eq!(
+            truncate_at_tool_tags(input),
+            "Text <function_call>{}</function_call> middle "
+        );
     }
 }

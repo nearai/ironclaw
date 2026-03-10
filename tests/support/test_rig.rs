@@ -379,6 +379,8 @@ pub struct TestRigBuilder {
     llm: Option<Arc<dyn LlmProvider>>,
     max_tool_iterations: usize,
     injection_check: bool,
+    auto_approve_tools: Option<bool>,
+    enable_skills: bool,
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
     extra_tools: Vec<Arc<dyn Tool>>,
@@ -392,6 +394,8 @@ impl TestRigBuilder {
             llm: None,
             max_tool_iterations: 10,
             injection_check: false,
+            auto_approve_tools: None,
+            enable_skills: false,
             enable_routines: false,
             http_exchanges: Vec::new(),
             extra_tools: Vec::new(),
@@ -432,6 +436,18 @@ impl TestRigBuilder {
         self
     }
 
+    /// Override agent-level automatic approval of `UnlessAutoApproved` tools.
+    pub fn with_auto_approve_tools(mut self, enable: bool) -> Self {
+        self.auto_approve_tools = Some(enable);
+        self
+    }
+
+    /// Enable skill discovery and registration for this test rig.
+    pub fn with_skills(mut self) -> Self {
+        self.enable_skills = true;
+        self
+    }
+
     /// Enable the routines system so the scheduler is wired with a `RoutineEngine`,
     /// allowing routine jobs to actually execute. Routine tools are always registered
     /// but require the engine to dispatch jobs.
@@ -466,6 +482,8 @@ impl TestRigBuilder {
             llm,
             max_tool_iterations,
             injection_check,
+            auto_approve_tools,
+            enable_skills,
             enable_routines,
             http_exchanges: explicit_http_exchanges,
             extra_tools,
@@ -491,6 +509,10 @@ impl TestRigBuilder {
         let mut config = Config::for_testing(db_path, skills_dir, installed_skills_dir);
         config.agent.max_tool_iterations = max_tool_iterations;
         config.safety.injection_check_enabled = injection_check;
+        config.skills.enabled = enable_skills;
+        if let Some(v) = auto_approve_tools {
+            config.agent.auto_approve_tools = v;
+        }
 
         // 3. Create SessionManager + LogBroadcaster.
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
@@ -540,7 +562,7 @@ impl TestRigBuilder {
         );
         builder.with_database(Arc::clone(&db));
         builder.with_llm(llm);
-        let components = builder
+        let mut components = builder
             .build_all()
             .await
             .expect("AppBuilder::build_all() failed in test rig");
@@ -581,6 +603,21 @@ impl TestRigBuilder {
                 components
                     .tools
                     .register_routine_tools(Arc::clone(db_arc), engine);
+            }
+
+            // Skills tools: ensure tests use temp skill dirs (sandbox-safe) even if
+            // AppBuilder did not wire them for this environment.
+            if enable_skills {
+                let registry = Arc::new(std::sync::RwLock::new(
+                    ironclaw::skills::SkillRegistry::new(temp_dir.path().join("skills"))
+                        .with_installed_dir(temp_dir.path().join("installed_skills")),
+                ));
+                let catalog = ironclaw::skills::catalog::shared_catalog();
+                components
+                    .tools
+                    .register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
+                components.skill_registry = Some(registry);
+                components.skill_catalog = Some(catalog);
             }
 
             // Register any extra test-specific tools.

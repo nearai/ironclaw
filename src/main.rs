@@ -9,8 +9,8 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
-        WebhookServerConfig,
+        ChannelManager, ChannelSecretUpdater, GatewayChannel, HttpChannel, ReplChannel,
+        SignalChannel, WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -677,12 +677,21 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Prepare SIGHUP handler for hot-reloading HTTP webhook config
+    // Broadcast channel for clean shutdown of background tasks
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+
     #[cfg(unix)]
     {
+        // Collect all channels that support secret updates
+        let mut secret_updaters: Vec<Arc<dyn ChannelSecretUpdater>> = Vec::new();
+        if let Some(ref state) = http_channel_state {
+            secret_updaters.push(Arc::clone(state) as Arc<dyn ChannelSecretUpdater>);
+        }
+
         let sighup_webhook_server = webhook_server.clone();
-        let sighup_http_state = http_channel_state.clone();
         let sighup_settings_store_clone = sighup_settings_store.clone();
         let sighup_secrets_store = components.secrets_store.clone();
+        let mut shutdown_rx = shutdown_tx.subscribe();
 
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
@@ -695,10 +704,19 @@ async fn async_main() -> anyhow::Result<()> {
             };
 
             loop {
-                sighup.recv().await;
+                // Exit loop on shutdown signal or when SIGHUP is received
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        tracing::debug!("SIGHUP handler shutting down");
+                        break;
+                    }
+                    _ = sighup.recv() => {
+                        // Handle SIGHUP signal
+                    }
+                }
                 tracing::info!("SIGHUP received — reloading HTTP webhook config");
 
-                // Inject channel secrets from database into environment variables
+                // Inject channel secrets from database into thread-safe overlay
                 // (similar to inject_llm_keys_from_secrets for LLM providers)
                 if let Some(ref secrets_store) = sighup_secrets_store {
                     // Inject HTTP webhook secret from encrypted store
@@ -706,11 +724,12 @@ async fn async_main() -> anyhow::Result<()> {
                         .get_decrypted("default", "http_webhook_secret")
                         .await
                     {
-                        // Safe: Environment variable modification during runtime SIGHUP reload.
-                        // All threads are synchronized via config reload, not reading env vars directly.
-                        unsafe {
-                            std::env::set_var("HTTP_WEBHOOK_SECRET", webhook_secret.expose());
-                        }
+                        // Thread-safe: Uses INJECTED_VARS mutex instead of unsafe std::env::set_var
+                        // Config::from_env() will read from the overlay via optional_env()
+                        ironclaw::config::inject_single_var(
+                            "HTTP_WEBHOOK_SECRET",
+                            webhook_secret.expose(),
+                        );
                         tracing::debug!("Injected HTTP_WEBHOOK_SECRET from secrets store");
                     }
                 }
@@ -750,34 +769,49 @@ async fn async_main() -> anyhow::Result<()> {
                     };
 
                 // Restart listener if addr changed
+                let mut restart_failed = false;
                 if let Some(ref ws_arc) = sighup_webhook_server {
-                    let mut ws = ws_arc.lock().await;
-                    let old_addr = ws.current_addr();
+                    // Read old address while holding lock, then drop immediately
+                    let old_addr = {
+                        let ws = ws_arc.lock().await;
+                        ws.current_addr()
+                    }; // Lock released here
+
                     if old_addr != new_addr {
                         tracing::info!(
                             "SIGHUP: HTTP addr {} -> {}, restarting listener",
                             old_addr,
                             new_addr
                         );
-                        if let Err(e) = ws.restart_with_addr(new_addr).await {
-                            tracing::error!("SIGHUP: listener restart failed: {}", e);
-                        } else {
-                            tracing::info!("SIGHUP: webhook server restarted on {}", new_addr);
+                        // Wait for restart to complete before proceeding with secret update.
+                        // This ensures atomicity: if restart fails, secret is not updated (partial state corruption).
+                        let mut ws = ws_arc.lock().await;
+                        match ws.restart_with_addr(new_addr).await {
+                            Ok(()) => {
+                                tracing::info!("SIGHUP: webhook server restarted on {}", new_addr);
+                            }
+                            Err(e) => {
+                                tracing::error!("SIGHUP: listener restart failed: {}", e);
+                                restart_failed = true;
+                            }
                         }
                     } else {
                         tracing::debug!("SIGHUP: addr unchanged ({})", old_addr);
                     }
                 }
 
-                // Always update secret in-place (zero-downtime)
-                if let Some(ref state) = sighup_http_state {
+                // Update secrets in all configured channels (if restart succeeded or wasn't needed)
+                if !restart_failed {
                     use secrecy::{ExposeSecret, SecretString};
                     let new_secret = new_http
                         .webhook_secret
                         .as_ref()
                         .map(|s| SecretString::from(s.expose_secret().to_string()));
-                    state.update_secret(new_secret).await;
-                    tracing::info!("SIGHUP: webhook secret updated");
+
+                    // Update all channels that support secret swapping
+                    for updater in &secret_updaters {
+                        updater.update_secret(new_secret.clone()).await;
+                    }
                 }
             }
         });
@@ -786,6 +820,9 @@ async fn async_main() -> anyhow::Result<()> {
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
+
+    // Signal background tasks (SIGHUP handler, etc.) to gracefully shut down
+    let _ = shutdown_tx.send(());
 
     // Shut down all stdio MCP server child processes.
     components.mcp_process_manager.shutdown_all().await;

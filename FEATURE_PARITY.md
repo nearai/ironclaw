@@ -46,14 +46,14 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Bonjour/mDNS discovery | ✅ | ❌ | |
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status + /healthz + /readyz, with channel-backed readiness probes |
-| `doctor` diagnostics | ✅ | ❌ | |
+| `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
 | Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies |
 | APNs push pipeline | ✅ | ❌ | Wake disconnected iOS nodes via push |
 | Oversized payload guard | ✅ | 🚧 | HTTP webhook has 64KB body limit + Content-Length check; no chat.history cap |
-| Pre-prompt context diagnostics | ✅ | ❌ | Context size logging before prompt |
+| Pre-prompt context diagnostics | ✅ | 🚧 | Token breakdown logged before LLM call (conversational dispatcher path); other LLM entry points not yet covered |
 
 ### Owner: _Unassigned_
 
@@ -175,7 +175,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `message send` | ✅ | ❌ | P2 | Send to channels |
 | `browser` | ✅ | ❌ | P3 | Browser automation |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
-| `doctor` | ✅ | ❌ | P2 | Diagnostics |
+| `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
 | `logs` | ✅ | ❌ | P3 | Query logs |
 | `update` | ✅ | ❌ | P3 | Self-update |
 | `completion` | ✅ | ✅ | - | Shell completion |
