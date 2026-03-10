@@ -92,6 +92,7 @@ struct EventEnvelope {
 struct EventHeader {
     event_id: Option<String>,
     event_type: Option<String>,
+    create_time: Option<String>,
     token: Option<String>,
     tenant_key: Option<String>,
 }
@@ -1030,9 +1031,10 @@ async fn ws_loop(
     bot_open_id: Option<String>,
 ) {
     let mut dedup = DedupCache::new();
+    let boot_time = now_unix_secs();
 
     loop {
-        match ws_session(&config, &client, &tx, &reply_map, &bot_open_id, &mut dedup).await {
+        match ws_session(&config, &client, &tx, &reply_map, &bot_open_id, &mut dedup, boot_time).await {
             Ok(()) => {
                 tracing::info!("Feishu WebSocket session ended normally, reconnecting…");
             }
@@ -1052,6 +1054,7 @@ async fn ws_session(
     reply_map: &Arc<tokio::sync::RwLock<lru::LruCache<Uuid, ReplyContext>>>,
     bot_open_id: &Option<String>,
     dedup: &mut DedupCache,
+    boot_time: u64,
 ) -> Result<(), ChannelError> {
     let (ws_url, client_config) = FeishuChannel::acquire_ws_url(client, config).await?;
     tracing::info!("Feishu: acquired WebSocket URL, connecting…");
@@ -1089,7 +1092,7 @@ async fn ws_session(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(WsMessage::Binary(data))) => {
-                        handle_binary_frame(&data, tx, reply_map, bot_open_id, dedup).await;
+                        handle_binary_frame(&data, tx, reply_map, bot_open_id, dedup, boot_time).await;
                     }
                     Some(Ok(WsMessage::Ping(data))) => {
                         let _ = ws_tx.send(WsMessage::Pong(data)).await;
@@ -1115,6 +1118,7 @@ async fn handle_binary_frame(
     reply_map: &Arc<tokio::sync::RwLock<lru::LruCache<Uuid, ReplyContext>>>,
     bot_open_id: &Option<String>,
     dedup: &mut DedupCache,
+    boot_time: u64,
 ) {
     let frame = match Frame::decode(data) {
         Ok(f) => f,
@@ -1164,6 +1168,25 @@ async fn handle_binary_frame(
     if event_type != "im.message.receive_v1" {
         tracing::debug!(event_type, "Feishu: unhandled event type, skipping");
         return;
+    }
+
+    let skip_pre_boot = std::env::var("FEISHU_SKIP_PRE_BOOT")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
+    if skip_pre_boot {
+        if let Some(ct) = envelope.header.as_ref().and_then(|h| h.create_time.as_deref()) {
+            if let Ok(event_ms) = ct.parse::<u64>() {
+                let event_secs = event_ms / 1000;
+                if event_secs < boot_time {
+                    tracing::info!(
+                        create_time = ct,
+                        boot_time,
+                        "Feishu: skipping pre-boot event"
+                    );
+                    return;
+                }
+            }
+        }
     }
 
     let event_id = envelope
