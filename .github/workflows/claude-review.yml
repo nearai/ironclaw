@@ -2,7 +2,7 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, labeled]
+    types: [labeled]
 
 permissions:
   contents: read
