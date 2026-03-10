@@ -3345,7 +3345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_llm_backend_preserves_model_when_backend_was_unset() {
+    fn test_set_llm_backend_clears_model_when_backend_was_unset() {
         let mut wizard = SetupWizard::new();
         wizard.settings.selected_model = Some("gpt-4o".to_string());
 

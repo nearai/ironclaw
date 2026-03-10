@@ -172,17 +172,15 @@ env-var mode or skipped secrets.
 | Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 | OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
-| OpenRouter¹ | API key | `llm_compatible_api_key` | `LLM_API_KEY` |
-| OpenAI-compatible¹ | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
-
-¹ OpenRouter and OpenAI-compatible share the same secret name and env var because
-OpenRouter is stored as `llm_backend = "openai_compatible"` under the hood.
-Switching between them overwrites the same credential slot.
+| OpenRouter | API key | `llm_openrouter_api_key` | `OPENROUTER_API_KEY` |
+| OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
 
 **OpenRouter** (via `run_provider_setup()` and `setup_api_key_provider()`):
 - Pre-configured OpenAI-compatible preset with base URL `https://openrouter.ai/api/v1`
 - Delegates to `setup_api_key_provider()` with a display name override ("OpenRouter")
-- Sets `llm_backend = "openai_compatible"` and `openai_compatible_base_url` automatically
+- Stores `llm_backend = "openrouter"` and uses `OPENROUTER_API_KEY` /
+  `llm_openrouter_api_key` credentials
+- Keeps `openai_compatible_base_url` as a compatibility fallback during config resolution
 - Preserves `selected_model` on a same-backend re-run
 - Clears `selected_model` only when switching from a different backend, so
   Step 4 prompts for a compatible model when needed
