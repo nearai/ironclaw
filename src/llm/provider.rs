@@ -503,6 +503,9 @@ pub fn strip_unsupported_completion_params(
 ///
 /// This is the single helper function used by all providers to remove
 /// parameters they don't support from tool calls, replacing duplicate stringly-typed logic.
+///
+/// Note: Only `Temperature` and `MaxTokens` are supported in `ToolCompletionRequest`.
+/// `StopSequences` is only available in `CompletionRequest` and is not applicable to tool calls.
 pub fn strip_unsupported_tool_params(
     unsupported: &std::collections::HashSet<String>,
     req: &mut ToolCompletionRequest,
@@ -516,6 +519,7 @@ pub fn strip_unsupported_tool_params(
     if unsupported.contains(UnsupportedParam::MaxTokens.name()) {
         req.max_tokens = None;
     }
+    // Note: StopSequences is not a field in ToolCompletionRequest, so no action needed
 }
 
 #[cfg(test)]
