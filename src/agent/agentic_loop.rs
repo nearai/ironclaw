@@ -64,6 +64,14 @@ impl Default for AgenticLoopConfig {
 /// implement only the behavior that differs between chat, job, and container
 /// contexts. The loop itself handles the common logic: tool intent nudge,
 /// iteration counting, tool definition refresh, and the respond → execute → process cycle.
+///
+/// # `Send + Sync` requirement
+///
+/// This trait requires `Send + Sync` because the loop accepts `&dyn LoopDelegate`.
+/// Delegates using borrowed references (e.g. `ChatDelegate<'a>`) must ensure all
+/// borrowed fields are `Send + Sync`. This is a load-bearing constraint: if a
+/// delegate needs to be spawned into a detached task, it must use `Arc`-based
+/// ownership instead of borrows (as `JobDelegate` and `ContainerDelegate` do).
 #[async_trait]
 pub trait LoopDelegate: Send + Sync {
     /// Called at the start of each iteration. Check for external signals
@@ -298,15 +306,15 @@ mod tests {
             _reason_ctx: &mut ReasoningContext,
             iteration: usize,
         ) -> Option<LoopOutcome> {
-            let guard = self.early_exit.lock().await;
-            if let Some((target, _)) = guard.as_ref() {
-                if *target != iteration {
-                    return None;
-                }
-                drop(guard);
-                return self.early_exit.lock().await.take().map(|(_, o)| o);
+            let mut guard = self.early_exit.lock().await;
+            let should_take = guard
+                .as_ref()
+                .is_some_and(|(target, _)| *target == iteration);
+            if should_take {
+                guard.take().map(|(_, o)| o)
+            } else {
+                None
             }
-            None
         }
 
         async fn call_llm(

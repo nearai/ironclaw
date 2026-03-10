@@ -727,7 +727,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         reason_ctx: &mut ReasoningContext,
         selection: &ToolSelection,
         result: Result<String, Error>,
-    ) -> Result<bool, Error> {
+    ) -> Result<(), Error> {
         self.log_event(
             "tool_use",
             serde_json::json!({
@@ -762,7 +762,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         "output": truncate_for_preview(&sanitized.content, 500),
                     }),
                 );
-                Ok(false)
+                Ok(())
             }
             Err(e) => {
                 tracing::warn!(
@@ -790,11 +790,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     serde_json::json!({
                         "tool_name": selection.tool_name,
                         "success": false,
-                        "output": format!("Error: {}", e),
+                        "output": truncate_for_preview(&format!("Error: {}", e), 500),
                     }),
                 );
 
-                Ok(false)
+                Ok(())
             }
         }
     }
@@ -878,13 +878,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 .execute_tool(&action.tool_name, &action.parameters)
                 .await;
 
-            let completed = self
-                .process_tool_result_job(reason_ctx, &selection, result)
+            self.process_tool_result_job(reason_ctx, &selection, result)
                 .await?;
-
-            if completed {
-                return Ok(());
-            }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -1034,10 +1029,11 @@ impl<'a> JobDelegate<'a> {
             self.worker
                 .mark_failed("Persistent rate limiting: exceeded retry limit")
                 .await?;
-            return Ok(crate::llm::RespondOutput {
-                result: RespondResult::Text(String::new()),
-                usage: crate::llm::TokenUsage::default(),
-            });
+            return Err(crate::error::LlmError::RateLimited {
+                provider: "rate-limit-exhausted".to_string(),
+                retry_after: None,
+            }
+            .into());
         }
 
         self.worker.log_event(
@@ -1061,7 +1057,10 @@ impl<'a> JobDelegate<'a> {
 #[async_trait]
 impl<'a> LoopDelegate for JobDelegate<'a> {
     async fn check_signals(&self) -> LoopSignal {
-        // Drain the message channel — scope the lock so it's dropped before any .await
+        // Drain the entire message channel, prioritizing Stop over user messages.
+        // Scope the lock so it's dropped before any .await below.
+        let mut stop_requested = false;
+        let mut first_user_message: Option<String> = None;
         {
             let mut rx = self.rx.lock().await;
             while let Ok(msg) = rx.try_recv() {
@@ -1071,7 +1070,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                             "Worker for job {} received stop signal",
                             self.worker.job_id
                         );
-                        return LoopSignal::Stop;
+                        stop_requested = true;
                     }
                     WorkerMessage::Ping => {
                         tracing::trace!("Worker for job {} received ping", self.worker.job_id);
@@ -1089,19 +1088,42 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                                 "content": content,
                             }),
                         );
-                        return LoopSignal::InjectMessage(content);
+                        // Keep only the first user message; subsequent ones will be
+                        // picked up on the next iteration's drain.
+                        if first_user_message.is_none() {
+                            first_user_message = Some(content);
+                        }
                     }
                 }
             }
         } // MutexGuard dropped here, before the cancellation .await
 
-        // Check for terminal state (cancellation, failure from rate-limit exhaustion, etc.)
+        // Stop takes priority over user messages
+        if stop_requested {
+            return LoopSignal::Stop;
+        }
+
+        if let Some(content) = first_user_message {
+            return LoopSignal::InjectMessage(content);
+        }
+
+        // Check for terminal or non-progressing state. The loop should stop when the
+        // job has been cancelled, failed, stuck, or already completed — not just the
+        // three states that `is_terminal()` covers (Accepted/Failed/Cancelled).
         if let Ok(ctx) = self
             .worker
             .context_manager()
             .get_context(self.worker.job_id)
             .await
-            && matches!(ctx.state, JobState::Cancelled | JobState::Failed)
+            && matches!(
+                ctx.state,
+                JobState::Cancelled
+                    | JobState::Failed
+                    | JobState::Stuck
+                    | JobState::Completed
+                    | JobState::Submitted
+                    | JobState::Accepted
+            )
         {
             tracing::info!(
                 "Worker for job {} detected terminal state {:?}",
@@ -1188,7 +1210,8 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         text: &str,
         reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
-        // Empty text from rate-limit backoff — just continue
+        // Empty text from rate-limit backoff retry — skip processing and let the
+        // loop proceed to the next iteration which will re-call the LLM.
         if text.is_empty() {
             return TextAction::Continue;
         }

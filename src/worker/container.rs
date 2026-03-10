@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::agent::agentic_loop::{
-    AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
+    AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction, truncate_for_preview,
 };
 use crate::config::SafetyConfig;
 use crate::context::JobContext;
@@ -109,7 +109,7 @@ impl WorkerRuntime {
         tracing::info!(
             "Received job: {} - {}",
             job.title,
-            truncate(&job.description, 100)
+            truncate_for_preview(&job.description, 100)
         );
 
         // Fetch credentials and store them for injection into child processes
@@ -158,6 +158,9 @@ Work independently to complete this job. Report when done."#,
         // Load tool definitions
         reason_ctx.available_tools = self.tools.tool_definitions().await;
 
+        // Shared iteration tracker — read after the loop to report accurate counts.
+        let iteration_tracker = Arc::new(Mutex::new(0u32));
+
         // Run with timeout using the shared agentic loop
         let result = tokio::time::timeout(self.config.timeout, async {
             let delegate = ContainerDelegate {
@@ -166,7 +169,7 @@ Work independently to complete this job. Report when done."#,
                 tools: self.tools.clone(),
                 extra_env: self.extra_env.clone(),
                 last_output: Mutex::new(String::new()),
-                iteration_tracker: Mutex::new(0u32),
+                iteration_tracker: iteration_tracker.clone(),
             };
 
             let config = AgenticLoopConfig {
@@ -185,6 +188,8 @@ Work independently to complete this job. Report when done."#,
         })
         .await;
 
+        let iterations = *iteration_tracker.lock().await;
+
         match result {
             Ok(Ok(LoopOutcome::Response(output))) => {
                 tracing::info!("Worker completed job {} successfully", self.config.job_id);
@@ -192,7 +197,7 @@ Work independently to complete this job. Report when done."#,
                     "result",
                     serde_json::json!({
                         "success": true,
-                        "message": truncate(&output, 2000),
+                        "message": truncate_for_preview(&output, 2000),
                     }),
                 )
                 .await;
@@ -200,7 +205,7 @@ Work independently to complete this job. Report when done."#,
                     .report_complete(&CompletionReport {
                         success: true,
                         message: Some(output),
-                        iterations: 0,
+                        iterations,
                     })
                     .await?;
             }
@@ -219,7 +224,7 @@ Work independently to complete this job. Report when done."#,
                     .report_complete(&CompletionReport {
                         success: false,
                         message: Some(format!("Execution failed: {}", msg)),
-                        iterations: 0,
+                        iterations,
                     })
                     .await?;
             }
@@ -229,7 +234,7 @@ Work independently to complete this job. Report when done."#,
                     .report_complete(&CompletionReport {
                         success: false,
                         message: Some("Execution stopped".to_string()),
-                        iterations: 0,
+                        iterations,
                     })
                     .await?;
             }
@@ -247,7 +252,7 @@ Work independently to complete this job. Report when done."#,
                     .report_complete(&CompletionReport {
                         success: false,
                         message: Some(format!("Execution failed: {}", e)),
-                        iterations: 0,
+                        iterations,
                     })
                     .await?;
             }
@@ -265,7 +270,7 @@ Work independently to complete this job. Report when done."#,
                     .report_complete(&CompletionReport {
                         success: false,
                         message: Some("Execution timed out".to_string()),
-                        iterations: 0,
+                        iterations,
                     })
                     .await?;
             }
@@ -296,8 +301,9 @@ struct ContainerDelegate {
     extra_env: Arc<HashMap<String, String>>,
     /// Tracks the last successful tool output for the final response.
     last_output: Mutex<String>,
-    /// Tracks the current iteration for progress reporting.
-    iteration_tracker: Mutex<u32>,
+    /// Tracks the current iteration — shared with the outer `run` method so
+    /// `CompletionReport` can include accurate iteration counts.
+    iteration_tracker: Arc<Mutex<u32>>,
 }
 
 impl ContainerDelegate {
@@ -317,13 +323,13 @@ impl ContainerDelegate {
             Ok(Some(prompt)) => {
                 tracing::info!(
                     "Received follow-up prompt: {}",
-                    truncate(&prompt.content, 100)
+                    truncate_for_preview(&prompt.content, 100)
                 );
                 self.post_event(
                     "message",
                     serde_json::json!({
                         "role": "user",
-                        "content": truncate(&prompt.content, 2000),
+                        "content": truncate_for_preview(&prompt.content, 2000),
                     }),
                 )
                 .await;
@@ -395,7 +401,7 @@ impl LoopDelegate for ContainerDelegate {
             "message",
             serde_json::json!({
                 "role": "assistant",
-                "content": truncate(text, 2000),
+                "content": truncate_for_preview(text, 2000),
             }),
         )
         .await;
@@ -426,7 +432,7 @@ impl LoopDelegate for ContainerDelegate {
                 "message",
                 serde_json::json!({
                     "role": "assistant",
-                    "content": truncate(text, 2000),
+                    "content": truncate_for_preview(text, 2000),
                 }),
             )
             .await;
@@ -446,7 +452,7 @@ impl LoopDelegate for ContainerDelegate {
                 "tool_use",
                 serde_json::json!({
                     "tool_name": tc.name,
-                    "input": truncate(&tc.arguments.to_string(), 500),
+                    "input": truncate_for_preview(&tc.arguments.to_string(), 500),
                 }),
             )
             .await;
@@ -465,8 +471,8 @@ impl LoopDelegate for ContainerDelegate {
                 serde_json::json!({
                     "tool_name": tc.name,
                     "output": match &result {
-                        Ok(output) => truncate(output, 2000),
-                        Err(e) => format!("Error: {}", truncate(e, 500)),
+                        Ok(output) => truncate_for_preview(output, 2000),
+                        Err(e) => format!("Error: {}", truncate_for_preview(e, 500)),
                     },
                     "success": result.is_ok(),
                 }),
@@ -490,7 +496,7 @@ impl LoopDelegate for ContainerDelegate {
             "message",
             serde_json::json!({
                 "role": "assistant",
-                "content": truncate(text, 2000),
+                "content": truncate_for_preview(text, 2000),
                 "nudge": true,
             }),
         )
@@ -503,39 +509,30 @@ impl LoopDelegate for ContainerDelegate {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let end = crate::util::floor_char_boundary(s, max);
-        format!("{}...", &s[..end])
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::worker::container::truncate;
+    use crate::agent::agentic_loop::truncate_for_preview;
 
     #[test]
     fn test_truncate_within_limit() {
-        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate_for_preview("hello", 10), "hello");
     }
 
     #[test]
     fn test_truncate_at_limit() {
-        assert_eq!(truncate("hello", 5), "hello");
+        assert_eq!(truncate_for_preview("hello", 5), "hello");
     }
 
     #[test]
     fn test_truncate_beyond_limit() {
-        let result = truncate("hello world", 5);
+        let result = truncate_for_preview("hello world", 5);
         assert_eq!(result, "hello...");
     }
 
     #[test]
     fn test_truncate_multibyte_safe() {
         // "é" is 2 bytes in UTF-8; slicing at byte 1 would panic without safety
-        let result = truncate("é is fancy", 1);
+        let result = truncate_for_preview("é is fancy", 1);
         // Should truncate to 0 chars (can't fit "é" in 1 byte)
         assert_eq!(result, "...");
     }
