@@ -63,12 +63,13 @@ pub async fn execute_tool_with_safety(
 
     match &result {
         Ok(Ok(output)) => {
-            let result_str = serde_json::to_string(&output.result)
-                .unwrap_or_else(|_| "<serialize error>".to_string());
+            let result_size = serde_json::to_string(&output.result)
+                .map(|s| s.len())
+                .unwrap_or(0);
             tracing::debug!(
                 tool = %tool_name,
                 elapsed_ms = elapsed.as_millis() as u64,
-                result = %result_str,
+                result_size_bytes = result_size,
                 "Tool call succeeded"
             );
         }

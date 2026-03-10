@@ -223,7 +223,7 @@ Work independently to complete this job. Report when done."#,
                     })
                     .await?;
             }
-            Ok(Ok(LoopOutcome::Stopped | LoopOutcome::Custom(_))) => {
+            Ok(Ok(LoopOutcome::Stopped | LoopOutcome::NeedApproval(_))) => {
                 tracing::info!("Worker for job {} stopped", self.config.job_id);
                 self.client
                     .report_complete(&CompletionReport {
@@ -484,6 +484,18 @@ impl LoopDelegate for ContainerDelegate {
         }
 
         Ok(None)
+    }
+
+    async fn on_tool_intent_nudge(&self, text: &str, _reason_ctx: &mut ReasoningContext) {
+        self.post_event(
+            "message",
+            serde_json::json!({
+                "role": "assistant",
+                "content": truncate(text, 2000),
+                "nudge": true,
+            }),
+        )
+        .await;
     }
 
     async fn after_iteration(&self, _iteration: usize) {

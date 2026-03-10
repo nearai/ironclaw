@@ -168,7 +168,6 @@ impl Agent {
             active_skills,
             cached_prompt,
             cached_prompt_no_tools,
-            max_tool_iterations,
             nudge_at,
             force_text_at,
             user_tz,
@@ -213,16 +212,8 @@ impl Agent {
                 ),
             }
             .into()),
-            LoopOutcome::Custom(any) => {
-                if let Ok(result) = any.downcast::<AgenticLoopResult>() {
-                    Ok(*result)
-                } else {
-                    Err(crate::error::LlmError::InvalidResponse {
-                        provider: "agent".to_string(),
-                        reason: "Unexpected custom loop outcome".to_string(),
-                    }
-                    .into())
-                }
+            LoopOutcome::NeedApproval(pending) => {
+                Ok(AgenticLoopResult::NeedApproval { pending: *pending })
             }
         }
     }
@@ -253,8 +244,6 @@ struct ChatDelegate<'a> {
     active_skills: Vec<crate::skills::LoadedSkill>,
     cached_prompt: String,
     cached_prompt_no_tools: String,
-    #[allow(dead_code)]
-    max_tool_iterations: usize,
     nudge_at: usize,
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
@@ -893,9 +882,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 user_timezone: Some(self.user_tz.name().to_string()),
             };
 
-            return Ok(Some(LoopOutcome::Custom(Box::new(
-                AgenticLoopResult::NeedApproval { pending },
-            ))));
+            return Ok(Some(LoopOutcome::NeedApproval(Box::new(pending))));
         }
 
         Ok(None)

@@ -14,7 +14,8 @@ Core agent logic. This is the most complex subsystem — read this before workin
 | `session_manager.rs` | Lifecycle: create/lookup sessions, map external thread IDs to internal UUIDs, prune stale sessions, manage undo managers. |
 | `router.rs` | Routes explicit `/commands` to `MessageIntent`. Natural language bypasses the router entirely. |
 | `scheduler.rs` | Parallel job scheduling. Maintains `jobs` map (full LLM-driven) and `subtasks` map (tool-exec/background). |
-| `worker.rs` | Per-job execution for background scheduler jobs: calls LLM, runs tools, handles the reasoning loop. Distinct from `dispatcher.rs`. |
+| *(moved to `src/worker/job.rs`)* | Per-job execution now lives in `src/worker/job.rs` as `JobDelegate`, using the shared `run_agentic_loop()` engine. |
+| `agentic_loop.rs` | Shared agentic loop engine: `run_agentic_loop()`, `LoopDelegate` trait, `LoopOutcome`, `LoopSignal`, `TextAction`. All three execution paths (chat, job, container) delegate to this. |
 | `compaction.rs` | Context window management: summarize old turns, write to workspace daily log, trim context. Three strategies. |
 | `context_monitor.rs` | Detects memory pressure. Suggests `CompactionStrategy` based on usage level. |
 | `self_repair.rs` | Detects stuck jobs and broken tools, attempts recovery. |
@@ -49,26 +50,28 @@ Session (per user)
 
 ## Agentic Loop (dispatcher.rs)
 
-The `dispatcher.rs` module handles **direct conversational turns** (user messages processed inline by the main agent). Background scheduler jobs use `worker.rs` instead — these are two separate execution paths.
+All three execution paths (chat, job, container) now use the shared `run_agentic_loop()` engine in `agentic_loop.rs`, each providing their own `LoopDelegate` implementation:
+
+- **`ChatDelegate`** (`dispatcher.rs`) — conversational turns, tool approval, skill context injection
+- **`JobDelegate`** (`src/worker/job.rs`) — background scheduler jobs, planning support, completion detection
+- **`ContainerDelegate`** (`src/worker/container.rs`) — Docker container worker, sequential tool exec, HTTP event streaming
 
 ```
-run_agentic_loop()  [dispatcher.rs — conversational turns]
-  1. Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
-  2. Detect group chat from metadata; exclude MEMORY.md if group chat
-  3. Select active skills (keyword/pattern scoring against message content)
-  4. Build skill context block (injected before user message)
-  5. LLM call → text response OR tool calls
-  6. If tool calls:
-     a. Check tool approval (session auto-approvals, pending approval queue)
-     b. Execute tools (parallel via JoinSet)
-     c. Sanitize results through SafetyLayer
-     d. Feed results back → goto 5
-  7. Return AgenticLoopResult::Response or NeedApproval
+run_agentic_loop(delegate, reasoning, reason_ctx, config)
+  1. Check signals (stop/cancel) via delegate.check_signals()
+  2. Pre-LLM hook via delegate.before_llm_call()
+  3. LLM call via delegate.call_llm()
+  4. If text response → delegate.handle_text_response() → Continue or Return
+  5. If tool calls → delegate.execute_tool_calls() → Continue or Return
+  6. Post-iteration hook via delegate.after_iteration()
+  7. Repeat until LoopOutcome returned or max_iterations reached
 ```
 
-**Tool approval:** Tools flagged `requires_approval` pause the loop and return `NeedApproval`. The web gateway stores the `PendingApproval` in session state and sends an `approval_needed` SSE event. The user's approval/deny resumes the loop.
+**Tool approval:** Tools flagged `requires_approval` pause the loop — `ChatDelegate` returns `LoopOutcome::NeedApproval(pending)`. The web gateway stores the `PendingApproval` in session state and sends an `approval_needed` SSE event. The user's approval/deny resumes the loop.
 
-**worker.rs vs dispatcher.rs:** `dispatcher.rs` runs the agentic loop for user-initiated conversational turns (holds session lock, tracks turns). `worker.rs` is spawned by the `Scheduler` for background jobs created via `CreateJob` / `/job` — it runs independently of the session and has its own LLM reasoning loop with planning support (`use_planning` flag).
+**Shared tool execution:** `tools/execute.rs` provides `execute_tool_with_safety()` (validate → timeout → execute → serialize) and `process_tool_result()` (sanitize → wrap → ChatMessage), used by all three delegates.
+
+**ChatDelegate vs JobDelegate:** `ChatDelegate` runs for user-initiated conversational turns (holds session lock, tracks turns). `JobDelegate` is spawned by the `Scheduler` for background jobs created via `CreateJob` / `/job` — it runs independently of the session and has planning support (`use_planning` flag).
 
 ## Command Routing (router.rs)
 

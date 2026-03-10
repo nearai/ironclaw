@@ -86,7 +86,8 @@ src/
 │   └── job_manager.rs  # Container lifecycle (create, stop, cleanup)
 │
 ├── worker/             # Runs inside Docker containers
-│   ├── runtime.rs      # Worker execution loop (tool calls, LLM)
+│   ├── container.rs    # Container worker runtime (ContainerDelegate + shared agentic loop)
+│   ├── job.rs          # Background job worker (JobDelegate + shared agentic loop)
 │   ├── claude_bridge.rs # Claude Code bridge (spawns claude CLI)
 │   └── proxy_llm.rs    # LlmProvider that proxies through orchestrator
 │

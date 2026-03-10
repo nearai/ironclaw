@@ -394,7 +394,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             LoopOutcome::Stopped => {
                 // Stop signal handled — nothing more to do
             }
-            LoopOutcome::Custom(_) => {}
+            LoopOutcome::NeedApproval(_) => {}
         }
 
         Ok(())
@@ -597,12 +597,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         match &result {
             Ok(Ok(output)) => {
-                let result_str = serde_json::to_string(&output.result)
-                    .unwrap_or_else(|_| "<serialize error>".to_string());
+                let result_size = serde_json::to_string(&output.result)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
                 tracing::debug!(
                     tool = %tool_name,
                     elapsed_ms = elapsed.as_millis() as u64,
-                    result = %result_str,
+                    result_size_bytes = result_size,
                     "Tool call succeeded"
                 );
             }
@@ -736,8 +737,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }),
         );
 
-        // Use shared result processing for sanitize → wrap → ChatMessage
-        let (content, message) = process_tool_result(
+        // Use shared result processing for sanitize → wrap → ChatMessage.
+        // The wrapped content (XML tags) goes into reason_ctx for the LLM.
+        // The raw sanitized content goes into events/SSE for human-readable UI.
+        let (_wrapped, message) = process_tool_result(
             &self.deps.safety,
             &selection.tool_name,
             &selection.tool_call_id,
@@ -746,11 +749,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         reason_ctx.messages.push(message);
 
         match &result {
-            Ok(_) => {
+            Ok(raw_output) => {
+                let sanitized = self.deps.safety.sanitize_tool_output(
+                    &selection.tool_name, raw_output);
                 self.log_event("tool_result", serde_json::json!({
                     "tool_name": selection.tool_name,
                     "success": true,
-                    "output": truncate_for_preview(&content, 500),
+                    "output": truncate_for_preview(&sanitized.content, 500),
                 }));
                 Ok(false)
             }
@@ -1083,17 +1088,18 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             }
         } // MutexGuard dropped here, before the cancellation .await
 
-        // Check for cancellation
+        // Check for terminal state (cancellation, failure from rate-limit exhaustion, etc.)
         if let Ok(ctx) = self
             .worker
             .context_manager()
             .get_context(self.worker.job_id)
             .await
-            && ctx.state == JobState::Cancelled
+            && matches!(ctx.state, JobState::Cancelled | JobState::Failed)
         {
             tracing::info!(
-                "Worker for job {} detected cancellation",
-                self.worker.job_id
+                "Worker for job {} detected terminal state {:?}",
+                self.worker.job_id,
+                ctx.state,
             );
             return LoopSignal::Stop;
         }
@@ -1261,6 +1267,17 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         Ok(None)
     }
 
+    async fn on_tool_intent_nudge(&self, text: &str, _reason_ctx: &mut ReasoningContext) {
+        self.worker.log_event(
+            "message",
+            serde_json::json!({
+                "role": "assistant",
+                "content": truncate_for_preview(text, 2000),
+                "nudge": true,
+            }),
+        );
+    }
+
     async fn after_iteration(&self, _iteration: usize) {
         // Small delay between iterations
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1295,7 +1312,6 @@ impl From<TaskOutput> for Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use crate::llm::ToolSelection;
-    use crate::util::llm_signals_completion;
 
     use super::*;
     use crate::config::SafetyConfig;
@@ -1413,61 +1429,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_completion_positive_signals() {
-        assert!(llm_signals_completion("The job is complete."));
-        assert!(llm_signals_completion(
-            "I have completed the task successfully."
-        ));
-        assert!(llm_signals_completion("The task is done."));
-        assert!(llm_signals_completion("The task is finished."));
-        assert!(llm_signals_completion(
-            "All steps are complete and verified."
-        ));
-        assert!(llm_signals_completion(
-            "I've done all the work. The work is done."
-        ));
-        assert!(llm_signals_completion(
-            "Successfully completed the migration."
-        ));
-    }
-
-    #[test]
-    fn test_completion_negative_signals_block_false_positives() {
-        assert!(!llm_signals_completion("The task is not complete yet."));
-        assert!(!llm_signals_completion("This is not done."));
-        assert!(!llm_signals_completion("The work is incomplete."));
-        assert!(!llm_signals_completion(
-            "The migration is not yet finished."
-        ));
-        assert!(!llm_signals_completion("The job isn't done yet."));
-        assert!(!llm_signals_completion("This remains unfinished."));
-    }
-
-    #[test]
-    fn test_completion_does_not_match_bare_substrings() {
-        assert!(!llm_signals_completion(
-            "I need to complete more work first."
-        ));
-        assert!(!llm_signals_completion(
-            "Let me finish the remaining steps."
-        ));
-        assert!(!llm_signals_completion(
-            "I'm done analyzing, now let me fix it."
-        ));
-        assert!(!llm_signals_completion(
-            "I completed step 1 but step 2 remains."
-        ));
-    }
-
-    #[test]
-    fn test_completion_tool_output_injection() {
-        assert!(!llm_signals_completion("TASK_COMPLETE"));
-        assert!(!llm_signals_completion("JOB_DONE"));
-        assert!(!llm_signals_completion(
-            "The tool returned: TASK_COMPLETE signal"
-        ));
-    }
+    // Completion detection tests live in src/util.rs (the canonical location).
+    // See: test_completion_signals, test_completion_negative, etc.
 
     #[tokio::test]
     async fn test_parallel_speedup() {

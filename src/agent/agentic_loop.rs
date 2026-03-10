@@ -7,6 +7,7 @@
 
 use async_trait::async_trait;
 
+use crate::agent::session::PendingApproval;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
 
@@ -36,8 +37,8 @@ pub enum LoopOutcome {
     Stopped,
     /// Max iterations exceeded.
     MaxIterations,
-    /// Custom outcome (e.g. approval needed, stuck).
-    Custom(Box<dyn std::any::Any + Send>),
+    /// A tool requires user approval before continuing (chat delegate only).
+    NeedApproval(Box<PendingApproval>),
 }
 
 /// Configuration for the agentic loop.
@@ -105,6 +106,10 @@ pub trait LoopDelegate: Send + Sync {
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, Error>;
 
+    /// Called when the LLM expresses tool intent without actually calling a tool.
+    /// Delegates can use this to emit events or log the nudge for observability.
+    async fn on_tool_intent_nudge(&self, _text: &str, _reason_ctx: &mut ReasoningContext) {}
+
     /// Called after each successful iteration (no error, no early return).
     async fn after_iteration(&self, _iteration: usize) {}
 }
@@ -154,6 +159,7 @@ pub async fn run_agentic_loop(
                         iteration,
                         "LLM expressed tool intent without calling a tool, nudging"
                     );
+                    delegate.on_tool_intent_nudge(&text, reason_ctx).await;
                     reason_ctx.messages.push(ChatMessage::assistant(&text));
                     reason_ctx
                         .messages
@@ -194,6 +200,9 @@ pub async fn run_agentic_loop(
 }
 
 /// Truncate a string for log/status previews.
+///
+/// `max` is a byte budget. The result is truncated at the last valid char
+/// boundary at or before `max` bytes, so it is always valid UTF-8.
 pub fn truncate_for_preview(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
