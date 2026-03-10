@@ -451,8 +451,8 @@ impl Tool for ToolRemoveTool {
     }
 
     fn description(&self) -> &str {
-        "Remove an installed extension (channel, tool, or MCP server). \
-         Unregisters tools and deletes configuration."
+        "Permanently remove an installed extension (channel, tool, or MCP server) from disk. \
+         This action cannot be undone — the WASM binary and configuration files will be deleted."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -492,7 +492,7 @@ impl Tool for ToolRemoveTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
+        ApprovalRequirement::Always
     }
 }
 
@@ -701,8 +701,36 @@ mod tests {
         assert_eq!(tool.name(), "tool_remove");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Always
         );
+    }
+
+    #[test]
+    fn tool_remove_always_requires_approval_regardless_of_params() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = ToolRemoveTool {
+            manager: test_manager_stub(),
+        };
+
+        let test_cases = vec![
+            ("no params", serde_json::json!({})),
+            ("empty name", serde_json::json!({"name": ""})),
+            ("slack", serde_json::json!({"name": "slack"})),
+            ("github-cli", serde_json::json!({"name": "github-cli"})),
+            (
+                "with extra fields",
+                serde_json::json!({"name": "tool", "extra": "field"}),
+            ),
+        ];
+
+        for (case_name, params) in test_cases {
+            assert_eq!(
+                tool.requires_approval(&params),
+                ApprovalRequirement::Always,
+                "tool_remove must always require approval for case: {}",
+                case_name
+            );
+        }
     }
 
     #[test]
@@ -749,6 +777,7 @@ mod tests {
 
         Arc::new(ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,

@@ -417,7 +417,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
             iteration += 1;
             if iteration > max_iterations {
-                self.mark_stuck("Maximum iterations exceeded").await?;
+                self.mark_failed("Maximum iterations exceeded: job hit the iteration cap")
+                    .await?;
                 return Ok(());
             }
 
@@ -437,7 +438,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         "LLM rate limited during tool selection, backing off"
                     );
                     if consecutive_rate_limits >= MAX_CONSECUTIVE_RATE_LIMITS {
-                        self.mark_stuck("Persistent rate limiting").await?;
+                        self.mark_failed("Persistent rate limiting: exceeded retry limit")
+                            .await?;
                         return Ok(());
                     }
                     self.log_event(
@@ -467,7 +469,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             "LLM rate limited during respond_with_tools, backing off"
                         );
                         if consecutive_rate_limits >= MAX_CONSECUTIVE_RATE_LIMITS {
-                            self.mark_stuck("Persistent rate limiting").await?;
+                            self.mark_failed("Persistent rate limiting: exceeded retry limit")
+                                .await?;
                             return Ok(());
                         }
                         self.log_event(
@@ -482,6 +485,20 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }
                     Err(e) => return Err(e.into()),
                 };
+
+                // Track token usage from LLM call against the job budget.
+                // NOTE: select_tools() also makes LLM calls but doesn't expose
+                // TokenUsage; only respond_with_tools() usage is tracked here.
+                let total_tokens = respond_output.usage.total() as u64;
+                if total_tokens > 0
+                    && let Err(msg) = self
+                        .context_manager()
+                        .update_context(self.job_id, |ctx| ctx.add_tokens(total_tokens))
+                        .await?
+                {
+                    self.mark_failed(&msg).await?;
+                    return Ok(());
+                }
 
                 match respond_output.result {
                     RespondResult::Text(response) => {
@@ -1760,6 +1777,86 @@ mod tests {
         assert!(
             result.is_ok(),
             "Always tool should be allowed with permission"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_budget_exceeded_fails_job() {
+        let worker = make_worker(vec![]).await;
+
+        // Transition to InProgress (required for mark_failed)
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Set a token budget
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.max_tokens = 100;
+            })
+            .await
+            .unwrap();
+
+        // Simulate adding tokens that exceed the budget
+        let budget_result = worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| ctx.add_tokens(200))
+            .await
+            .unwrap();
+
+        assert!(
+            budget_result.is_err(),
+            "Should return error when token budget exceeded"
+        );
+
+        // Verify that mark_failed transitions job to Failed
+        worker
+            .mark_failed(&budget_result.unwrap_err())
+            .await
+            .unwrap();
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .unwrap();
+        assert_eq!(ctx.state, JobState::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_iteration_cap_marks_failed_not_stuck() {
+        let worker = make_worker(vec![]).await;
+
+        // Transition to InProgress (required for mark_failed)
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Simulate what the execution loop does when max_iterations is exceeded
+        worker
+            .mark_failed("Maximum iterations exceeded: job hit the iteration cap")
+            .await
+            .unwrap();
+
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            ctx.state,
+            JobState::Failed,
+            "Iteration cap should transition to Failed, not Stuck"
         );
     }
 }

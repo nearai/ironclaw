@@ -75,7 +75,7 @@ impl ChannelManager {
                     break;
                 }
             }
-            tracing::info!(channel = %name, "Hot-added channel stream ended");
+            tracing::debug!(channel = %name, "Hot-added channel stream ended");
         });
 
         Ok(())
@@ -92,7 +92,7 @@ impl ChannelManager {
         for (name, channel) in channels.iter() {
             match channel.start().await {
                 Ok(stream) => {
-                    tracing::info!("Started channel: {}", name);
+                    tracing::debug!("Started channel: {}", name);
                     streams.push(stream);
                 }
                 Err(e) => {

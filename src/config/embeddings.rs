@@ -100,13 +100,13 @@ impl EmbeddingsConfig {
         session: Arc<SessionManager>,
     ) -> Option<Arc<dyn EmbeddingProvider>> {
         if !self.enabled {
-            tracing::info!("Embeddings disabled (set EMBEDDING_ENABLED=true to enable)");
+            tracing::debug!("Embeddings disabled (set EMBEDDING_ENABLED=true to enable)");
             return None;
         }
 
         match self.provider.as_str() {
             "nearai" => {
-                tracing::info!(
+                tracing::debug!(
                     "Embeddings enabled via NEAR AI (model: {}, dim: {})",
                     self.model,
                     self.dimension,
@@ -117,7 +117,7 @@ impl EmbeddingsConfig {
                 ))
             }
             "ollama" => {
-                tracing::info!(
+                tracing::debug!(
                     "Embeddings enabled via Ollama (model: {}, url: {}, dim: {})",
                     self.model,
                     self.ollama_base_url,
@@ -130,7 +130,7 @@ impl EmbeddingsConfig {
             }
             _ => {
                 if let Some(api_key) = self.openai_api_key() {
-                    tracing::info!(
+                    tracing::debug!(
                         "Embeddings enabled via OpenAI (model: {}, dim: {})",
                         self.model,
                         self.dimension,

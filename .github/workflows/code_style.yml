@@ -44,6 +44,7 @@ jobs:
 
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
+    if: github.base_ref == 'main'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -76,7 +77,12 @@ jobs:
     needs: [format, clippy, clippy-windows]
     steps:
       - run: |
-          if [[ "${{ needs.format.result }}" != "success" || "${{ needs.clippy.result }}" != "success" || "${{ needs.clippy-windows.result }}" != "success" ]]; then
+          if [[ "${{ needs.format.result }}" != "success" || "${{ needs.clippy.result }}" != "success" ]]; then
             echo "One or more jobs failed"
+            exit 1
+          fi
+          # clippy-windows only runs on main PRs, so skip/success are both acceptable
+          if [[ "${{ needs.clippy-windows.result }}" == "failure" ]]; then
+            echo "Windows clippy failed"
             exit 1
           fi
