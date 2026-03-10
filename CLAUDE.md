@@ -177,12 +177,6 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 
 **Module-owned initialization:** Module-specific initialization logic (database connection, transport creation, channel setup) must live in the owning module as a public factory function — not in `main.rs` or `app.rs`. These entry-point files orchestrate calls to module factories. Feature-flag branching (`#[cfg(feature = ...)]`) must be confined to the module that owns the abstraction.
 
-### Error Handling
-- Use `thiserror` for error types in `error.rs`
-- Never use `.unwrap()` or `.expect()` in production code (tests are fine)
-- Map errors with context: `.map_err(|e| SomeError::Variant { reason: e.to_string() })?`
-- Before committing, grep for `.unwrap()` and `.expect(` in changed files to catch violations mechanically
-
 | Module | Spec |
 |--------|------|
 | `src/agent/` | `src/agent/CLAUDE.md` |

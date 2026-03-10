@@ -10,8 +10,6 @@ use clap::Subcommand;
 use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
-#[allow(unused_imports)]
-use crate::config::Config;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
