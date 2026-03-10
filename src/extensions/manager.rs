@@ -4018,7 +4018,7 @@ mod tests {
         let placeholders = vec![
             "ICTEST1_BOT_TOKEN".to_string(), // valid: matches channel prefix
             "ICTEST2_TOKEN".to_string(),     // invalid: wrong channel prefix
-            "ICTEST1_UNRELATED_OTHER".to_string(), // invalid: no underscore-less prefix match
+            "ICTEST1_UNRELATED_OTHER".to_string(), // valid prefix, but env var not set — not injected
         ];
         let already_injected = std::collections::HashSet::new();
 
