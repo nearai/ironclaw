@@ -768,10 +768,10 @@ async fn async_main() -> anyhow::Result<()> {
                         }
                     };
 
-                // Restart listener if addr changed
+                // Restart listener if addr changed.
+                // Minimize lock scope: acquire, read old addr, release, then restart.
                 let mut restart_failed = false;
                 if let Some(ref ws_arc) = sighup_webhook_server {
-                    // Read old address while holding lock, then drop immediately
                     let old_addr = {
                         let ws = ws_arc.lock().await;
                         ws.current_addr()
@@ -783,8 +783,10 @@ async fn async_main() -> anyhow::Result<()> {
                             old_addr,
                             new_addr
                         );
-                        // Wait for restart to complete before proceeding with secret update.
-                        // This ensures atomicity: if restart fails, secret is not updated (partial state corruption).
+                        // NOTE: Lock is held across restart_with_addr().await. This is
+                        // acceptable because SIGHUP is infrequent and restart is fast. A full
+                        // fix would require refactoring restart_with_addr to separate state
+                        // mutation from async I/O.
                         let mut ws = ws_arc.lock().await;
                         match ws.restart_with_addr(new_addr).await {
                             Ok(()) => {

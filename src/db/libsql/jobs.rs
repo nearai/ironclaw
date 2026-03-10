@@ -30,8 +30,9 @@ impl JobStore for LibSqlBackend {
                     id, conversation_id, title, description, category, status, source,
                     user_id,
                     budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                    actual_cost, repair_attempts, created_at, started_at, completed_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                    actual_cost, repair_attempts, max_tokens, total_tokens_used,
+                    created_at, started_at, completed_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 ON CONFLICT (id) DO UPDATE SET
                     title = excluded.title,
                     description = excluded.description,
@@ -42,6 +43,8 @@ impl JobStore for LibSqlBackend {
                     estimated_time_secs = excluded.estimated_time_secs,
                     actual_cost = excluded.actual_cost,
                     repair_attempts = excluded.repair_attempts,
+                    max_tokens = excluded.max_tokens,
+                    total_tokens_used = excluded.total_tokens_used,
                     started_at = excluded.started_at,
                     completed_at = excluded.completed_at
                 "#,
@@ -61,6 +64,8 @@ impl JobStore for LibSqlBackend {
                     estimated_time_secs,
                     ctx.actual_cost.to_string(),
                     ctx.repair_attempts as i64,
+                    ctx.max_tokens as i64,
+                    ctx.total_tokens_used as i64,
                     fmt_ts(&ctx.created_at),
                     fmt_opt_ts(&ctx.started_at),
                     fmt_opt_ts(&ctx.completed_at),
@@ -78,7 +83,8 @@ impl JobStore for LibSqlBackend {
                 r#"
                 SELECT id, conversation_id, title, description, category, status, user_id,
                        budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                       actual_cost, repair_attempts, created_at, started_at, completed_at
+                       actual_cost, repair_attempts, max_tokens, total_tokens_used,
+                       created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = ?1
                 "#,
                 params![id.to_string()],
@@ -111,12 +117,12 @@ impl JobStore for LibSqlBackend {
                     estimated_duration: estimated_time_secs
                         .map(|s| std::time::Duration::from_secs(s as u64)),
                     actual_cost: get_decimal(&row, 12),
-                    total_tokens_used: 0,
-                    max_tokens: 0,
+                    max_tokens: get_i64(&row, 14) as u64,
+                    total_tokens_used: get_i64(&row, 15) as u64,
                     repair_attempts: get_i64(&row, 13) as u32,
-                    created_at: get_ts(&row, 14),
-                    started_at: get_opt_ts(&row, 15),
-                    completed_at: get_opt_ts(&row, 16),
+                    created_at: get_ts(&row, 16),
+                    started_at: get_opt_ts(&row, 17),
+                    completed_at: get_opt_ts(&row, 18),
                     transitions: Vec::new(),
                     metadata: serde_json::Value::Null,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
