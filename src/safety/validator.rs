@@ -384,10 +384,7 @@ mod tests {
 
         assert!(result.is_valid);
         assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("repetition")),
+            result.warnings.iter().any(|w| w.contains("repetition")),
             "expected repetition warning for tool params, got: {:?}",
             result.warnings
         );
@@ -403,10 +400,7 @@ mod tests {
 
         assert!(result.is_valid);
         assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("whitespace")),
+            result.warnings.iter().any(|w| w.contains("whitespace")),
             "expected whitespace warning for tool params, got: {:?}",
             result.warnings
         );
