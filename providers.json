@@ -296,27 +296,6 @@
     }
   },
   {
-    "id": "gemini",
-    "aliases": [
-      "google_gemini",
-      "google"
-    ],
-    "protocol": "open_ai_completions",
-    "default_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-    "api_key_env": "GEMINI_API_KEY",
-    "api_key_required": true,
-    "model_env": "GEMINI_MODEL",
-    "default_model": "gemini-2.5-flash",
-    "description": "Google Gemini (via OpenAI-compatible endpoint)",
-    "setup": {
-      "kind": "api_key",
-      "secret_name": "llm_gemini_api_key",
-      "key_url": "https://aistudio.google.com/app/apikey",
-      "display_name": "Google Gemini",
-      "can_list_models": true
-    }
-  },
-  {
     "id": "ionet",
     "aliases": [
       "io_net",
