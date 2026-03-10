@@ -28,6 +28,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_bots: "ironclaw-ci[bot]"
           claude_args: "--max-turns 50 --model claude-haiku-4-5-20251001 --allowedTools 'Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*)'"
           prompt: |
             Code review this pull request. Follow these steps precisely:
