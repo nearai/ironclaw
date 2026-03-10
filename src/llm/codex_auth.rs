@@ -112,11 +112,7 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
     let auth: CodexAuthJson = match serde_json::from_str(&content) {
         Ok(a) => a,
         Err(e) => {
-            tracing::warn!(
-                "Failed to parse Codex auth file {}: {}",
-                path.display(),
-                e
-            );
+            tracing::warn!("Failed to parse Codex auth file {}: {}", path.display(), e);
             return None;
         }
     };
@@ -145,19 +141,19 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
     }
 
     // ChatGPT mode: use access_token as bearer token.
-    if let Some(tokens) = auth.tokens {
-        if !tokens.access_token.is_empty() {
-            tracing::info!(
-                "Loaded access token from Codex auth.json (ChatGPT mode, base_url={})",
-                CHATGPT_BACKEND_URL
-            );
-            return Some(CodexCredentials {
-                token: tokens.access_token,
-                is_chatgpt_mode: true,
-                refresh_token: tokens.refresh_token.map(SecretString::from),
-                auth_path: Some(path.to_path_buf()),
-            });
-        }
+    if let Some(tokens) = auth.tokens
+        && !tokens.access_token.is_empty()
+    {
+        tracing::info!(
+            "Loaded access token from Codex auth.json (ChatGPT mode, base_url={})",
+            CHATGPT_BACKEND_URL
+        );
+        return Some(CodexCredentials {
+            token: tokens.access_token,
+            is_chatgpt_mode: true,
+            refresh_token: tokens.refresh_token.map(SecretString::from),
+            auth_path: Some(path.to_path_buf()),
+        });
     }
 
     tracing::debug!(
@@ -233,7 +229,10 @@ pub async fn refresh_access_token(
             &refresh_resp.access_token,
             refresh_resp.refresh_token.as_deref(),
         ) {
-            tracing::warn!("Failed to persist refreshed tokens to {}: {e}", path.display());
+            tracing::warn!(
+                "Failed to persist refreshed tokens to {}: {e}",
+                path.display()
+            );
         } else {
             tracing::info!("Refreshed tokens persisted to {}", path.display());
         }

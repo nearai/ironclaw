@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use secrecy::SecretString;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -155,7 +155,13 @@ impl CodexChatGptProvider {
     /// model slugs, ordered by priority (highest first).
     async fn fetch_available_models(client: &Client, base_url: &str, api_key: &str) -> Vec<String> {
         let url = format!("{base_url}/models?client_version=0.111.0");
-        let resp = match client.get(&url).bearer_auth(api_key).timeout(Duration::from_secs(10)).send().await {
+        let resp = match client
+            .get(&url)
+            .bearer_auth(api_key)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("Failed to fetch Codex models: {e}");
@@ -176,7 +182,11 @@ impl CodexChatGptProvider {
             .map(|models| {
                 models
                     .iter()
-                    .filter_map(|m| m.get("slug").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                    .filter_map(|m| {
+                        m.get("slug")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -202,7 +212,7 @@ impl CodexChatGptProvider {
         let input: Vec<Value> = messages
             .iter()
             .filter(|m| m.role != Role::System)
-            .flat_map(|m| Self::message_to_input_items(m))
+            .flat_map(Self::message_to_input_items)
             .collect();
 
         // Convert tool definitions
@@ -337,14 +347,9 @@ impl CodexChatGptProvider {
         );
 
         let api_key = self.api_key.read().await.clone();
-        let resp = Self::send_http_request(
-            &self.client,
-            &url,
-            &api_key,
-            &body,
-            self.request_timeout,
-        )
-        .await?;
+        let resp =
+            Self::send_http_request(&self.client, &url, &api_key, &body, self.request_timeout)
+                .await?;
 
         let status = resp.status();
         if status.as_u16() == 401 {
@@ -365,13 +370,11 @@ impl CodexChatGptProvider {
                     .await?;
                     let retry_status = retry_resp.status();
                     if !retry_status.is_success() {
-                        let body_text = tokio::time::timeout(
-                            Duration::from_secs(5),
-                            retry_resp.text(),
-                        )
-                        .await
-                        .unwrap_or(Ok(String::new()))
-                        .unwrap_or_default();
+                        let body_text =
+                            tokio::time::timeout(Duration::from_secs(5), retry_resp.text())
+                                .await
+                                .unwrap_or(Ok(String::new()))
+                                .unwrap_or_default();
                         return Err(LlmError::RequestFailed {
                             provider: "codex_chatgpt".to_string(),
                             reason: format!(
@@ -379,10 +382,14 @@ impl CodexChatGptProvider {
                             ),
                         });
                     }
-                    let sse_text = retry_resp.text().await.map_err(|e| LlmError::RequestFailed {
-                        provider: "codex_chatgpt".to_string(),
-                        reason: format!("Failed to read SSE response: {e}"),
-                    })?;
+                    let sse_text =
+                        retry_resp
+                            .text()
+                            .await
+                            .map_err(|e| LlmError::RequestFailed {
+                                provider: "codex_chatgpt".to_string(),
+                                reason: format!("Failed to read SSE response: {e}"),
+                            })?;
                     return Self::parse_sse_response(&sse_text);
                 }
 
@@ -406,23 +413,27 @@ impl CodexChatGptProvider {
 
                     let retry_status = retry_resp.status();
                     if !retry_status.is_success() {
-                        let body_text = tokio::time::timeout(
-                            Duration::from_secs(5),
-                            retry_resp.text(),
-                        )
-                        .await
-                        .unwrap_or(Ok(String::new()))
-                        .unwrap_or_default();
+                        let body_text =
+                            tokio::time::timeout(Duration::from_secs(5), retry_resp.text())
+                                .await
+                                .unwrap_or(Ok(String::new()))
+                                .unwrap_or_default();
                         return Err(LlmError::RequestFailed {
                             provider: "codex_chatgpt".to_string(),
-                            reason: format!("HTTP {retry_status} from {url} (after token refresh): {body_text}"),
+                            reason: format!(
+                                "HTTP {retry_status} from {url} (after token refresh): {body_text}"
+                            ),
                         });
                     }
 
-                    let sse_text = retry_resp.text().await.map_err(|e| LlmError::RequestFailed {
-                        provider: "codex_chatgpt".to_string(),
-                        reason: format!("Failed to read SSE response: {e}"),
-                    })?;
+                    let sse_text =
+                        retry_resp
+                            .text()
+                            .await
+                            .map_err(|e| LlmError::RequestFailed {
+                                provider: "codex_chatgpt".to_string(),
+                                reason: format!("Failed to read SSE response: {e}"),
+                            })?;
                     return Self::parse_sse_response(&sse_text);
                 } else {
                     tracing::warn!(
@@ -441,18 +452,13 @@ impl CodexChatGptProvider {
 
         if !status.is_success() {
             // Read the error body with a timeout to avoid hanging
-            let body_text = tokio::time::timeout(
-                Duration::from_secs(5),
-                resp.text(),
-            )
-            .await
-            .unwrap_or(Ok(String::new()))
-            .unwrap_or_default();
+            let body_text = tokio::time::timeout(Duration::from_secs(5), resp.text())
+                .await
+                .unwrap_or(Ok(String::new()))
+                .unwrap_or_default();
             return Err(LlmError::RequestFailed {
                 provider: "codex_chatgpt".to_string(),
-                reason: format!(
-                    "HTTP {status} from {url}: {body_text}",
-                ),
+                reason: format!("HTTP {status} from {url}: {body_text}",),
             });
         }
 
@@ -537,44 +543,38 @@ impl CodexChatGptProvider {
                                 .unwrap_or("")
                                 .to_string();
 
-                            result
-                                .pending_tool_calls
-                                .entry(item_id)
-                                .or_insert_with(|| PendingToolCall {
+                            result.pending_tool_calls.entry(item_id).or_insert_with(|| {
+                                PendingToolCall {
                                     call_id,
                                     name,
                                     arguments: String::new(),
-                                });
+                                }
+                            });
                         }
                     }
                     "response.function_call_arguments.delta" => {
                         // Delta events use `item_id` (not `call_id`)
-                        if let Some(item_id) =
-                            parsed.get("item_id").and_then(|v| v.as_str())
+                        if let Some(item_id) = parsed.get("item_id").and_then(|v| v.as_str())
+                            && let Some(entry) = result.pending_tool_calls.get_mut(item_id)
+                            && let Some(delta) = parsed.get("delta").and_then(|d| d.as_str())
                         {
-                            if let Some(entry) = result.pending_tool_calls.get_mut(item_id) {
-                                if let Some(delta) =
-                                    parsed.get("delta").and_then(|d| d.as_str())
-                                {
-                                    entry.arguments.push_str(delta);
-                                }
-                            }
+                            entry.arguments.push_str(delta);
                         }
                     }
                     "response.completed" => {
-                        if let Some(response) = parsed.get("response") {
-                            if let Some(usage) = response.get("usage") {
-                                result.input_tokens = usage
-                                    .get("input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32;
-                                result.output_tokens = usage
-                                    .get("output_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32;
-                            }
+                        if let Some(response) = parsed.get("response")
+                            && let Some(usage) = response.get("usage")
+                        {
+                            result.input_tokens = usage
+                                .get("input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                                as u32;
+                            result.output_tokens = usage
+                                .get("output_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                                as u32;
                         }
                     }
                     _ => {}
@@ -670,8 +670,8 @@ impl LlmProvider for CodexChatGptProvider {
             .pending_tool_calls
             .into_values()
             .map(|tc| {
-                let args: Value = serde_json::from_str(&tc.arguments)
-                    .unwrap_or_else(|_| json!(tc.arguments));
+                let args: Value =
+                    serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!(tc.arguments));
                 // gpt-5.2-codex fills optional parameters with empty strings (e.g.
                 // `"timestamp": ""`), which IronClaw's tool validation rejects.
                 // Strip them so only actually-provided values reach the tool.
