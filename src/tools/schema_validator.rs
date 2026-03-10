@@ -565,12 +565,19 @@ mod tests {
                         "description": { "type": "string", "description": "What it does" },
                         "trigger_type": {
                             "type": "string",
-                            "enum": ["cron", "event", "webhook", "manual"],
+                            "enum": ["cron", "event", "system_event", "manual"],
                             "description": "When the routine fires"
                         },
                         "schedule": { "type": "string", "description": "Cron expression" },
                         "event_pattern": { "type": "string", "description": "Regex pattern" },
                         "event_channel": { "type": "string", "description": "Channel filter" },
+                        "event_source": { "type": "string", "description": "System event source" },
+                        "event_type": { "type": "string", "description": "System event type" },
+                        "event_filters": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "description": "Exact-match payload filters"
+                        },
                         "prompt": { "type": "string", "description": "Instructions" },
                         "context_paths": {
                             "type": "array",
@@ -645,6 +652,18 @@ mod tests {
                         "limit": { "type": "integer", "description": "Max runs", "default": 10 }
                     },
                     "required": ["name"]
+                }),
+            ),
+            (
+                "event_emit",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "event_source": { "type": "string", "description": "Event source" },
+                        "event_type": { "type": "string", "description": "Event type" },
+                        "payload": { "type": "object", "description": "Event payload", "properties": {} }
+                    },
+                    "required": ["event_source", "event_type"]
                 }),
             ),
             // Job tools with complex deps

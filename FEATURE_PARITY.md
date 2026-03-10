@@ -53,7 +53,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies |
 | APNs push pipeline | ✅ | ❌ | Wake disconnected iOS nodes via push |
 | Oversized payload guard | ✅ | 🚧 | HTTP webhook has 64KB body limit + Content-Length check; no chat.history cap |
-| Pre-prompt context diagnostics | ✅ | ❌ | Context size logging before prompt |
+| Pre-prompt context diagnostics | ✅ | 🚧 | Token breakdown logged before LLM call (conversational dispatcher path); other LLM entry points not yet covered |
 
 ### Owner: _Unassigned_
 

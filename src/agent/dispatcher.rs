@@ -10,6 +10,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::Agent;
+use crate::agent::context_monitor::{ContextBreakdown, estimate_text_tokens};
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -251,6 +252,27 @@ impl Agent {
                 tracing::info!(
                     iteration,
                     "Forcing text-only response (iteration limit reached)"
+                );
+            }
+
+            // Pre-prompt context diagnostics: log token breakdown before LLM call
+            {
+                let breakdown = ContextBreakdown::analyze(&context_messages);
+                let system_prompt_tokens =
+                    estimate_text_tokens(context.system_prompt.as_deref().unwrap_or(""));
+                let total_tokens = breakdown.total_tokens + system_prompt_tokens;
+                tracing::debug!(
+                    iteration,
+                    messages = breakdown.message_count,
+                    total_tokens,
+                    system_prompt_tokens,
+                    system_msg_tokens = breakdown.system_tokens,
+                    user_tokens = breakdown.user_tokens,
+                    assistant_tokens = breakdown.assistant_tokens,
+                    tool_tokens = breakdown.tool_tokens,
+                    tools_available = context.available_tools.len(),
+                    force_text,
+                    "Pre-prompt context diagnostics"
                 );
             }
 

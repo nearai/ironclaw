@@ -64,6 +64,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_delete",
     "routine_fire",
     "routine_history",
+    "event_emit",
     "skill_list",
     "skill_search",
     "skill_install",
@@ -427,8 +428,8 @@ impl ToolRegistry {
         engine: Arc<crate::agent::routine_engine::RoutineEngine>,
     ) {
         use crate::tools::builtin::{
-            RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool,
-            RoutineListTool, RoutineUpdateTool,
+            EventEmitTool, RoutineCreateTool, RoutineDeleteTool, RoutineFireTool,
+            RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
         };
         self.register_sync(Arc::new(RoutineCreateTool::new(
             Arc::clone(&store),
@@ -448,7 +449,8 @@ impl ToolRegistry {
             Arc::clone(&engine),
         )));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
-        tracing::debug!("Registered 6 routine management tools");
+        self.register_sync(Arc::new(EventEmitTool::new(engine)));
+        tracing::debug!("Registered 7 routine management tools");
     }
 
     /// Register message tool for sending messages to channels.

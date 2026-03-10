@@ -1,6 +1,8 @@
 name: Code Style
 on:
   pull_request:
+    branches:
+      - main
 
 jobs:
   format:

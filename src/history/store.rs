@@ -1087,7 +1087,7 @@ impl Store {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT * FROM routines WHERE enabled AND trigger_type = 'event'",
+                "SELECT * FROM routines WHERE enabled AND trigger_type IN ('event', 'system_event')",
                 &[],
             )
             .await?;
