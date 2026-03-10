@@ -18,7 +18,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::channels::{
-    AttachmentKind, Channel, IncomingAttachment, IncomingMessage, MessageStream, OutgoingResponse,
+    AttachmentKind, Channel, ChannelSecretUpdater, IncomingAttachment, IncomingMessage,
+    MessageStream, OutgoingResponse,
 };
 use crate::config::HttpConfig;
 use crate::error::ChannelError;
@@ -494,6 +495,16 @@ impl Channel for HttpChannel {
     async fn shutdown(&self) -> Result<(), ChannelError> {
         *self.state.tx.write().await = None;
         Ok(())
+    }
+}
+
+/// Implement secret update for HTTP channel state.
+/// This allows SIGHUP handler to update secrets generically via the trait.
+#[async_trait]
+impl ChannelSecretUpdater for HttpChannelState {
+    async fn update_secret(&self, new_secret: Option<SecretString>) {
+        *self.webhook_secret.write().await = new_secret;
+        tracing::info!("HTTP webhook secret updated");
     }
 }
 

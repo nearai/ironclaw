@@ -9,8 +9,8 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
-        WebhookServerConfig,
+        ChannelManager, ChannelSecretUpdater, GatewayChannel, HttpChannel, ReplChannel,
+        SignalChannel, WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -682,8 +682,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     #[cfg(unix)]
     {
+        // Collect all channels that support secret updates
+        let mut secret_updaters: Vec<Arc<dyn ChannelSecretUpdater>> = Vec::new();
+        if let Some(ref state) = http_channel_state {
+            secret_updaters.push(Arc::clone(state) as Arc<dyn ChannelSecretUpdater>);
+        }
+
         let sighup_webhook_server = webhook_server.clone();
-        let sighup_http_state = http_channel_state.clone();
         let sighup_settings_store_clone = sighup_settings_store.clone();
         let sighup_secrets_store = components.secrets_store.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
@@ -795,16 +800,17 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 }
 
-                // Update secret only if restart succeeded or wasn't needed (prevent partial state corruption)
+                // Update secrets in all configured channels (if restart succeeded or wasn't needed)
                 if !restart_failed {
-                    if let Some(ref state) = sighup_http_state {
-                        use secrecy::{ExposeSecret, SecretString};
-                        let new_secret = new_http
-                            .webhook_secret
-                            .as_ref()
-                            .map(|s| SecretString::from(s.expose_secret().to_string()));
-                        state.update_secret(new_secret).await;
-                        tracing::info!("SIGHUP: webhook secret updated");
+                    use secrecy::{ExposeSecret, SecretString};
+                    let new_secret = new_http
+                        .webhook_secret
+                        .as_ref()
+                        .map(|s| SecretString::from(s.expose_secret().to_string()));
+
+                    // Update all channels that support secret swapping
+                    for updater in &secret_updaters {
+                        updater.update_secret(new_secret.clone()).await;
                     }
                 }
             }
