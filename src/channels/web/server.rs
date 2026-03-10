@@ -370,7 +370,7 @@ pub async fn start_server(
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
-                tracing::info!("Web gateway shutting down");
+                tracing::debug!("Web gateway shutting down");
             })
             .await
         {

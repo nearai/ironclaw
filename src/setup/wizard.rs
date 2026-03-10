@@ -76,6 +76,8 @@ pub struct SetupConfig {
     pub channels_only: bool,
     /// Only reconfigure LLM provider and model selection.
     pub provider_only: bool,
+    /// Quick setup: auto-defaults everything except LLM provider and model.
+    pub quick: bool,
 }
 
 /// Interactive setup wizard for IronClaw.
@@ -154,6 +156,26 @@ impl SetupWizard {
             print_step(1, 2, "Inference Provider");
             self.step_inference_provider().await?;
             self.persist_after_step().await;
+            print_step(2, 2, "Model Selection");
+            self.step_model_selection().await?;
+            self.persist_after_step().await;
+        } else if self.config.quick {
+            // Quick mode: auto-default database + security, only ask for
+            // LLM provider + model. Designed for first-run experience.
+            self.auto_setup_database().await?;
+
+            // Load existing settings from DB (if any prior partial run)
+            let step1_settings = self.settings.clone();
+            self.try_load_existing_settings().await;
+            self.settings.merge_from(&step1_settings);
+
+            self.auto_setup_security().await?;
+            self.persist_after_step().await;
+
+            print_step(1, 2, "Inference Provider");
+            self.step_inference_provider().await?;
+            self.persist_after_step().await;
+
             print_step(2, 2, "Model Selection");
             self.step_model_selection().await?;
             self.persist_after_step().await;
@@ -659,7 +681,7 @@ impl SetupWizard {
             use refinery::embed_migrations;
             embed_migrations!("migrations");
 
-            print_info("Running migrations...");
+            tracing::debug!("Running PostgreSQL migrations...");
 
             let mut client = pool
                 .get()
@@ -671,7 +693,7 @@ impl SetupWizard {
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
-            print_success("Migrations applied");
+            tracing::debug!("PostgreSQL migrations applied");
         }
         Ok(())
     }
@@ -682,14 +704,14 @@ impl SetupWizard {
         if let Some(ref backend) = self.db_backend {
             use crate::db::Database;
 
-            print_info("Running migrations...");
+            tracing::debug!("Running libSQL migrations...");
 
             backend
                 .run_migrations()
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
-            print_success("Migrations applied");
+            tracing::debug!("libSQL migrations applied");
         }
         Ok(())
     }
@@ -801,6 +823,135 @@ impl SetupWizard {
             }
         }
 
+        Ok(())
+    }
+
+    /// Auto-setup database with zero prompts (quick mode).
+    ///
+    /// Uses existing env vars if present, otherwise defaults to libsql at the
+    /// standard path. Falls back to the interactive `step_database()` only when
+    /// just the postgres feature is compiled (can't auto-default postgres).
+    async fn auto_setup_database(&mut self) -> Result<(), SetupError> {
+        // If DATABASE_URL or LIBSQL_PATH already set, respect existing config
+        let env_backend = std::env::var("DATABASE_BACKEND").ok();
+
+        #[cfg(feature = "postgres")]
+        if let Some(ref backend) = env_backend
+            && (backend == "postgres" || backend == "postgresql")
+        {
+            if std::env::var("DATABASE_URL").is_ok() {
+                print_info("Using existing PostgreSQL configuration");
+                return self.step_database_postgres().await;
+            }
+            // Postgres configured but no URL — fall through to interactive
+            return self.step_database().await;
+        }
+
+        #[cfg(feature = "postgres")]
+        if std::env::var("DATABASE_URL").is_ok() {
+            print_info("Using existing PostgreSQL configuration");
+            return self.step_database_postgres().await;
+        }
+
+        // Auto-default to libsql if the feature is compiled
+        #[cfg(feature = "libsql")]
+        {
+            self.settings.database_backend = Some("libsql".to_string());
+
+            let existing_path = std::env::var("LIBSQL_PATH")
+                .ok()
+                .or_else(|| self.settings.libsql_path.clone());
+
+            let db_path = existing_path.unwrap_or_else(|| {
+                crate::config::default_libsql_path()
+                    .to_string_lossy()
+                    .to_string()
+            });
+
+            let turso_url = std::env::var("LIBSQL_URL").ok();
+            let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
+
+            self.test_database_connection_libsql(
+                &db_path,
+                turso_url.as_deref(),
+                turso_token.as_deref(),
+            )
+            .await?;
+
+            self.run_migrations_libsql().await?;
+
+            self.settings.libsql_path = Some(db_path.clone());
+            if let Some(url) = turso_url {
+                self.settings.libsql_url = Some(url);
+            }
+
+            print_success(&format!("Using embedded database at {}", db_path));
+            return Ok(());
+        }
+
+        // Only postgres feature compiled — can't auto-default, use interactive
+        #[allow(unreachable_code)]
+        {
+            self.step_database().await
+        }
+    }
+
+    /// Auto-setup security with zero prompts (quick mode).
+    ///
+    /// Silently configures the master key: uses existing env var or keychain
+    /// key if available, otherwise generates and stores one automatically
+    /// (keychain on macOS, env var fallback).
+    async fn auto_setup_security(&mut self) -> Result<(), SetupError> {
+        // Check env var first
+        if std::env::var("SECRETS_MASTER_KEY").is_ok() {
+            self.settings.secrets_master_key_source = KeySource::Env;
+            print_success("Security configured (env var)");
+            return Ok(());
+        }
+
+        // Try existing keychain key (no prompts — get_master_key may show
+        // OS dialogs on macOS, but that's unavoidable for keychain access)
+        if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
+            let key_hex: String = keychain_key_bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
+                    .map_err(|e| SetupError::Config(e.to_string()))?,
+            ));
+            self.settings.secrets_master_key_source = KeySource::Keychain;
+            print_success("Security configured (keychain)");
+            return Ok(());
+        }
+
+        // No existing key — generate one
+        // Try keychain first (preferred on macOS)
+        let key = crate::secrets::keychain::generate_master_key();
+        if crate::secrets::keychain::store_master_key(&key)
+            .await
+            .is_ok()
+        {
+            let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
+                    .map_err(|e| SetupError::Config(e.to_string()))?,
+            ));
+            self.settings.secrets_master_key_source = KeySource::Keychain;
+            print_success("Master key stored in OS keychain");
+            return Ok(());
+        }
+
+        // Keychain unavailable — fall back to env var mode
+        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+        self.secrets_crypto = Some(Arc::new(
+            SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                .map_err(|e| SetupError::Config(e.to_string()))?,
+        ));
+        crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
+        self.settings.secrets_master_key_hex = Some(key_hex);
+        self.settings.secrets_master_key_source = KeySource::Env;
+        print_success("Master key stored in ~/.ironclaw/.env");
         Ok(())
     }
 
@@ -2506,7 +2657,7 @@ impl SetupWizard {
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
-            crate::bootstrap::save_bootstrap_env(&pairs).map_err(|e| {
+            crate::bootstrap::upsert_bootstrap_vars(&pairs).map_err(|e| {
                 SetupError::Io(std::io::Error::other(format!(
                     "Failed to save bootstrap env to .env: {}",
                     e
@@ -2777,6 +2928,13 @@ impl SetupWizard {
         println!("  ironclaw config set <setting> <value>");
         println!("  ironclaw onboard");
         println!();
+
+        if self.config.quick {
+            print_info(
+                "Tip: Run `ironclaw onboard` to configure channels, extensions, embeddings, and more.",
+            );
+            println!();
+        }
 
         Ok(())
     }
@@ -3217,11 +3375,6 @@ async fn discover_wasm_channels(dir: &std::path::Path) -> Vec<(String, ChannelCa
 /// Reads `NEARAI_API_KEY` from the environment so that users who authenticated
 /// via Cloud API key (option 4) don't get re-prompted during model selection.
 fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
-    let base_url =
-        std::env::var("NEARAI_BASE_URL").unwrap_or_else(|_| "https://private.near.ai".to_string());
-    let auth_base_url =
-        std::env::var("NEARAI_AUTH_URL").unwrap_or_else(|_| "https://private.near.ai".to_string());
-
     // If the user authenticated via API key (option 4), the key is stored
     // as an env var. Pass it through so `resolve_bearer_token()` doesn't
     // re-trigger the interactive auth prompt.
@@ -3229,6 +3382,17 @@ fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
         .ok()
         .filter(|k| !k.is_empty())
         .map(secrecy::SecretString::from);
+
+    // Match the same base_url logic as LlmConfig::resolve(): use cloud-api
+    // when an API key is present, private.near.ai for session-token auth.
+    let default_base = if api_key.is_some() {
+        "https://cloud-api.near.ai"
+    } else {
+        "https://private.near.ai"
+    };
+    let base_url = std::env::var("NEARAI_BASE_URL").unwrap_or_else(|_| default_base.to_string());
+    let auth_base_url =
+        std::env::var("NEARAI_AUTH_URL").unwrap_or_else(|_| "https://private.near.ai".to_string());
 
     crate::config::LlmConfig {
         backend: "nearai".to_string(),
@@ -3462,10 +3626,14 @@ async fn install_selected_bundled_channels(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Mutex;
 
     use tempfile::tempdir;
 
     use super::*;
+
+    /// Mutex to serialize tests that mutate env vars (NEARAI_API_KEY, etc.).
+    static NEARAI_ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_wizard_creation() {
@@ -3480,6 +3648,7 @@ mod tests {
             skip_auth: true,
             channels_only: false,
             provider_only: false,
+            quick: false,
         };
         let wizard = SetupWizard::with_config(config);
         assert!(wizard.config.skip_auth);
@@ -3860,7 +4029,9 @@ mod tests {
     fn test_build_nearai_model_fetch_config_picks_up_api_key_env() {
         use secrecy::ExposeSecret;
 
+        let _lock = NEARAI_ENV_MUTEX.lock().unwrap();
         let _guard = EnvGuard::set("NEARAI_API_KEY", "test-cloud-api-key-12345");
+        let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
 
         let config = build_nearai_model_fetch_config();
         assert!(
@@ -3871,24 +4042,37 @@ mod tests {
             config.nearai.api_key.as_ref().unwrap().expose_secret(),
             "test-cloud-api-key-12345"
         );
+        // With API key, base_url must point to cloud-api (not private.near.ai)
+        assert_eq!(
+            config.nearai.base_url, "https://cloud-api.near.ai",
+            "API key auth must use cloud-api base URL for model fetching"
+        );
     }
 
     /// Regression test for #799: when NEARAI_API_KEY is absent or empty,
     /// the config should have `api_key: None` (session token path).
     #[test]
     fn test_build_nearai_model_fetch_config_none_when_no_api_key() {
+        let _lock = NEARAI_ENV_MUTEX.lock().unwrap();
         let _guard = EnvGuard::clear("NEARAI_API_KEY");
+        let _guard2 = EnvGuard::clear("NEARAI_BASE_URL");
 
         let config = build_nearai_model_fetch_config();
         assert!(
             config.nearai.api_key.is_none(),
             "config should have no api_key when env var is absent"
         );
+        // Without API key, base_url must point to private.near.ai (session token)
+        assert_eq!(
+            config.nearai.base_url, "https://private.near.ai",
+            "session-token auth must use private.near.ai base URL"
+        );
     }
 
     /// Regression test for #799: empty NEARAI_API_KEY should be treated as absent.
     #[test]
     fn test_build_nearai_model_fetch_config_none_when_empty_api_key() {
+        let _lock = NEARAI_ENV_MUTEX.lock().unwrap();
         let _guard = EnvGuard::set("NEARAI_API_KEY", "");
 
         let config = build_nearai_model_fetch_config();

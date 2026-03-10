@@ -193,6 +193,10 @@ impl WasmToolLoader {
     ///
     /// Tools without a capabilities file get no permissions (default deny).
     pub async fn load_from_dir(&self, dir: &Path) -> Result<LoadResults, WasmLoadError> {
+        if !dir.exists() {
+            // Directory not created yet (e.g. quick setup skips extensions).
+            return Ok(LoadResults::default());
+        }
         if !dir.is_dir() {
             return Err(WasmLoadError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotADirectory,
@@ -1076,5 +1080,20 @@ mod tests {
             !tools.contains_key("nested"),
             "nested.wasm inside subdir should NOT be discovered"
         );
+    }
+
+    #[tokio::test]
+    async fn load_from_dir_returns_empty_when_dir_missing() {
+        let loader = make_loader();
+
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent_tools_dir");
+
+        let results = loader.load_from_dir(&missing).await;
+
+        // Must succeed with empty results, not error
+        let results = results.expect("missing dir should return Ok, not Err");
+        assert!(results.loaded.is_empty());
+        assert!(results.errors.is_empty());
     }
 }

@@ -514,7 +514,7 @@ impl Agent {
                         *slot.write().await = Some(Arc::clone(&engine));
                     }
 
-                    tracing::info!(
+                    tracing::debug!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
                         rt_config.cron_check_interval_secs,
                         rt_config.max_concurrent_routines
@@ -536,20 +536,20 @@ impl Agent {
         let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
         // Main message loop
-        tracing::info!("Agent {} ready and listening", self.config.name);
+        tracing::debug!("Agent {} ready and listening", self.config.name);
 
         loop {
             let message = tokio::select! {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Ctrl+C received, shutting down...");
+                    tracing::debug!("Ctrl+C received, shutting down...");
                     break;
                 }
                 msg = message_stream.next() => {
                     match msg {
                         Some(m) => m,
                         None => {
-                            tracing::info!("All channel streams ended, shutting down...");
+                            tracing::debug!("All channel streams ended, shutting down...");
                             break;
                         }
                     }
@@ -624,7 +624,7 @@ impl Agent {
                 }
                 Ok(None) => {
                     // Shutdown signal received (/quit, /exit, /shutdown)
-                    tracing::info!("Shutdown command received, exiting...");
+                    tracing::debug!("Shutdown command received, exiting...");
                     break;
                 }
                 Err(e) => {
@@ -653,7 +653,7 @@ impl Agent {
         }
 
         // Cleanup
-        tracing::info!("Agent shutting down...");
+        tracing::debug!("Agent shutting down...");
         repair_handle.abort();
         pruning_handle.abort();
         if let Some(handle) = heartbeat_handle {

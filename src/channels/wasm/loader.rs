@@ -184,6 +184,10 @@ impl WasmChannelLoader {
     /// └── telegram.capabilities.json
     /// ```
     pub async fn load_from_dir(&self, dir: &Path) -> Result<LoadResults, WasmChannelError> {
+        if !dir.exists() {
+            // Directory not created yet (e.g. quick setup skips channels).
+            return Ok(LoadResults::default());
+        }
         if !dir.is_dir() {
             return Err(WasmChannelError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotADirectory,
@@ -485,5 +489,22 @@ mod tests {
         // Empty name
         let result = loader.load_from_files("", &wasm_path, None).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_from_dir_returns_empty_when_dir_missing() {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None);
+
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent_channels_dir");
+
+        let results = loader.load_from_dir(&missing).await;
+
+        // Must succeed with empty results, not error
+        let results = results.expect("missing dir should return Ok, not Err");
+        assert!(results.loaded.is_empty());
+        assert!(results.errors.is_empty());
     }
 }
