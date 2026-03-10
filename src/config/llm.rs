@@ -209,6 +209,7 @@ impl LlmConfig {
             extra_headers_env,
             api_key_required,
             base_url_required,
+            unsupported_params,
         ) = if let Some(def) = def {
             (
                 def.id.as_str(),
@@ -221,6 +222,7 @@ impl LlmConfig {
                 def.extra_headers_env.as_deref(),
                 def.api_key_required,
                 def.base_url_required,
+                def.unsupported_params.clone(),
             )
         } else {
             // Absolute fallback: treat as generic openai_completions
@@ -235,6 +237,7 @@ impl LlmConfig {
                 Some("LLM_EXTRA_HEADERS"),
                 false,
                 true,
+                Vec::new(),
             )
         };
 
@@ -338,6 +341,7 @@ impl LlmConfig {
             extra_headers,
             oauth_token,
             cache_retention,
+            unsupported_params,
         })
     }
 }
@@ -624,6 +628,12 @@ mod tests {
         let provider = cfg.provider.expect("provider config should be present");
         assert_eq!(provider.base_url, "https://inference.tinfoil.sh/v1");
         assert_eq!(provider.model, "kimi-k2-5");
+        assert!(
+            provider
+                .unsupported_params
+                .contains(&"temperature".to_string()),
+            "tinfoil should propagate unsupported_params from registry"
+        );
     }
 
     #[test]
