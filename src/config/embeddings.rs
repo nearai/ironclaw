@@ -154,6 +154,7 @@ mod tests {
     use super::*;
     use crate::config::helpers::ENV_MUTEX;
     use crate::settings::{EmbeddingsSettings, Settings};
+    use crate::testing::credentials::*;
 
     /// Clear all embedding-related env vars.
     fn clear_embedding_env() {
@@ -173,7 +174,7 @@ mod tests {
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
-            std::env::set_var("OPENAI_API_KEY", "sk-test-key-for-issue-129");
+            std::env::set_var("OPENAI_API_KEY", TEST_OPENAI_API_KEY_ISSUE_129);
         }
 
         let settings = Settings {

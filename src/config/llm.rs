@@ -385,6 +385,7 @@ mod tests {
     use super::*;
     use crate::config::helpers::ENV_MUTEX;
     use crate::settings::Settings;
+    use crate::testing::credentials::*;
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
@@ -647,7 +648,7 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_BACKEND", "open_ai");
-            std::env::set_var("OPENAI_API_KEY", "test-key");
+            std::env::set_var("OPENAI_API_KEY", TEST_API_KEY);
         }
 
         let settings = Settings::default();
@@ -781,7 +782,7 @@ mod tests {
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
-            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-test-token");
+            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", TEST_ANTHROPIC_OAUTH_TOKEN);
         }
 
         let settings = Settings {
@@ -805,7 +806,7 @@ mod tests {
         );
         assert_eq!(
             provider.oauth_token.as_ref().unwrap().expose_secret(),
-            "sk-ant-oat01-test-token"
+            TEST_ANTHROPIC_OAUTH_TOKEN
         );
 
         clear_anthropic_env();
@@ -819,8 +820,8 @@ mod tests {
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
-            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-real-key");
-            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-test-token");
+            std::env::set_var("ANTHROPIC_API_KEY", TEST_ANTHROPIC_API_KEY);
+            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", TEST_ANTHROPIC_OAUTH_TOKEN);
         }
 
         let settings = Settings {
@@ -835,7 +836,7 @@ mod tests {
                 .api_key
                 .as_ref()
                 .map(|k| k.expose_secret().to_string()),
-            Some("sk-ant-real-key".to_string()),
+            Some(TEST_ANTHROPIC_API_KEY.to_string()),
             "real API key should take priority over OAuth placeholder"
         );
         assert!(
@@ -852,7 +853,7 @@ mod tests {
         clear_anthropic_env();
         // SAFETY: Under ENV_MUTEX.
         unsafe {
-            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-test-token");
+            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", TEST_ANTHROPIC_OAUTH_TOKEN);
         }
 
         let settings = Settings {

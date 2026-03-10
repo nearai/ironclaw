@@ -3907,6 +3907,7 @@ mod tests {
         channels_dir: std::path::PathBuf,
     ) -> ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::testing::credentials::TEST_CRYPTO_KEY;
         use crate::tools::ToolRegistry;
         use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
@@ -3914,8 +3915,7 @@ mod tests {
         std::fs::create_dir_all(&tools_dir).ok();
         std::fs::create_dir_all(&channels_dir).ok();
 
-        let master_key =
-            secrecy::SecretString::from("0123456789abcdef0123456789abcdef".to_string());
+        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
         let crypto = Arc::new(SecretsCrypto::new(master_key).unwrap());
 
         ExtensionManager::new(

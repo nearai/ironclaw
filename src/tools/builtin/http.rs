@@ -609,6 +609,7 @@ impl Tool for HttpTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::{TEST_CRYPTO_KEY, TEST_OPENAI_API_KEY};
 
     #[test]
     fn test_http_tool_schema_headers_is_array() {
@@ -870,7 +871,7 @@ mod tests {
             // secrets_store is not used in requires_approval, just needs to be present
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "0123456789abcdef0123456789abcdef".to_string(),
+                    TEST_CRYPTO_KEY.to_string(),
                 ))
                 .unwrap(),
             ))),
@@ -894,7 +895,7 @@ mod tests {
             registry,
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "0123456789abcdef0123456789abcdef".to_string(),
+                    TEST_CRYPTO_KEY.to_string(),
                 ))
                 .unwrap(),
             ))),
@@ -926,7 +927,7 @@ mod tests {
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://example.com",
-            "headers": {"X-Custom": "Bearer sk-test123"}
+            "headers": {"X-Custom": format!("Bearer {TEST_OPENAI_API_KEY}")}
         });
         assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
     }
@@ -961,7 +962,7 @@ mod tests {
             registry,
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "0123456789abcdef0123456789abcdef".to_string(),
+                    TEST_CRYPTO_KEY.to_string(),
                 ))
                 .unwrap(),
             ))),

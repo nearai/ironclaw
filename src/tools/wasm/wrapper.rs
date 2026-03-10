@@ -1212,6 +1212,11 @@ fn coerce_params_to_schema(
 mod tests {
     use std::sync::Arc;
 
+    use crate::testing::credentials::{
+        TEST_BEARER_TOKEN_123, TEST_GOOGLE_OAUTH_FRESH, TEST_GOOGLE_OAUTH_LEGACY,
+        TEST_GOOGLE_OAUTH_TOKEN, TEST_OAUTH_CLIENT_ID, TEST_OAUTH_CLIENT_SECRET,
+        test_secrets_store,
+    };
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
 
@@ -1279,12 +1284,12 @@ mod tests {
                 let mut h = HashMap::new();
                 h.insert(
                     "Authorization".to_string(),
-                    "Bearer test-token-123".to_string(),
+                    format!("Bearer {TEST_BEARER_TOKEN_123}"),
                 );
                 h
             },
             query_params: HashMap::new(),
-            secret_value: "test-token-123".to_string(),
+            secret_value: TEST_BEARER_TOKEN_123.to_string(),
         }];
 
         let store_data = StoreData::new(
@@ -1300,7 +1305,7 @@ mod tests {
         store_data.inject_host_credentials("www.googleapis.com", &mut headers, &mut url);
         assert_eq!(
             headers.get("Authorization"),
-            Some(&"Bearer test-token-123".to_string())
+            Some(&format!("Bearer {TEST_BEARER_TOKEN_123}"))
         );
 
         // Should not inject for non-matching host
@@ -1376,13 +1381,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_no_http_cap() {
-        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::wasm::wrapper::resolve_host_credentials;
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         let caps = Capabilities::default();
         let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
@@ -1394,21 +1395,17 @@ mod tests {
         use std::collections::HashMap;
 
         use crate::secrets::{
-            CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-            SecretsCrypto, SecretsStore,
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         store
             .create(
                 "user1",
-                CreateSecretParams::new("google_oauth_token", "ya29.test-token"),
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_TOKEN),
             )
             .await
             .unwrap();
@@ -1436,7 +1433,7 @@ mod tests {
         assert_eq!(result[0].host_patterns, vec!["www.googleapis.com"]);
         assert_eq!(
             result[0].headers.get("Authorization"),
-            Some(&"Bearer ya29.test-token".to_string())
+            Some(&format!("Bearer {TEST_GOOGLE_OAUTH_TOKEN}"))
         );
     }
 
@@ -1444,16 +1441,11 @@ mod tests {
     async fn test_resolve_host_credentials_missing_secret() {
         use std::collections::HashMap;
 
-        use crate::secrets::{
-            CredentialLocation, CredentialMapping, InMemorySecretsStore, SecretsCrypto,
-        };
+        use crate::secrets::{CredentialLocation, CredentialMapping};
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         // No secret stored, should silently skip
         let mut credentials = HashMap::new();
@@ -1483,23 +1475,19 @@ mod tests {
         use std::collections::HashMap;
 
         use crate::secrets::{
-            CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-            SecretsCrypto, SecretsStore,
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         // Store a token that expires 2 hours from now (well within buffer)
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
         store
             .create(
                 "user1",
-                CreateSecretParams::new("google_oauth_token", "ya29.fresh-token")
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_FRESH)
                     .with_expiry(expires_at),
             )
             .await
@@ -1525,8 +1513,8 @@ mod tests {
 
         let oauth_config = OAuthRefreshConfig {
             token_url: "https://oauth2.googleapis.com/token".to_string(),
-            client_id: "test-client-id".to_string(),
-            client_secret: Some("test-client-secret".to_string()),
+            client_id: TEST_OAUTH_CLIENT_ID.to_string(),
+            client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -1537,7 +1525,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
-            Some(&"Bearer ya29.fresh-token".to_string())
+            Some(&format!("Bearer {TEST_GOOGLE_OAUTH_FRESH}"))
         );
     }
 
@@ -1546,16 +1534,12 @@ mod tests {
         use std::collections::HashMap;
 
         use crate::secrets::{
-            CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-            SecretsCrypto, SecretsStore,
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         // Store an expired token
         let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
@@ -1595,22 +1579,18 @@ mod tests {
         use std::collections::HashMap;
 
         use crate::secrets::{
-            CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-            SecretsCrypto, SecretsStore,
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         // Legacy token: no expires_at set
         store
             .create(
                 "user1",
-                CreateSecretParams::new("google_oauth_token", "ya29.legacy-token"),
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_LEGACY),
             )
             .await
             .unwrap();
@@ -1635,8 +1615,8 @@ mod tests {
 
         let oauth_config = OAuthRefreshConfig {
             token_url: "https://oauth2.googleapis.com/token".to_string(),
-            client_id: "test-client-id".to_string(),
-            client_secret: Some("test-client-secret".to_string()),
+            client_id: TEST_OAUTH_CLIENT_ID.to_string(),
+            client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -1647,7 +1627,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
-            Some(&"Bearer ya29.legacy-token".to_string())
+            Some(&format!("Bearer {TEST_GOOGLE_OAUTH_LEGACY}"))
         );
     }
 

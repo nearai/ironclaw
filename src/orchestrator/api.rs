@@ -458,6 +458,7 @@ mod tests {
     use crate::orchestrator::auth::TokenStore;
     use crate::orchestrator::job_manager::{ContainerJobConfig, ContainerJobManager};
     use crate::testing::StubLlm;
+    use crate::testing::credentials::TEST_CRYPTO_KEY;
 
     use super::*;
 
@@ -662,9 +663,9 @@ mod tests {
     #[tokio::test]
     async fn credentials_returns_secrets_when_store_configured() {
         use secrecy::SecretString;
-        let key = "0123456789abcdef0123456789abcdef";
         let crypto = Arc::new(
-            crate::secrets::SecretsCrypto::new(SecretString::from(key.to_string())).unwrap(),
+            crate::secrets::SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string()))
+                .unwrap(),
         );
         let secrets_store = Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
 

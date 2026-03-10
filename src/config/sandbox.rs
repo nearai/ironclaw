@@ -272,6 +272,7 @@ fn parse_oauth_access_token(json: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use crate::config::sandbox::*;
+    use crate::testing::credentials::*;
 
     // ── SandboxModeConfig defaults ──────────────────────────────────
 
@@ -405,9 +406,12 @@ mod tests {
 
     #[test]
     fn parse_oauth_token_valid() {
-        let json = r#"{"claudeAiOauth": {"accessToken": "sk-ant-oat01-fake"}}"#;
-        let token = parse_oauth_access_token(json);
-        assert_eq!(token, Some("sk-ant-oat01-fake".to_string()));
+        let json = format!(
+            r#"{{"claudeAiOauth": {{"accessToken": "{}"}}}}"#,
+            TEST_ANTHROPIC_OAUTH_FAKE
+        );
+        let token = parse_oauth_access_token(&json);
+        assert_eq!(token, Some(TEST_ANTHROPIC_OAUTH_FAKE.to_string()));
     }
 
     #[test]
@@ -434,16 +438,19 @@ mod tests {
 
     #[test]
     fn parse_oauth_token_nested_extra_fields() {
-        let json = r#"{
-            "claudeAiOauth": {
-                "accessToken": "sk-ant-oat01-real-token",
+        let json = format!(
+            r#"{{
+            "claudeAiOauth": {{
+                "accessToken": "{}",
                 "refreshToken": "rt-abc",
                 "expiresAt": 1700000000
-            }
-        }"#;
+            }}
+        }}"#,
+            TEST_ANTHROPIC_OAUTH_REAL
+        );
         assert_eq!(
-            parse_oauth_access_token(json),
-            Some("sk-ant-oat01-real-token".to_string())
+            parse_oauth_access_token(&json),
+            Some(TEST_ANTHROPIC_OAUTH_REAL.to_string())
         );
     }
 
