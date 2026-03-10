@@ -833,6 +833,7 @@ impl SetupWizard {
     /// just the postgres feature is compiled (can't auto-default postgres).
     async fn auto_setup_database(&mut self) -> Result<(), SetupError> {
         // If DATABASE_URL or LIBSQL_PATH already set, respect existing config
+        #[cfg(feature = "postgres")]
         let env_backend = std::env::var("DATABASE_BACKEND").ok();
 
         #[cfg(feature = "postgres")]
