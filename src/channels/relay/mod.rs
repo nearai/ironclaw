@@ -1,5 +1,5 @@
 //! Channel-relay integration for connecting to external messaging platforms
-//! (Slack, Telegram, etc.) via the channel-relay service.
+//! (Slack) via the channel-relay service.
 //!
 //! The relay service handles OAuth, credential storage, webhook ingestion,
 //! and SSE event streaming. IronClaw consumes the SSE stream and sends

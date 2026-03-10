@@ -11,6 +11,13 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+/// Known relay event types.
+pub mod event_types {
+    pub const MESSAGE: &str = "message";
+    pub const DIRECT_MESSAGE: &str = "direct_message";
+    pub const MENTION: &str = "mention";
+}
+
 /// A parsed SSE event from the channel-relay stream.
 ///
 /// Field names match the channel-relay `ChannelEvent` struct exactly.
@@ -70,7 +77,7 @@ impl ChannelEvent {
     pub fn is_message(&self) -> bool {
         matches!(
             self.event_type.as_str(),
-            "message" | "direct_message" | "mention"
+            event_types::MESSAGE | event_types::DIRECT_MESSAGE | event_types::MENTION
         )
     }
 }
@@ -243,44 +250,6 @@ impl RelayClient {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| RelayError::Protocol("Response missing stream_token field".to_string()))
-    }
-
-    /// Proxy a Slack API call through channel-relay.
-    ///
-    /// Calls `POST /proxy/slack/{method}?team_id=X&instance_id=Y` with the given JSON body.
-    pub async fn proxy_slack(
-        &self,
-        team_id: &str,
-        method: &str,
-        body: serde_json::Value,
-        instance_id: Option<&str>,
-    ) -> Result<serde_json::Value, RelayError> {
-        let mut query: Vec<(&str, &str)> = vec![("team_id", team_id)];
-        if let Some(iid) = instance_id {
-            query.push(("instance_id", iid));
-        }
-        let resp = self
-            .http
-            .post(format!("{}/proxy/slack/{}", self.base_url, method))
-            .header("X-API-Key", self.api_key.expose_secret())
-            .query(&query)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| RelayError::Network(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RelayError::Api {
-                status,
-                message: body,
-            });
-        }
-
-        resp.json()
-            .await
-            .map_err(|e| RelayError::Protocol(e.to_string()))
     }
 
     /// Proxy an API call through channel-relay for any provider.
@@ -525,5 +494,25 @@ mod tests {
 
         let err = RelayError::TokenExpired;
         assert_eq!(err.to_string(), "Stream token expired");
+    }
+
+    #[test]
+    fn event_type_constants_match_is_message() {
+        let make = |et: &str| ChannelEvent {
+            id: String::new(),
+            event_type: et.to_string(),
+            provider: String::new(),
+            provider_scope: String::new(),
+            channel_id: String::new(),
+            sender_id: String::new(),
+            sender_name: None,
+            content: None,
+            thread_id: None,
+            raw: serde_json::Value::Null,
+            timestamp: None,
+        };
+        assert!(make(event_types::MESSAGE).is_message());
+        assert!(make(event_types::DIRECT_MESSAGE).is_message());
+        assert!(make(event_types::MENTION).is_message());
     }
 }

@@ -150,7 +150,7 @@ struct ProxyQuery {
 }
 
 #[tokio::test]
-async fn test_proxy_slack_sends_correct_payload() {
+async fn test_proxy_provider_sends_correct_payload() {
     let app = Router::new().route(
         "/proxy/slack/chat.postMessage",
         post(
@@ -171,7 +171,7 @@ async fn test_proxy_slack_sends_correct_payload() {
         "text": "Hello from test",
     });
     let resp = client
-        .proxy_slack("T123", "chat.postMessage", body, None)
+        .proxy_provider("slack", "T123", "chat.postMessage", body, None)
         .await
         .unwrap();
     assert_eq!(resp["ok"], true);

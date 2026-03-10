@@ -2,7 +2,7 @@
 //!
 //! `RelayChannel` connects to a channel-relay service via SSE, converts
 //! incoming events to `IncomingMessage`s, and sends responses via the
-//! relay's provider-specific proxy API (Slack or Telegram).
+//! relay's provider-specific proxy API (Slack).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,7 +56,9 @@ pub struct RelayChannel {
     /// Handle to the reconnect task for clean shutdown.
     reconnect_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
     /// Handle to the SSE parser task for clean shutdown.
-    parser_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
+    parser_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    /// Maximum consecutive reconnect failures before giving up.
+    max_consecutive_failures: u64,
 }
 
 impl RelayChannel {
@@ -98,7 +100,8 @@ impl RelayChannel {
             backoff_initial_ms: 1000,
             backoff_max_ms: 60000,
             reconnect_handle: RwLock::new(None),
-            parser_handle: RwLock::new(None),
+            parser_handle: Arc::new(RwLock::new(None)),
+            max_consecutive_failures: 50,
         }
     }
 
@@ -112,6 +115,12 @@ impl RelayChannel {
         self.stream_timeout_secs = stream_timeout_secs;
         self.backoff_initial_ms = backoff_initial_ms;
         self.backoff_max_ms = backoff_max_ms;
+        self
+    }
+
+    /// Set the maximum number of consecutive reconnect failures before giving up.
+    pub fn with_max_failures(mut self, max: u64) -> Self {
+        self.max_consecutive_failures = max;
         self
     }
 
@@ -186,7 +195,8 @@ impl Channel for RelayChannel {
         let stream_timeout_secs = self.stream_timeout_secs;
         let backoff_initial_ms = self.backoff_initial_ms;
         let backoff_max_ms = self.backoff_max_ms;
-        let parser_handle = Arc::new(RwLock::new(None::<tokio::task::JoinHandle<()>>));
+        let max_consecutive_failures = self.max_consecutive_failures;
+        let parser_handle = Arc::clone(&self.parser_handle);
         let provider_str = self.provider.as_str().to_string();
         let relay_name = channel_name.clone();
 
@@ -195,12 +205,14 @@ impl Channel for RelayChannel {
 
             let mut current_stream = stream;
             let mut backoff_ms = backoff_initial_ms;
+            let mut consecutive_failures: u64 = 0;
 
             loop {
                 // Read events from the current stream
                 while let Some(event) = current_stream.next().await {
-                    // Reset backoff on successful event
+                    // Reset backoff and failure count on successful event
                     backoff_ms = backoff_initial_ms;
+                    consecutive_failures = 0;
 
                     // Validate required fields
                     if event.sender_id.is_empty()
@@ -256,8 +268,20 @@ impl Channel for RelayChannel {
                 }
 
                 // Stream ended, attempt reconnect with backoff
+                consecutive_failures += 1;
+                if consecutive_failures >= max_consecutive_failures {
+                    tracing::error!(
+                        channel = %relay_name,
+                        failures = consecutive_failures,
+                        "Relay channel giving up after {} consecutive failures",
+                        consecutive_failures
+                    );
+                    break;
+                }
+
                 tracing::warn!(
                     backoff_ms = backoff_ms,
+                    failures = consecutive_failures,
                     "Relay SSE stream ended, reconnecting..."
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
@@ -529,5 +553,46 @@ mod tests {
         assert_eq!(body["channel"], "C456");
         assert_eq!(body["text"], "hello");
         assert_eq!(body["thread_ts"], "1234567.890");
+    }
+
+    #[test]
+    fn parser_handle_is_shared_arc() {
+        let channel = RelayChannel::new(
+            test_client(),
+            "token".into(),
+            "T123".into(),
+            "inst1".into(),
+            "user1".into(),
+        );
+        // parser_handle should be an Arc — cloning should give a second reference
+        let handle_clone = Arc::clone(&channel.parser_handle);
+        // Both point to the same allocation
+        assert!(Arc::ptr_eq(&channel.parser_handle, &handle_clone));
+    }
+
+    #[test]
+    fn with_max_failures_sets_value() {
+        let channel = RelayChannel::new(
+            test_client(),
+            "token".into(),
+            "T123".into(),
+            "inst1".into(),
+            "user1".into(),
+        )
+        .with_max_failures(10);
+
+        assert_eq!(channel.max_consecutive_failures, 10);
+    }
+
+    #[test]
+    fn default_max_failures_is_50() {
+        let channel = RelayChannel::new(
+            test_client(),
+            "token".into(),
+            "T123".into(),
+            "inst1".into(),
+            "user1".into(),
+        );
+        assert_eq!(channel.max_consecutive_failures, 50);
     }
 }

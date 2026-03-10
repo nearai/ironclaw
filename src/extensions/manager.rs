@@ -3175,7 +3175,24 @@ impl ExtensionManager {
                 let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3001".into());
                 format!("http://{}:{}", host, port)
             });
-        let callback_url = format!("{}/oauth/slack/callback", callback_base);
+
+        // Generate CSRF nonce for OAuth state parameter
+        let state_nonce = uuid::Uuid::new_v4().to_string();
+        let state_key = format!("relay:{}:oauth_state", name);
+        // Delete any stale nonce before storing the new one
+        let _ = self.secrets.delete(&self.user_id, &state_key).await;
+        self.secrets
+            .create(
+                &self.user_id,
+                CreateSecretParams::new(&state_key, &state_nonce),
+            )
+            .await
+            .map_err(|e| ExtensionError::AuthFailed(format!("Failed to store OAuth state: {e}")))?;
+
+        let callback_url = format!(
+            "{}/oauth/slack/callback?state={}",
+            callback_base, state_nonce
+        );
 
         match client
             .initiate_oauth(&instance_id, &user_id_uuid, &callback_url)
