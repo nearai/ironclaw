@@ -30,8 +30,8 @@ use crate::setup::channels::{
     SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_header, print_info, print_step,
-    print_success, secret_input, select_many, select_one,
+    confirm, input, optional_input, print_banner, print_error, print_header, print_info,
+    print_step, print_success, secret_input, select_many, select_one,
 };
 
 // unused const, keep commented for clarity / future use
@@ -139,6 +139,7 @@ impl SetupWizard {
     /// settings are loaded from the database after Step 1 establishes a
     /// connection, so users don't have to re-enter everything.
     pub async fn run(&mut self) -> Result<(), SetupError> {
+        print_banner();
         print_header("IronClaw Setup Wizard");
 
         if self.config.channels_only {
