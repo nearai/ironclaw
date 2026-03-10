@@ -764,6 +764,7 @@ async fn async_main() -> anyhow::Result<()> {
                     };
 
                 // Restart listener if addr changed
+                let mut restart_failed = false;
                 if let Some(ref ws_arc) = sighup_webhook_server {
                     // Read old address while holding lock, then drop immediately
                     let old_addr = {
@@ -777,31 +778,34 @@ async fn async_main() -> anyhow::Result<()> {
                             old_addr,
                             new_addr
                         );
-                        // Spawn background task to avoid holding lock across async I/O boundary
-                        // This prevents blocking webhook processing while listener restarts
-                        let ws_clone = ws_arc.clone();
-                        tokio::spawn(async move {
-                            let mut ws = ws_clone.lock().await;
-                            if let Err(e) = ws.restart_with_addr(new_addr).await {
-                                tracing::error!("SIGHUP: listener restart failed: {}", e);
-                            } else {
+                        // Wait for restart to complete before proceeding with secret update.
+                        // This ensures atomicity: if restart fails, secret is not updated (partial state corruption).
+                        let mut ws = ws_arc.lock().await;
+                        match ws.restart_with_addr(new_addr).await {
+                            Ok(()) => {
                                 tracing::info!("SIGHUP: webhook server restarted on {}", new_addr);
                             }
-                        });
+                            Err(e) => {
+                                tracing::error!("SIGHUP: listener restart failed: {}", e);
+                                restart_failed = true;
+                            }
+                        }
                     } else {
                         tracing::debug!("SIGHUP: addr unchanged ({})", old_addr);
                     }
                 }
 
-                // Always update secret in-place (zero-downtime)
-                if let Some(ref state) = sighup_http_state {
-                    use secrecy::{ExposeSecret, SecretString};
-                    let new_secret = new_http
-                        .webhook_secret
-                        .as_ref()
-                        .map(|s| SecretString::from(s.expose_secret().to_string()));
-                    state.update_secret(new_secret).await;
-                    tracing::info!("SIGHUP: webhook secret updated");
+                // Update secret only if restart succeeded or wasn't needed (prevent partial state corruption)
+                if !restart_failed {
+                    if let Some(ref state) = sighup_http_state {
+                        use secrecy::{ExposeSecret, SecretString};
+                        let new_secret = new_http
+                            .webhook_secret
+                            .as_ref()
+                            .map(|s| SecretString::from(s.expose_secret().to_string()));
+                        state.update_secret(new_secret).await;
+                        tracing::info!("SIGHUP: webhook secret updated");
+                    }
                 }
             }
         });
