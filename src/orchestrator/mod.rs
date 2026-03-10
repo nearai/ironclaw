@@ -96,59 +96,53 @@ pub async fn setup_orchestrator(
         crate::sandbox::DockerStatus::Disabled
     };
 
-    let job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>> =
-        if config.sandbox.enabled && docker_status.is_ok() {
-            let (tx, _) = broadcast::channel(256);
-            Some(tx)
-        } else {
-            None
+    let (job_event_tx, container_job_manager) = if config.sandbox.enabled && docker_status.is_ok() {
+        let (tx, _) = broadcast::channel(256);
+        let job_event_tx = Some(tx);
+
+        let token_store = TokenStore::new();
+        let job_config = ContainerJobConfig {
+            image: config.sandbox.image.clone(),
+            memory_limit_mb: config.sandbox.memory_limit_mb,
+            cpu_shares: config.sandbox.cpu_shares,
+            orchestrator_port: 50051,
+            claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            claude_code_oauth_token: crate::config::ClaudeCodeConfig::extract_oauth_token(),
+            claude_code_model: config.claude_code.model.clone(),
+            claude_code_max_turns: config.claude_code.max_turns,
+            claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
+            claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+        };
+        let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+
+        let orchestrator_state = api::OrchestratorState {
+            llm: Arc::clone(llm),
+            job_manager: Arc::clone(&jm),
+            token_store,
+            job_event_tx: job_event_tx.clone(),
+            prompt_queue: Arc::clone(&prompt_queue),
+            store: db.cloned(),
+            secrets_store: secrets_store.cloned(),
+            user_id: "default".to_string(),
         };
 
-    let container_job_manager: Option<Arc<ContainerJobManager>> =
-        if config.sandbox.enabled && docker_status.is_ok() {
-            let token_store = TokenStore::new();
-            let job_config = ContainerJobConfig {
-                image: config.sandbox.image.clone(),
-                memory_limit_mb: config.sandbox.memory_limit_mb,
-                cpu_shares: config.sandbox.cpu_shares,
-                orchestrator_port: 50051,
-                claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-                claude_code_oauth_token: crate::config::ClaudeCodeConfig::extract_oauth_token(),
-                claude_code_model: config.claude_code.model.clone(),
-                claude_code_max_turns: config.claude_code.max_turns,
-                claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
-                claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
-            };
-            let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
-
-            let orchestrator_state = api::OrchestratorState {
-                llm: Arc::clone(llm),
-                job_manager: Arc::clone(&jm),
-                token_store,
-                job_event_tx: job_event_tx.clone(),
-                prompt_queue: Arc::clone(&prompt_queue),
-                store: db.cloned(),
-                secrets_store: secrets_store.cloned(),
-                user_id: "default".to_string(),
-            };
-
-            tokio::spawn(async move {
-                if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
-                    tracing::error!("Orchestrator API failed: {}", e);
-                }
-            });
-
-            if config.claude_code.enabled {
-                tracing::info!(
-                    "Claude Code sandbox mode available (model: {}, max_turns: {})",
-                    config.claude_code.model,
-                    config.claude_code.max_turns
-                );
+        tokio::spawn(async move {
+            if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
+                tracing::error!("Orchestrator API failed: {}", e);
             }
-            Some(jm)
-        } else {
-            None
-        };
+        });
+
+        if config.claude_code.enabled {
+            tracing::info!(
+                "Claude Code sandbox mode available (model: {}, max_turns: {})",
+                config.claude_code.model,
+                config.claude_code.max_turns
+            );
+        }
+        (job_event_tx, Some(jm))
+    } else {
+        (None, None)
+    };
 
     OrchestratorSetup {
         container_job_manager,

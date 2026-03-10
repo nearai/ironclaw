@@ -213,6 +213,8 @@ impl AppBuilder {
             }
         };
 
+        // Fallback covers the no-database path where `init_database` returned
+        // early before populating `self.handles`.
         let empty_handles = crate::db::DatabaseHandles::default();
         let handles = self.handles.as_ref().unwrap_or(&empty_handles);
         let store = crate::secrets::create_secrets_store(crypto, handles);

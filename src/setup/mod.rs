@@ -33,6 +33,10 @@ pub use prompts::{
 pub use wizard::{SetupConfig, SetupWizard};
 
 /// Check if onboarding is needed and return the reason.
+///
+/// Reads environment variables (`DATABASE_URL`, `LIBSQL_PATH`,
+/// `ONBOARD_COMPLETED`, `NEARAI_API_KEY`) and checks for the default
+/// session file on disk. Not safe to call concurrently with `env::set_var`.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 pub fn check_onboard_needed() -> Option<&'static str> {
     let has_db = std::env::var("DATABASE_URL").is_ok()

@@ -78,7 +78,9 @@ pub use store::in_memory::InMemorySecretsStore;
 
 /// Create a secrets store from a master key and database handles.
 ///
-/// Returns `None` if no matching backend handle is available.
+/// Returns `None` if no matching backend handle is available (e.g. when
+/// running without a database). This is a normal condition in no-db mode,
+/// not an error — callers should treat `None` as "secrets unavailable".
 pub fn create_secrets_store(
     crypto: std::sync::Arc<SecretsCrypto>,
     handles: &crate::db::DatabaseHandles,
