@@ -258,7 +258,7 @@ impl LlmConfig {
             if creds.is_chatgpt_mode {
                 codex_base_url_override = Some(creds.base_url().to_string());
             }
-            Some(SecretString::from(creds.token))
+            Some(creds.token)
         } else if let Some(env_var) = api_key_env {
             // Resolve API key from env (including secrets store overlay)
             optional_env(env_var)?.map(SecretString::from)

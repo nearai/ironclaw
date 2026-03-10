@@ -161,7 +161,7 @@ fn create_codex_chatgpt_from_registry(
     let api_key = config
         .api_key
         .as_ref()
-        .map(|k| k.expose_secret().to_string())
+        .cloned()
         .ok_or_else(|| LlmError::AuthFailed {
             provider: "codex_chatgpt".to_string(),
         })?;
@@ -174,7 +174,7 @@ fn create_codex_chatgpt_from_registry(
 
     let provider = codex_chatgpt::CodexChatGptProvider::with_lazy_model(
         &config.base_url,
-        &api_key,
+        api_key,
         &config.model,
         config.refresh_token.clone(),
         config.auth_path.clone(),

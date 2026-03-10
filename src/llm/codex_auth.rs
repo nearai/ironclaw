@@ -35,7 +35,7 @@ const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 #[derive(Debug, Clone)]
 pub struct CodexCredentials {
     /// The bearer token (API key or ChatGPT access_token).
-    pub token: String,
+    pub token: SecretString,
     /// Whether this is a ChatGPT OAuth token (vs. an OpenAI API key).
     pub is_chatgpt_mode: bool,
     /// OAuth refresh token (only present in ChatGPT mode).
@@ -69,7 +69,7 @@ struct CodexAuthJson {
 
 #[derive(Debug, Deserialize)]
 struct CodexTokens {
-    access_token: String,
+    access_token: SecretString,
     refresh_token: Option<SecretString>,
 }
 
@@ -84,7 +84,7 @@ struct RefreshRequest<'a> {
 /// Response from the OAuth token refresh endpoint.
 #[derive(Debug, Deserialize)]
 struct RefreshResponse {
-    access_token: String,
+    access_token: SecretString,
     refresh_token: Option<SecretString>,
 }
 
@@ -128,7 +128,7 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
         if let Some(key) = auth.openai_api_key.filter(|k| !k.is_empty()) {
             tracing::info!("Loaded API key from Codex auth.json (API key mode)");
             return Some(CodexCredentials {
-                token: key,
+                token: SecretString::from(key),
                 is_chatgpt_mode: false,
                 refresh_token: None,
                 auth_path: None,
@@ -142,7 +142,7 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
 
     // ChatGPT mode: use access_token as bearer token.
     if let Some(tokens) = auth.tokens
-        && !tokens.access_token.is_empty()
+        && !tokens.access_token.expose_secret().is_empty()
     {
         tracing::info!(
             "Loaded access token from Codex auth.json (ChatGPT mode, base_url={})",
@@ -174,7 +174,7 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
 pub async fn refresh_access_token(
     refresh_token: &SecretString,
     auth_path: Option<&Path>,
-) -> Option<String> {
+) -> Option<SecretString> {
     let client = reqwest::Client::new();
     let req = RefreshRequest {
         client_id: CLIENT_ID,
@@ -226,7 +226,7 @@ pub async fn refresh_access_token(
     if let Some(path) = auth_path {
         if let Err(e) = persist_refreshed_tokens(
             path,
-            &refresh_resp.access_token,
+            refresh_resp.access_token.expose_secret(),
             refresh_resp
                 .refresh_token
                 .as_ref()
@@ -285,7 +285,7 @@ mod tests {
         )
         .unwrap();
         let creds = load_codex_credentials(f.path()).expect("should load");
-        assert_eq!(creds.token, "sk-test-123");
+        assert_eq!(creds.token.expose_secret(), "sk-test-123");
         assert!(!creds.is_chatgpt_mode);
         assert_eq!(creds.base_url(), OPENAI_API_URL);
     }
@@ -299,7 +299,7 @@ mod tests {
         )
         .unwrap();
         let creds = load_codex_credentials(f.path()).expect("should load");
-        assert_eq!(creds.token, "eyJ-test");
+        assert_eq!(creds.token.expose_secret(), "eyJ-test");
         assert!(creds.is_chatgpt_mode);
         assert_eq!(
             creds
@@ -321,7 +321,7 @@ mod tests {
         )
         .unwrap();
         let creds = load_codex_credentials(f.path()).expect("should load");
-        assert_eq!(creds.token, "sk-priority");
+        assert_eq!(creds.token.expose_secret(), "sk-priority");
         assert!(!creds.is_chatgpt_mode);
     }
 

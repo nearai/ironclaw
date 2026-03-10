@@ -16,7 +16,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -34,7 +34,7 @@ use super::provider::{
 pub struct CodexChatGptProvider {
     client: Client,
     base_url: String,
-    api_key: RwLock<String>,
+    api_key: RwLock<SecretString>,
     /// User-configured model name (or empty/"default" for auto-detect).
     configured_model: String,
     /// Lazily resolved model name (populated on first LLM call).
@@ -54,7 +54,7 @@ impl CodexChatGptProvider {
         Self {
             client: Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            api_key: RwLock::new(api_key.to_string()),
+            api_key: RwLock::new(SecretString::from(api_key.to_string())),
             configured_model: model.to_string(),
             resolved_model: tokio::sync::OnceCell::const_new(),
             refresh_token: None,
@@ -78,7 +78,7 @@ impl CodexChatGptProvider {
     ///    "default"), auto-detect the highest-priority model from the API.
     pub fn with_lazy_model(
         base_url: &str,
-        api_key: &str,
+        api_key: SecretString,
         configured_model: &str,
         refresh_token: Option<SecretString>,
         auth_path: Option<PathBuf>,
@@ -93,7 +93,7 @@ impl CodexChatGptProvider {
         Self {
             client: Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),
-            api_key: RwLock::new(api_key.to_string()),
+            api_key: RwLock::new(api_key),
             configured_model: configured_model.to_string(),
             resolved_model: tokio::sync::OnceCell::const_new(),
             refresh_token,
@@ -110,8 +110,8 @@ impl CodexChatGptProvider {
         self.resolved_model
             .get_or_init(|| async {
                 let api_key = self.api_key.read().await.clone();
-                let available =
-                    Self::fetch_available_models(&self.client, &self.base_url, &api_key).await;
+                let available = Self::fetch_available_models(&self.client, &self.base_url, &api_key)
+                    .await;
 
                 let configured = &self.configured_model;
                 if !configured.is_empty() && configured != "default" {
@@ -153,11 +153,15 @@ impl CodexChatGptProvider {
 
     /// Query `/models?client_version=0.111.0` and return the list of available
     /// model slugs, ordered by priority (highest first).
-    async fn fetch_available_models(client: &Client, base_url: &str, api_key: &str) -> Vec<String> {
+    async fn fetch_available_models(
+        client: &Client,
+        base_url: &str,
+        api_key: &SecretString,
+    ) -> Vec<String> {
         let url = format!("{base_url}/models?client_version=0.111.0");
         let resp = match client
             .get(&url)
-            .bearer_auth(api_key)
+            .bearer_auth(api_key.expose_secret())
             .timeout(Duration::from_secs(10))
             .send()
             .await
@@ -358,7 +362,7 @@ impl CodexChatGptProvider {
                 let _refresh_guard = self.refresh_lock.lock().await;
                 let current_token = self.api_key.read().await.clone();
 
-                if current_token != api_key {
+                if current_token.expose_secret() != api_key.expose_secret() {
                     tracing::info!("Received 401, but another request already refreshed the token");
                     let retry_resp = Self::send_http_request(
                         &self.client,
@@ -475,13 +479,13 @@ impl CodexChatGptProvider {
     async fn send_http_request(
         client: &Client,
         url: &str,
-        api_key: &str,
+        api_key: &SecretString,
         body: &Value,
         timeout: Duration,
     ) -> Result<reqwest::Response, LlmError> {
         client
             .post(url)
-            .bearer_auth(api_key)
+            .bearer_auth(api_key.expose_secret())
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
             .json(body)
