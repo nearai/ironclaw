@@ -2136,4 +2136,36 @@ mod tests {
             assert_eq!(summary.channel, ch);
         }
     }
+
+    /// Regression test: save_job must persist user_id and get_job must return it.
+    /// Requires a running PostgreSQL instance (integration tier).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_save_job_persists_user_id() {
+        use crate::config::Config;
+        use crate::context::JobContext;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        let ctx = JobContext::with_user("test-user-42", "PG user_id test", "regression test");
+        store.save_job(&ctx).await.unwrap();
+
+        let loaded = store.get_job(ctx.job_id).await.unwrap().unwrap();
+        assert_eq!(loaded.user_id, "test-user-42");
+
+        // Clean up
+        let conn = store.conn().await.unwrap();
+        conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&ctx.job_id])
+            .await
+            .unwrap();
+    }
 }
