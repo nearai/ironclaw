@@ -709,7 +709,8 @@ impl Tool for SkillRemoveTool {
     }
 
     fn description(&self) -> &str {
-        "Remove an installed skill by name. Only user-installed skills can be removed."
+        "Permanently remove an installed skill from disk. This action cannot be undone — \
+         the skill files will be deleted."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -770,7 +771,7 @@ impl Tool for SkillRemoveTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
+        ApprovalRequirement::Always
     }
 }
 
@@ -837,10 +838,39 @@ mod tests {
         assert_eq!(tool.name(), "skill_remove");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Always
         );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
+    }
+
+    #[test]
+    fn skill_remove_always_requires_approval_regardless_of_params() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = SkillRemoveTool::new(test_registry());
+
+        let test_cases = vec![
+            ("no params", serde_json::json!({})),
+            ("empty name", serde_json::json!({"name": ""})),
+            (
+                "deployment skill",
+                serde_json::json!({"name": "deployment"}),
+            ),
+            ("custom skill", serde_json::json!({"name": "custom-skill"})),
+            (
+                "with extra fields",
+                serde_json::json!({"name": "skill", "extra": "field"}),
+            ),
+        ];
+
+        for (case_name, params) in test_cases {
+            assert_eq!(
+                tool.requires_approval(&params),
+                ApprovalRequirement::Always,
+                "skill_remove must always require approval for case: {}",
+                case_name
+            );
+        }
     }
 
     #[test]
