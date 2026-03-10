@@ -14,6 +14,7 @@ exclude = [
     "tools-src/google-slides",
     "tools-src/slack",
     "tools-src/telegram",
+    "fuzz",
 ]
 
 [package]
