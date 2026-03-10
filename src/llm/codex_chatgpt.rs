@@ -399,7 +399,8 @@ impl CodexChatGptProvider {
 
                 tracing::info!("Received 401, attempting token refresh");
                 if let Some(new_token) =
-                    codex_auth::refresh_access_token(rt, self.auth_path.as_deref()).await
+                    codex_auth::refresh_access_token(&self.client, rt, self.auth_path.as_deref())
+                        .await
                 {
                     // Update stored api_key
                     *self.api_key.write().await = new_token.clone();

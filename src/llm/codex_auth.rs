@@ -172,10 +172,10 @@ pub fn load_codex_credentials(path: &Path) -> Option<CodexCredentials> {
 /// Returns `None` if the refresh token is missing, the request fails,
 /// or the response is malformed.
 pub async fn refresh_access_token(
+    client: &reqwest::Client,
     refresh_token: &SecretString,
     auth_path: Option<&Path>,
 ) -> Option<SecretString> {
-    let client = reqwest::Client::new();
     let req = RefreshRequest {
         client_id: CLIENT_ID,
         grant_type: "refresh_token",
