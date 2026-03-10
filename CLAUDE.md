@@ -64,6 +64,13 @@ src/
 │   ├── repl.rs         # Simple REPL (for testing)
 │   ├── web/            # Web gateway (browser UI) — see src/channels/web/CLAUDE.md
 │   └── wasm/           # WASM channel runtime
+│       ├── mod.rs
+│       ├── bundled.rs  # Bundled channel discovery
+│       ├── capabilities.rs # Channel-specific capabilities (HTTP endpoint, emit rate)
+│       ├── error.rs    # WASM channel error types
+│       ├── runtime.rs  # WASM channel execution runtime
+│       ├── setup.rs    # WasmChannelSetup, setup_wasm_channels(), inject_channel_credentials()
+│       └── wrapper.rs  # Channel trait wrapper for WASM modules
 │
 ├── cli/                # CLI subcommands (clap)
 │   ├── mod.rs          # Cli struct, Command enum (run/onboard/config/tool/registry/mcp/memory/pairing/service/doctor/status/completion)
@@ -76,7 +83,13 @@ src/
 │
 ├── hooks/              # Lifecycle hooks (6 points: BeforeInbound, BeforeToolCall, BeforeOutbound, OnSessionStart, OnSessionEnd, TransformResponse)
 │
-├── tunnel/             # Tunnel abstraction (cloudflare, ngrok, tailscale, custom, none)
+├── tunnel/             # Tunnel abstraction for public internet exposure
+│   ├── mod.rs          # Tunnel trait, TunnelProviderConfig, create_tunnel(), start_managed_tunnel()
+│   ├── cloudflare.rs   # CloudflareTunnel (cloudflared binary)
+│   ├── ngrok.rs        # NgrokTunnel
+│   ├── tailscale.rs    # TailscaleTunnel (serve/funnel modes)
+│   ├── custom.rs       # CustomTunnel (arbitrary command with {host}/{port})
+│   └── none.rs         # NoneTunnel (local-only, no exposure)
 │
 ├── observability/      # Pluggable event/metric recording (noop, log, multi)
 │
@@ -86,7 +99,8 @@ src/
 │   └── job_manager.rs  # Container lifecycle (create, stop, cleanup)
 │
 ├── worker/             # Runs inside Docker containers
-│   ├── runtime.rs      # Worker execution loop (tool calls, LLM)
+│   ├── container.rs    # Container worker runtime (ContainerDelegate + shared agentic loop)
+│   ├── job.rs          # Background job worker (JobDelegate + shared agentic loop)
 │   ├── claude_bridge.rs # Claude Code bridge (spawns claude CLI)
 │   └── proxy_llm.rs    # LlmProvider that proxies through orchestrator
 │
@@ -105,8 +119,26 @@ src/
 │   ├── rate_limiter.rs # Shared sliding-window rate limiter
 │   ├── builtin/        # Built-in tools (echo, time, json, http, web_fetch, file, shell, memory, message, job, routine, extension_tools, skill_tools, secrets_tools)
 │   ├── builder/        # Dynamic tool building
-│   ├── mcp/            # Model Context Protocol client
-│   └── wasm/           # Full WASM sandbox (wasmtime) — runtime, host functions, fuel metering, allowlist, credential injection
+│   │   ├── core.rs     # BuildRequirement, SoftwareType, Language
+│   │   ├── templates.rs # Project scaffolding
+│   │   ├── testing.rs  # Test harness integration
+│   │   └── validation.rs # WASM validation
+│   ├── mcp/            # Model Context Protocol
+│   │   ├── client.rs   # MCP client over HTTP
+│   │   ├── factory.rs  # create_client_from_config() — transport dispatch factory
+│   │   ├── protocol.rs # JSON-RPC types
+│   │   └── session.rs  # MCP session management (Mcp-Session-Id header, per-server state)
+│   └── wasm/           # Full WASM sandbox (wasmtime)
+│       ├── runtime.rs  # Module compilation and caching
+│       ├── wrapper.rs  # Tool trait wrapper for WASM modules
+│       ├── host.rs     # Host functions (logging, time, workspace)
+│       ├── limits.rs   # Fuel metering and memory limiting
+│       ├── allowlist.rs # Network endpoint allowlisting
+│       ├── credential_injector.rs # Safe credential injection
+│       ├── loader.rs   # WASM tool discovery from filesystem
+│       ├── rate_limiter.rs # Per-tool rate limiting
+│       ├── error.rs    # WASM-specific error types
+│       └── storage.rs  # Linear memory persistence
 │
 ├── db/                 # Dual-backend persistence (PostgreSQL + libSQL) — see src/db/CLAUDE.md
 │
@@ -143,6 +175,8 @@ Dual-backend: PostgreSQL + libSQL/Turso. **All new persistence features must sup
 ## Module Specs
 
 When modifying a module with a spec, read the spec first. Code follows spec; spec is the tiebreaker.
+
+**Module-owned initialization:** Module-specific initialization logic (database connection, transport creation, channel setup) must live in the owning module as a public factory function — not in `main.rs` or `app.rs`. These entry-point files orchestrate calls to module factories. Feature-flag branching (`#[cfg(feature = ...)]`) must be confined to the module that owns the abstraction.
 
 | Module | Spec |
 |--------|------|

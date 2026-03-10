@@ -200,6 +200,16 @@ fn read_secret_line() -> io::Result<SecretString> {
     let mut input = String::new();
     let mut stdout = io::stdout();
 
+    // Drain any residual key events (e.g. Enter from a prior `read_line` prompt)
+    // that are already queued before we start reading. Without this, on
+    // Windows the leftover Enter is immediately consumed and the function
+    // returns an empty string before the user can type anything.
+    // Uses Duration::ZERO so we never block waiting for new input — only
+    // events already in the queue are consumed.
+    while event::poll(std::time::Duration::ZERO)? {
+        let _ = event::read()?;
+    }
+
     loop {
         if let Event::Key(KeyEvent {
             code, modifiers, ..

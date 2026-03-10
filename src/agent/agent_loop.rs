@@ -446,6 +446,8 @@ impl Agent {
                         Arc::clone(workspace),
                         notify_tx,
                         Some(self.scheduler.clone()),
+                        self.tools().clone(),
+                        self.safety().clone(),
                     ));
 
                     // Register routine tools
@@ -514,7 +516,7 @@ impl Agent {
                         *slot.write().await = Some(Arc::clone(&engine));
                     }
 
-                    tracing::info!(
+                    tracing::debug!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
                         rt_config.cron_check_interval_secs,
                         rt_config.max_concurrent_routines
@@ -536,20 +538,20 @@ impl Agent {
         let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
         // Main message loop
-        tracing::info!("Agent {} ready and listening", self.config.name);
+        tracing::debug!("Agent {} ready and listening", self.config.name);
 
         loop {
             let message = tokio::select! {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Ctrl+C received, shutting down...");
+                    tracing::debug!("Ctrl+C received, shutting down...");
                     break;
                 }
                 msg = message_stream.next() => {
                     match msg {
                         Some(m) => m,
                         None => {
-                            tracing::info!("All channel streams ended, shutting down...");
+                            tracing::debug!("All channel streams ended, shutting down...");
                             break;
                         }
                     }
@@ -624,7 +626,7 @@ impl Agent {
                 }
                 Ok(None) => {
                     // Shutdown signal received (/quit, /exit, /shutdown)
-                    tracing::info!("Shutdown command received, exiting...");
+                    tracing::debug!("Shutdown command received, exiting...");
                     break;
                 }
                 Err(e) => {
@@ -653,7 +655,7 @@ impl Agent {
         }
 
         // Cleanup
-        tracing::info!("Agent shutting down...");
+        tracing::debug!("Agent shutting down...");
         repair_handle.abort();
         pruning_handle.abort();
         if let Some(handle) = heartbeat_handle {
@@ -736,6 +738,18 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+        // Log at info level only for tracking without exposing PII (user_id can be a phone number)
+        tracing::info!(message_id = %message.id, "Processing message");
+
+        // Log sensitive details at debug level for troubleshooting
+        tracing::debug!(
+            message_id = %message.id,
+            user_id = %message.user_id,
+            channel = %message.channel,
+            thread_id = ?message.thread_id,
+            "Message details"
+        );
+
         // Set message tool context for this turn (current channel and target)
         // For Signal, use signal_target from metadata (group:ID or phone number),
         // otherwise fall back to user_id
@@ -784,10 +798,19 @@ impl Agent {
 
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(ref external_thread_id) = message.thread_id {
+            tracing::debug!(
+                message_id = %message.id,
+                thread_id = %external_thread_id,
+                "Hydrating thread from DB"
+            );
             self.maybe_hydrate_thread(message, external_thread_id).await;
         }
 
         // Resolve session and thread
+        tracing::debug!(
+            message_id = %message.id,
+            "Resolving session and thread"
+        );
         let (session, thread_id) = self
             .session_manager
             .resolve_thread(
@@ -796,6 +819,11 @@ impl Agent {
                 message.thread_id.as_deref(),
             )
             .await;
+        tracing::info!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            "Resolved session and thread"
+        );
 
         // Auth mode interception: if the thread is awaiting a token, route
         // the message directly to the credential store. Nothing touches

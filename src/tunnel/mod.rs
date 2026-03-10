@@ -180,6 +180,68 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
     }
 }
 
+// ── Managed tunnel startup ───────────────────────────────────────
+
+/// Start a managed tunnel if configured and no static URL is already set.
+///
+/// Returns the (potentially mutated) config with `tunnel.public_url` set,
+/// plus the active tunnel handle (if one was started) for later shutdown.
+pub async fn start_managed_tunnel(
+    mut config: crate::config::Config,
+) -> (crate::config::Config, Option<Box<dyn Tunnel>>) {
+    if config.tunnel.public_url.is_some() {
+        tracing::info!(
+            "Static tunnel URL in use: {}",
+            config.tunnel.public_url.as_deref().unwrap_or("?")
+        );
+        return (config, None);
+    }
+
+    let Some(ref provider_config) = config.tunnel.provider else {
+        return (config, None);
+    };
+
+    let gateway_port = config
+        .channels
+        .gateway
+        .as_ref()
+        .map(|g| g.port)
+        .unwrap_or(3000);
+    let gateway_host = config
+        .channels
+        .gateway
+        .as_ref()
+        .map(|g| g.host.as_str())
+        .unwrap_or("127.0.0.1");
+
+    match create_tunnel(provider_config) {
+        Ok(Some(tunnel)) => {
+            tracing::info!(
+                "Starting {} tunnel on {}:{}...",
+                tunnel.name(),
+                gateway_host,
+                gateway_port
+            );
+            match tunnel.start(gateway_host, gateway_port).await {
+                Ok(url) => {
+                    tracing::info!("Tunnel started: {}", url);
+                    config.tunnel.public_url = Some(url);
+                    (config, Some(tunnel))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to start tunnel: {}", e);
+                    (config, None)
+                }
+            }
+        }
+        Ok(None) => (config, None),
+        Err(e) => {
+            tracing::error!("Failed to create tunnel: {}", e);
+            (config, None)
+        }
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────
 
 #[cfg(test)]

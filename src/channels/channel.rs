@@ -344,6 +344,24 @@ pub trait Channel: Send + Sync {
     }
 }
 
+/// Trait for channels that support hot-secret-swapping during SIGHUP reload.
+///
+/// This allows channels to update authentication credentials without restarting,
+/// enabling zero-downtime configuration reloads. Channels that don't support
+/// secret updates can simply not implement this trait.
+#[async_trait]
+pub trait ChannelSecretUpdater: Send + Sync {
+    /// Update the secret for this channel.
+    ///
+    /// Called during SIGHUP configuration reload. Implementation should:
+    /// - Apply the new secret atomically
+    /// - Not fail the entire reload if secret update fails
+    /// - Log appropriate errors/info messages
+    ///
+    /// The secret is optional (may be None if secret is no longer configured).
+    async fn update_secret(&self, new_secret: Option<secrecy::SecretString>);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

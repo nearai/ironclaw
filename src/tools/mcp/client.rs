@@ -490,6 +490,12 @@ impl Tool for McpToolWrapper {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+
+        // Strip top-level null values before forwarding — LLMs often emit
+        // `"field": null` for optional params, but many MCP servers reject
+        // explicit nulls for fields that should simply be absent.
+        let params = strip_top_level_nulls(params);
+
         let result = self.client.call_tool(&self.tool.name, params).await?;
         let content: String = result
             .content
@@ -516,9 +522,22 @@ impl Tool for McpToolWrapper {
     }
 }
 
-/// Sanitize an HTTP error response body for safe display.
+/// Remove top-level keys whose value is JSON null from an object.
 ///
-/// Detects full HTML error pages (containing `<html` or `<!DOCTYPE`) and
+/// LLMs frequently emit `"field": null` for optional parameters.  Many MCP
+/// servers (e.g. Notion) treat an explicit `null` as an invalid value for
+/// optional fields that should simply be absent.  Stripping these before
+/// forwarding avoids 400-class rejections from strict servers.
+fn strip_top_level_nulls(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let filtered = map.into_iter().filter(|(_, v)| !v.is_null()).collect();
+            serde_json::Value::Object(filtered)
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,5 +824,41 @@ mod tests {
         assert!(http_transport.supports_http_features());
         let mock_non_http = MockTransport::new(false, vec![]);
         assert!(!mock_non_http.supports_http_features());
+    }
+
+    #[test]
+    fn test_strip_top_level_nulls_removes_null_fields() {
+        let input = serde_json::json!({
+            "query": "search term",
+            "sort": null,
+            "filter": null,
+            "page_size": 10
+        });
+        let result = strip_top_level_nulls(input);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj["query"], "search term");
+        assert_eq!(obj["page_size"], 10);
+        assert!(!obj.contains_key("sort"));
+        assert!(!obj.contains_key("filter"));
+    }
+
+    #[test]
+    fn test_strip_top_level_nulls_preserves_non_objects() {
+        let input = serde_json::json!("just a string");
+        let result = strip_top_level_nulls(input.clone());
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_strip_top_level_nulls_preserves_nested_nulls() {
+        let input = serde_json::json!({
+            "outer": { "inner": null },
+            "top_null": null
+        });
+        let result = strip_top_level_nulls(input);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert!(obj["outer"]["inner"].is_null());
     }
 }
