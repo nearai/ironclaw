@@ -10,7 +10,7 @@ use clap::{Args, Subcommand};
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::secrets::{SecretsCrypto, SecretsStore};
+use crate::secrets::SecretsStore;
 use crate::tools::mcp::{
     McpClient, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
@@ -628,17 +628,7 @@ async fn save_servers(
 
 /// Initialize and return the secrets store.
 async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
-    let config = Config::from_env().await?;
-
-    let master_key = config.secrets.master_key().ok_or_else(|| {
-        anyhow::anyhow!(
-            "SECRETS_MASTER_KEY not set. Run 'ironclaw onboard' first or set it in .env"
-        )
-    })?;
-
-    let crypto = Arc::new(SecretsCrypto::new(master_key.clone())?);
-
-    Ok(crate::db::create_secrets_store(&config.database, crypto).await?)
+    crate::cli::init_secrets_store().await
 }
 
 #[cfg(test)]
