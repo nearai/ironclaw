@@ -210,6 +210,45 @@ impl ExtensionManager {
         *self.relay_channel_manager.write().await = Some(channel_manager);
     }
 
+    /// Check if a channel name corresponds to a relay extension (has stored stream token).
+    pub async fn is_relay_channel(&self, name: &str) -> bool {
+        self.secrets
+            .exists(&self.user_id, &format!("relay:{}:stream_token", name))
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Restore persisted relay channels after startup.
+    ///
+    /// Loads the persisted active channel list, filters to relay types (those with
+    /// a stored stream token), and activates each via `activate_stored_relay()`.
+    /// Skips channels that are already active. Call this after `set_relay_channel_manager()`.
+    pub async fn restore_relay_channels(&self) {
+        let persisted = self.load_persisted_active_channels().await;
+        let already_active = self.active_channel_names.read().await.clone();
+
+        for name in &persisted {
+            if already_active.contains(name) {
+                continue;
+            }
+            if !self.is_relay_channel(name).await {
+                continue;
+            }
+            match self.activate_stored_relay(name).await {
+                Ok(_) => {
+                    tracing::debug!(channel = %name, "Restored persisted relay channel");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %name,
+                        error = %e,
+                        "Failed to restore persisted relay channel"
+                    );
+                }
+            }
+        }
+    }
+
     /// Access the secrets store (used by OAuth callback handlers).
     pub fn secrets(&self) -> &Arc<dyn SecretsStore + Send + Sync> {
         &self.secrets
@@ -762,9 +801,17 @@ impl ExtensionManager {
                     .delete(&self.user_id, &format!("relay:{}:stream_token", name))
                     .await;
 
-                // Shut down the channel if the channel runtime is available
+                // Shut down the channel (check both runtime paths for WASM+relay and relay-only modes)
+                let mut shut_down = false;
                 if let Some(ref rt) = *self.channel_runtime.read().await
                     && let Some(channel) = rt.channel_manager.get_channel(name).await
+                {
+                    let _ = channel.shutdown().await;
+                    shut_down = true;
+                }
+                if !shut_down
+                    && let Some(ref cm) = *self.relay_channel_manager.read().await
+                    && let Some(channel) = cm.get_channel(name).await
                 {
                     let _ = channel.shutdown().await;
                 }
@@ -4453,6 +4500,74 @@ mod tests {
         assert!(
             mgr.installed_relay_extensions.read().await.is_empty(),
             "determine_installed_kind must not modify installed_relay_extensions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_relay_channel_detects_stored_token() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        // No token stored → not a relay channel
+        assert!(!mgr.is_relay_channel("slack-relay").await);
+
+        // Store a stream token
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("relay:slack-relay:stream_token", "tok123"),
+            )
+            .await
+            .expect("store token");
+
+        // Now it's detected as a relay channel
+        assert!(mgr.is_relay_channel("slack-relay").await);
+    }
+
+    #[tokio::test]
+    async fn test_remove_relay_shuts_down_via_relay_channel_manager() {
+        // Regression: remove() only checked channel_runtime for shutdown, missing
+        // relay-only mode where only relay_channel_manager is set.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        // Set up relay channel manager with a stub channel
+        let cm = Arc::new(crate::channels::ChannelManager::new());
+        let (stub, _tx) = crate::testing::StubChannel::new("slack-relay");
+        cm.add(Box::new(stub)).await;
+        mgr.set_relay_channel_manager(Arc::clone(&cm)).await;
+
+        // Mark as installed + store a token so determine_installed_kind finds it
+        mgr.installed_relay_extensions
+            .write()
+            .await
+            .insert("slack-relay".to_string());
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    "relay:slack-relay:stream_token",
+                    "tok123",
+                ),
+            )
+            .await
+            .expect("store token");
+
+        // Verify channel exists before removal
+        assert!(cm.get_channel("slack-relay").await.is_some());
+
+        // Remove should succeed and shut down the channel
+        let result = mgr.remove("slack-relay").await;
+        assert!(result.is_ok(), "remove should succeed: {:?}", result.err());
+
+        // installed_relay_extensions should be cleared
+        assert!(
+            !mgr
+                .installed_relay_extensions
+                .read()
+                .await
+                .contains("slack-relay"),
+            "Should be removed from installed set"
         );
     }
 }

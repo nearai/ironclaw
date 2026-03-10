@@ -339,23 +339,26 @@ impl Channel for RelayChannel {
                     }
                 }
 
-                // Check if the team is still valid (with backoff on failure)
-                match client.list_connections(&instance_id).await {
-                    Ok(conns) => {
-                        let has_team = conns.iter().any(|c| c.team_id == team_id && c.connected);
-                        if !has_team {
-                            tracing::warn!(
-                                team_id = %team_id,
-                                "Team no longer connected, stopping relay channel"
-                            );
-                            return;
+                // Check if the team is still valid (skip when team_id is unknown,
+                // e.g. when no DB store was available at activation time)
+                if !team_id.is_empty() {
+                    match client.list_connections(&instance_id).await {
+                        Ok(conns) => {
+                            let has_team = conns.iter().any(|c| c.team_id == team_id && c.connected);
+                            if !has_team {
+                                tracing::warn!(
+                                    team_id = %team_id,
+                                    "Team no longer connected, stopping relay channel"
+                                );
+                                return;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Could not verify team connection, will retry next iteration"
-                        );
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Could not verify team connection, will retry next iteration"
+                            );
+                        }
                     }
                 }
             }
@@ -618,5 +621,21 @@ mod tests {
             "user1".into(),
         );
         assert_eq!(channel.max_consecutive_failures, 50);
+    }
+
+    #[test]
+    fn empty_team_id_accepted_at_construction() {
+        // Regression: empty team_id (when no DB store is available) must not
+        // prevent channel construction or cause immediate shutdown.
+        let channel = RelayChannel::new(
+            test_client(),
+            "token".into(),
+            String::new(), // empty team_id
+            "inst1".into(),
+            "user1".into(),
+        );
+        assert_eq!(channel.team_id, "");
+        // The reconnect loop now skips team validation when team_id is empty,
+        // so the channel remains alive.
     }
 }
