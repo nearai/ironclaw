@@ -160,11 +160,27 @@ impl Scheduler {
             .create_job_for_user(user_id, title, description)
             .await?;
 
+        // Apply token budget from config, allowing per-job metadata override.
+        let max_tokens = metadata
+            .as_ref()
+            .and_then(|m| m.get("max_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.config.max_tokens_per_job);
+
         // Apply metadata if provided
         if let Some(meta) = metadata {
             self.context_manager
                 .update_context(job_id, |ctx| {
                     ctx.metadata = meta;
+                })
+                .await?;
+        }
+
+        // Set token budget (separate update to avoid overwriting metadata)
+        if max_tokens > 0 {
+            self.context_manager
+                .update_context(job_id, |ctx| {
+                    ctx.max_tokens = max_tokens;
                 })
                 .await?;
         }

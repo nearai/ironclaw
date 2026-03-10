@@ -29,6 +29,8 @@ pub struct AgentConfig {
     pub auto_approve_tools: bool,
     /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
     pub default_timezone: String,
+    /// Maximum tokens per job (0 = unlimited).
+    pub max_tokens_per_job: u64,
 }
 
 impl AgentConfig {
@@ -50,6 +52,7 @@ impl AgentConfig {
             max_tool_iterations: 10,
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
+            max_tokens_per_job: 0,
         }
     }
 
@@ -105,6 +108,10 @@ impl AgentConfig {
                 }
                 tz
             },
+            max_tokens_per_job: parse_optional_env(
+                "AGENT_MAX_TOKENS_PER_JOB",
+                settings.agent.max_tokens_per_job,
+            )?,
         })
     }
 }
