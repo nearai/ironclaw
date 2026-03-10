@@ -812,7 +812,7 @@ async fn run_worker(
         orchestrator_url
     );
 
-    let config = ironclaw::worker::runtime::WorkerConfig {
+    let config = ironclaw::worker::container::WorkerConfig {
         job_id,
         orchestrator_url: orchestrator_url.to_string(),
         max_iterations,

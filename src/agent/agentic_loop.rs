@@ -1,0 +1,204 @@
+//! Unified agentic loop engine.
+//!
+//! Provides a single implementation of the core LLM call → tool execution →
+//! result processing → context update → repeat cycle. Three consumers
+//! (chat dispatcher, job worker, container runtime) customize behavior
+//! via the `LoopDelegate` trait.
+
+use async_trait::async_trait;
+
+use crate::error::Error;
+use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+
+/// Signal from the delegate indicating how the loop should proceed.
+pub enum LoopSignal {
+    /// Continue normally.
+    Continue,
+    /// Stop the loop gracefully.
+    Stop,
+    /// Inject a user message into context and continue.
+    InjectMessage(String),
+}
+
+/// Outcome of a text response from the LLM.
+pub enum TextAction {
+    /// Return this as the final loop result.
+    Return(LoopOutcome),
+    /// Continue the loop (text was handled but loop should proceed).
+    Continue,
+}
+
+/// Final outcome of the agentic loop.
+pub enum LoopOutcome {
+    /// Completed with a text response.
+    Response(String),
+    /// Loop was stopped by a signal.
+    Stopped,
+    /// Max iterations exceeded.
+    MaxIterations,
+    /// Custom outcome (e.g. approval needed, stuck).
+    Custom(Box<dyn std::any::Any + Send>),
+}
+
+/// Configuration for the agentic loop.
+pub struct AgenticLoopConfig {
+    pub max_iterations: usize,
+    pub enable_tool_intent_nudge: bool,
+    pub max_tool_intent_nudges: u32,
+}
+
+impl Default for AgenticLoopConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 50,
+            enable_tool_intent_nudge: true,
+            max_tool_intent_nudges: 2,
+        }
+    }
+}
+
+/// Strategy trait — each consumer implements this to customize I/O and lifecycle.
+///
+/// The shared loop calls these methods at well-defined points. Consumers
+/// implement only the behavior that differs between chat, job, and container
+/// contexts. The loop itself handles the common logic: tool intent nudge,
+/// iteration counting, tool definition refresh, and the respond → execute → process cycle.
+#[async_trait]
+pub trait LoopDelegate: Send + Sync {
+    /// Called at the start of each iteration. Check for external signals
+    /// (cancellation, user messages, stop requests).
+    async fn check_signals(&self) -> LoopSignal;
+
+    /// Called before the LLM call. Allows the delegate to refresh tool
+    /// definitions, enforce cost guards, or inject messages.
+    /// Return `Some(outcome)` to break the loop early.
+    async fn before_llm_call(
+        &self,
+        reason_ctx: &mut ReasoningContext,
+        iteration: usize,
+    ) -> Option<LoopOutcome>;
+
+    /// Call the LLM and return the result. Delegates own the LLM call
+    /// to handle consumer-specific concerns (rate limiting, auto-compaction,
+    /// cost tracking, force_text mode).
+    async fn call_llm(
+        &self,
+        reasoning: &Reasoning,
+        reason_ctx: &mut ReasoningContext,
+        iteration: usize,
+    ) -> Result<crate::llm::RespondOutput, Error>;
+
+    /// Handle a text-only response from the LLM.
+    /// Return `TextAction::Return` to exit the loop, `TextAction::Continue` to proceed.
+    async fn handle_text_response(
+        &self,
+        text: &str,
+        reason_ctx: &mut ReasoningContext,
+    ) -> TextAction;
+
+    /// Execute tool calls and add results to context.
+    /// Return `Some(outcome)` to break the loop (e.g. approval needed).
+    async fn execute_tool_calls(
+        &self,
+        tool_calls: Vec<crate::llm::ToolCall>,
+        content: Option<String>,
+        reason_ctx: &mut ReasoningContext,
+    ) -> Result<Option<LoopOutcome>, Error>;
+
+    /// Called after each successful iteration (no error, no early return).
+    async fn after_iteration(&self, _iteration: usize) {}
+}
+
+/// Run the unified agentic loop.
+///
+/// This is the single implementation used by all three consumers (chat, job, container).
+/// The `delegate` provides consumer-specific behavior via the `LoopDelegate` trait.
+pub async fn run_agentic_loop(
+    delegate: &dyn LoopDelegate,
+    reasoning: &Reasoning,
+    reason_ctx: &mut ReasoningContext,
+    config: &AgenticLoopConfig,
+) -> Result<LoopOutcome, Error> {
+    let mut consecutive_tool_intent_nudges: u32 = 0;
+
+    for iteration in 1..=config.max_iterations {
+        // Check for external signals (stop, cancellation, user messages)
+        match delegate.check_signals().await {
+            LoopSignal::Continue => {}
+            LoopSignal::Stop => return Ok(LoopOutcome::Stopped),
+            LoopSignal::InjectMessage(msg) => {
+                reason_ctx.messages.push(ChatMessage::user(&msg));
+            }
+        }
+
+        // Pre-LLM call hook (cost guard, tool refresh, iteration limit nudge)
+        if let Some(outcome) = delegate.before_llm_call(reason_ctx, iteration).await {
+            return Ok(outcome);
+        }
+
+        // Call LLM
+        let output = delegate.call_llm(reasoning, reason_ctx, iteration).await?;
+
+        match output.result {
+            RespondResult::Text(text) => {
+                // Tool intent nudge: if the LLM says "let me search..." without
+                // actually calling a tool, inject a nudge message.
+                if config.enable_tool_intent_nudge
+                    && !reason_ctx.available_tools.is_empty()
+                    && !reason_ctx.force_text
+                    && consecutive_tool_intent_nudges < config.max_tool_intent_nudges
+                    && crate::llm::llm_signals_tool_intent(&text)
+                {
+                    consecutive_tool_intent_nudges += 1;
+                    tracing::info!(
+                        iteration,
+                        "LLM expressed tool intent without calling a tool, nudging"
+                    );
+                    reason_ctx.messages.push(ChatMessage::assistant(&text));
+                    reason_ctx
+                        .messages
+                        .push(ChatMessage::user(crate::llm::TOOL_INTENT_NUDGE));
+                    delegate.after_iteration(iteration).await;
+                    continue;
+                }
+
+                // Reset nudge counter since we got a non-intent text response
+                if !crate::llm::llm_signals_tool_intent(&text) {
+                    consecutive_tool_intent_nudges = 0;
+                }
+
+                match delegate.handle_text_response(&text, reason_ctx).await {
+                    TextAction::Return(outcome) => return Ok(outcome),
+                    TextAction::Continue => {}
+                }
+            }
+            RespondResult::ToolCalls {
+                tool_calls,
+                content,
+            } => {
+                consecutive_tool_intent_nudges = 0;
+
+                if let Some(outcome) = delegate
+                    .execute_tool_calls(tool_calls, content, reason_ctx)
+                    .await?
+                {
+                    return Ok(outcome);
+                }
+            }
+        }
+
+        delegate.after_iteration(iteration).await;
+    }
+
+    Ok(LoopOutcome::MaxIterations)
+}
+
+/// Truncate a string for log/status previews.
+pub fn truncate_for_preview(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let end = crate::util::floor_char_boundary(s, max);
+        format!("{}...", &s[..end])
+    }
+}

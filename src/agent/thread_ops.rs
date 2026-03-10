@@ -812,19 +812,12 @@ impl Agent {
             // Sanitize tool result, then record the cleaned version in the
             // thread. Must happen before auth intercept check which may return early.
             let is_tool_error = tool_result.is_err();
-            let result_content = match &tool_result {
-                Ok(output) => {
-                    let sanitized = self
-                        .safety()
-                        .sanitize_tool_output(&pending.tool_name, output);
-                    self.safety().wrap_for_llm(
-                        &pending.tool_name,
-                        &sanitized.content,
-                        sanitized.was_modified,
-                    )
-                }
-                Err(e) => format!("Error: {}", e),
-            };
+            let (result_content, _) = crate::tools::execute::process_tool_result(
+                self.safety(),
+                &pending.tool_name,
+                &pending.tool_call_id,
+                &tool_result,
+            );
 
             // Record sanitized result in thread
             {
@@ -1064,17 +1057,12 @@ impl Agent {
                 // Sanitize first, then record the cleaned version in thread.
                 // Must happen before auth detection which may set deferred_auth.
                 let is_deferred_error = deferred_result.is_err();
-                let deferred_content = match &deferred_result {
-                    Ok(output) => {
-                        let sanitized = self.safety().sanitize_tool_output(&tc.name, output);
-                        self.safety().wrap_for_llm(
-                            &tc.name,
-                            &sanitized.content,
-                            sanitized.was_modified,
-                        )
-                    }
-                    Err(e) => format!("Error: {}", e),
-                };
+                let (deferred_content, _) = crate::tools::execute::process_tool_result(
+                    self.safety(),
+                    &tc.name,
+                    &tc.id,
+                    &deferred_result,
+                );
 
                 // Record sanitized result in thread
                 {
