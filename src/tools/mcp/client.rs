@@ -135,6 +135,15 @@ impl McpClient {
         }
     }
 
+    /// Attach a session manager for Streamable HTTP session tracking.
+    ///
+    /// When set, the client includes `Mcp-Session-Id` headers in requests,
+    /// enabling servers to maintain per-session state across calls.
+    pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
+        self.session_manager = Some(session_manager);
+        self
+    }
+
     /// Create a new authenticated MCP client.
     ///
     /// Use this for hosted MCP servers that require OAuth authentication.
@@ -522,6 +531,16 @@ impl Tool for McpToolWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_with_session_manager() {
+        let client = McpClient::new("http://localhost:8080");
+        assert!(client.session_manager.is_none());
+
+        let sm = Arc::new(McpSessionManager::new());
+        let client = client.with_session_manager(sm);
+        assert!(client.session_manager.is_some());
+    }
 
     #[test]
     fn test_mcp_request_list_tools() {

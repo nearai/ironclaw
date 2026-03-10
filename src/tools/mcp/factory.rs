@@ -88,10 +88,12 @@ pub async fn create_client_from_config(
                         user_id,
                     ))
                 } else {
-                    Ok(McpClient::new_with_config(server))
+                    Ok(McpClient::new_with_config(server)
+                        .with_session_manager(Arc::clone(session_manager)))
                 }
             } else {
-                Ok(McpClient::new_with_config(server))
+                Ok(McpClient::new_with_config(server)
+                    .with_session_manager(Arc::clone(session_manager)))
             }
         }
     }
