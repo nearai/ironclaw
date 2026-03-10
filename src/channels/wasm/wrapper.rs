@@ -3059,6 +3059,7 @@ mod tests {
     };
     use crate::channels::wasm::wrapper::{HttpResponse, WasmChannel};
     use crate::pairing::PairingStore;
+    use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
     use crate::tools::wasm::ResourceLimits;
 
     fn create_test_channel() -> WasmChannel {
@@ -4009,7 +4010,7 @@ mod tests {
         let mut creds = std::collections::HashMap::new();
         creds.insert(
             "TELEGRAM_BOT_TOKEN".to_string(),
-            "8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis".to_string(),
+            TEST_TELEGRAM_BOT_TOKEN.to_string(),
         );
         creds.insert("OTHER_SECRET".to_string(), "s3cret".to_string());
 
@@ -4022,13 +4023,15 @@ mod tests {
             Arc::new(PairingStore::new()),
         );
 
-        let error = "HTTP request failed: error sending request for url \
-            (https://api.telegram.org/bot8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis/getUpdates)";
+        let error = format!(
+            "HTTP request failed: error sending request for url \
+            (https://api.telegram.org/bot{TEST_TELEGRAM_BOT_TOKEN}/getUpdates)"
+        );
 
-        let redacted = store.redact_credentials(error);
+        let redacted = store.redact_credentials(&error);
 
         assert!(
-            !redacted.contains("8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis"),
+            !redacted.contains(TEST_TELEGRAM_BOT_TOKEN),
             "credential value should be redacted"
         );
         assert!(

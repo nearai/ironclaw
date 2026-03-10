@@ -18,6 +18,8 @@
 //! }
 //! ```
 
+pub mod credentials;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

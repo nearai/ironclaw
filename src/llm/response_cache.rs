@@ -205,7 +205,7 @@ impl LlmProvider for CachedProvider {
                     let hit_count = entry.hit_count;
                     // Clone now so we can release the mutable borrow before stats.
                     let cached_response = entry.response.clone();
-                    tracing::debug!(hits = hit_count, "response cache hit");
+                    tracing::trace!(hits = hit_count, "response cache hit");
                     // Drop the mutable borrow of `entry` before reading `guard` immutably.
                     let _ = entry;
                     let total_hits = self.total_hit_count.fetch_add(1, Ordering::Relaxed) + 1;

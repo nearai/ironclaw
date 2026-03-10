@@ -113,6 +113,31 @@ pub struct ExtensionManager {
     gateway_token: Option<String>,
 }
 
+/// Sanitize a URL for logging by removing query parameters and credentials.
+/// Prevents accidental logging of API keys, OAuth tokens, or other sensitive data in URLs.
+fn sanitize_url_for_logging(url: &str) -> String {
+    // If URL is very short or doesn't look like a URL, just use as-is
+    if url.len() < 10 || !url.contains("://") {
+        return url.to_string();
+    }
+
+    // Try to parse and remove sensitive components
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        // Remove query string and fragment
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+
+        // Remove userinfo (username and password) if present
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+
+        parsed.to_string()
+    } else {
+        // Fallback: strip after ? or #
+        url.split(['?', '#']).next().unwrap_or(url).to_string()
+    }
+}
+
 impl ExtensionManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -299,7 +324,8 @@ impl ExtensionManager {
         url: Option<&str>,
         kind_hint: Option<ExtensionKind>,
     ) -> Result<InstallResult, ExtensionError> {
-        tracing::info!(extension = %name, url = ?url, kind = ?kind_hint, "Installing extension");
+        let sanitized_url = url.map(sanitize_url_for_logging);
+        tracing::info!(extension = %name, url = ?sanitized_url, kind = ?kind_hint, "Installing extension");
         Self::validate_extension_name(name)?;
 
         // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
@@ -321,7 +347,8 @@ impl ExtensionManager {
                 }
             }
             .map_err(|e| {
-                tracing::error!(extension = %name, url = %url, error = %e, "Extension install from URL failed");
+                let sanitized = sanitize_url_for_logging(url);
+                tracing::error!(extension = %name, url = %sanitized, error = %e, "Extension install from URL failed");
                 e
             });
         }
@@ -1212,10 +1239,11 @@ impl ExtensionManager {
             .build()
             .map_err(|e| ExtensionError::DownloadFailed(e.to_string()))?;
 
-        tracing::debug!(extension = %name, url = %url, "Downloading WASM extension");
+        let sanitized_url = sanitize_url_for_logging(url);
+        tracing::debug!(extension = %name, url = %sanitized_url, "Downloading WASM extension");
 
         let response = client.get(url).send().await.map_err(|e| {
-            tracing::error!(extension = %name, url = %url, error = %e, "Download request failed");
+            tracing::error!(extension = %name, url = %sanitized_url, error = %e, "Download request failed");
             ExtensionError::DownloadFailed(e.to_string())
         })?;
 
@@ -1223,7 +1251,7 @@ impl ExtensionManager {
             let status = response.status();
             tracing::error!(
                 extension = %name,
-                url = %url,
+                url = %sanitized_url,
                 status = %status,
                 "Download returned non-success HTTP status"
             );
@@ -3990,6 +4018,7 @@ mod tests {
         channels_dir: std::path::PathBuf,
     ) -> ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::testing::credentials::TEST_CRYPTO_KEY;
         use crate::tools::ToolRegistry;
         use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
@@ -3997,8 +4026,7 @@ mod tests {
         std::fs::create_dir_all(&tools_dir).ok();
         std::fs::create_dir_all(&channels_dir).ok();
 
-        let master_key =
-            secrecy::SecretString::from("0123456789abcdef0123456789abcdef".to_string());
+        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
         let crypto = Arc::new(SecretsCrypto::new(master_key).unwrap());
 
         ExtensionManager::new(
@@ -4106,5 +4134,97 @@ mod tests {
 
         unsafe { std::env::remove_var("_TOKEN") };
         unsafe { std::env::remove_var("ICTEST6_TOKEN") };
+    }
+
+    #[test]
+    fn test_sanitize_url_with_query_params() {
+        let url = "https://api.example.com/path?api_key=secret123&token=abc";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, "https://api.example.com/path");
+        assert!(!result.contains("api_key"));
+        assert!(!result.contains("secret123"));
+        assert!(!result.contains("token"));
+    }
+
+    #[test]
+    fn test_sanitize_url_with_credentials() {
+        let url = "https://user:password@api.example.com:8080/path";
+        let result = super::sanitize_url_for_logging(url);
+        assert!(!result.contains("user"));
+        assert!(!result.contains("password"));
+        assert!(!result.contains("@"));
+        assert!(result.contains("api.example.com"));
+        assert!(result.contains(":8080"));
+    }
+
+    #[test]
+    fn test_sanitize_url_with_fragment() {
+        let url = "https://api.example.com/path#section";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, "https://api.example.com/path");
+        assert!(!result.contains("#"));
+        assert!(!result.contains("section"));
+    }
+
+    #[test]
+    fn test_sanitize_url_with_port() {
+        let url = "https://api.example.com:9443/path?key=value";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, "https://api.example.com:9443/path");
+        assert!(result.contains(":9443"));
+        assert!(!result.contains("key"));
+    }
+
+    #[test]
+    fn test_sanitize_url_with_all_components() {
+        let url = "https://admin:secret@api.example.com:8080/v1/data?api_key=xyz#results";
+        let result = super::sanitize_url_for_logging(url);
+        assert!(!result.contains("admin"));
+        assert!(!result.contains("secret"));
+        assert!(!result.contains("@"));
+        assert!(!result.contains("api_key"));
+        assert!(!result.contains("xyz"));
+        assert!(!result.contains("#"));
+        assert!(!result.contains("results"));
+        assert!(result.contains("api.example.com:8080"));
+        assert!(result.contains("/v1/data"));
+    }
+
+    #[test]
+    fn test_sanitize_url_malformed() {
+        // Malformed URL should fallback to string splitting
+        let url = "https://[invalid-url";
+        let result = super::sanitize_url_for_logging(url);
+        // Malformed URL without query should return as-is via fallback
+        assert_eq!(result, url);
+
+        // Should still strip query params via fallback
+        let url_with_query = "https://[invalid-url?key=secret";
+        let result_with_query = super::sanitize_url_for_logging(url_with_query);
+        assert_eq!(result_with_query, "https://[invalid-url");
+        assert!(!result_with_query.contains("?"));
+        assert!(!result_with_query.contains("secret"));
+    }
+
+    #[test]
+    fn test_sanitize_url_short_string() {
+        let url = "short";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, "short");
+    }
+
+    #[test]
+    fn test_sanitize_url_not_url_like() {
+        let input = "this is not a url";
+        let result = super::sanitize_url_for_logging(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_sanitize_url_preserves_path() {
+        let url = "https://api.example.com/v1/users/123/profile";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, url);
+        assert!(result.contains("/v1/users/123/profile"));
     }
 }
