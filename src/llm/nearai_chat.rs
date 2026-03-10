@@ -270,8 +270,10 @@ impl NearAiChatProvider {
             reason: format!("Failed to read response body: {}", e),
         })?;
 
-        tracing::debug!("NEAR AI Chat response status: {}", status);
-        tracing::debug!("NEAR AI Chat response body: {}", response_text);
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!("NEAR AI Chat response status: {}", status);
+            tracing::debug!("NEAR AI Chat response body: {}", response_text);
+        }
 
         if !status.is_success() {
             let status_code = status.as_u16();

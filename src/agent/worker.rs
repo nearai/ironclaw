@@ -855,10 +855,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             Ok(Ok(output)) => {
                 let result_str = serde_json::to_string(&output.result)
                     .unwrap_or_else(|_| "<serialize error>".to_string());
+                let result_preview = crate::agent::truncate_for_preview(&result_str, 200);
                 tracing::debug!(
                     tool = %tool_name,
                     elapsed_ms = elapsed.as_millis() as u64,
-                    result = %result_str,
+                    result = %result_preview,
                     "Tool call succeeded"
                 );
             }

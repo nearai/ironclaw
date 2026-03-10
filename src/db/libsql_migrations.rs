@@ -653,6 +653,7 @@ END;
 pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::error::DatabaseError> {
     use crate::error::DatabaseError;
 
+    let mut applied_count = 0;
     for &(version, name, sql) in INCREMENTAL_MIGRATIONS {
         // Check if already applied
         let mut rows = conn
@@ -668,8 +669,6 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
         if rows.next().await.ok().flatten().is_some() {
             continue; // Already applied
         }
-
-        tracing::info!(version, name, "libSQL: applying incremental migration");
 
         // Wrap migration + recording in a transaction for atomicity.
         // If the process crashes mid-migration, the transaction rolls back
@@ -702,7 +701,12 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
             ))
         })?;
 
-        tracing::info!(version, name, "libSQL: migration applied successfully");
+        applied_count += 1;
+        tracing::trace!(version, name, "libSQL: migration applied");
+    }
+
+    if applied_count > 0 {
+        tracing::info!("libSQL: applied {} incremental migrations", applied_count);
     }
 
     Ok(())

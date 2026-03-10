@@ -663,7 +663,7 @@ async fn chat_send_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
-    tracing::debug!(
+    tracing::trace!(
         "[chat_send_handler] Received message: content={:?}, thread_id={:?}",
         req.content,
         req.thread_id
@@ -698,7 +698,7 @@ async fn chat_send_handler(
     }
 
     let msg_id = msg.id;
-    tracing::debug!(
+    tracing::trace!(
         "[chat_send_handler] Created message id={}, content={:?}, images={}",
         msg_id,
         req.content,

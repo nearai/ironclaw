@@ -85,7 +85,7 @@ impl Agent {
                     crate::skills::SkillTrust::Installed => "INSTALLED",
                 };
 
-                tracing::info!(
+                tracing::debug!(
                     skill_name = skill.name(),
                     skill_version = skill.version(),
                     trust = %skill.trust,
@@ -216,7 +216,7 @@ impl Agent {
             // Apply trust-based tool attenuation if skills are active.
             let tool_defs = if !active_skills.is_empty() {
                 let result = crate::skills::attenuate_tools(&tool_defs, &active_skills);
-                tracing::info!(
+                tracing::debug!(
                     min_trust = %result.min_trust,
                     tools_available = result.tools.len(),
                     tools_removed = result.removed_tools.len(),

@@ -136,7 +136,7 @@ impl ToolRegistry {
             return;
         }
         self.tools.write().await.insert(name.clone(), tool);
-        tracing::debug!("Registered tool: {}", name);
+        tracing::trace!("Registered tool: {}", name);
     }
 
     /// Register a tool (sync version for startup, marks as built-in).
