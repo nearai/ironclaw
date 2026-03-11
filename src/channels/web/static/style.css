@@ -49,6 +49,8 @@
   --accent-tee-border: rgba(52, 211, 153, 0.25);
   --accent-tee-hover: rgba(52, 211, 153, 0.18);
   --text-on-danger: #fff;
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
+  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.4);
   --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
   --danger-error-border: rgba(230, 76, 76, 0.2);
   --note-bg: rgba(255, 255, 255, 0.04);
@@ -93,7 +95,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 24px;
-  box-shadow: 0 4px 24px var(--shadow);
+  box-shadow: var(--shadow-card);
 }
 
 .auth-brand {
@@ -3078,7 +3080,7 @@ body {
   transition: transform 0.25s ease;
   max-width: 360px;
   word-break: break-word;
-  box-shadow: 0 4px 12px var(--shadow);
+  box-shadow: var(--shadow-toast);
 }
 
 .toast.visible {
@@ -3941,6 +3943,8 @@ mark {
   --accent-tee-border: rgba(5, 150, 105, 0.2);
   --accent-tee-hover: rgba(5, 150, 105, 0.15);
   --text-on-danger: #fff;
+  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.08);
   --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
   --danger-error-border: rgba(220, 38, 38, 0.15);
   --note-bg: rgba(0, 0, 0, 0.02);
