@@ -239,6 +239,26 @@
     }
   },
   {
+    "id": "zai",
+    "aliases": [
+      "bigmodel"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://api.z.ai/api/paas/v4",
+    "api_key_env": "ZAI_API_KEY",
+    "api_key_required": true,
+    "model_env": "ZAI_MODEL",
+    "default_model": "glm-5",
+    "description": "Z.AI GLM inference API",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_zai_api_key",
+      "key_url": "https://z.ai/manage-apikey/apikey-list",
+      "display_name": "Z.AI",
+      "can_list_models": false
+    }
+  },
+  {
     "id": "cerebras",
     "aliases": [],
     "protocol": "open_ai_completions",
