@@ -5,7 +5,6 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::context::JobContext;
-use crate::tools::tool::ApprovalRequirement;
 use crate::tools::{Tool, ToolError, ToolOutput};
 
 /// Tool for generating images using FLUX or compatible image generation APIs.
@@ -85,10 +84,6 @@ impl Tool for ImageGenerateTool {
             },
             "required": ["prompt"]
         })
-    }
-
-    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -186,6 +181,7 @@ impl Tool for ImageGenerateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::tool::ApprovalRequirement;
 
     #[test]
     fn test_tool_metadata() {
@@ -197,7 +193,7 @@ mod tests {
         assert_eq!(tool.name(), "image_generate");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Never
         );
 
         let schema = tool.parameters_schema();

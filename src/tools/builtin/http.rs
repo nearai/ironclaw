@@ -586,18 +586,22 @@ impl Tool for HttpTool {
     }
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
-        // 1. Manual auth headers/query params in LLM params
-        if crate::safety::params_contain_manual_credentials(params) {
+        let has_credentials = crate::safety::params_contain_manual_credentials(params)
+            || (self.credential_registry.as_ref().is_some_and(|registry| {
+                extract_host_from_params(params)
+                    .is_some_and(|host| registry.has_credentials_for_host(&host))
+            }));
+
+        if has_credentials {
             return ApprovalRequirement::Always;
         }
-        // 2. Target host has credential mappings (will be auto-injected)
-        if let Some(ref registry) = self.credential_registry
-            && let Some(host) = extract_host_from_params(params)
-            && registry.has_credentials_for_host(&host)
-        {
-            return ApprovalRequirement::Always;
+
+        // GET requests (or missing method, since GET is the default) are low-risk
+        let method = params["method"].as_str().unwrap_or("GET");
+        if method.eq_ignore_ascii_case("GET") {
+            return ApprovalRequirement::Never;
         }
-        // Default: outbound HTTP still needs approval unless auto-approved
+
         ApprovalRequirement::UnlessAutoApproved
     }
 
@@ -724,10 +728,23 @@ mod tests {
     // ── Approval requirement tests ──────────────────────────────────────
 
     #[test]
-    fn test_no_auth_headers_returns_unless_auto_approved() {
+    fn test_get_no_auth_headers_returns_never() {
         let tool = HttpTool::new();
         let params = serde_json::json!({
             "method": "GET",
+            "url": "https://api.example.com/data"
+        });
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::Never
+        );
+    }
+
+    #[test]
+    fn test_post_no_auth_headers_returns_unless_auto_approved() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "POST",
             "url": "https://api.example.com/data"
         });
         assert_eq!(
@@ -813,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn test_non_auth_headers_return_unless_auto_approved() {
+    fn test_get_non_auth_headers_return_never() {
         let tool = HttpTool::new();
         let params = serde_json::json!({
             "method": "GET",
@@ -822,12 +839,12 @@ mod tests {
         });
         assert_eq!(
             tool.requires_approval(&params),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Never
         );
     }
 
     #[test]
-    fn test_empty_headers_return_unless_auto_approved() {
+    fn test_get_empty_headers_return_never() {
         let tool = HttpTool::new();
 
         // Empty object
@@ -838,7 +855,7 @@ mod tests {
         });
         assert_eq!(
             tool.requires_approval(&params),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Never
         );
 
         // Empty array
@@ -849,7 +866,7 @@ mod tests {
         });
         assert_eq!(
             tool.requires_approval(&params),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Never
         );
     }
 
@@ -880,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn test_host_without_credential_mapping_returns_unless_auto_approved() {
+    fn test_get_host_without_credential_mapping_returns_never() {
         use crate::tools::wasm::SharedCredentialRegistry;
 
         let registry = Arc::new(SharedCredentialRegistry::new());
@@ -894,7 +911,7 @@ mod tests {
         });
         assert_eq!(
             tool.requires_approval(&params),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Never
         );
     }
 
