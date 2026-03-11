@@ -1690,22 +1690,25 @@ function renderNodes(nodes, container, depth) {
     const row = document.createElement('div');
     row.className = 'tree-row';
     row.style.paddingLeft = (depth * 16 + 8) + 'px';
+    row.tabIndex = 0;
+    row.setAttribute('role', 'treeitem');
 
     if (node.is_dir) {
+      row.setAttribute('aria-expanded', node.expanded ? 'true' : 'false');
       const arrow = document.createElement('span');
       arrow.className = 'expand-arrow' + (node.expanded ? ' expanded' : '');
       arrow.textContent = '\u25B6';
-      arrow.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleExpand(node);
-      });
       row.appendChild(arrow);
 
       const label = document.createElement('span');
       label.className = 'tree-label dir';
       label.textContent = node.name;
-      label.addEventListener('click', () => toggleExpand(node));
       row.appendChild(label);
+
+      row.addEventListener('click', () => toggleExpand(node));
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(node); }
+      });
     } else {
       const spacer = document.createElement('span');
       spacer.className = 'expand-arrow-spacer';
@@ -1714,8 +1717,12 @@ function renderNodes(nodes, container, depth) {
       const label = document.createElement('span');
       label.className = 'tree-label file';
       label.textContent = node.name;
-      label.addEventListener('click', () => readMemoryFile(node.path));
       row.appendChild(label);
+
+      row.addEventListener('click', () => readMemoryFile(node.path));
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); readMemoryFile(node.path); }
+      });
     }
 
     container.appendChild(row);

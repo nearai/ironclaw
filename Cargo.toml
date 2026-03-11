@@ -175,6 +175,10 @@ readabilityrs = { version = "0.1.2", optional = true }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
 hex = "0.4.3"
 
+# OpenClaw import (feature gated)
+rusqlite = { version = "0.32", optional = true, features = ["bundled"] }
+json5 = { version = "0.4", optional = true }
+
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
@@ -210,6 +214,7 @@ libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+import = ["dep:rusqlite", "dep:json5"]
 
 [[test]]
 name = "html_to_markdown"

@@ -86,6 +86,12 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return completion.run();
         }
+        #[cfg(feature = "import")]
+        Some(Command::Import(import_cmd)) => {
+            init_cli_tracing();
+            let config = ironclaw::config::Config::from_env().await?;
+            return ironclaw::cli::run_import_command(import_cmd, &config).await;
+        }
         Some(Command::Worker {
             job_id,
             orchestrator_url,
