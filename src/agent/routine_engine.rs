@@ -799,24 +799,12 @@ async fn execute_lightweight_no_tools(
             reason: e.to_string(),
         })?;
 
-    let content = response.content.trim();
-    let tokens_used = Some((response.input_tokens + response.output_tokens) as i32);
-
-    // Empty content guard
-    if content.is_empty() {
-        return if response.finish_reason == FinishReason::Length {
-            Err(RoutineError::TruncatedResponse)
-        } else {
-            Err(RoutineError::EmptyResponse)
-        };
-    }
-
-    // Check for the "nothing to do" sentinel
-    if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
-        return Ok((RunStatus::Ok, None, tokens_used));
-    }
-
-    Ok((RunStatus::Attention, Some(content.to_string()), tokens_used))
+    handle_text_response(
+        &response.content,
+        response.finish_reason,
+        response.input_tokens,
+        response.output_tokens,
+    )
 }
 
 /// Handle a text-only LLM response in lightweight routine execution.
@@ -925,7 +913,10 @@ async fn execute_lightweight_with_tools(
             );
         } else {
             // Tool-enabled iteration
-            let tool_defs = ctx.tools.tool_definitions().await;
+            let tool_defs = ctx
+                .tools
+                .tool_definitions_excluding(ROUTINE_TOOL_DENYLIST)
+                .await;
 
             let request = ToolCompletionRequest::new(messages.clone(), tool_defs)
                 .with_max_tokens(effective_max_tokens)
@@ -991,12 +982,33 @@ async fn execute_lightweight_with_tools(
     }
 }
 
+/// Tools that must never be callable from lightweight routines.
+///
+/// These tools pose autonomy-escalation risks: a routine could self-replicate,
+/// modify its own triggers/prompts, delete other routines, or restart the agent.
+const ROUTINE_TOOL_DENYLIST: &[&str] = &[
+    "routine_create",
+    "routine_update",
+    "routine_delete",
+    "routine_fire",
+    "restart",
+];
+
 /// Execute a single tool for a lightweight routine.
 async fn execute_routine_tool(
     ctx: &EngineContext,
     job_ctx: &JobContext,
     tc: &ToolCall,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Block tools that pose autonomy-escalation risks
+    if ROUTINE_TOOL_DENYLIST.contains(&tc.name.as_str()) {
+        return Err(format!(
+            "Tool '{}' is not available in lightweight routines",
+            tc.name
+        )
+        .into());
+    }
+
     // Check if tool exists
     let tool = ctx
         .tools
@@ -1299,6 +1311,36 @@ mod tests {
                 "blocks"
             };
             assert_eq!(label, expected, "Approval pattern should match");
+        }
+    }
+
+    #[test]
+    fn test_routine_tool_denylist_blocks_self_management_tools() {
+        let denylisted = vec![
+            "routine_create",
+            "routine_update",
+            "routine_delete",
+            "routine_fire",
+            "restart",
+        ];
+        for tool in &denylisted {
+            assert!(
+                super::ROUTINE_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should be in ROUTINE_TOOL_DENYLIST",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_routine_tool_denylist_allows_safe_tools() {
+        let allowed = vec!["echo", "time", "json", "http", "memory_search", "shell"];
+        for tool in &allowed {
+            assert!(
+                !super::ROUTINE_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should NOT be in ROUTINE_TOOL_DENYLIST",
+                tool
+            );
         }
     }
 
