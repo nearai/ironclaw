@@ -250,6 +250,7 @@ fn extract_source(source: &ExtensionSource) -> String {
         ExtensionSource::Discovered { url } => url.clone(),
         ExtensionSource::WasmDownload { wasm_url, .. } => wasm_url.clone(),
         ExtensionSource::WasmBuildable { source_dir, .. } => source_dir.clone(),
+        ExtensionSource::ChannelRelay { relay_url } => relay_url.clone(),
     }
 }
 
