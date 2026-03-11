@@ -57,7 +57,7 @@
             "id": "call_event_emit_1",
             "name": "event_emit",
             "arguments": {
-              "source": "github",
+              "event_source": "github",
               "event_type": "issue.opened",
               "payload": {
                 "repository": "nearai/ironclaw",

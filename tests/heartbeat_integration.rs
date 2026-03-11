@@ -15,7 +15,6 @@ use ironclaw::{
     config::Config,
     history::Store,
     llm::{create_llm_provider, create_session_manager},
-    safety::SafetyLayer,
     workspace::Workspace,
 };
 
@@ -85,7 +84,9 @@ async fn test_heartbeat_end_to_end() {
 
     // 5. Create LLM provider
     let session = create_session_manager(config.llm.session.clone()).await;
-    let llm = create_llm_provider(&config.llm, session).expect("Failed to create LLM provider");
+    let llm = create_llm_provider(&config.llm, session)
+        .await
+        .expect("Failed to create LLM provider");
     println!("[5/6] LLM provider created (model: {})", llm.model_name());
 
     // 6. Run heartbeat check
@@ -93,8 +94,7 @@ async fn test_heartbeat_end_to_end() {
 
     let hb_config = ironclaw::agent::HeartbeatConfig::default();
     let hygiene_config = ironclaw::workspace::hygiene::HygieneConfig::default();
-    let safety = Arc::new(SafetyLayer::new(&config.safety));
-    let runner = HeartbeatRunner::new(hb_config, hygiene_config, workspace, llm, safety);
+    let runner = HeartbeatRunner::new(hb_config, hygiene_config, workspace, llm);
 
     let result = runner.check_heartbeat().await;
 

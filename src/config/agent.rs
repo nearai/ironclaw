@@ -27,6 +27,10 @@ pub struct AgentConfig {
     pub max_tool_iterations: usize,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
+    /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
+    pub default_timezone: String,
+    /// Maximum tokens per job (0 = unlimited).
+    pub max_tokens_per_job: u64,
 }
 
 impl AgentConfig {
@@ -47,6 +51,8 @@ impl AgentConfig {
             max_actions_per_hour: None,
             max_tool_iterations: 10,
             auto_approve_tools: true,
+            default_timezone: "UTC".to_string(),
+            max_tokens_per_job: 0,
         }
     }
 
@@ -89,6 +95,44 @@ impl AgentConfig {
                 "AGENT_AUTO_APPROVE_TOOLS",
                 settings.agent.auto_approve_tools,
             )?,
+            default_timezone: {
+                let tz: String = parse_optional_env(
+                    "DEFAULT_TIMEZONE",
+                    settings.agent.default_timezone.clone(),
+                )?;
+                if crate::timezone::parse_timezone(&tz).is_none() {
+                    return Err(ConfigError::InvalidValue {
+                        key: "DEFAULT_TIMEZONE".into(),
+                        message: format!("invalid IANA timezone: '{tz}'"),
+                    });
+                }
+                tz
+            },
+            max_tokens_per_job: parse_optional_env(
+                "AGENT_MAX_TOKENS_PER_JOB",
+                settings.agent.max_tokens_per_job,
+            )?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_timezone_rejects_invalid() {
+        let mut settings = Settings::default();
+        settings.agent.default_timezone = "Fake/Zone".to_string();
+
+        let result = AgentConfig::resolve(&settings);
+        assert!(result.is_err(), "invalid IANA timezone should be rejected");
+    }
+
+    #[test]
+    fn test_default_timezone_accepts_valid() {
+        let settings = Settings::default(); // default is "UTC"
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert_eq!(config.default_timezone, "UTC");
     }
 }

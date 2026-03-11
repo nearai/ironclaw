@@ -661,12 +661,9 @@ mod tests {
 
     #[tokio::test]
     async fn credentials_returns_secrets_when_store_configured() {
+        use crate::testing::credentials::test_secrets_store;
         use secrecy::SecretString;
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(
-            crate::secrets::SecretsCrypto::new(SecretString::from(key.to_string())).unwrap(),
-        );
-        let secrets_store = Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+        let secrets_store = Arc::new(test_secrets_store());
 
         // Create a secret
         secrets_store

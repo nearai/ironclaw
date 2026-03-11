@@ -16,8 +16,8 @@ use rust_decimal::prelude::MathematicalOps;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
-use crate::config::NearAiConfig;
-use crate::error::LlmError;
+use crate::llm::config::NearAiConfig;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -58,17 +58,28 @@ impl NearAiChatProvider {
     /// By default this enables tool-message flattening for compatibility with
     /// providers that reject `role: "tool"` messages.
     pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Result<Self, LlmError> {
-        Self::new_with_flatten(config, session, true)
+        Self::new_with_options(config, session, true, 120)
     }
 
-    /// Create a chat completions provider with configurable tool-message flattening.
-    pub fn new_with_flatten(
+    /// Create a new provider with a custom request timeout.
+    pub fn new_with_timeout(
+        config: NearAiConfig,
+        session: Arc<SessionManager>,
+        request_timeout_secs: u64,
+    ) -> Result<Self, LlmError> {
+        Self::new_with_options(config, session, true, request_timeout_secs)
+    }
+
+    /// Create a chat completions provider with configurable tool-message flattening
+    /// and request timeout.
+    pub fn new_with_options(
         config: NearAiConfig,
         session: Arc<SessionManager>,
         flatten_tool_messages: bool,
+        request_timeout_secs: u64,
     ) -> Result<Self, LlmError> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(request_timeout_secs))
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
@@ -99,7 +110,7 @@ impl NearAiChatProvider {
             handle.spawn(async move {
                 match fetch_pricing(&client, &base_url, api_key.as_ref(), &session).await {
                     Ok(map) if !map.is_empty() => {
-                        tracing::info!("Loaded NEAR AI pricing for {} model(s)", map.len());
+                        tracing::debug!("Loaded NEAR AI pricing for {} model(s)", map.len());
                         match pricing.write() {
                             Ok(mut guard) => *guard = map,
                             Err(poisoned) => *poisoned.into_inner() = map,
@@ -259,8 +270,15 @@ impl NearAiChatProvider {
             reason: format!("Failed to read response body: {}", e),
         })?;
 
-        tracing::debug!("NEAR AI Chat response status: {}", status);
-        tracing::debug!("NEAR AI Chat response body: {}", response_text);
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!("NEAR AI Chat response status: {}", status);
+        }
+
+        // Log response body only at TRACE level to avoid exposing sensitive content
+        // (user-generated data, tool outputs, leaked secrets) in DEBUG logs
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!("NEAR AI Chat response body: {}", response_text);
+        }
 
         if !status.is_success() {
             let status_code = status.as_u16();

@@ -14,11 +14,12 @@ exclude = [
     "tools-src/google-slides",
     "tools-src/slack",
     "tools-src/telegram",
+    "fuzz",
 ]
 
 [package]
 name = "ironclaw"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -73,6 +74,8 @@ toml = "0.8"
 # Core types
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 rust_decimal_macros = "1"
 
@@ -140,6 +143,11 @@ subtle = "2"  # Constant-time comparisons for token validation
 # Multi-provider LLM support
 rig-core = "0.30"
 
+# AWS Bedrock (native Converse API, opt-in via --features bedrock)
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-smithy-types = { version = "1", optional = true }
+
 # Docker sandbox
 bollard = "0.18"
 
@@ -166,6 +174,10 @@ html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
 hex = "0.4.3"
+
+# OpenClaw import (feature gated)
+rusqlite = { version = "0.32", optional = true, features = ["bundled"] }
+json5 = { version = "0.4", optional = true }
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -201,15 +213,21 @@ postgres = [
 libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+import = ["dep:rusqlite", "dep:json5"]
 
 [[test]]
 name = "html_to_markdown"
 required-features = ["html-to-markdown"]
 
+[profile.release]
+strip = true          # Remove debug symbols from release binaries
+
 # The profile that 'cargo dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"
+lto = "fat"           # Full cross-crate LTO (slow build, better codegen)
+codegen-units = 1     # Single codegen unit for maximum optimization
 
 # Config for 'dist'
 [workspace.metadata.dist]

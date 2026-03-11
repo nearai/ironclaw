@@ -18,6 +18,8 @@
 //! }
 //! ```
 
+pub mod credentials;
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -1009,6 +1011,7 @@ mod tests {
             enabled: true,
             trigger: Trigger::Cron {
                 schedule: "0 * * * *".to_string(),
+                timezone: None,
             },
             action: RoutineAction::Lightweight {
                 prompt: "Check status".to_string(),

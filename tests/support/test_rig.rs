@@ -534,20 +534,18 @@ impl TestRigBuilder {
         components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
         components.config.agent.allow_local_tools = true;
 
+        let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
+            Arc::new(tokio::sync::RwLock::new(None));
+
         // 6. Register job tools, routine tools, and extra tools.
         {
-            use ironclaw::context::ContextManager;
-
             // Ensure filesystem/shell dev tools are always available in the
             // test rig, even if upstream builder flags/config disable local tools.
             components.tools.register_dev_tools();
 
-            let ctx_mgr = Arc::new(ContextManager::new(
-                components.config.agent.max_parallel_jobs,
-            ));
             components.tools.register_job_tools(
-                ctx_mgr,
-                None,
+                Arc::clone(&components.context_manager),
+                Some(scheduler_slot.clone()),
                 None,
                 components.db.clone(),
                 None,
@@ -570,6 +568,8 @@ impl TestRigBuilder {
                     Arc::clone(ws),
                     notify_tx,
                     None,
+                    components.tools.clone(),
+                    components.safety.clone(),
                 ));
                 components
                     .tools
@@ -654,6 +654,8 @@ impl TestRigBuilder {
                 max_concurrent_routines: 3,
                 default_cooldown_secs: 300,
                 max_lightweight_tokens: 4096,
+                lightweight_tools_enabled: true,
+                lightweight_max_iterations: 3,
             })
         } else {
             None
@@ -665,9 +667,12 @@ impl TestRigBuilder {
             None, // heartbeat_config
             None, // hygiene_config
             routine_config,
-            None, // context_manager
+            Some(Arc::clone(&components.context_manager)),
             None, // session_manager
         );
+
+        // Match main.rs: fill the scheduler slot once Agent::new has created it.
+        *scheduler_slot.write().await = Some(agent.scheduler());
 
         // 9. Spawn agent in background task.
         let agent_handle = tokio::spawn(async move {

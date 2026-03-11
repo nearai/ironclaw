@@ -429,7 +429,7 @@ impl TraceLlm {
     }
 
     /// Strip `<tool_output name="..." sanitized="...">...\n</tool_output>`
-    /// wrapper and unescape XML entities from safety-layer output.
+    /// wrapper from safety-layer output.
     fn unwrap_tool_output(content: &str) -> std::borrow::Cow<'_, str> {
         let trimmed = content.trim();
         if let Some(rest) = trimmed.strip_prefix("<tool_output")
@@ -438,14 +438,6 @@ impl TraceLlm {
             let inner = &rest[tag_end + 1..];
             if let Some(close) = inner.rfind("</tool_output>") {
                 let body = inner[..close].trim();
-                // Reverse XML escaping applied by safety layer.
-                if body.contains("&amp;") || body.contains("&lt;") || body.contains("&gt;") {
-                    return std::borrow::Cow::Owned(
-                        body.replace("&amp;", "&")
-                            .replace("&lt;", "<")
-                            .replace("&gt;", ">"),
-                    );
-                }
                 return std::borrow::Cow::Borrowed(body);
             }
         }
@@ -513,32 +505,41 @@ impl LlmProvider for TraceLlm {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let step = self.next_step(&request.messages)?;
-        match step.response {
-            TraceResponse::Text {
-                content,
-                input_tokens,
-                output_tokens,
-            } => Ok(CompletionResponse {
-                content,
-                input_tokens,
-                output_tokens,
-                finish_reason: FinishReason::Stop,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-            }),
-            TraceResponse::ToolCalls { .. } => Err(LlmError::RequestFailed {
-                provider: self.model_name.clone(),
-                reason: "TraceLlm::complete() called but current step is a tool_calls response; \
-                         use complete_with_tools() instead"
-                    .to_string(),
-            }),
-            TraceResponse::UserInput { .. } => Err(LlmError::RequestFailed {
-                provider: self.model_name.clone(),
-                reason: "TraceLlm::complete() encountered a user_input step; \
-                         these should have been filtered out during construction"
-                    .to_string(),
-            }),
+        // complete() is called when Reasoning has force_text=true (no tools
+        // available). Skip any remaining ToolCalls steps in the trace and
+        // return the next Text step, since in real usage the LLM would
+        // produce text when no tools are offered.
+        loop {
+            let step = self.next_step(&request.messages)?;
+            match step.response {
+                TraceResponse::Text {
+                    content,
+                    input_tokens,
+                    output_tokens,
+                } => {
+                    return Ok(CompletionResponse {
+                        content,
+                        input_tokens,
+                        output_tokens,
+                        finish_reason: FinishReason::Stop,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                    });
+                }
+                TraceResponse::ToolCalls { .. } => {
+                    // Skip tool_calls steps — complete() is called in
+                    // force_text mode so the LLM can't use tools anyway.
+                    continue;
+                }
+                TraceResponse::UserInput { .. } => {
+                    return Err(LlmError::RequestFailed {
+                        provider: self.model_name.clone(),
+                        reason: "TraceLlm::complete() encountered a user_input step; \
+                                 these should have been filtered out during construction"
+                            .to_string(),
+                    });
+                }
+            }
         }
     }
 

@@ -4,8 +4,9 @@
 .env.*
 !.env.example
 
-# Claude Code worktrees
+# Claude Code worktrees and lock files
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Sidecar tool data
 .sidecar/
@@ -22,4 +23,9 @@ bench-results/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+# Traces
 trace_*.json
+
+# Local Claude Code settings (machine-specific, should not be committed)
+.claude/settings.local.json
+.worktrees/

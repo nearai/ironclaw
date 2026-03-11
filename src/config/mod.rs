@@ -14,6 +14,7 @@ mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
 pub(crate) mod llm;
+pub mod relay;
 mod routines;
 mod safety;
 mod sandbox;
@@ -37,7 +38,8 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsq
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
-pub use self::llm::{CacheRetention, LlmConfig, NearAiConfig, RegistryProviderConfig};
+pub use self::llm::default_session_path;
+pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
@@ -46,6 +48,10 @@ pub use self::skills::SkillsConfig;
 pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
+pub use crate::llm::config::{
+    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
+    RegistryProviderConfig,
+};
 pub use crate::llm::session::SessionConfig;
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
@@ -81,6 +87,9 @@ pub struct Config {
     pub skills: SkillsConfig,
     pub transcription: TranscriptionConfig,
     pub observability: crate::observability::ObservabilityConfig,
+    /// Channel-relay integration (Slack via external relay service).
+    /// Present only when both `CHANNEL_RELAY_URL` and `CHANNEL_RELAY_API_KEY` are set.
+    pub relay: Option<RelayConfig>,
 }
 
 impl Config {
@@ -153,6 +162,7 @@ impl Config {
             },
             transcription: TranscriptionConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
+            relay: None,
         }
     }
 
@@ -257,6 +267,32 @@ impl Config {
         Ok(())
     }
 
+    /// Re-resolve only the LLM config after credential injection.
+    ///
+    /// Called by `AppBuilder::init_secrets()` after injecting API keys into
+    /// the env overlay. Only rebuilds `self.llm` — all other config fields
+    /// are unaffected, preserving values from the initial config load (or
+    /// from `Config::for_testing()` in test mode).
+    pub async fn re_resolve_llm(
+        &mut self,
+        store: Option<&(dyn crate::db::SettingsStore + Sync)>,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<(), ConfigError> {
+        let settings = if let Some(store) = store {
+            let mut s = match store.get_all_settings(user_id).await {
+                Ok(map) => Settings::from_db_map(&map),
+                Err(_) => Settings::default(),
+            };
+            Self::apply_toml_overlay(&mut s, toml_path)?;
+            s
+        } else {
+            Settings::default()
+        };
+        self.llm = LlmConfig::resolve(&settings)?;
+        Ok(())
+    }
+
     /// Build config from settings (shared by from_env and from_db).
     async fn build(settings: &Settings) -> Result<Self, ConfigError> {
         Ok(Self {
@@ -280,6 +316,7 @@ impl Config {
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
+            relay: RelayConfig::from_env(),
         })
     }
 }

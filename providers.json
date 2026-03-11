@@ -9,8 +9,9 @@
     "api_key_required": true,
     "base_url_env": "OPENAI_BASE_URL",
     "model_env": "OPENAI_MODEL",
-    "default_model": "gpt-4o",
+    "default_model": "gpt-5-mini",
     "description": "OpenAI GPT models (direct API)",
+    "unsupported_params": ["temperature"],
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_openai_api_key",
@@ -86,6 +87,7 @@
     "model_env": "TINFOIL_MODEL",
     "default_model": "kimi-k2-5",
     "description": "Tinfoil private inference (hardware-attested TEE)",
+    "unsupported_params": ["temperature"],
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_tinfoil_api_key",
@@ -293,26 +295,6 @@
       "key_url": "https://aistudio.google.com/app/apikey",
       "display_name": "Google Gemini",
       "can_list_models": true
-    }
-  },
-  {
-    "id": "bedrock",
-    "aliases": [
-      "aws_bedrock",
-      "aws"
-    ],
-    "protocol": "open_ai_completions",
-    "api_key_env": "BEDROCK_ACCESS_KEY",
-    "api_key_required": false,
-    "base_url_env": "BEDROCK_BASE_URL",
-    "model_env": "BEDROCK_MODEL",
-    "default_model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "description": "AWS Bedrock (requires LiteLLM or OpenAI-compatible proxy)",
-    "setup": {
-      "kind": "open_ai_compatible",
-      "secret_name": "llm_bedrock_api_key",
-      "display_name": "AWS Bedrock",
-      "can_list_models": false
     }
   },
   {

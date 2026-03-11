@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use rust_decimal::Decimal;
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -770,7 +770,7 @@ impl SmartRoutingProvider {
                 }
             };
             let complexity = TaskComplexity::from(tier);
-            tracing::debug!(
+            tracing::trace!(
                 %tier,
                 ?complexity,
                 "Smart routing: explicit tier hint"
@@ -782,7 +782,7 @@ impl SmartRoutingProvider {
         for po in DEFAULT_OVERRIDES.iter() {
             if po.regex.is_match(last_user_msg) {
                 let complexity = TaskComplexity::from(po.tier);
-                tracing::debug!(
+                tracing::trace!(
                     tier = %po.tier,
                     ?complexity,
                     "Smart routing: pattern override matched"
@@ -798,7 +798,7 @@ impl SmartRoutingProvider {
             &self.domain_regex,
         );
         let complexity = TaskComplexity::from(breakdown.tier);
-        tracing::debug!(
+        tracing::trace!(
             score = breakdown.total,
             tier = %breakdown.tier,
             ?complexity,
@@ -872,7 +872,7 @@ impl LlmProvider for SmartRoutingProvider {
 
         match complexity {
             TaskComplexity::Simple => {
-                tracing::debug!(
+                tracing::trace!(
                     model = %self.cheap.model_name(),
                     "Smart routing: Simple task -> cheap model"
                 );
@@ -880,7 +880,7 @@ impl LlmProvider for SmartRoutingProvider {
                 self.cheap.complete(request).await
             }
             TaskComplexity::Complex => {
-                tracing::debug!(
+                tracing::trace!(
                     model = %self.primary.model_name(),
                     "Smart routing: Complex task -> primary model"
                 );
@@ -889,7 +889,7 @@ impl LlmProvider for SmartRoutingProvider {
             }
             TaskComplexity::Moderate => {
                 if self.config.cascade_enabled {
-                    tracing::debug!(
+                    tracing::trace!(
                         model = %self.cheap.model_name(),
                         "Smart routing: Moderate task -> cheap model (cascade enabled)"
                     );
@@ -913,7 +913,7 @@ impl LlmProvider for SmartRoutingProvider {
                     }
                 } else {
                     // Without cascade, moderate tasks go to cheap model
-                    tracing::debug!(
+                    tracing::trace!(
                         model = %self.cheap.model_name(),
                         "Smart routing: Moderate task -> cheap model (cascade disabled)"
                     );
@@ -931,7 +931,7 @@ impl LlmProvider for SmartRoutingProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
         self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
-        tracing::debug!(
+        tracing::trace!(
             model = %self.primary.model_name(),
             "Smart routing: Tool use -> primary model (always)"
         );
@@ -944,6 +944,10 @@ impl LlmProvider for SmartRoutingProvider {
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         self.primary.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.primary.effective_model_name(requested_model)
     }
 
     fn active_model_name(&self) -> String {

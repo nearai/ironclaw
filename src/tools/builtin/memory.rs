@@ -172,7 +172,7 @@ impl Tool for MemoryWriteTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -239,11 +239,12 @@ impl Tool for MemoryWriteTool {
                 paths::MEMORY.to_string()
             }
             "daily_log" => {
+                let tz = crate::timezone::parse_timezone(&ctx.user_timezone)
+                    .unwrap_or(chrono_tz::Tz::UTC);
                 self.workspace
-                    .append_daily_log(content)
+                    .append_daily_log_tz(content, tz)
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"))
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?
             }
             "heartbeat" => {
                 if append {

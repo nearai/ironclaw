@@ -209,6 +209,7 @@ async fn start_test_server_with_provider(
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -699,6 +700,7 @@ async fn test_no_llm_provider_returns_503() {
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -730,8 +732,8 @@ async fn test_chat_completions_body_too_large() {
     let (addr, _state, _mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
-    // Build a payload over 1 MB (the gateway's DefaultBodyLimit)
-    let big_content = "x".repeat(2 * 1024 * 1024);
+    // Build a payload over 10 MB (the gateway's DefaultBodyLimit)
+    let big_content = "x".repeat(11 * 1024 * 1024);
     let resp = client()
         .post(&url)
         .bearer_auth(AUTH_TOKEN)

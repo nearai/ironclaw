@@ -279,6 +279,27 @@ impl near::agent::host::Host for StoreData {
         let raw_headers: HashMap<String, String> =
             serde_json::from_str(&headers_json).unwrap_or_default();
 
+        // Leak scan runs on WASM-provided values BEFORE host credential injection.
+        // This prevents false positives where the host-injected Bearer token
+        // (e.g., xoxb- Slack token) triggers the leak detector — WASM never saw
+        // the real value, so scanning the pre-injection state is correct.
+        // Inline the scan to avoid allocating a Vec of cloned headers.
+        let leak_detector = LeakDetector::new();
+        leak_detector
+            .scan_and_clean(&injected_url)
+            .map_err(|e| format!("Potential secret leak in URL blocked: {}", e))?;
+        for (name, value) in &raw_headers {
+            leak_detector.scan_and_clean(value).map_err(|e| {
+                format!("Potential secret leak in header '{}' blocked: {}", name, e)
+            })?;
+        }
+        if let Some(body_bytes) = body.as_deref() {
+            let body_str = String::from_utf8_lossy(body_bytes);
+            leak_detector
+                .scan_and_clean(&body_str)
+                .map_err(|e| format!("Potential secret leak in body blocked: {}", e))?;
+        }
+
         let mut headers: HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -296,16 +317,6 @@ impl near::agent::host::Host for StoreData {
         if let Some(host) = extract_host_from_url(&url) {
             self.inject_host_credentials(&host, &mut headers, &mut url);
         }
-
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
@@ -633,14 +644,61 @@ impl WasmToolWrapper {
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
 
-        // Check for tool-level error
+        // Check for tool-level error — on failure, call the WASM module's
+        // description() and schema() exports so the LLM can retry with the
+        // correct parameters without us having to include the (large) schema
+        // in every request's tools array.
         if let Some(err) = response.error {
-            return Err(WasmError::ToolReturnedError(err));
+            let hint = build_tool_hint(tool_iface, &mut store);
+            return Err(WasmError::ToolReturnedError { message: err, hint });
         }
 
         // Return result (or empty string if none)
         Ok((response.output.unwrap_or_default(), logs))
     }
+}
+
+/// Maximum characters for the description portion of a tool hint.
+const HINT_DESC_MAX: usize = 500;
+/// Maximum characters for the schema portion of a tool hint.
+const HINT_SCHEMA_MAX: usize = 3000;
+
+/// Call the WASM module's `description()` and `schema()` exports to build a
+/// hint string.  Returns an empty string if both calls fail or return empty.
+/// Description is capped at [`HINT_DESC_MAX`] chars, schema at
+/// [`HINT_SCHEMA_MAX`] chars.
+fn build_tool_hint(tool_iface: &wit_tool::Guest, store: &mut Store<StoreData>) -> String {
+    let desc = tool_iface
+        .call_description(&mut *store)
+        .ok()
+        .unwrap_or_default();
+    let schema = tool_iface.call_schema(&mut *store).ok().unwrap_or_default();
+    if desc.is_empty() && schema.is_empty() {
+        return String::new();
+    }
+    let mut hint = String::new();
+    if !desc.is_empty() {
+        hint.push_str("Description: ");
+        if desc.len() > HINT_DESC_MAX {
+            let end = crate::util::floor_char_boundary(&desc, HINT_DESC_MAX);
+            hint.push_str(&desc[..end]);
+            hint.push('…');
+        } else {
+            hint.push_str(&desc);
+        }
+        hint.push('\n');
+    }
+    if !schema.is_empty() {
+        hint.push_str("Parameters schema: ");
+        if schema.len() > HINT_SCHEMA_MAX {
+            let end = crate::util::floor_char_boundary(&schema, HINT_SCHEMA_MAX);
+            hint.push_str(&schema[..end]);
+            hint.push('…');
+        } else {
+            hint.push_str(&schema);
+        }
+    }
+    hint
 }
 
 #[async_trait]
@@ -1169,6 +1227,11 @@ fn coerce_params_to_schema(
 mod tests {
     use std::sync::Arc;
 
+    use crate::testing::credentials::{
+        TEST_BEARER_TOKEN_123, TEST_GOOGLE_OAUTH_FRESH, TEST_GOOGLE_OAUTH_LEGACY,
+        TEST_GOOGLE_OAUTH_TOKEN, TEST_OAUTH_CLIENT_ID, TEST_OAUTH_CLIENT_SECRET,
+        test_secrets_store,
+    };
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
 
@@ -1236,12 +1299,12 @@ mod tests {
                 let mut h = HashMap::new();
                 h.insert(
                     "Authorization".to_string(),
-                    "Bearer test-token-123".to_string(),
+                    format!("Bearer {TEST_BEARER_TOKEN_123}"),
                 );
                 h
             },
             query_params: HashMap::new(),
-            secret_value: "test-token-123".to_string(),
+            secret_value: TEST_BEARER_TOKEN_123.to_string(),
         }];
 
         let store_data = StoreData::new(
@@ -1257,7 +1320,7 @@ mod tests {
         store_data.inject_host_credentials("www.googleapis.com", &mut headers, &mut url);
         assert_eq!(
             headers.get("Authorization"),
-            Some(&"Bearer test-token-123".to_string())
+            Some(&format!("Bearer {TEST_BEARER_TOKEN_123}"))
         );
 
         // Should not inject for non-matching host
@@ -1333,13 +1396,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_no_http_cap() {
-        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::wasm::wrapper::resolve_host_credentials;
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         let caps = Capabilities::default();
         let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
@@ -1351,21 +1410,17 @@ mod tests {
         use std::collections::HashMap;
 
         use crate::secrets::{
-            CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-            SecretsCrypto, SecretsStore,
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         store
             .create(
                 "user1",
-                CreateSecretParams::new("google_oauth_token", "ya29.test-token"),
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_TOKEN),
             )
             .await
             .unwrap();
@@ -1393,7 +1448,7 @@ mod tests {
         assert_eq!(result[0].host_patterns, vec!["www.googleapis.com"]);
         assert_eq!(
             result[0].headers.get("Authorization"),
-            Some(&"Bearer ya29.test-token".to_string())
+            Some(&format!("Bearer {TEST_GOOGLE_OAUTH_TOKEN}"))
         );
     }
 
@@ -1401,16 +1456,11 @@ mod tests {
     async fn test_resolve_host_credentials_missing_secret() {
         use std::collections::HashMap;
 
-        use crate::secrets::{
-            CredentialLocation, CredentialMapping, InMemorySecretsStore, SecretsCrypto,
-        };
+        use crate::secrets::{CredentialLocation, CredentialMapping};
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         // No secret stored, should silently skip
         let mut credentials = HashMap::new();
@@ -1440,23 +1490,19 @@ mod tests {
         use std::collections::HashMap;
 
         use crate::secrets::{
-            CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-            SecretsCrypto, SecretsStore,
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         // Store a token that expires 2 hours from now (well within buffer)
         let expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
         store
             .create(
                 "user1",
-                CreateSecretParams::new("google_oauth_token", "ya29.fresh-token")
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_FRESH)
                     .with_expiry(expires_at),
             )
             .await
@@ -1482,8 +1528,8 @@ mod tests {
 
         let oauth_config = OAuthRefreshConfig {
             token_url: "https://oauth2.googleapis.com/token".to_string(),
-            client_id: "test-client-id".to_string(),
-            client_secret: Some("test-client-secret".to_string()),
+            client_id: TEST_OAUTH_CLIENT_ID.to_string(),
+            client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -1494,7 +1540,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
-            Some(&"Bearer ya29.fresh-token".to_string())
+            Some(&format!("Bearer {TEST_GOOGLE_OAUTH_FRESH}"))
         );
     }
 
@@ -1503,16 +1549,12 @@ mod tests {
         use std::collections::HashMap;
 
         use crate::secrets::{
-            CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-            SecretsCrypto, SecretsStore,
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::resolve_host_credentials;
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         // Store an expired token
         let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
@@ -1552,22 +1594,18 @@ mod tests {
         use std::collections::HashMap;
 
         use crate::secrets::{
-            CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-            SecretsCrypto, SecretsStore,
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
-        use secrecy::SecretString;
 
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        let store = InMemorySecretsStore::new(crypto);
+        let store = test_secrets_store();
 
         // Legacy token: no expires_at set
         store
             .create(
                 "user1",
-                CreateSecretParams::new("google_oauth_token", "ya29.legacy-token"),
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_LEGACY),
             )
             .await
             .unwrap();
@@ -1592,8 +1630,8 @@ mod tests {
 
         let oauth_config = OAuthRefreshConfig {
             token_url: "https://oauth2.googleapis.com/token".to_string(),
-            client_id: "test-client-id".to_string(),
-            client_secret: Some("test-client-secret".to_string()),
+            client_id: TEST_OAUTH_CLIENT_ID.to_string(),
+            client_secret: Some(TEST_OAUTH_CLIENT_SECRET.to_string()),
             secret_name: "google_oauth_token".to_string(),
             provider: Some("google".to_string()),
         };
@@ -1604,7 +1642,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
-            Some(&"Bearer ya29.legacy-token".to_string())
+            Some(&format!("Bearer {TEST_GOOGLE_OAUTH_LEGACY}"))
         );
     }
 
@@ -1748,5 +1786,58 @@ mod tests {
         let result = super::coerce_params_to_schema(params, &schema);
         // Should remain as string since it can't be parsed
         assert_eq!(result["count"], serde_json::json!("not-a-number"));
+    }
+
+    /// Regression test: leak scan must run on raw headers (before credential
+    /// injection), not after. If it ran post-injection, the host-injected
+    /// Slack bot token (`xoxb-...`) would trigger a Block and reject the
+    /// tool's own legitimate outbound request.
+    #[test]
+    fn test_leak_scan_runs_before_credential_injection() {
+        use crate::safety::LeakDetector;
+
+        // Simulate pre-injection headers: WASM only sees the placeholder, not the real token.
+        let raw_headers: Vec<(String, String)> = vec![
+            (
+                "Authorization".to_string(),
+                "Bearer {SLACK_BOT_TOKEN}".to_string(),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+
+        let detector = LeakDetector::new();
+
+        // Pre-injection scan should pass — placeholders are not secrets.
+        let pre_result = detector.scan_http_request(
+            "https://slack.com/api/chat.postMessage",
+            &raw_headers,
+            None,
+        );
+        assert!(
+            pre_result.is_ok(),
+            "Leak scan on pre-injection headers should pass, but got: {:?}",
+            pre_result
+        );
+
+        // Post-injection headers would contain a real Slack token.
+        let post_injection_headers: Vec<(String, String)> = vec![
+            (
+                "Authorization".to_string(),
+                "Bearer xoxb-1234567890-abcdefghij".to_string(),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+
+        // Post-injection scan WOULD block — this is the false positive
+        // that the pre-injection ordering prevents.
+        let post_result = detector.scan_http_request(
+            "https://slack.com/api/chat.postMessage",
+            &post_injection_headers,
+            None,
+        );
+        assert!(
+            post_result.is_err(),
+            "Leak scan on post-injection headers should block the Slack token"
+        );
     }
 }

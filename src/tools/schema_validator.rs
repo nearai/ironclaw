@@ -659,16 +659,11 @@ mod tests {
                 serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "source": { "type": "string", "description": "Event source" },
+                        "event_source": { "type": "string", "description": "Event source" },
                         "event_type": { "type": "string", "description": "Event type" },
-                        "payload": {
-                            "type": "object",
-                            "description": "Event payload",
-                            "properties": {}
-                        },
-                        "user_id": { "type": "string", "description": "Optional target user id" }
+                        "payload": { "type": "object", "description": "Event payload", "properties": {} }
                     },
-                    "required": ["source", "event_type"]
+                    "required": ["event_source", "event_type"]
                 }),
             ),
             // Job tools with complex deps

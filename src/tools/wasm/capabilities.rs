@@ -327,8 +327,6 @@ pub struct WebhookCapability {
     pub hmac_timestamp_header: Option<String>,
     /// Optional signature prefix (default: "sha256=" or "v0=" for timestamped mode).
     pub hmac_prefix: Option<String>,
-    /// Optional timestamp tolerance seconds for timestamped HMAC validation.
-    pub hmac_timestamp_tolerance_secs: Option<i64>,
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@
 //! - `routine_delete` - Remove a routine
 //! - `routine_fire` - Manually trigger a routine
 //! - `routine_history` - View past runs
-//! - `event_emit` - Emit a structured event to event-driven routines
+//! - `event_emit` - Emit a structured system event to `system_event`-triggered routines
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,8 +88,7 @@ impl Tool for RoutineCreateTool {
                 },
                 "event_filters": {
                     "type": "object",
-                    "additionalProperties": { "type": "string" },
-                    "description": "Optional exact-match filters against payload fields for system_event triggers"
+                    "description": "Optional exact-match filters against payload fields for system_event triggers. Values can be strings, numbers, or booleans."
                 },
                 "prompt": {
                     "type": "string",
@@ -121,6 +120,10 @@ impl Tool for RoutineCreateTool {
                 "notify_user": {
                     "type": "string",
                     "description": "User/target to notify (e.g. username, chat ID). Defaults to 'default'."
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone for cron schedule evaluation (e.g. 'America/New_York'). Defaults to UTC."
                 }
             },
             "required": ["name", "trigger_type", "prompt"]
@@ -157,12 +160,26 @@ impl Tool for RoutineCreateTool {
                                 "cron trigger requires 'schedule'".to_string(),
                             )
                         })?;
+                let timezone = params
+                    .get("timezone")
+                    .and_then(|v| v.as_str())
+                    .map(|tz| {
+                        crate::timezone::parse_timezone(tz)
+                            .map(|_| tz.to_string())
+                            .ok_or_else(|| {
+                                ToolError::InvalidParameters(format!(
+                                    "invalid IANA timezone: '{tz}'"
+                                ))
+                            })
+                    })
+                    .transpose()?;
                 // Validate cron expression
-                next_cron_fire(schedule).map_err(|e| {
+                next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
                     ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
                 })?;
                 Trigger::Cron {
                     schedule: schedule.to_string(),
+                    timezone,
                 }
             }
             "event" => {
@@ -208,7 +225,10 @@ impl Tool for RoutineCreateTool {
                     .and_then(|v| v.as_object())
                     .map(|obj| {
                         obj.iter()
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string())))
+                            .filter_map(|(k, v)| {
+                                crate::agent::routine::json_value_as_filter_string(v)
+                                    .map(|s| (k.to_string(), s))
+                            })
                             .collect::<std::collections::HashMap<String, String>>()
                     })
                     .unwrap_or_default();
@@ -270,8 +290,12 @@ impl Tool for RoutineCreateTool {
             .unwrap_or(300);
 
         // Compute next fire time for cron
-        let next_fire = if let Trigger::Cron { ref schedule } = trigger {
-            next_cron_fire(schedule).unwrap_or(None)
+        let next_fire = if let Trigger::Cron {
+            ref schedule,
+            ref timezone,
+        } = trigger
+        {
+            next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None)
         } else {
             None
         };
@@ -457,6 +481,10 @@ impl Tool for RoutineUpdateTool {
                     "type": "string",
                     "description": "New cron schedule (for cron triggers)"
                 },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone for cron schedule (e.g. 'America/New_York'). Only valid for cron triggers."
+                },
                 "description": {
                     "type": "string",
                     "description": "New description"
@@ -498,15 +526,47 @@ impl Tool for RoutineUpdateTool {
             }
         }
 
-        if let Some(schedule) = params.get("schedule").and_then(|v| v.as_str()) {
-            // Validate
-            next_cron_fire(schedule)
-                .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
+        // Validate timezone param if provided
+        let new_timezone = params
+            .get("timezone")
+            .and_then(|v| v.as_str())
+            .map(|tz| {
+                crate::timezone::parse_timezone(tz)
+                    .map(|_| tz.to_string())
+                    .ok_or_else(|| {
+                        ToolError::InvalidParameters(format!("invalid IANA timezone: '{tz}'"))
+                    })
+            })
+            .transpose()?;
 
-            routine.trigger = Trigger::Cron {
-                schedule: schedule.to_string(),
+        let new_schedule = params.get("schedule").and_then(|v| v.as_str());
+
+        if new_schedule.is_some() || new_timezone.is_some() {
+            // Extract existing cron fields (cloned to avoid borrow conflict)
+            let existing_cron = match &routine.trigger {
+                Trigger::Cron { schedule, timezone } => Some((schedule.clone(), timezone.clone())),
+                _ => None,
             };
-            routine.next_fire_at = next_cron_fire(schedule).unwrap_or(None);
+
+            if let Some((old_schedule, old_tz)) = existing_cron {
+                let effective_schedule = new_schedule.unwrap_or(&old_schedule);
+                let effective_tz = new_timezone.or(old_tz);
+                // Validate
+                next_cron_fire(effective_schedule, effective_tz.as_deref()).map_err(|e| {
+                    ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
+                })?;
+
+                routine.trigger = Trigger::Cron {
+                    schedule: effective_schedule.to_string(),
+                    timezone: effective_tz.clone(),
+                };
+                routine.next_fire_at =
+                    next_cron_fire(effective_schedule, effective_tz.as_deref()).unwrap_or(None);
+            } else {
+                return Err(ToolError::InvalidParameters(
+                    "Cannot update schedule or timezone on a non-cron routine.".to_string(),
+                ));
+            }
         }
 
         self.store
@@ -693,96 +753,6 @@ pub struct RoutineHistoryTool {
     store: Arc<dyn Database>,
 }
 
-// ==================== event_emit ====================
-
-pub struct EventEmitTool {
-    engine: Arc<RoutineEngine>,
-}
-
-impl EventEmitTool {
-    pub fn new(engine: Arc<RoutineEngine>) -> Self {
-        Self { engine }
-    }
-}
-
-#[async_trait]
-impl Tool for EventEmitTool {
-    fn name(&self) -> &str {
-        "event_emit"
-    }
-
-    fn description(&self) -> &str {
-        "Emit a structured event to event-driven routines. \
-         Use this to trigger routines from tool workflows without waiting for cron."
-    }
-
-    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::Never
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "source": {
-                    "type": "string",
-                    "description": "Event source (e.g. 'github', 'workflow', 'tool')"
-                },
-                "event_type": {
-                    "type": "string",
-                    "description": "Event type (e.g. 'issue.opened', 'pr.ready')"
-                },
-                "payload": {
-                    "type": "object",
-                    "description": "Structured event payload"
-                },
-                "user_id": {
-                    "type": "string",
-                    "description": "Optional target user id; defaults to current user"
-                }
-            },
-            "required": ["source", "event_type"]
-        })
-    }
-
-    async fn execute(
-        &self,
-        params: serde_json::Value,
-        ctx: &JobContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let start = std::time::Instant::now();
-
-        let source = require_str(&params, "source")?;
-        let event_type = require_str(&params, "event_type")?;
-        let payload = params
-            .get("payload")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-        let user_id = params
-            .get("user_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&ctx.user_id);
-
-        let fired = self
-            .engine
-            .emit_system_event(source, event_type, &payload, Some(user_id))
-            .await;
-
-        let result = serde_json::json!({
-            "source": source,
-            "event_type": event_type,
-            "target_user_id": user_id,
-            "fired_routines": fired,
-        });
-
-        Ok(ToolOutput::success(result, start.elapsed()))
-    }
-
-    fn requires_sanitization(&self) -> bool {
-        false
-    }
-}
-
 impl RoutineHistoryTool {
     pub fn new(store: Arc<dyn Database>) -> Self {
         Self { store }
@@ -876,5 +846,89 @@ impl Tool for RoutineHistoryTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+}
+
+// ==================== event_emit ====================
+
+pub struct EventEmitTool {
+    engine: Arc<RoutineEngine>,
+}
+
+impl EventEmitTool {
+    pub fn new(engine: Arc<RoutineEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+#[async_trait]
+impl Tool for EventEmitTool {
+    fn name(&self) -> &str {
+        "event_emit"
+    }
+
+    fn description(&self) -> &str {
+        "Emit a structured system event to routines with a system_event trigger. \
+         Use this to trigger routines from tool workflows without waiting for cron."
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        // Emitting an event can fire system_event routines that dispatch full_jobs
+        // with pre-authorized Always-gated tools — same escalation risk as routine_fire.
+        ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "event_source": {
+                    "type": "string",
+                    "description": "Event source (e.g. 'github', 'workflow', 'tool')"
+                },
+                "event_type": {
+                    "type": "string",
+                    "description": "Event type (e.g. 'issue.opened', 'pr.ready')"
+                },
+                "payload": {
+                    "type": "object",
+                    "description": "Structured event payload"
+                }
+            },
+            "required": ["event_source", "event_type"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let source = require_str(&params, "event_source")?;
+        let event_type = require_str(&params, "event_type")?;
+        let payload = params
+            .get("payload")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let fired = self
+            .engine
+            .emit_system_event(source, event_type, &payload, Some(&ctx.user_id))
+            .await;
+
+        let result = serde_json::json!({
+            "event_source": source,
+            "event_type": event_type,
+            "user_id": &ctx.user_id,
+            "fired_routines": fired,
+        });
+
+        Ok(ToolOutput::success(result, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        true
     }
 }

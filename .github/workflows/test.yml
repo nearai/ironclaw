@@ -1,6 +1,9 @@
 name: Run Tests
 on:
+  workflow_call:
   pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -38,6 +41,9 @@ jobs:
 
   telegram-tests:
     name: Telegram Channel Tests
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.base_ref != 'staging')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -50,6 +56,9 @@ jobs:
 
   windows-build:
     name: Windows Build (${{ matrix.name }})
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.base_ref != 'staging')
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -74,6 +83,9 @@ jobs:
 
   wasm-wit-compat:
     name: WASM WIT Compatibility
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.base_ref != 'staging')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -94,6 +106,9 @@ jobs:
 
   docker-build:
     name: Docker Build
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.base_ref != 'staging')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -123,12 +138,22 @@ jobs:
     needs: [tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check]
     steps:
       - run: |
-          if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.telegram-tests.result }}" != "success" || "${{ needs.wasm-wit-compat.result }}" != "success" || "${{ needs.docker-build.result }}" != "success" || "${{ needs.windows-build.result }}" != "success" ]]; then
-            echo "One or more jobs failed"
+          # Unit tests must always pass
+          if [[ "${{ needs.tests.result }}" != "success" ]]; then
+            echo "Unit tests failed"
             exit 1
           fi
-          # version-check only runs on PRs, so skip/success are both acceptable
-          if [[ "${{ needs.version-check.result }}" == "failure" ]]; then
-            echo "Version bump check failed"
-            exit 1
-          fi
+          # Gated jobs: must pass on promotion PRs / push, skipped on developer PRs
+          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check; do
+            case "$job" in
+              telegram-tests) result="${{ needs.telegram-tests.result }}" ;;
+              wasm-wit-compat) result="${{ needs.wasm-wit-compat.result }}" ;;
+              docker-build) result="${{ needs.docker-build.result }}" ;;
+              windows-build) result="${{ needs.windows-build.result }}" ;;
+              version-check) result="${{ needs.version-check.result }}" ;;
+            esac
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              echo "$job failed"
+              exit 1
+            fi
+          done

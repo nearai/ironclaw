@@ -244,6 +244,14 @@ mod tests {
             "event_emit should report fired routine count: {:?}",
             emit_result.1
         );
+        // Verify at least one routine actually fired (not just that the key exists).
+        let emit_json: serde_json::Value =
+            serde_json::from_str(&emit_result.1).expect("event_emit result should be valid JSON");
+        assert!(
+            emit_json["fired_routines"].as_u64().unwrap_or(0) > 0,
+            "event_emit should have fired at least one routine: {:?}",
+            emit_result.1
+        );
 
         rig.shutdown();
     }
@@ -262,16 +270,13 @@ mod tests {
 
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
+            .with_skills()
             .with_auto_approve_tools(true)
             .build()
             .await;
 
         rig.send_message("Install the workflow skill template and simulate a webhook routine run")
             .await;
-        // `skill_install` is approval-gated in the interactive loop.
-        // Approve once so the trace can proceed through the remaining steps.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        rig.send_message("always").await;
         let responses = rig.wait_for_responses(1, Duration::from_secs(20)).await;
         rig.verify_trace_expects(&trace, &responses);
 
@@ -351,6 +356,16 @@ mod tests {
         assert!(
             create_result.1.contains("job_id"),
             "create_job should return a job_id: {:?}",
+            create_result.1
+        );
+        assert!(
+            create_result.1.contains("in_progress"),
+            "create_job should dispatch through the scheduler, not stay pending: {:?}",
+            create_result.1
+        );
+        assert!(
+            !create_result.1.contains("scheduler unavailable"),
+            "create_job should not fall back to the unscheduled path: {:?}",
             create_result.1
         );
         let status_result = results

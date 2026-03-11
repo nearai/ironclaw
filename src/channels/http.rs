@@ -10,14 +10,17 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse};
+use crate::channels::{
+    AttachmentKind, Channel, ChannelSecretUpdater, IncomingAttachment, IncomingMessage,
+    MessageStream, OutgoingResponse,
+};
 use crate::config::HttpConfig;
 use crate::error::ChannelError;
 
@@ -27,13 +30,16 @@ pub struct HttpChannel {
     state: Arc<HttpChannelState>,
 }
 
-struct HttpChannelState {
+pub struct HttpChannelState {
     /// Sender for incoming messages.
     tx: RwLock<Option<mpsc::Sender<IncomingMessage>>>,
     /// Pending responses keyed by message ID.
     pending_responses: RwLock<std::collections::HashMap<Uuid, oneshot::Sender<String>>>,
     /// Expected webhook secret for authentication (if configured).
-    webhook_secret: Option<String>,
+    /// Stored in a separate Arc<RwLock<>> to avoid contending with other state operations.
+    /// Rarely changes (only on SIGHUP), so isolated from hot-path state accesses.
+    /// Uses SecretString to prevent accidental logging and memory dump exposure.
+    webhook_secret: Arc<RwLock<Option<SecretString>>>,
     /// Fixed user ID for this HTTP channel.
     user_id: String,
     /// Rate limiting state.
@@ -46,8 +52,17 @@ struct RateLimitState {
     request_count: u32,
 }
 
-/// Maximum JSON body size for webhook requests (64 KB).
-const MAX_BODY_BYTES: usize = 64 * 1024;
+impl HttpChannelState {
+    /// Update the webhook secret in-place without restarting the listener.
+    /// Called during SIGHUP to hot-swap credentials.
+    pub async fn update_secret(&self, new_secret: Option<SecretString>) {
+        *self.webhook_secret.write().await = new_secret;
+    }
+}
+
+/// Maximum JSON body size for webhook requests (15 MB, to support base64 image attachments
+/// with ~33% overhead from base64 encoding).
+const MAX_BODY_BYTES: usize = 15 * 1024 * 1024;
 
 /// Maximum number of pending wait-for-response requests.
 const MAX_PENDING_RESPONSES: usize = 100;
@@ -64,7 +79,7 @@ impl HttpChannel {
         let webhook_secret = config
             .webhook_secret
             .as_ref()
-            .map(|s| s.expose_secret().to_string());
+            .map(|s| SecretString::from(s.expose_secret().to_string()));
         let user_id = config.user_id.clone();
 
         Self {
@@ -72,7 +87,7 @@ impl HttpChannel {
             state: Arc::new(HttpChannelState {
                 tx: RwLock::new(None),
                 pending_responses: RwLock::new(std::collections::HashMap::new()),
-                webhook_secret,
+                webhook_secret: Arc::new(RwLock::new(webhook_secret)),
                 user_id,
                 rate_limit: tokio::sync::Mutex::new(RateLimitState {
                     window_start: std::time::Instant::now(),
@@ -99,6 +114,16 @@ impl HttpChannel {
     pub fn addr(&self) -> (&str, u16) {
         (&self.config.host, self.config.port)
     }
+
+    /// Return a shared handle to the channel state for out-of-band updates.
+    pub fn shared_state(&self) -> Arc<HttpChannelState> {
+        Arc::clone(&self.state)
+    }
+
+    /// Update the webhook secret in-place without restarting the listener.
+    pub async fn update_secret(&self, new_secret: Option<SecretString>) {
+        self.state.update_secret(new_secret).await;
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,7 +140,33 @@ struct WebhookRequest {
     /// Whether to wait for a synchronous response.
     #[serde(default)]
     wait_for_response: bool,
+    /// Optional file attachments (base64-encoded).
+    #[serde(default)]
+    attachments: Vec<AttachmentData>,
 }
+
+/// A file attachment in a webhook request.
+#[derive(Debug, Deserialize)]
+struct AttachmentData {
+    /// MIME type (e.g. "image/png", "application/pdf").
+    mime_type: String,
+    /// Optional filename.
+    #[serde(default)]
+    filename: Option<String>,
+    /// Base64-encoded file data.
+    #[serde(default)]
+    data_base64: Option<String>,
+    /// URL to fetch the file from (not downloaded server-side for SSRF prevention).
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// Maximum size per attachment (5 MB decoded).
+const MAX_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
+/// Maximum total attachment size (10 MB decoded).
+const MAX_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+/// Maximum number of attachments per request.
+const MAX_ATTACHMENTS: usize = 5;
 
 #[derive(Debug, Serialize)]
 struct WebhookResponse {
@@ -172,9 +223,10 @@ async fn webhook_handler(
     });
 
     // Validate secret if configured
-    if let Some(ref expected_secret) = state.webhook_secret {
+    if let Some(ref expected_secret) = *state.webhook_secret.read().await {
+        let expected_bytes = expected_secret.expose_secret().as_bytes();
         match &req.secret {
-            Some(provided) if bool::from(provided.as_bytes().ct_eq(expected_secret.as_bytes())) => {
+            Some(provided) if bool::from(provided.as_bytes().ct_eq(expected_bytes)) => {
                 // Secret matches, continue
             }
             Some(_) => {
@@ -211,15 +263,106 @@ async fn webhook_handler(
         );
     }
 
-    let msg = IncomingMessage::new("http", &state.user_id, &req.content).with_metadata(
+    // Validate and decode attachments
+    let attachments = if !req.attachments.is_empty() {
+        if req.attachments.len() > MAX_ATTACHMENTS {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(WebhookResponse {
+                    message_id: Uuid::nil(),
+                    status: "error".to_string(),
+                    response: Some(format!("Too many attachments (max {})", MAX_ATTACHMENTS)),
+                }),
+            );
+        }
+
+        let mut decoded_attachments = Vec::new();
+        let mut total_bytes: usize = 0;
+        for att in &req.attachments {
+            if let Some(ref b64) = att.data_base64 {
+                use base64::Engine;
+                let data = match base64::engine::general_purpose::STANDARD.decode(b64) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(WebhookResponse {
+                                message_id: Uuid::nil(),
+                                status: "error".to_string(),
+                                response: Some("Invalid base64 in attachment".to_string()),
+                            }),
+                        );
+                    }
+                };
+                if data.len() > MAX_ATTACHMENT_BYTES {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(WebhookResponse {
+                            message_id: Uuid::nil(),
+                            status: "error".to_string(),
+                            response: Some(format!(
+                                "Attachment too large (max {} bytes)",
+                                MAX_ATTACHMENT_BYTES
+                            )),
+                        }),
+                    );
+                }
+                total_bytes += data.len();
+                if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+                    return (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(WebhookResponse {
+                            message_id: Uuid::nil(),
+                            status: "error".to_string(),
+                            response: Some("Total attachment size exceeds limit".to_string()),
+                        }),
+                    );
+                }
+                decoded_attachments.push(IncomingAttachment {
+                    id: Uuid::new_v4().to_string(),
+                    kind: AttachmentKind::from_mime_type(&att.mime_type),
+                    mime_type: att.mime_type.clone(),
+                    filename: att.filename.clone(),
+                    size_bytes: Some(data.len() as u64),
+                    source_url: None,
+                    storage_key: None,
+                    extracted_text: None,
+                    data,
+                    duration_secs: None,
+                });
+            } else if let Some(ref url) = att.url {
+                // URL-only attachment: set source_url but don't download (SSRF prevention)
+                decoded_attachments.push(IncomingAttachment {
+                    id: Uuid::new_v4().to_string(),
+                    kind: AttachmentKind::from_mime_type(&att.mime_type),
+                    mime_type: att.mime_type.clone(),
+                    filename: att.filename.clone(),
+                    size_bytes: None,
+                    source_url: Some(url.clone()),
+                    storage_key: None,
+                    extracted_text: None,
+                    data: Vec::new(),
+                    duration_secs: None,
+                });
+            }
+        }
+        decoded_attachments
+    } else {
+        Vec::new()
+    };
+
+    let mut msg = IncomingMessage::new("http", &state.user_id, &req.content).with_metadata(
         serde_json::json!({
             "wait_for_response": req.wait_for_response,
         }),
     );
 
+    if !attachments.is_empty() {
+        msg = msg.with_attachments(attachments);
+    }
+
     if let Some(thread_id) = &req.thread_id {
-        let msg = msg.with_thread(thread_id);
-        return process_message(state, msg, req.wait_for_response).await;
+        msg = msg.with_thread(thread_id);
     }
 
     process_message(state, msg, req.wait_for_response).await
@@ -252,9 +395,14 @@ async fn process_message(
         None
     };
 
-    // Send message to the channel
-    let tx_guard = state.tx.read().await;
-    if let Some(tx) = tx_guard.as_ref() {
+    // Clone sender while holding read lock, then release lock before async send.
+    // This prevents blocking other webhook handlers during the async I/O.
+    let tx = {
+        let guard = state.tx.read().await;
+        guard.as_ref().cloned()
+    };
+
+    if let Some(tx) = tx {
         if tx.send(msg).await.is_err() {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -275,7 +423,6 @@ async fn process_message(
             }),
         );
     }
-    drop(tx_guard);
 
     // Wait for response if requested
     let response = if let Some(rx) = response_rx {
@@ -308,7 +455,7 @@ impl Channel for HttpChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        if self.state.webhook_secret.is_none() {
+        if self.state.webhook_secret.read().await.is_none() {
             return Err(ChannelError::StartupFailed {
                 name: "http".to_string(),
                 reason: "HTTP webhook secret is required (set HTTP_WEBHOOK_SECRET)".to_string(),
@@ -352,6 +499,16 @@ impl Channel for HttpChannel {
     async fn shutdown(&self) -> Result<(), ChannelError> {
         *self.state.tx.write().await = None;
         Ok(())
+    }
+}
+
+/// Implement secret update for HTTP channel state.
+/// This allows SIGHUP handler to update secrets generically via the trait.
+#[async_trait]
+impl ChannelSecretUpdater for HttpChannelState {
+    async fn update_secret(&self, new_secret: Option<SecretString>) {
+        *self.webhook_secret.write().await = new_secret;
+        tracing::info!("HTTP webhook secret updated");
     }
 }
 
@@ -441,5 +598,157 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_update_secret_hot_swap() {
+        let channel = test_channel(Some("old-secret"));
+        let _stream = channel.start().await.unwrap();
+        let app1 = channel.routes();
+
+        // Request with old-secret should succeed
+        let body_old = serde_json::json!({
+            "content": "hello",
+            "secret": "old-secret"
+        });
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_old).unwrap()))
+            .unwrap();
+        let resp1 = app1.oneshot(req1).await.unwrap();
+        assert_eq!(
+            resp1.status(),
+            StatusCode::OK,
+            "old secret should work initially"
+        );
+
+        // Update secret to new-secret
+        channel
+            .update_secret(Some(SecretString::from("new-secret".to_string())))
+            .await;
+
+        let app2 = channel.routes();
+
+        // Request with old-secret should fail
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_old).unwrap()))
+            .unwrap();
+        let resp2 = app2.oneshot(req2).await.unwrap();
+        assert_eq!(
+            resp2.status(),
+            StatusCode::UNAUTHORIZED,
+            "old secret should fail after update"
+        );
+
+        let app3 = channel.routes();
+
+        // Request with new-secret should succeed
+        let body_new = serde_json::json!({
+            "content": "hello",
+            "secret": "new-secret"
+        });
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body_new).unwrap()))
+            .unwrap();
+        let resp3 = app3.oneshot(req3).await.unwrap();
+        assert_eq!(
+            resp3.status(),
+            StatusCode::OK,
+            "new secret should work after update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_requests_during_secret_update() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let channel = test_channel(Some("initial-secret"));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        // Counters for request outcomes
+        let success_count = StdArc::new(AtomicUsize::new(0));
+
+        let mut handles = vec![];
+
+        // Spawn 5 concurrent tasks that keep making requests with the initial secret
+        for i in 0..5 {
+            let app = app.clone();
+            let success = StdArc::clone(&success_count);
+
+            let handle = tokio::spawn(async move {
+                let body = serde_json::json!({
+                    "content": format!("test-{}", i),
+                    "secret": "initial-secret"
+                });
+
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/webhook")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+
+                let resp = app.oneshot(req).await.unwrap();
+                if resp.status() == StatusCode::OK {
+                    success.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Update secret mid-flight (tests that RwLock allows readers while writer holds lock)
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        channel
+            .update_secret(Some(SecretString::from("updated-secret".to_string())))
+            .await;
+
+        // Spawn 5 more tasks that use the new secret
+        for i in 5..10 {
+            let app = app.clone();
+            let success = StdArc::clone(&success_count);
+
+            let handle = tokio::spawn(async move {
+                let body = serde_json::json!({
+                    "content": format!("test-{}", i),
+                    "secret": "updated-secret"
+                });
+
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/webhook")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap();
+
+                let resp = app.oneshot(req).await.unwrap();
+                if resp.status() == StatusCode::OK {
+                    success.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        // Verify all requests succeeded with their respective secrets
+        assert_eq!(
+            success_count.load(Ordering::SeqCst),
+            10,
+            "All concurrent requests should succeed with correct secrets after update"
+        );
     }
 }
