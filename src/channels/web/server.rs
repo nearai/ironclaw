@@ -318,7 +318,11 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
-        .route("/favicon.ico", get(favicon_handler));
+        .route("/favicon.ico", get(favicon_handler))
+        .route("/i18n/index.js", get(i18n_index_handler))
+        .route("/i18n/en.js", get(i18n_en_handler))
+        .route("/i18n/zh-CN.js", get(i18n_zh_handler))
+        .route("/i18n-app.js", get(i18n_app_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
@@ -427,6 +431,46 @@ async fn favicon_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         include_bytes!("static/favicon.ico").as_slice(),
+    )
+}
+
+async fn i18n_index_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n/index.js"),
+    )
+}
+
+async fn i18n_en_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n/en.js"),
+    )
+}
+
+async fn i18n_zh_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n/zh-CN.js"),
+    )
+}
+
+async fn i18n_app_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n-app.js"),
     )
 }
 
