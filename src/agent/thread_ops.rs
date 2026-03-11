@@ -840,6 +840,33 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
+        // Resolve the approval target thread by request_id when available.
+        // This makes approval robust if a client/relay loses exact thread context.
+        let thread_id = if let Some(req_id) = request_id {
+            let sess = session.lock().await;
+            if let Some((matched_thread_id, _)) = sess.threads.iter().find(|(_, thread)| {
+                thread
+                    .pending_approval
+                    .as_ref()
+                    .map(|p| p.request_id == req_id)
+                    .unwrap_or(false)
+            }) {
+                if *matched_thread_id != thread_id {
+                    tracing::debug!(
+                        requested_thread = %thread_id,
+                        matched_thread = %matched_thread_id,
+                        request_id = %req_id,
+                        "Resolved approval to thread by request_id"
+                    );
+                }
+                *matched_thread_id
+            } else {
+                thread_id
+            }
+        } else {
+            thread_id
+        };
+
         // Get pending approval for this thread
         let pending = {
             let mut sess = session.lock().await;

@@ -35,6 +35,201 @@ impl GwsBridgeTool {
     }
 }
 
+fn default_spam_list_args() -> Vec<String> {
+    vec![
+        "gmail".to_string(),
+        "users".to_string(),
+        "messages".to_string(),
+        "list".to_string(),
+        "--params={\"userId\":\"me\",\"q\":\"in:spam\",\"maxResults\":50}".to_string(),
+    ]
+}
+
+fn strip_wrapping_quotes(s: &str) -> &str {
+    if s.len() >= 2 {
+        let bytes = s.as_bytes();
+        let first = bytes[0] as char;
+        let last = bytes[s.len() - 1] as char;
+        if (first == '\'' && last == '\'') || (first == '"' && last == '"') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+/// Normalize common model-produced quoting artifacts for `--params`.
+///
+/// Models often emit shell-quoted forms like:
+/// - `--params='{"userId":"me"}'`
+/// - `--params` + `'"{...}"'`
+fn normalize_args(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
+        if let Some(raw) = arg.strip_prefix("--params=") {
+            let cleaned = strip_wrapping_quotes(raw);
+            out.push(format!("--params={}", cleaned));
+            i += 1;
+            continue;
+        }
+
+        if arg == "--params" && i + 1 < args.len() {
+            let cleaned = strip_wrapping_quotes(&args[i + 1]).to_string();
+            out.push(arg.clone());
+            out.push(cleaned);
+            i += 2;
+            continue;
+        }
+
+        out.push(arg.clone());
+        i += 1;
+    }
+    out
+}
+
+fn prepend(head: &[&str], tail: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(head.len() + tail.len());
+    out.extend(head.iter().map(|s| s.to_string()));
+    out.extend_from_slice(tail);
+    out
+}
+
+/// Canonicalize common shorthand emitted by models into valid `gws` syntax.
+///
+/// `gws` requires: `<service> <resource> [sub-resource] <method>`.
+/// Models frequently emit short forms like `list` or `messages list`.
+fn canonicalize_args(args: &[String]) -> Vec<String> {
+    if args.is_empty() {
+        return Vec::new();
+    }
+
+    match args[0].as_str() {
+        // Bare verbs/resources often appear for Gmail spam summarization flows.
+        "list" => prepend(&["gmail", "users", "messages", "list"], &args[1..]),
+        "messages" => {
+            if args.len() >= 2 && matches!(args[1].as_str(), "list" | "get") {
+                let mut out = vec![
+                    "gmail".to_string(),
+                    "users".to_string(),
+                    "messages".to_string(),
+                    args[1].clone(),
+                ];
+                out.extend_from_slice(&args[2..]);
+                out
+            } else {
+                prepend(&["gmail", "users", "messages", "list"], &args[1..])
+            }
+        }
+        "threads" => {
+            if args.len() >= 2 && matches!(args[1].as_str(), "list" | "get") {
+                let mut out = vec![
+                    "gmail".to_string(),
+                    "users".to_string(),
+                    "threads".to_string(),
+                    args[1].clone(),
+                ];
+                out.extend_from_slice(&args[2..]);
+                out
+            } else {
+                prepend(&["gmail", "users", "threads", "list"], &args[1..])
+            }
+        }
+        // Accept `gmail list` shorthand.
+        "gmail" => {
+            if args.len() >= 2 && args[1] == "list" {
+                let mut out = vec![
+                    "gmail".to_string(),
+                    "users".to_string(),
+                    "messages".to_string(),
+                    "list".to_string(),
+                ];
+                out.extend_from_slice(&args[2..]);
+                out
+            } else {
+                args.to_vec()
+            }
+        }
+        // Accept `calendar list` shorthand.
+        "calendar" => {
+            if args.len() >= 2 && args[1] == "list" {
+                let mut out = vec![
+                    "calendar".to_string(),
+                    "events".to_string(),
+                    "list".to_string(),
+                ];
+                out.extend_from_slice(&args[2..]);
+                out
+            } else {
+                args.to_vec()
+            }
+        }
+        // Accept `drive list` shorthand.
+        "drive" => {
+            if args.len() >= 2 && args[1] == "list" {
+                let mut out = vec!["drive".to_string(), "files".to_string(), "list".to_string()];
+                out.extend_from_slice(&args[2..]);
+                out
+            } else {
+                args.to_vec()
+            }
+        }
+        _ => args.to_vec(),
+    }
+}
+
+fn normalize_gmail_list_params(args: &[String]) -> Vec<String> {
+    if args.len() < 4
+        || args[0] != "gmail"
+        || args[1] != "users"
+        || args[2] != "messages"
+        || args[3] != "list"
+    {
+        return args.to_vec();
+    }
+
+    let mut out = args.to_vec();
+
+    let rewrite_params = |raw: &str| -> Option<String> {
+        let mut parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+        let obj = parsed.as_object_mut()?;
+        if let Some(label_ids) = obj.get("labelIds").cloned()
+            && let Some(arr) = label_ids.as_array()
+        {
+            let joined = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            if !joined.is_empty() {
+                obj.insert(
+                    "labelIds".to_string(),
+                    serde_json::Value::String(joined),
+                );
+                return serde_json::to_string(&parsed).ok();
+            }
+        }
+        None
+    };
+
+    for i in 0..out.len() {
+        if let Some(raw) = out[i].strip_prefix("--params=") {
+            if let Some(rewritten) = rewrite_params(raw) {
+                out[i] = format!("--params={}", rewritten);
+            }
+            return out;
+        }
+        if out[i] == "--params" && i + 1 < out.len() {
+            if let Some(rewritten) = rewrite_params(&out[i + 1]) {
+                out[i + 1] = rewritten;
+            }
+            return out;
+        }
+    }
+
+    out
+}
+
 /// Helper to parse arguments properly, separating commands and args
 fn check_allowlist(args: &[String]) -> Result<(), &'static str> {
     if args.is_empty() {
@@ -106,6 +301,141 @@ fn redact_secrets(input: &str) -> String {
     result
 }
 
+fn extract_message_count(args: &[String], parsed: &serde_json::Value) -> Option<usize> {
+    // Only annotate Gmail list calls, where result count is a common user-facing need.
+    if args.len() < 4
+        || args[0] != "gmail"
+        || args[1] != "users"
+        || args[2] != "messages"
+        || args[3] != "list"
+    {
+        return None;
+    }
+
+    if let Some(arr) = parsed.get("messages").and_then(|m| m.as_array()) {
+        return Some(arr.len());
+    }
+
+    parsed
+        .get("resultSizeEstimate")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+}
+
+fn parse_params_json(args: &[String]) -> Option<serde_json::Value> {
+    for i in 0..args.len() {
+        if let Some(raw) = args[i].strip_prefix("--params=") {
+            return serde_json::from_str::<serde_json::Value>(raw).ok();
+        }
+        if args[i] == "--params" && i + 1 < args.len() {
+            return serde_json::from_str::<serde_json::Value>(&args[i + 1]).ok();
+        }
+    }
+    None
+}
+
+fn should_retry_spam_zero(args: &[String], message_count: Option<usize>) -> bool {
+    if message_count != Some(0) {
+        return false;
+    }
+    if args.len() < 4
+        || args[0] != "gmail"
+        || args[1] != "users"
+        || args[2] != "messages"
+        || args[3] != "list"
+    {
+        return false;
+    }
+    true
+}
+
+fn build_spam_retry_args(args: &[String]) -> Vec<String> {
+    let user_id = parse_params_json(args)
+        .and_then(|v| {
+            v.get("userId")
+                .and_then(|u| u.as_str().map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| "me".to_string());
+
+    vec![
+        "gmail".to_string(),
+        "users".to_string(),
+        "messages".to_string(),
+        "list".to_string(),
+        format!(
+            "--params={{\"userId\":\"{}\",\"q\":\"in:spam\",\"maxResults\":50}}",
+            user_id
+        ),
+    ]
+}
+
+async fn run_gws_command(bin_path: &str, args: &[String]) -> Result<(String, i32), ToolError> {
+    let mut command = Command::new(bin_path);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command.spawn().map_err(|e| {
+        let mut msg = format!("Failed to spawn {}: {}", bin_path, e);
+        if e.kind() == std::io::ErrorKind::NotFound {
+            msg.push_str("\nMake sure the binary is installed. If it's not in your PATH, you can configure it via the GWS_BINARY_PATH environment variable (e.g., GWS_BINARY_PATH=/Users/username/.cargo/bin/gws).");
+        }
+        ToolError::ExecutionFailed(msg)
+    })?;
+
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
+
+    let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
+        let stdout_fut = async {
+            if let Some(mut out) = stdout_handle {
+                let mut buf = Vec::new();
+                let _ = (&mut out)
+                    .take(MAX_OUTPUT_SIZE as u64)
+                    .read_to_end(&mut buf)
+                    .await;
+                String::from_utf8_lossy(&buf).to_string()
+            } else {
+                String::new()
+            }
+        };
+        let stderr_fut = async {
+            if let Some(mut err) = stderr_handle {
+                let mut buf = Vec::new();
+                let _ = (&mut err)
+                    .take(MAX_OUTPUT_SIZE as u64)
+                    .read_to_end(&mut buf)
+                    .await;
+                String::from_utf8_lossy(&buf).to_string()
+            } else {
+                String::new()
+            }
+        };
+        let (stdout, stderr, wait_result) = tokio::join!(stdout_fut, stderr_fut, child.wait());
+        let status = wait_result.map_err(|e| format!("Wait error: {}", e))?;
+        let combined = if stderr.is_empty() {
+            stdout
+        } else if stdout.is_empty() {
+            stderr
+        } else {
+            format!("{}\n\n--- stderr ---\n{}", stdout, stderr)
+        };
+        Ok::<_, String>((combined, status.code().unwrap_or(-1)))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!("Execution error: {}", e))),
+        Err(_) => {
+            let _ = child.kill().await;
+            Err(ToolError::Timeout(DEFAULT_TIMEOUT))
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for GwsBridgeTool {
     fn name(&self) -> &str {
@@ -116,7 +446,8 @@ impl Tool for GwsBridgeTool {
         "Optional fallback pathway wrapping a local 'gws' binary to interact with Google Workspace. \
          Note: IC-native Google WASM tools are primary/default. This tool must be explicitly enabled \
          via GWS_BRIDGE_ENABLED environment variable. Only read-only operations on Gmail, Calendar, \
-         and Drive are permitted."
+         and Drive are permitted. Preferred args examples: [\"gmail\",\"users\",\"messages\",\"list\",\"--params={\\\"userId\\\":\\\"me\\\"}\"] \
+         or [\"calendar\",\"events\",\"list\",\"--params={\\\"calendarId\\\":\\\"primary\\\"}\"]."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -128,7 +459,7 @@ impl Tool for GwsBridgeTool {
                     "items": {
                         "type": "string"
                     },
-                    "description": "Arguments to pass to the gws binary (e.g., [\"gmail\", \"list\"])"
+                    "description": "Arguments to pass to the gws binary in canonical form: <service> <resource> [sub-resource] <method> [flags]"
                 }
             },
             "required": ["args"]
@@ -154,13 +485,18 @@ impl Tool for GwsBridgeTool {
         }
 
         // 2. Parse arguments
-        let args_val = params.get("args").ok_or_else(|| {
-            ToolError::InvalidParameters("Missing 'args' array parameter".to_string())
-        })?;
-
-        let args: Vec<String> = serde_json::from_value(args_val.clone()).map_err(|e| {
-            ToolError::InvalidParameters(format!("'args' must be an array of strings: {}", e))
-        })?;
+        let args: Vec<String> = match params.get("args") {
+            Some(args_val) => serde_json::from_value(args_val.clone()).map_err(|e| {
+                ToolError::InvalidParameters(format!("'args' must be an array of strings: {}", e))
+            })?,
+            None => {
+                tracing::warn!(
+                    "gws_bridge called without args; defaulting to safe spam preflight list"
+                );
+                default_spam_list_args()
+            }
+        };
+        let args = normalize_gmail_list_params(&canonicalize_args(&normalize_args(&args)));
 
         // 3. Strict allowlist validation
         if let Err(reason) = check_allowlist(&args) {
@@ -181,71 +517,8 @@ impl Tool for GwsBridgeTool {
         }
 
         // 5. Execute command directly (no shell interpolation)
-        let mut command = Command::new(&bin_path);
-        command
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = match command.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                let mut msg = format!("Failed to spawn {}: {}", bin_path, e);
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    msg.push_str("\nMake sure the binary is installed. If it's not in your PATH, you can configure it via the GWS_BINARY_PATH environment variable (e.g., GWS_BINARY_PATH=/Users/username/.cargo/bin/gws).");
-                }
-                return Err(ToolError::ExecutionFailed(msg));
-            }
-        };
-
-        // 6. Capture output with bounded size
-        let stdout_handle = child.stdout.take();
-        let stderr_handle = child.stderr.take();
-
-        let result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-            let stdout_fut = async {
-                if let Some(mut out) = stdout_handle {
-                    let mut buf = Vec::new();
-                    let _ = (&mut out)
-                        .take(MAX_OUTPUT_SIZE as u64)
-                        .read_to_end(&mut buf)
-                        .await;
-                    String::from_utf8_lossy(&buf).to_string()
-                } else {
-                    String::new()
-                }
-            };
-
-            let stderr_fut = async {
-                if let Some(mut err) = stderr_handle {
-                    let mut buf = Vec::new();
-                    let _ = (&mut err)
-                        .take(MAX_OUTPUT_SIZE as u64)
-                        .read_to_end(&mut buf)
-                        .await;
-                    String::from_utf8_lossy(&buf).to_string()
-                } else {
-                    String::new()
-                }
-            };
-
-            let (stdout, stderr, wait_result) = tokio::join!(stdout_fut, stderr_fut, child.wait());
-            let status = wait_result.map_err(|e| format!("Wait error: {}", e))?;
-
-            Ok::<_, String>((stdout, stderr, status.code().unwrap_or(-1)))
-        })
-        .await;
-
-        match result {
-            Ok(Ok((stdout, stderr, code))) => {
-                let mut combined = if stderr.is_empty() {
-                    stdout
-                } else if stdout.is_empty() {
-                    stderr
-                } else {
-                    format!("{}\n\n--- stderr ---\n{}", stdout, stderr)
-                };
+        match run_gws_command(&bin_path, &args).await {
+            Ok((mut combined, code)) => {
 
                 // Truncate if somehow larger than limit (safety)
                 if combined.len() > MAX_OUTPUT_SIZE {
@@ -262,24 +535,44 @@ impl Tool for GwsBridgeTool {
                 }
 
                 // Apply redaction
-                let redacted = redact_secrets(&combined);
+                let mut redacted = redact_secrets(&combined);
+
+                let mut parsed_output = serde_json::from_str::<serde_json::Value>(&redacted).ok();
+                let mut message_count = parsed_output
+                    .as_ref()
+                    .and_then(|p| extract_message_count(&args, p));
+
+                // Retry for known false-zero spam list cases.
+                if should_retry_spam_zero(&args, message_count) {
+                    let retry_args = build_spam_retry_args(&args);
+                    if let Ok((retry_out, retry_code)) = run_gws_command(&bin_path, &retry_args).await
+                        && retry_code == 0
+                    {
+                        let retry_redacted = redact_secrets(&retry_out);
+                        let retry_parsed =
+                            serde_json::from_str::<serde_json::Value>(&retry_redacted).ok();
+                        let retry_count = retry_parsed
+                            .as_ref()
+                            .and_then(|p| extract_message_count(&retry_args, p));
+                        if retry_count.unwrap_or(0) > 0 {
+                            redacted = retry_redacted;
+                            parsed_output = retry_parsed;
+                            message_count = retry_count;
+                        }
+                    }
+                }
 
                 let output_json = serde_json::json!({
                     "output": redacted,
                     "exit_code": code,
                     "success": code == 0,
+                    "parsed_output": parsed_output,
+                    "message_count": message_count,
                 });
 
                 Ok(ToolOutput::success(output_json, start.elapsed()))
             }
-            Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!(
-                "Execution error: {}",
-                e
-            ))),
-            Err(_) => {
-                let _ = child.kill().await;
-                Err(ToolError::Timeout(DEFAULT_TIMEOUT))
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -339,6 +632,96 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_args_params_equals_wrapped_quotes() {
+        let input = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "list".to_string(),
+            "--params='{\"userId\":\"me\",\"q\":\"in:spam\"}'".to_string(),
+        ];
+        let out = normalize_args(&input);
+        assert_eq!(
+            out[4],
+            "--params={\"userId\":\"me\",\"q\":\"in:spam\"}".to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_args_params_separate_wrapped_quotes() {
+        let input = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "get".to_string(),
+            "--params".to_string(),
+            "'{\"userId\":\"me\",\"id\":\"123\"}'".to_string(),
+        ];
+        let out = normalize_args(&input);
+        assert_eq!(out[4], "--params".to_string());
+        assert_eq!(out[5], "{\"userId\":\"me\",\"id\":\"123\"}".to_string());
+    }
+
+    #[test]
+    fn test_canonicalize_args_bare_list_to_gmail_messages_list() {
+        let input = vec![
+            "list".to_string(),
+            "--params={\"userId\":\"me\",\"q\":\"in:spam\"}".to_string(),
+        ];
+        let out = canonicalize_args(&input);
+        assert_eq!(
+            out,
+            vec![
+                "gmail".to_string(),
+                "users".to_string(),
+                "messages".to_string(),
+                "list".to_string(),
+                "--params={\"userId\":\"me\",\"q\":\"in:spam\"}".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_args_messages_list_to_gmail_users_messages_list() {
+        let input = vec![
+            "messages".to_string(),
+            "list".to_string(),
+            "--params={\"userId\":\"me\"}".to_string(),
+        ];
+        let out = canonicalize_args(&input);
+        assert_eq!(
+            out,
+            vec![
+                "gmail".to_string(),
+                "users".to_string(),
+                "messages".to_string(),
+                "list".to_string(),
+                "--params={\"userId\":\"me\"}".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_args_gmail_list_to_users_messages_list() {
+        let input = vec![
+            "gmail".to_string(),
+            "list".to_string(),
+            "--params={\"userId\":\"me\"}".to_string(),
+        ];
+        let out = canonicalize_args(&input);
+        assert_eq!(
+            out,
+            vec![
+                "gmail".to_string(),
+                "users".to_string(),
+                "messages".to_string(),
+                "list".to_string(),
+                "--params={\"userId\":\"me\"}".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn test_redact_secrets() {
         let text = "Output: Bearer abcdefghijklmnopqrstuvwxyz123456\nOther: ya29.abcdefg1234567890\nKey: AKIA1234567890ABCDEF\nSk: sk-abcdefghijklmnopqrstuvwxyz1234567890";
         let redacted = redact_secrets(text);
@@ -354,6 +737,139 @@ mod tests {
 
         assert!(redacted.contains("[REDACTED_SECRET_KEY]"));
         assert!(!redacted.contains("sk-abcdefghijklmnopqrstuvwxyz1234567890"));
+    }
+
+    #[test]
+    fn test_extract_message_count_from_messages_array() {
+        let args = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "list".to_string(),
+        ];
+        let parsed = serde_json::json!({
+            "messages": [{"id":"1"}, {"id":"2"}, {"id":"3"}],
+            "resultSizeEstimate": 99
+        });
+        assert_eq!(extract_message_count(&args, &parsed), Some(3));
+    }
+
+    #[test]
+    fn test_extract_message_count_from_estimate_when_no_messages() {
+        let args = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "list".to_string(),
+        ];
+        let parsed = serde_json::json!({
+            "resultSizeEstimate": 4
+        });
+        assert_eq!(extract_message_count(&args, &parsed), Some(4));
+    }
+
+    #[test]
+    fn test_extract_message_count_none_for_non_gmail_list() {
+        let args = vec![
+            "calendar".to_string(),
+            "events".to_string(),
+            "list".to_string(),
+        ];
+        let parsed = serde_json::json!({
+            "items": [1,2,3]
+        });
+        assert_eq!(extract_message_count(&args, &parsed), None);
+    }
+
+    #[test]
+    fn test_normalize_gmail_list_params_label_ids_array_equals_form() {
+        let input = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "list".to_string(),
+            "--params={\"userId\":\"me\",\"labelIds\":[\"SPAM\"],\"maxResults\":10}".to_string(),
+        ];
+        let out = normalize_gmail_list_params(&input);
+        assert_eq!(
+            out[4],
+            "--params={\"labelIds\":\"SPAM\",\"maxResults\":10,\"userId\":\"me\"}".to_string()
+        );
+    }
+
+    #[test]
+    fn test_normalize_gmail_list_params_label_ids_array_split_form() {
+        let input = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "list".to_string(),
+            "--params".to_string(),
+            "{\"userId\":\"me\",\"labelIds\":[\"SPAM\",\"INBOX\"]}".to_string(),
+        ];
+        let out = normalize_gmail_list_params(&input);
+        assert_eq!(out[4], "--params".to_string());
+        assert_eq!(
+            out[5],
+            "{\"labelIds\":\"SPAM,INBOX\",\"userId\":\"me\"}".to_string()
+        );
+    }
+
+    #[test]
+    fn test_should_retry_spam_zero_when_label_ids_array_spam() {
+        let args = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "list".to_string(),
+            "--params={\"userId\":\"me\",\"labelIds\":[\"SPAM\"],\"maxResults\":10}".to_string(),
+        ];
+        assert!(should_retry_spam_zero(&args, Some(0)));
+    }
+
+    #[test]
+    fn test_should_retry_spam_zero_when_params_missing() {
+        let args = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "list".to_string(),
+        ];
+        assert!(should_retry_spam_zero(&args, Some(0)));
+    }
+
+    #[test]
+    fn test_should_not_retry_spam_when_non_zero() {
+        let args = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "list".to_string(),
+            "--params={\"userId\":\"me\",\"q\":\"in:spam\"}".to_string(),
+        ];
+        assert!(!should_retry_spam_zero(&args, Some(3)));
+    }
+
+    #[test]
+    fn test_should_retry_spam_zero_even_without_spam_markers() {
+        let args = vec![
+            "gmail".to_string(),
+            "users".to_string(),
+            "messages".to_string(),
+            "list".to_string(),
+            "--params={\"userId\":\"me\",\"maxResults\":50}".to_string(),
+        ];
+        assert!(should_retry_spam_zero(&args, Some(0)));
+    }
+
+    #[test]
+    fn test_default_spam_list_args_shape() {
+        let args = default_spam_list_args();
+        assert_eq!(args[0], "gmail");
+        assert_eq!(args[1], "users");
+        assert_eq!(args[2], "messages");
+        assert_eq!(args[3], "list");
+        assert!(args[4].contains("\"q\":\"in:spam\""));
     }
 
     #[tokio::test]

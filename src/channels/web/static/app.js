@@ -654,6 +654,12 @@ function sendApprovalAction(requestId, action, threadId) {
     label.textContent = labelText;
     actions.appendChild(label);
     setTimeout(() => { card.remove(); }, 1500);
+
+    // Approval can transition to another pending approval in the same turn.
+    // If SSE is missed or delayed, poll briefly to recover next state.
+    if (approvalThreadId) {
+      pollApprovalContinuation(approvalThreadId);
+    }
   }).catch((err) => {
     addMessage('system', 'Failed to send approval: ' + err.message);
     if (!card) return;
@@ -663,6 +669,39 @@ function sendApprovalAction(requestId, action, threadId) {
       btn.disabled = false;
     });
   });
+}
+
+function pollApprovalContinuation(threadId) {
+  let attempts = 0;
+  const maxAttempts = 20;
+  const timer = setInterval(() => {
+    attempts += 1;
+    apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId) + '&limit=1')
+      .then((data) => {
+        if (!data) return;
+
+        if (data.pending_approval) {
+          showApproval(data.pending_approval);
+          clearInterval(timer);
+          return;
+        }
+
+        const turns = Array.isArray(data.turns) ? data.turns : [];
+        const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+        const isTerminal = !!(lastTurn && (lastTurn.response || lastTurn.state === 'Failed' || lastTurn.state === 'Completed'));
+        if (isTerminal || attempts >= maxAttempts) {
+          if (threadId === currentThreadId) {
+            loadHistory();
+          }
+          clearInterval(timer);
+        }
+      })
+      .catch(() => {
+        if (attempts >= maxAttempts) {
+          clearInterval(timer);
+        }
+      });
+  }, 750);
 }
 
 function renderMarkdown(text) {
@@ -1373,6 +1412,8 @@ function loadHistory(before) {
         }
         if (turn.response) {
           addMessage('assistant', turn.response);
+        } else if (turn.state === 'Failed' && turn.error) {
+          addMessage('system', 'Turn failed: ' + turn.error);
         }
       }
       // Show processing indicator if the last turn is still in-progress
@@ -1399,6 +1440,9 @@ function loadHistory(before) {
         if (turn.response) {
           const assistantDiv = createMessageElement('assistant', turn.response);
           fragment.appendChild(assistantDiv);
+        } else if (turn.state === 'Failed' && turn.error) {
+          const errorDiv = createMessageElement('system', 'Turn failed: ' + turn.error);
+          fragment.appendChild(errorDiv);
         }
       }
       container.insertBefore(fragment, container.firstChild);

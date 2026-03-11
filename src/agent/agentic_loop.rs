@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult, Role};
 
 /// Signal from the delegate indicating how the loop should proceed.
 pub enum LoopSignal {
@@ -154,6 +154,27 @@ pub async fn run_agentic_loop(
 
         match output.result {
             RespondResult::Text(text) => {
+                // Guard: for spam-folder checks, require a fresh gws_bridge tool
+                // result before accepting "empty/no spam" claims.
+                if config.enable_tool_intent_nudge
+                    && consecutive_tool_intent_nudges < config.max_tool_intent_nudges
+                    && needs_fresh_spam_tool_call(&text, reason_ctx)
+                {
+                    consecutive_tool_intent_nudges += 1;
+                    tracing::info!(
+                        iteration,
+                        "Spam summary response lacked fresh gws_bridge evidence, nudging for tool call"
+                    );
+                    reason_ctx.messages.push(ChatMessage::assistant(&text));
+                    reason_ctx.messages.push(ChatMessage::user(
+                        "Do not answer from memory for spam-folder checks. \
+                         Call gws_bridge now to list Gmail spam messages (fresh data), \
+                         then answer from tool output only.",
+                    ));
+                    delegate.after_iteration(iteration).await;
+                    continue;
+                }
+
                 // Tool intent nudge: if the LLM says "let me search..." without
                 // actually calling a tool, inject a nudge message.
                 if config.enable_tool_intent_nudge
@@ -205,6 +226,51 @@ pub async fn run_agentic_loop(
     }
 
     Ok(LoopOutcome::MaxIterations)
+}
+
+fn needs_fresh_spam_tool_call(text: &str, reason_ctx: &ReasoningContext) -> bool {
+    let latest_user = latest_user_message(reason_ctx);
+    let Some(user_msg) = latest_user else {
+        return false;
+    };
+    let user_lower = user_msg.to_lowercase();
+    let spam_request = (user_lower.contains("spam") && user_lower.contains("email"))
+        || user_lower.contains("spam folder")
+        || user_lower.contains("in:spam");
+    if !spam_request {
+        return false;
+    }
+
+    let text_lower = text.to_lowercase();
+    let claims_empty = (text_lower.contains("spam folder") || text_lower.contains("spam"))
+        && (text_lower.contains("empty")
+            || text_lower.contains("no spam")
+            || text_lower.contains("no messages"));
+    if !claims_empty {
+        return false;
+    }
+
+    !has_tool_result_since_last_user(reason_ctx, "gws_bridge")
+}
+
+fn latest_user_message(reason_ctx: &ReasoningContext) -> Option<&str> {
+    reason_ctx
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .map(|m| m.content.as_str())
+}
+
+fn has_tool_result_since_last_user(reason_ctx: &ReasoningContext, tool_name: &str) -> bool {
+    let last_user_idx = reason_ctx
+        .messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .unwrap_or(0);
+    reason_ctx.messages[last_user_idx + 1..].iter().any(|m| {
+        m.role == Role::Tool && m.name.as_deref().is_some_and(|n| n.eq(tool_name))
+    })
 }
 
 /// Truncate a string for log/status previews.
@@ -583,5 +649,28 @@ mod tests {
     fn test_truncate_multibyte_safe() {
         let result = truncate_for_preview("café", 4);
         assert_eq!(result, "caf...");
+    }
+
+    #[test]
+    fn test_needs_fresh_spam_tool_call_true_when_empty_claim_without_tool() {
+        let mut ctx = ReasoningContext::new();
+        ctx.messages
+            .push(ChatMessage::user("summarise my email spam folder"));
+        let text = "Your Gmail spam folder is empty.";
+        assert!(needs_fresh_spam_tool_call(text, &ctx));
+    }
+
+    #[test]
+    fn test_needs_fresh_spam_tool_call_false_when_tool_result_present() {
+        let mut ctx = ReasoningContext::new();
+        ctx.messages
+            .push(ChatMessage::user("summarise my email spam folder"));
+        ctx.messages.push(ChatMessage::tool_result(
+            "turn0_0",
+            "gws_bridge",
+            "{\"resultSizeEstimate\":3}",
+        ));
+        let text = "Your Gmail spam folder is empty.";
+        assert!(!needs_fresh_spam_tool_call(text, &ctx));
     }
 }
