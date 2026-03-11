@@ -194,27 +194,32 @@ jobs:
             COMMIT_MD="- (no non-merge commits in range)"
           fi
 
+          PR_BODY=$(cat <<EOF
+## Auto-promotion from staging CI
+
+**Batch range:** \`${RANGE}\`
+**Promotion branch:** \`${BRANCH}\`
+**Base:** \`${BASE}\`
+**Triggered by:** Staging CI batch at ${TIMESTAMP}
+
+### Commits in this batch (${COMMIT_COUNT}):
+${COMMIT_MD}
+
+Waiting for gates:
+- Tests: pending
+- E2E: pending
+- Claude Code review: pending (will post comments on this PR)
+
+---
+*Auto-created by staging-ci workflow*
+EOF
+)
+
           PR_URL=$(gh pr create \
             --base "$BASE" \
             --head "$BRANCH" \
             --title "chore: promote staging to main (${TIMESTAMP})" \
-            --body "## Auto-promotion from staging CI
-
-          **Batch range:** \`${RANGE}\`
-          **Promotion branch:** \`${BRANCH}\`
-          **Base:** \`${BASE}\`
-          **Triggered by:** Staging CI batch at ${TIMESTAMP}
-
-          ### Commits in this batch (${COMMIT_COUNT}):
-          ${COMMIT_MD}
-
-          Waiting for gates:
-          - Tests: pending
-          - E2E: pending
-          - Claude Code review: pending (will post comments on this PR)
-
-          ---
-          *Auto-created by staging-ci workflow*" \
+            --body "$PR_BODY" \
             --label "staging-promotion")
 
           PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
