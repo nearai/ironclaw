@@ -3058,7 +3058,6 @@ mod tests {
         );
     }
 
-
     // --- Slack relay OAuth CSRF tests ---
 
     fn test_relay_oauth_router(state: Arc<GatewayState>) -> Router {

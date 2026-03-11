@@ -144,7 +144,7 @@ let restartEnabled = false; // Track if restart is available in this deployment
 
 function triggerRestart() {
   if (!currentThreadId) {
-    alert('Please start a conversation first');
+    alert(I18n.t('error.startConversation'));
     return;
   }
 
@@ -155,7 +155,7 @@ function triggerRestart() {
 
 function confirmRestart() {
   if (!currentThreadId) {
-    alert('Please start a conversation first');
+    alert(I18n.t('error.startConversation'));
     return;
   }
 
@@ -190,7 +190,7 @@ function confirmRestart() {
     })
     .catch((err) => {
       console.error('[confirmRestart] Restart request failed:', err);
-      addMessage('system', 'Restart failed: ' + err.message);
+      addMessage('system', I18n.t('error.restartFailed', { message: err.message }));
       isRestarting = false;
       restartBtn.disabled = false;
       if (restartIcon) restartIcon.classList.remove('spinning');
@@ -2346,7 +2346,7 @@ function renderExtensionCard(ext) {
       // installed or configured: show Setup button
       var setupBtn = document.createElement('button');
       setupBtn.className = 'btn-ext configure';
-      setupBtn.textContent = I18n.t('common.configure');
+      setupBtn.textContent = I18n.t('ext.setup');
       setupBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
       actions.appendChild(setupBtn);
     }

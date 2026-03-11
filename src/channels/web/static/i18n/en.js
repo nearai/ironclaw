@@ -58,7 +58,6 @@ I18n.register('en', {
   'chat.toggleSidebar': 'Toggle Sidebar',
   'chat.assistant': 'Assistant',
   'chat.conversations': 'Conversations',
-  'chat.inputPlaceholder': 'Type a message or / for commands...',
   'chat.send': 'Send',
   'chat.attachImages': 'Attach Images',
   'chat.empty': 'Select a file to view content',
@@ -160,6 +159,7 @@ I18n.register('en', {
   'tools.registered': 'Registered Tools',
   'tools.name': 'Name',
   'tools.description': 'Description',
+  'tools.empty': 'No tools registered',
   
   // Skills Tab
   'skills.installed': 'Installed Skills',
@@ -183,7 +183,10 @@ I18n.register('en', {
   'skills.updated': 'updated',
   'skills.loading': 'Loading skills...',
   'skills.loadFailed': 'Failed to load skills: {message}',
-  
+  'skills.confirmRemove': 'Remove skill "{name}"?',
+  'skills.removeFailed': 'Remove failed: {message}',
+  'skills.removed': 'Removed skill "{name}"',
+
   // Jobs Summary
   'jobs.summary.total': 'Total',
   'jobs.summary.inProgress': 'In Progress',
@@ -290,11 +293,6 @@ I18n.register('en', {
   'tool.used': '{count} tool(s) used',
   'tool.requiresApproval': 'Tool requires approval',
   
-  // Time
-  'time.justNow': 'just now',
-  'time.minutesAgo': '{count} minutes ago',
-  'time.hoursAgo': '{count} hours ago',
-  'time.daysAgo': '{count} days ago',
   
   // TEE
   'tee.loadingReport': 'Loading attestation report...',
@@ -332,29 +330,13 @@ I18n.register('en', {
   'ext.install': 'Install',
   'ext.installing': 'Installing...',
   'ext.installed': 'Installed',
+  'ext.setup': 'Setup',
   'ext.reconfigure': 'Reconfigure',
   'ext.configure': 'Configure',
   'ext.confirmRemove': 'Remove extension "{name}"?',
   'ext.removeFailed': 'Remove failed: {message}',
   'ext.removed': 'Removed {name}',
   'ext.installFailed': 'Install failed: {message}',
-  
-  // Skills
-  'skills.confirmRemove': 'Remove skill "{name}"?',
-  'skills.removeFailed': 'Remove failed: {message}',
-  'skills.removed': 'Removed skill "{name}"',
-  'skills.installed': 'Installed Skills',
-  'skills.noInstalled': 'No skills installed',
-  'skills.loading': 'Loading skills...',
-  'skills.searchClawHub': 'Search ClawHub',
-  'skills.remove': 'Remove',
-  'skills.activatesOn': 'Activates on',
-  'skills.searching': 'Searching...',
-  'skills.registryError': 'Catalog error: {message}',
-  
-  // MCP Servers
-  'mcp.noServers': 'No MCP servers available',
-  'mcp.addCustom': 'Add Custom MCP Server',
   
   // Configure
   'config.title': 'Configure {name}',

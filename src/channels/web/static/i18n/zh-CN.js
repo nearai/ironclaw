@@ -58,7 +58,6 @@ I18n.register('zh-CN', {
   'chat.toggleSidebar': '切换侧边栏',
   'chat.assistant': '助手',
   'chat.conversations': '对话列表',
-  'chat.inputPlaceholder': '输入消息或 / 查看命令...',
   'chat.send': '发送',
   'chat.attachImages': '附加图片',
   'chat.empty': '选择文件查看内容',
@@ -184,6 +183,9 @@ I18n.register('zh-CN', {
   'skills.updated': '更新于',
   'skills.loading': '加载技能中...',
   'skills.loadFailed': '加载技能失败: {message}',
+  'skills.confirmRemove': '确定要移除技能 "{name}" 吗？',
+  'skills.removeFailed': '移除失败: {message}',
+  'skills.removed': '已移除技能 "{name}"',
   
   // 任务摘要
   'jobs.summary.total': '总计',
@@ -291,11 +293,6 @@ I18n.register('zh-CN', {
   'tool.used': '{count} 个工具已使用',
   'tool.requiresApproval': '工具需要审批',
   
-  // 时间
-  'time.justNow': '刚刚',
-  'time.minutesAgo': '{count} 分钟前',
-  'time.hoursAgo': '{count} 小时前',
-  'time.daysAgo': '{count} 天前',
   
   // TEE
   'tee.loadingReport': '加载认证报告中...',
@@ -333,29 +330,13 @@ I18n.register('zh-CN', {
   'ext.install': '安装',
   'ext.installing': '安装中...',
   'ext.installed': '已安装',
+  'ext.setup': '设置',
   'ext.reconfigure': '重新配置',
   'ext.configure': '配置',
   'ext.confirmRemove': '确定要移除扩展 "{name}" 吗？',
   'ext.removeFailed': '移除失败: {message}',
   'ext.removed': '已移除 {name}',
   'ext.installFailed': '安装失败: {message}',
-  
-  // 技能
-  'skills.confirmRemove': '确定要移除技能 "{name}" 吗？',
-  'skills.removeFailed': '移除失败: {message}',
-  'skills.removed': '已移除技能 "{name}"',
-  'skills.installed': '已安装技能',
-  'skills.noInstalled': '没有安装技能',
-  'skills.loading': '加载技能中...',
-  'skills.searchClawHub': '搜索 ClawHub',
-  'skills.remove': '移除',
-  'skills.activatesOn': '激活关键词',
-  'skills.searching': '搜索中...',
-  'skills.registryError': '目录错误: {message}',
-  
-  // MCP 服务器
-  'mcp.noServers': '没有可用的 MCP 服务器',
-  'mcp.addCustom': '添加自定义 MCP 服务器',
   
   // 配置
   'config.title': '配置 {name}',
