@@ -213,6 +213,19 @@ fn parse_headers_param(
 ) -> Result<Vec<(String, String)>, ToolError> {
     match headers {
         None => Ok(Vec::new()),
+        Some(serde_json::Value::String(raw)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(Vec::new());
+            }
+            let parsed = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|e| {
+                ToolError::InvalidParameters(format!(
+                    "headers string must contain valid JSON object/array: {}",
+                    e
+                ))
+            })?;
+            parse_headers_param(Some(&parsed))
+        }
         Some(serde_json::Value::Object(map)) => {
             let mut out = Vec::with_capacity(map.len());
             for (k, v) in map {
@@ -244,6 +257,47 @@ fn parse_headers_param(
         }
         Some(_) => Err(ToolError::InvalidParameters(
             "'headers' must be an object or an array of {name, value}".to_string(),
+        )),
+    }
+}
+
+fn parse_timeout_secs_param(timeout: Option<&serde_json::Value>) -> Result<Option<u64>, ToolError> {
+    match timeout {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => n.as_u64().map(Some).ok_or_else(|| {
+            ToolError::InvalidParameters("timeout_secs must be a non-negative integer".to_string())
+        }),
+        Some(serde_json::Value::String(raw)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let secs = trimmed.parse::<u64>().map_err(|_| {
+                ToolError::InvalidParameters(
+                    "timeout_secs string must contain a non-negative integer".to_string(),
+                )
+            })?;
+            Ok(Some(secs))
+        }
+        Some(_) => Err(ToolError::InvalidParameters(
+            "timeout_secs must be an integer".to_string(),
+        )),
+    }
+}
+
+fn parse_save_to_param(save_to: Option<&serde_json::Value>) -> Result<Option<String>, ToolError> {
+    match save_to {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(path)) => {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Some(_) => Err(ToolError::InvalidParameters(
+            "save_to must be a string".to_string(),
         )),
     }
 }
@@ -325,15 +379,18 @@ impl Tool for HttpTool {
         let start = std::time::Instant::now();
 
         let method = require_str(&params, "method")?;
+        let method_upper = method.to_uppercase();
 
         let url = require_str(&params, "url")?;
         let mut parsed_url = validate_url(url)?;
 
         // Parse headers
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
+        let timeout_secs = parse_timeout_secs_param(params.get("timeout_secs"))?;
+        let save_to = parse_save_to_param(params.get("save_to"))?;
 
         // Build request
-        let mut request = match method.to_uppercase().as_str() {
+        let mut request = match method_upper.as_str() {
             "GET" => self.client.get(parsed_url.clone()),
             "POST" => self.client.post(parsed_url.clone()),
             "PUT" => self.client.put(parsed_url.clone()),
@@ -347,6 +404,10 @@ impl Tool for HttpTool {
             }
         };
 
+        if let Some(secs) = timeout_secs {
+            request = request.timeout(Duration::from_secs(secs));
+        }
+
         // Add headers
         for (key, value) in &headers_vec {
             request = request.header(key.as_str(), value.as_str());
@@ -355,7 +416,9 @@ impl Tool for HttpTool {
         // Add body if present
         let body_bytes = if let Some(body) = params.get("body") {
             if let Some(body_str) = body.as_str() {
-                if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
+                if body_str.is_empty() {
+                    None
+                } else if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
                     let bytes = serde_json::to_vec(&json_body).map_err(|e| {
                         ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
                     })?;
@@ -420,7 +483,7 @@ impl Tool for HttpTool {
 
         // Build the interceptor request descriptor for recording/replay
         let intercept_req = crate::llm::recording::HttpExchangeRequest {
-            method: method.to_uppercase(),
+            method: method_upper,
             url: parsed_url.to_string(),
             headers: headers_vec.clone(),
             body: body_bytes
@@ -464,7 +527,7 @@ impl Tool for HttpTool {
             .collect();
 
         // Use a larger size limit when saving to disk (file downloads)
-        let saving_to_disk = params.get("save_to").is_some();
+        let saving_to_disk = save_to.is_some();
         let max_size = if saving_to_disk {
             MAX_SAVE_TO_SIZE
         } else {
@@ -509,8 +572,8 @@ impl Tool for HttpTool {
         let body_bytes = bytes::Bytes::from(body);
 
         // If save_to is specified, write raw bytes to file and return metadata.
-        if let Some(save_to) = params.get("save_to").and_then(|v| v.as_str()) {
-            let save_to_owned = save_to.to_string();
+        if let Some(save_to) = save_to {
+            let save_to_owned = save_to.clone();
             let bytes_clone = body_bytes.clone();
             tokio::task::spawn_blocking(move || {
                 let canonical = validate_save_to_path(&save_to_owned)?;
@@ -702,6 +765,35 @@ mod tests {
                 ("X-Test".to_string(), "1".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_headers_param_accepts_stringified_array() {
+        let headers =
+            serde_json::json!("[{\"name\":\"Authorization\",\"value\":\"Bearer token\"}]");
+        let parsed = parse_headers_param(Some(&headers)).unwrap();
+        assert_eq!(
+            parsed,
+            vec![("Authorization".to_string(), "Bearer token".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_timeout_secs_param_accepts_string_integer() {
+        let timeout = serde_json::json!("30");
+        assert_eq!(parse_timeout_secs_param(Some(&timeout)).unwrap(), Some(30));
+    }
+
+    #[test]
+    fn test_parse_timeout_secs_param_treats_empty_string_as_none() {
+        let timeout = serde_json::json!("");
+        assert_eq!(parse_timeout_secs_param(Some(&timeout)).unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_save_to_param_treats_empty_string_as_none() {
+        let save_to = serde_json::json!("");
+        assert_eq!(parse_save_to_param(Some(&save_to)).unwrap(), None);
     }
 
     #[test]
@@ -934,6 +1026,25 @@ mod tests {
     fn test_extract_host_from_params_missing_url() {
         let params = serde_json::json!({"method": "GET"});
         assert_eq!(extract_host_from_params(&params), None);
+    }
+
+    #[test]
+    fn test_extract_host_from_params_error() {
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        let tool = HttpTool::new().with_credentials(
+            Arc::new(SharedCredentialRegistry::new()),
+            Arc::new(test_secrets_store()),
+        );
+        let error = serde_json::json!({
+            "body": "",
+            "headers": "[]",
+            "method": "GET",
+            "save_to": "",
+            "timeout_secs": "30",
+            "url": "https://r.jina.ai/http://news.baidu.com/"
+        });
+        let _ = tool.requires_approval(&error);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
