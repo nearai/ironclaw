@@ -716,9 +716,8 @@ function copyMessage(btn) {
     || message.textContent
     || '';
   navigator.clipboard.writeText(text).then(() => {
-    const original = btn.textContent;
     btn.textContent = 'Copied';
-    setTimeout(() => { btn.textContent = original; }, 1200);
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
   }).catch(() => {
     btn.textContent = 'Failed';
     setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
@@ -743,8 +742,6 @@ function appendToLastAssistant(chunk) {
     const content = last.querySelector('.message-content');
     if (content) {
       content.innerHTML = renderMarkdown(raw);
-    } else {
-      last.innerHTML = renderMarkdown(raw);
     }
     container.scrollTop = container.scrollHeight;
   } else {
