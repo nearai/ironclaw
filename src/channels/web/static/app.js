@@ -627,30 +627,42 @@ function filterSlashCommands(value) {
   }
 }
 
-function sendApprovalAction(requestId, action) {
-  apiFetch('/api/chat/approval', {
-    method: 'POST',
-    body: { request_id: requestId, action: action, thread_id: currentThreadId },
-  }).catch((err) => {
-    addMessage('system', 'Failed to send approval: ' + err.message);
-  });
-
-  // Disable buttons and show confirmation on the card
+function sendApprovalAction(requestId, action, threadId) {
   const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
+  const approvalThreadId = threadId
+    || (card ? card.getAttribute('data-thread-id') : '')
+    || currentThreadId
+    || null;
+
   if (card) {
     const buttons = card.querySelectorAll('.approval-actions button');
     buttons.forEach((btn) => {
       btn.disabled = true;
     });
+  }
+
+  apiFetch('/api/chat/approval', {
+    method: 'POST',
+    body: { request_id: requestId, action: action, thread_id: approvalThreadId },
+  }).then(() => {
+    if (!card) return;
+
     const actions = card.querySelector('.approval-actions');
     const label = document.createElement('span');
     label.className = 'approval-resolved';
     const labelText = action === 'approve' ? 'Approved' : action === 'always' ? 'Always approved' : 'Denied';
     label.textContent = labelText;
     actions.appendChild(label);
-    // Remove the card after showing the confirmation briefly
     setTimeout(() => { card.remove(); }, 1500);
-  }
+  }).catch((err) => {
+    addMessage('system', 'Failed to send approval: ' + err.message);
+    if (!card) return;
+
+    const buttons = card.querySelectorAll('.approval-actions button');
+    buttons.forEach((btn) => {
+      btn.disabled = false;
+    });
+  });
 }
 
 function renderMarkdown(text) {
@@ -1010,6 +1022,7 @@ function showApproval(data) {
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.setAttribute('data-request-id', data.request_id);
+  card.setAttribute('data-thread-id', data.thread_id || '');
 
   const header = document.createElement('div');
   header.className = 'approval-header';
@@ -1051,17 +1064,17 @@ function showApproval(data) {
   const approveBtn = document.createElement('button');
   approveBtn.className = 'approve';
   approveBtn.textContent = I18n.t('approval.approve');
-  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
+  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve', data.thread_id));
 
   const alwaysBtn = document.createElement('button');
   alwaysBtn.className = 'always';
   alwaysBtn.textContent = I18n.t('approval.always');
-  alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
+  alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always', data.thread_id));
 
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
   denyBtn.textContent = I18n.t('approval.deny');
-  denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
+  denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny', data.thread_id));
 
   actions.appendChild(approveBtn);
   actions.appendChild(alwaysBtn);
