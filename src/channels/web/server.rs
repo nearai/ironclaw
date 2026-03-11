@@ -28,6 +28,7 @@ use uuid::Uuid;
 use crate::agent::SessionManager;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
+use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{AuthState, auth_middleware};
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
@@ -164,6 +165,8 @@ pub struct GatewayState {
     pub scheduler: Option<crate::tools::builtin::SchedulerSlot>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
+    /// Rate limiter for OAuth callback endpoints (10 requests per 60 seconds).
+    pub oauth_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
     /// Populated at startup from `registry/` manifests, independent of extension manager.
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
@@ -200,7 +203,11 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
-        .route("/oauth/callback", get(oauth_callback_handler));
+        .route("/oauth/callback", get(oauth_callback_handler))
+        .route(
+            "/oauth/slack/callback",
+            get(slack_relay_oauth_callback_handler),
+        );
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -650,6 +657,208 @@ async fn oauth_callback_handler(
     axum::response::Html(html).into_response()
 }
 
+/// OAuth callback for Slack via channel-relay.
+///
+/// This is a PUBLIC route (no Bearer token required) because channel-relay
+/// redirects the user's browser here after Slack OAuth completes.
+/// Query params: `stream_token`, `provider`, `team_id`.
+async fn slack_relay_oauth_callback_handler(
+    State(state): State<Arc<GatewayState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Rate limit
+    if !state.oauth_rate_limiter.check() {
+        return axum::response::Html(
+            "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+             <h2>Too Many Requests</h2>\
+             <p>Please try again later.</p>\
+             </body></html>"
+                .to_string(),
+        )
+        .into_response();
+    }
+
+    // Validate stream_token: required, non-empty, max 2048 bytes
+    let stream_token = match params.get("stream_token") {
+        Some(t) if !t.is_empty() && t.len() <= 2048 => t.clone(),
+        Some(t) if t.len() > 2048 => {
+            return axum::response::Html(
+                "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+                 <h2>Error</h2><p>Invalid callback parameters.</p></body></html>"
+                    .to_string(),
+            )
+            .into_response();
+        }
+        _ => {
+            return axum::response::Html(
+                "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+                 <h2>Error</h2><p>Invalid callback parameters.</p></body></html>"
+                    .to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    // Validate team_id format: empty or T followed by alphanumeric (max 20 chars)
+    let team_id = params.get("team_id").cloned().unwrap_or_default();
+    if !team_id.is_empty() {
+        let valid_team_id = team_id.len() <= 21
+            && team_id.starts_with('T')
+            && team_id[1..].chars().all(|c| c.is_ascii_alphanumeric());
+        if !valid_team_id {
+            return axum::response::Html(
+                "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+                 <h2>Error</h2><p>Invalid callback parameters.</p></body></html>"
+                    .to_string(),
+            )
+            .into_response();
+        }
+    }
+
+    // Validate provider: must be "slack" (only supported provider)
+    let provider = params
+        .get("provider")
+        .cloned()
+        .unwrap_or_else(|| "slack".into());
+    if provider != "slack" {
+        return axum::response::Html(
+            "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+             <h2>Error</h2><p>Invalid callback parameters.</p></body></html>"
+                .to_string(),
+        )
+        .into_response();
+    }
+
+    let ext_mgr = match state.extension_manager.as_ref() {
+        Some(mgr) => mgr,
+        None => {
+            return axum::response::Html(
+                "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+                 <h2>Error</h2><p>Extension manager not available.</p></body></html>"
+                    .to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    // Validate CSRF state parameter
+    let state_param = match params.get("state") {
+        Some(s) if !s.is_empty() && s.len() <= 128 => s.clone(),
+        _ => {
+            return axum::response::Html(
+                "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+                 <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
+                    .to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
+    let stored_state = match ext_mgr
+        .secrets()
+        .get_decrypted(&state.user_id, &state_key)
+        .await
+    {
+        Ok(secret) => secret.expose().to_string(),
+        Err(_) => {
+            return axum::response::Html(
+                "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+                 <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
+                    .to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    if state_param != stored_state {
+        return axum::response::Html(
+            "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+             <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
+                .to_string(),
+        )
+        .into_response();
+    }
+
+    // Delete the nonce (one-time use)
+    let _ = ext_mgr.secrets().delete(&state.user_id, &state_key).await;
+
+    let result: Result<(), String> = async {
+        // Store the stream token as a secret
+        let token_key = format!("relay:{}:stream_token", DEFAULT_RELAY_NAME);
+        let _ = ext_mgr.secrets().delete(&state.user_id, &token_key).await;
+        ext_mgr
+            .secrets()
+            .create(
+                &state.user_id,
+                crate::secrets::CreateSecretParams {
+                    name: token_key,
+                    value: secrecy::SecretString::from(stream_token),
+                    provider: Some(provider.clone()),
+                    expires_at: None,
+                },
+            )
+            .await
+            .map_err(|e| format!("Failed to store stream token: {}", e))?;
+
+        // Store team_id in settings
+        if let Some(ref store) = state.store {
+            let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
+            let _ = store
+                .set_setting(&state.user_id, &team_id_key, &serde_json::json!(team_id))
+                .await;
+        }
+
+        // Activate the relay channel
+        ext_mgr
+            .activate_stored_relay(DEFAULT_RELAY_NAME)
+            .await
+            .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
+
+        Ok(())
+    }
+    .await;
+
+    let (success, message) = match &result {
+        Ok(()) => (true, "Slack connected successfully!".to_string()),
+        Err(e) => {
+            tracing::error!(error = %e, "Slack relay OAuth callback failed");
+            (
+                false,
+                "Connection failed. Check server logs for details.".to_string(),
+            )
+        }
+    };
+
+    // Broadcast SSE event to notify the web UI
+    state.sse.broadcast(SseEvent::AuthCompleted {
+        extension_name: DEFAULT_RELAY_NAME.to_string(),
+        success,
+        message: message.clone(),
+    });
+
+    if success {
+        axum::response::Html(
+            "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+             <h2>Slack Connected!</h2>\
+             <p>You can close this tab and return to IronClaw.</p>\
+             <script>window.close()</script>\
+             </body></html>"
+                .to_string(),
+        )
+        .into_response()
+    } else {
+        axum::response::Html(format!(
+            "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+             <h2>Connection Failed</h2>\
+             <p>{}</p>\
+             </body></html>",
+            message
+        ))
+        .into_response()
+    }
+}
+
 // --- Chat handlers ---
 
 /// Convert web gateway `ImageData` to `IncomingAttachment` objects.
@@ -707,9 +916,9 @@ async fn chat_send_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
-    tracing::debug!(
-        "[chat_send_handler] Received message: content={:?}, thread_id={:?}",
-        req.content,
+    tracing::trace!(
+        "[chat_send_handler] Received message: content_len={}, thread_id={:?}",
+        req.content.len(),
         req.thread_id
     );
 
@@ -742,10 +951,10 @@ async fn chat_send_handler(
     }
 
     let msg_id = msg.id;
-    tracing::debug!(
-        "[chat_send_handler] Created message id={}, content={:?}, images={}",
+    tracing::trace!(
+        "[chat_send_handler] Created message id={}, content_len={}, images={}",
         msg_id,
-        req.content,
+        req.content.len(),
         req.images.len()
     );
 
@@ -1683,13 +1892,13 @@ async fn extensions_activate_handler(
             Ok(Json(resp))
         }
         Err(activate_err) => {
-            let err_str = activate_err.to_string();
-            let needs_auth = err_str.contains("authentication")
-                || err_str.contains("401")
-                || err_str.contains("Unauthorized");
+            let needs_auth = matches!(
+                &activate_err,
+                crate::extensions::ExtensionError::AuthRequired
+            );
 
             if !needs_auth {
-                return Ok(Json(ActionResponse::fail(err_str)));
+                return Ok(Json(ActionResponse::fail(activate_err.to_string())));
             }
 
             // Activation failed due to auth; try authenticating first.
@@ -2423,6 +2632,7 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
 
     #[test]
     fn test_build_turns_from_db_messages_complete() {
@@ -2524,6 +2734,7 @@ mod tests {
             skill_catalog: None,
             scheduler: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
+            oauth_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: vec![],
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -2596,7 +2807,7 @@ mod tests {
         // Build an ExtensionManager so the handler can look up flows
         let secrets = Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
             crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                "test-key-at-least-32-chars-long!!".to_string(),
+                TEST_GATEWAY_CRYPTO_KEY.to_string(),
             ))
             .expect("crypto"),
         )));
@@ -2646,7 +2857,7 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "test-key-at-least-32-chars-long!!".to_string(),
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
                 ))
                 .expect("crypto"),
             )));
@@ -2752,7 +2963,7 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "test-key-at-least-32-chars-long!!".to_string(),
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
                 ))
                 .expect("crypto"),
             )));
@@ -2845,5 +3056,178 @@ mod tests {
                 .get("test_nonce")
                 .is_none()
         );
+    }
+
+    // --- Slack relay OAuth CSRF tests ---
+
+    fn test_relay_oauth_router(state: Arc<GatewayState>) -> Router {
+        Router::new()
+            .route(
+                "/oauth/slack/callback",
+                get(slack_relay_oauth_callback_handler),
+            )
+            .with_state(state)
+    }
+
+    fn test_secrets_store() -> Arc<dyn crate::secrets::SecretsStore + Send + Sync> {
+        Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+            crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                "test-key-at-least-32-chars-long!!".to_string(),
+            ))
+            .expect("crypto"),
+        )))
+    }
+
+    fn test_ext_mgr(
+        secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) -> Arc<ExtensionManager> {
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+        let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
+        Arc::new(ExtensionManager::new(
+            mcp_sm,
+            mcp_pm,
+            secrets,
+            tool_registry,
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/wasm_tools"),
+            std::path::PathBuf::from("/tmp/wasm_channels"),
+            None,
+            "test".to_string(),
+            None,
+            vec![],
+        ))
+    }
+
+    #[tokio::test]
+    async fn test_relay_oauth_callback_missing_state_param() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let ext_mgr = test_ext_mgr(secrets);
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_relay_oauth_router(state);
+
+        // Callback without state param should be rejected
+        let req = axum::http::Request::builder()
+            .uri("/oauth/slack/callback?stream_token=tok123&team_id=T123&provider=slack")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(
+            html.contains("Invalid or expired authorization"),
+            "Expected CSRF error, got: {}",
+            &html[..html.len().min(300)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_relay_oauth_callback_wrong_state_param() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+
+        // Store a valid nonce
+        secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME),
+                    "correct-nonce-value",
+                ),
+            )
+            .await
+            .expect("store nonce");
+
+        let ext_mgr = test_ext_mgr(secrets);
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_relay_oauth_router(state);
+
+        // Callback with wrong state param
+        let req = axum::http::Request::builder()
+            .uri("/oauth/slack/callback?stream_token=tok123&team_id=T123&provider=slack&state=wrong-nonce")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(
+            html.contains("Invalid or expired authorization"),
+            "Expected CSRF error for wrong nonce, got: {}",
+            &html[..html.len().min(300)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_relay_oauth_callback_correct_state_proceeds() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let nonce = "valid-test-nonce-12345";
+
+        // Store the correct nonce
+        secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new(
+                    format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME),
+                    nonce,
+                ),
+            )
+            .await
+            .expect("store nonce");
+
+        let ext_mgr = test_ext_mgr(secrets.clone());
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_relay_oauth_router(state);
+
+        // Callback with correct state param — will pass CSRF check
+        // but may fail downstream (no real relay service) — that's OK,
+        // we just verify it doesn't return a CSRF error.
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/slack/callback?stream_token=tok123&team_id=T123&provider=slack&state={}",
+                nonce
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        // Should NOT contain the CSRF error message
+        assert!(
+            !html.contains("Invalid or expired authorization"),
+            "Should have passed CSRF check, got: {}",
+            &html[..html.len().min(300)]
+        );
+
+        // Verify the nonce was consumed (deleted)
+        let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
+        let exists = secrets.exists("test", &state_key).await.unwrap_or(true);
+        assert!(!exists, "CSRF nonce should be deleted after use");
     }
 }

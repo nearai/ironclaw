@@ -24,7 +24,7 @@ pub struct WebhookServerConfig {
 pub struct WebhookServer {
     config: WebhookServerConfig,
     routes: Vec<Router>,
-    /// Merged router saved after start() for restart_with_addr().
+    /// Merged router saved after start() for restarts via `install_listener()`.
     merged_router: Option<Router>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     handle: Option<JoinHandle<()>>,
@@ -59,7 +59,7 @@ impl WebhookServer {
     }
 
     /// Bind a listener to the configured address and spawn the server task.
-    /// Private helper used by both start() and restart_with_addr().
+    /// Private helper used by `start()`.
     async fn bind_and_spawn(&mut self, app: Router) -> Result<(), ChannelError> {
         let listener = tokio::net::TcpListener::bind(self.config.addr)
             .await
@@ -89,47 +89,49 @@ impl WebhookServer {
         Ok(())
     }
 
-    /// Gracefully shut down the current listener and rebind to a new address.
-    /// The merged router from the original `start()` call is reused.
-    ///
-    /// If binding to the new address fails, the old listener remains active and
-    /// state is restored. This prevents a denial-of-service if the new address
-    /// is invalid or already in use.
-    pub async fn restart_with_addr(&mut self, new_addr: SocketAddr) -> Result<(), ChannelError> {
-        let app = self
-            .merged_router
-            .clone()
-            .ok_or_else(|| ChannelError::StartupFailed {
-                name: "webhook_server".to_string(),
-                reason: "restart_with_addr called before start()".to_string(),
-            })?;
+    /// Clone the merged router, if `start()` has been called.
+    pub fn merged_router_clone(&self) -> Option<Router> {
+        self.merged_router.clone()
+    }
 
-        // Save old state for rollback if new bind fails
-        let old_addr = self.config.addr;
+    /// Install a pre-bound listener, replacing the current one.
+    ///
+    /// The caller is responsible for binding the `TcpListener` *outside* any
+    /// lock so that the async bind does not block other lock waiters. This
+    /// method only does synchronous bookkeeping plus spawning the (non-blocking)
+    /// server task, so it is safe to call while holding a mutex.
+    pub fn install_listener(
+        &mut self,
+        new_addr: SocketAddr,
+        listener: tokio::net::TcpListener,
+        app: Router,
+    ) -> (Option<oneshot::Sender<()>>, Option<JoinHandle<()>>) {
+        // Capture old handles so the caller can shut them down outside the lock.
         let old_shutdown_tx = self.shutdown_tx.take();
         let old_handle = self.handle.take();
 
-        // Update config to new address and try to bind
         self.config.addr = new_addr;
-        match self.bind_and_spawn(app).await {
-            Ok(()) => {
-                // New listener is running, gracefully shut down the old one
-                if let Some(tx) = old_shutdown_tx {
-                    let _ = tx.send(());
-                }
-                if let Some(handle) = old_handle {
-                    let _ = handle.await;
-                }
-                Ok(())
+
+        // Spawn the new server task (non-blocking).
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        self.shutdown_tx = Some(shutdown_tx);
+
+        let handle = tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                    tracing::debug!("Webhook server shutting down");
+                })
+                .await
+            {
+                tracing::error!("Webhook server error: {}", e);
             }
-            Err(e) => {
-                // Restore old state; old listener remains active
-                self.config.addr = old_addr;
-                self.shutdown_tx = old_shutdown_tx;
-                self.handle = old_handle;
-                Err(e)
-            }
-        }
+        });
+        self.handle = Some(handle);
+
+        tracing::info!("Webhook server listening on {}", new_addr);
+
+        (old_shutdown_tx, old_handle)
     }
 
     /// Return the current bind address.
@@ -213,12 +215,21 @@ mod tests {
             "First server should respond to health check"
         );
 
-        // Restart on second port
-        let addr2 = format!("127.0.0.1:{}", port2).parse().unwrap();
-        server
-            .restart_with_addr(addr2)
+        // Restart on second port using two-phase approach
+        let addr2: SocketAddr = format!("127.0.0.1:{}", port2).parse().unwrap();
+        let app = server
+            .merged_router_clone()
+            .expect("Router should exist after start()");
+        let listener = tokio::net::TcpListener::bind(addr2)
             .await
-            .expect("Failed to restart with new addr");
+            .expect("Failed to bind to new addr");
+        let (old_tx, old_handle) = server.install_listener(addr2, listener, app);
+        if let Some(tx) = old_tx {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = old_handle {
+            let _ = handle.await;
+        }
 
         // Assert the address changed
         assert_eq!(
@@ -295,13 +306,18 @@ mod tests {
             .expect("Failed to send request");
         assert_eq!(response.status(), 200, "Server should be listening");
 
-        // Try to restart on an invalid address (port 0 is reserved, won't bind)
-        // Use port 1 which typically requires elevated privileges
+        // Try to restart on an invalid address (port 1 typically requires elevated privileges)
         let invalid_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
 
-        // Attempt restart (should fail)
-        let result = server.restart_with_addr(invalid_addr).await;
-        assert!(result.is_err(), "Restart with invalid address should fail");
+        // Attempt bind (should fail); server state is untouched because we
+        // never call install_listener on failure.
+        let app = server
+            .merged_router_clone()
+            .expect("Router should exist after start()");
+        let result = tokio::net::TcpListener::bind(invalid_addr).await;
+        assert!(result.is_err(), "Bind to privileged port should fail");
+        // `app` is dropped — server state unchanged (rollback by construction)
+        drop(app);
 
         // Verify the old address is still responding (rollback succeeded)
         let response = client

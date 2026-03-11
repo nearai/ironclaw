@@ -37,6 +37,8 @@ pub enum ExtensionKind {
     WasmTool,
     /// WASM channel module with hot-activation support.
     WasmChannel,
+    /// External channel via channel-relay service (Slack, etc.).
+    ChannelRelay,
 }
 
 impl std::fmt::Display for ExtensionKind {
@@ -45,6 +47,7 @@ impl std::fmt::Display for ExtensionKind {
             ExtensionKind::McpServer => write!(f, "mcp_server"),
             ExtensionKind::WasmTool => write!(f, "wasm_tool"),
             ExtensionKind::WasmChannel => write!(f, "wasm_channel"),
+            ExtensionKind::ChannelRelay => write!(f, "channel_relay"),
         }
     }
 }
@@ -99,6 +102,8 @@ pub enum ExtensionSource {
     },
     /// Discovered online (not yet validated for a specific source type).
     Discovered { url: String },
+    /// External channel via channel-relay service.
+    ChannelRelay { relay_url: String },
 }
 
 /// Hint about what authentication method is needed.
@@ -116,6 +121,8 @@ pub enum AuthHint {
     CapabilitiesAuth,
     /// No authentication needed.
     None,
+    /// OAuth via channel-relay service.
+    ChannelRelayOAuth,
 }
 
 /// Where a search result came from.
@@ -498,6 +505,9 @@ pub enum ExtensionError {
 
     #[error("Activation failed: {0}")]
     ActivationFailed(String),
+
+    #[error("Authentication required")]
+    AuthRequired,
 
     #[error("Installation failed: {0}")]
     InstallFailed(String),
@@ -976,6 +986,7 @@ mod tests {
                 ExtensionError::Config("missing key".into()),
                 "Config error: missing key",
             ),
+            (ExtensionError::AuthRequired, "Authentication required"),
             (
                 ExtensionError::Other("something broke".into()),
                 "something broke",

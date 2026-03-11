@@ -365,6 +365,7 @@ pub trait ChannelSecretUpdater: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::TEST_REDACT_SECRET_123;
 
     /// Stub tool that marks `"value"` as sensitive.
     struct SecretTool;
@@ -394,7 +395,7 @@ mod tests {
 
     #[test]
     fn tool_completed_redacts_sensitive_params_on_failure() {
-        let params = serde_json::json!({"name": "api_key", "value": "sk-secret-123"});
+        let params = serde_json::json!({"name": "api_key", "value": TEST_REDACT_SECRET_123});
         let err: Result<String, crate::error::Error> =
             Err(crate::error::ToolError::ExecutionFailed {
                 name: "secret_save".into(),
@@ -429,7 +430,7 @@ mod tests {
                 param_str
             );
             assert!(
-                !param_str.contains("sk-secret-123"),
+                !param_str.contains(TEST_REDACT_SECRET_123),
                 "raw secret should not appear: {}",
                 param_str
             );

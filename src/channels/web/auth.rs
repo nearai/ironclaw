@@ -83,14 +83,15 @@ pub async fn auth_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::{TEST_AUTH_SECRET_TOKEN, TEST_BEARER_TOKEN};
 
     #[test]
     fn test_auth_state_clone() {
         let state = AuthState {
-            token: "test-token".to_string(),
+            token: TEST_BEARER_TOKEN.to_string(),
         };
         let cloned = state.clone();
-        assert_eq!(cloned.token, "test-token");
+        assert_eq!(cloned.token, TEST_BEARER_TOKEN);
     }
 
     use axum::Router;
@@ -120,10 +121,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_valid_bearer_token_passes() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .uri("/api/chat/events")
-            .header("Authorization", "Bearer secret-token")
+            .header("Authorization", format!("Bearer {TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -132,7 +133,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_bearer_token_rejected() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .uri("/api/chat/events")
             .header("Authorization", "Bearer wrong-token")
@@ -144,9 +145,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_token_allowed_for_chat_events() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
-            .uri("/api/chat/events?token=secret-token")
+            .uri(format!("/api/chat/events?token={TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -155,9 +156,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_token_allowed_for_logs_events() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
-            .uri("/api/logs/events?token=secret-token")
+            .uri(format!("/api/logs/events?token={TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -166,9 +167,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_token_allowed_for_ws_upgrade() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
-            .uri("/api/chat/ws?token=secret-token")
+            .uri(format!("/api/chat/ws?token={TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -202,9 +203,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_token_rejected_for_non_sse_get() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
-            .uri("/api/chat/history?token=secret-token")
+            .uri(format!("/api/chat/history?token={TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -213,10 +214,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_token_rejected_for_post() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .method(Method::POST)
-            .uri("/api/chat/send?token=secret-token")
+            .uri(format!("/api/chat/send?token={TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -225,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_token_invalid_rejected() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .uri("/api/chat/events?token=wrong-token")
             .body(Body::empty())
@@ -236,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_auth_at_all_rejected() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .uri("/api/chat/events")
             .body(Body::empty())
@@ -247,11 +248,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_bearer_header_works_for_post() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .method(Method::POST)
             .uri("/api/chat/send")
-            .header("Authorization", "Bearer secret-token")
+            .header("Authorization", format!("Bearer {TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -260,10 +261,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_bearer_prefix_case_insensitive() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .uri("/api/chat/events")
-            .header("Authorization", "bearer secret-token")
+            .header("Authorization", format!("bearer {TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -272,10 +273,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_bearer_prefix_mixed_case() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .uri("/api/chat/events")
-            .header("Authorization", "BEARER secret-token")
+            .header("Authorization", format!("BEARER {TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -284,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_bearer_token_rejected() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .uri("/api/chat/events")
             .header("Authorization", "Bearer ")
@@ -296,10 +297,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_with_whitespace_rejected() {
-        let app = test_app("secret-token");
+        let app = test_app(TEST_AUTH_SECRET_TOKEN);
         let req = Request::builder()
             .uri("/api/chat/events")
-            .header("Authorization", "Bearer  secret-token")
+            .header("Authorization", format!("Bearer  {TEST_AUTH_SECRET_TOKEN}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();

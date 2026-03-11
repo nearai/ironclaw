@@ -887,13 +887,13 @@ impl Workspace {
                 Ok(_) => continue,
                 Err(WorkspaceError::DocumentNotFound { .. }) => {}
                 Err(e) => {
-                    tracing::warn!("Failed to check {}: {}", path, e);
+                    tracing::debug!("Failed to check {}: {}", path, e);
                     continue;
                 }
             }
 
             if let Err(e) = self.write(path, content).await {
-                tracing::warn!("Failed to seed {}: {}", path, e);
+                tracing::debug!("Failed to seed {}: {}", path, e);
             } else {
                 count += 1;
             }
@@ -977,7 +977,7 @@ impl Workspace {
                 Ok(_) => continue,
                 Err(WorkspaceError::DocumentNotFound { .. }) => {}
                 Err(e) => {
-                    tracing::warn!("Failed to check {}: {}", file_name, e);
+                    tracing::trace!("Failed to check {}: {}", file_name, e);
                     continue;
                 }
             }
