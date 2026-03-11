@@ -73,6 +73,10 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         | "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
 
+        // MiniMax
+        "MiniMax-M2.5" => Some((dec!(0.0000003), dec!(0.0000012))),
+        "MiniMax-M2.5-highspeed" => Some((dec!(0.0000006), dec!(0.0000024))),
+
         // Ollama / local models -- free
         _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
 
@@ -134,6 +138,16 @@ mod tests {
         let (input, output) = model_cost("mistral:latest").unwrap();
         assert_eq!(input, Decimal::ZERO);
         assert_eq!(output, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_minimax_costs() {
+        let (input, output) = model_cost("MiniMax-M2.5").unwrap();
+        assert!(input > Decimal::ZERO);
+        assert!(output > input);
+        let (input_hs, output_hs) = model_cost("MiniMax-M2.5-highspeed").unwrap();
+        assert!(input_hs > input); // highspeed is more expensive
+        assert!(output_hs > output);
     }
 
     #[test]

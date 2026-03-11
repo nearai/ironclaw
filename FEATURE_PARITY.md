@@ -244,7 +244,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
-| MiniMax | ✅ | ❌ | P3 | Regional endpoint selection |
+| MiniMax | ✅ | ✅ | - | OpenAI-compatible; regional endpoint via `MINIMAX_BASE_URL` |
 | GLM-5 | ✅ | ❌ | P3 | |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
 | llama.cpp (native) | ❌ | 🔮 | P3 | Rust bindings |
