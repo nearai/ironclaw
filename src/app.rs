@@ -389,8 +389,14 @@ impl AppBuilder {
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings(emb.clone());
             }
+            if self.config.memory.extraction_enabled {
+                ws = ws.with_max_facts(self.config.memory.max_facts_in_context);
+            }
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
+            if self.config.memory.extraction_enabled {
+                tools.register_memory_facts_tools(db.clone(), Arc::clone(&ws));
+            }
             Some(ws)
         } else {
             None

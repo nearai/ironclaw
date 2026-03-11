@@ -443,6 +443,35 @@ async fn async_main() -> anyhow::Result<()> {
         &components.dev_loaded_tool_names,
     )
     .await;
+
+    // Register memory extraction hook if enabled and database is available.
+    if config.memory.extraction_enabled {
+        if let Some(ref db) = components.db {
+            use ironclaw::workspace::FactExtractionConfig;
+
+            let extraction_config = FactExtractionConfig {
+                max_facts_per_session: config.memory.max_facts_per_session,
+                min_messages: config.memory.extraction_min_messages,
+                dedup_threshold: config.memory.dedup_threshold,
+                extraction_model: config.memory.extraction_model.clone(),
+            };
+
+            let hook = ironclaw::hooks::MemoryExtractorHook::new(
+                db.clone(),
+                components.llm.clone(),
+                components.embeddings.clone(),
+                extraction_config,
+            );
+
+            components
+                .hooks
+                .register_with_priority(std::sync::Arc::new(hook), 500)
+                .await;
+
+            tracing::info!("Memory extraction hook registered (OnSessionEnd)");
+        }
+    }
+
     tracing::info!(
         bundled = hook_bootstrap.bundled_hooks,
         plugin = hook_bootstrap.plugin_hooks,

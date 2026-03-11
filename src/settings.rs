@@ -99,6 +99,10 @@ pub struct Settings {
     /// Builder configuration.
     #[serde(default)]
     pub builder: BuilderSettings,
+
+    /// Memory fact extraction configuration.
+    #[serde(default)]
+    pub memory: MemorySettings,
 }
 
 /// Source for the secrets master key.
@@ -596,6 +600,57 @@ impl Default for BuilderSettings {
             max_iterations: default_builder_max_iterations(),
             timeout_secs: default_builder_timeout(),
             auto_register: true,
+        }
+    }
+}
+
+/// Memory fact extraction configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySettings {
+    /// Whether automatic fact extraction is enabled.
+    #[serde(default)]
+    pub extraction_enabled: bool,
+
+    /// Model override for fact extraction (e.g., "claude-3-5-haiku-20241022").
+    #[serde(default)]
+    pub extraction_model: Option<String>,
+
+    /// Maximum facts to inject into the system prompt.
+    #[serde(default = "default_max_facts_in_context")]
+    pub max_facts_in_context: usize,
+
+    /// TTL for facts in days (0 = no expiry).
+    #[serde(default)]
+    pub fact_ttl_days: u64,
+
+    /// Minimum messages to trigger extraction.
+    #[serde(default = "default_extraction_min_messages")]
+    pub extraction_min_messages: usize,
+
+    /// Maximum facts per extraction session.
+    #[serde(default = "default_max_facts_per_session")]
+    pub max_facts_per_session: usize,
+
+    /// Cosine similarity threshold for dedup (0.0-1.0).
+    #[serde(default = "default_dedup_threshold")]
+    pub dedup_threshold: f32,
+}
+
+fn default_max_facts_in_context() -> usize { 15 }
+fn default_extraction_min_messages() -> usize { 5 }
+fn default_max_facts_per_session() -> usize { 15 }
+fn default_dedup_threshold() -> f32 { 0.85 }
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            extraction_enabled: false,
+            extraction_model: None,
+            max_facts_in_context: default_max_facts_in_context(),
+            fact_ttl_days: 0,
+            extraction_min_messages: default_extraction_min_messages(),
+            max_facts_per_session: default_max_facts_per_session(),
+            dedup_threshold: default_dedup_threshold(),
         }
     }
 }

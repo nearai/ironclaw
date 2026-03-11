@@ -668,3 +668,61 @@ impl WorkspaceStore for PgBackend {
             .await
     }
 }
+
+// Stub FactStore for Postgres (not yet implemented — libSQL-first).
+#[async_trait]
+impl crate::db::FactStore for PgBackend {
+    async fn upsert_fact(&self, _id: Uuid, _user_id: &str, _agent_id: Option<Uuid>,
+        _content: &str, _category: &str, _confidence: f32, _source_session_id: Option<&str>,
+        _embedding: Option<&[f32]>, _metadata: Option<&str>,
+    ) -> Result<(), crate::error::WorkspaceError> {
+        Err(crate::error::WorkspaceError::SearchFailed {
+            reason: "FactStore not implemented for PostgreSQL backend".to_string(),
+        })
+    }
+    async fn search_facts(&self, _user_id: &str, _agent_id: Option<Uuid>, _query: &str,
+        _embedding: Option<&[f32]>, _limit: usize,
+    ) -> Result<Vec<crate::db::FactSearchResult>, crate::error::WorkspaceError> {
+        Ok(Vec::new())
+    }
+    async fn get_facts_by_category(&self, _user_id: &str, _agent_id: Option<Uuid>,
+        _category: &str, _limit: usize,
+    ) -> Result<Vec<crate::db::Fact>, crate::error::WorkspaceError> {
+        Ok(Vec::new())
+    }
+    async fn get_recent_facts(&self, _user_id: &str, _agent_id: Option<Uuid>,
+        _limit: usize,
+    ) -> Result<Vec<crate::db::Fact>, crate::error::WorkspaceError> {
+        Ok(Vec::new())
+    }
+    async fn get_fact(&self, _id: Uuid) -> Result<Option<crate::db::Fact>, crate::error::WorkspaceError> {
+        Ok(None)
+    }
+    async fn update_fact(&self, _id: Uuid, _content: &str, _confidence: f32,
+    ) -> Result<(), crate::error::WorkspaceError> {
+        Err(crate::error::WorkspaceError::SearchFailed {
+            reason: "FactStore not implemented for PostgreSQL backend".to_string(),
+        })
+    }
+    async fn delete_fact(&self, _id: Uuid) -> Result<(), crate::error::WorkspaceError> {
+        Err(crate::error::WorkspaceError::SearchFailed {
+            reason: "FactStore not implemented for PostgreSQL backend".to_string(),
+        })
+    }
+    async fn delete_expired_facts(&self) -> Result<u64, crate::error::WorkspaceError> {
+        Ok(0)
+    }
+    async fn log_extraction(&self, _entry: &crate::db::ExtractionLogEntry,
+    ) -> Result<(), crate::error::WorkspaceError> {
+        Ok(())
+    }
+    async fn find_similar_facts(&self, _user_id: &str, _agent_id: Option<Uuid>,
+        _embedding: &[f32], _threshold: f32, _limit: usize,
+    ) -> Result<Vec<crate::db::FactSearchResult>, crate::error::WorkspaceError> {
+        Ok(Vec::new())
+    }
+    async fn get_recent_transcript_for_user(&self, _user_id: &str, _max_messages: usize,
+    ) -> Result<Vec<(String, String)>, crate::error::WorkspaceError> {
+        Ok(Vec::new())
+    }
+}

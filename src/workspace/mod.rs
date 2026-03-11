@@ -43,6 +43,7 @@
 mod chunker;
 mod document;
 mod embeddings;
+pub mod fact_extractor;
 pub mod hygiene;
 #[cfg(feature = "postgres")]
 mod repository;
@@ -53,6 +54,7 @@ pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 pub use embeddings::{
     EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
 };
+pub use fact_extractor::{FactExtractionConfig, FactExtractor};
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
@@ -332,6 +334,8 @@ pub struct Workspace {
     storage: WorkspaceStorage,
     /// Embedding provider for semantic search.
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    /// Maximum facts to inject into the system prompt (None = disabled).
+    max_facts_in_context: Option<usize>,
 }
 
 impl Workspace {
@@ -343,6 +347,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Repo(Repository::new(pool)),
             embeddings: None,
+            max_facts_in_context: None,
         }
     }
 
@@ -355,6 +360,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Db(db),
             embeddings: None,
+            max_facts_in_context: None,
         }
     }
 
@@ -368,6 +374,17 @@ impl Workspace {
     pub fn with_embeddings(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embeddings = Some(provider);
         self
+    }
+
+    /// Set the maximum number of facts to inject into the system prompt.
+    pub fn with_max_facts(mut self, max_facts: usize) -> Self {
+        self.max_facts_in_context = if max_facts > 0 { Some(max_facts) } else { None };
+        self
+    }
+
+    /// Get the embedding provider, if configured.
+    pub fn embeddings(&self) -> &Option<Arc<dyn EmbeddingProvider>> {
+        &self.embeddings
     }
 
     /// Get the user ID.
@@ -658,6 +675,35 @@ impl Workspace {
                     "## Yesterday's Notes"
                 };
                 parts.push(format!("{}\n\n{}", header, doc.content));
+            }
+        }
+
+        // Inject remembered facts from automatic extraction (non-group-chat only).
+        // This reads from the memory_facts table populated by the FactExtractor.
+        if !is_group_chat {
+            if let Some(max_facts) = self.max_facts_in_context {
+                if let WorkspaceStorage::Db(ref db) = self.storage {
+                    match db
+                        .get_recent_facts(&self.user_id, self.agent_id, max_facts)
+                        .await
+                    {
+                        Ok(facts) if !facts.is_empty() => {
+                            let mut section =
+                                String::from("## Remembered Facts\n\nAutomatically extracted knowledge from past sessions:\n");
+                            for fact in &facts {
+                                section.push_str(&format!(
+                                    "- [{}] {}\n",
+                                    fact.category, fact.content
+                                ));
+                            }
+                            parts.push(section);
+                        }
+                        Ok(_) => {} // No facts yet
+                        Err(e) => {
+                            tracing::debug!("Failed to load memory facts: {}", e);
+                        }
+                    }
+                }
             }
         }
 

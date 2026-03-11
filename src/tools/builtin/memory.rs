@@ -497,6 +497,304 @@ impl Tool for MemoryTreeTool {
     }
 }
 
+// ========== Structured Fact Tools ==========
+
+use crate::db::Database;
+
+/// Tool for searching structured facts in the memory_facts table.
+///
+/// Uses hybrid FTS + semantic search to find relevant facts.
+pub struct MemoryFactsSearchTool {
+    db: Arc<dyn Database>,
+    workspace: Arc<Workspace>,
+}
+
+impl MemoryFactsSearchTool {
+    /// Create a new memory facts search tool.
+    pub fn new(db: Arc<dyn Database>, workspace: Arc<Workspace>) -> Self {
+        Self { db, workspace }
+    }
+}
+
+#[async_trait]
+impl Tool for MemoryFactsSearchTool {
+    fn name(&self) -> &str {
+        "memory_facts_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search structured facts extracted from past conversations. Returns atomic \
+         knowledge items (preferences, learned facts, procedures, context). Use this \
+         alongside memory_search for the most complete recall of past information."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language search query"
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Optional category filter: preference, learned, procedural, context",
+                    "enum": ["preference", "learned", "procedural", "context"]
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum results (default: 10, max: 50)",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 50
+                }
+            },
+            "required": ["query"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let query = require_str(&params, "query")?;
+        let category = params.get("category").and_then(|v| v.as_str());
+        let limit = params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10)
+            .min(50) as usize;
+
+        let user_id = &ctx.user_id;
+
+        // If category filter is specified, use category-based retrieval
+        if let Some(cat) = category {
+            let facts = self
+                .db
+                .get_facts_by_category(user_id, None, cat, limit)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Fact search failed: {}", e)))?;
+
+            let output = serde_json::json!({
+                "query": query,
+                "category_filter": cat,
+                "results": facts.iter().map(|f| serde_json::json!({
+                    "id": f.id.to_string(),
+                    "content": f.content,
+                    "category": f.category,
+                    "confidence": f.confidence,
+                    "updated_at": f.updated_at.to_rfc3339(),
+                })).collect::<Vec<_>>(),
+                "result_count": facts.len(),
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
+        // Try embedding-enhanced search if embeddings are available
+        let embedding = if let Some(embedder) = self.workspace.embeddings() {
+            embedder.embed(query).await.ok()
+        } else {
+            None
+        };
+
+        let results = self
+            .db
+            .search_facts(user_id, None, query, embedding.as_deref(), limit)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Fact search failed: {}", e)))?;
+
+        let output = serde_json::json!({
+            "query": query,
+            "results": results.iter().map(|r| serde_json::json!({
+                "id": r.fact.id.to_string(),
+                "content": r.fact.content,
+                "category": r.fact.category,
+                "confidence": r.fact.confidence,
+                "score": r.score,
+                "updated_at": r.fact.updated_at.to_rfc3339(),
+            })).collect::<Vec<_>>(),
+            "result_count": results.len(),
+        });
+
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false // Internal memory
+    }
+}
+
+/// Tool for managing structured facts (add/update/delete).
+pub struct MemoryFactsManageTool {
+    db: Arc<dyn Database>,
+}
+
+impl MemoryFactsManageTool {
+    /// Create a new memory facts manage tool.
+    pub fn new(db: Arc<dyn Database>) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl Tool for MemoryFactsManageTool {
+    fn name(&self) -> &str {
+        "memory_facts_manage"
+    }
+
+    fn description(&self) -> &str {
+        "Manage structured facts: add new facts, update existing ones, or delete outdated facts. \
+         Facts are atomic knowledge items automatically extracted from conversations. Use this \
+         to manually curate the fact store when auto-extraction misses or gets something wrong."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Action to perform: add, update, or delete",
+                    "enum": ["add", "update", "delete"]
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Fact ID (required for update and delete)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The fact content (required for add, optional for update)"
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Category: preference, learned, procedural, context (required for add)",
+                    "enum": ["preference", "learned", "procedural", "context"]
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "Confidence score 0.0-1.0 (default: 1.0)",
+                    "default": 1.0,
+                    "minimum": 0.0,
+                    "maximum": 1.0
+                }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let action = require_str(&params, "action")?;
+        let user_id = &ctx.user_id;
+
+        match action {
+            "add" => {
+                let content = require_str(&params, "content")?;
+                let category = params
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("learned");
+                let confidence = params
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0) as f32;
+
+                if content.trim().is_empty() {
+                    return Err(ToolError::InvalidParameters(
+                        "content cannot be empty".to_string(),
+                    ));
+                }
+
+                let id = uuid::Uuid::new_v4();
+                self.db
+                    .upsert_fact(
+                        id,
+                        user_id,
+                        None,
+                        content,
+                        category,
+                        confidence,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("Add fact failed: {}", e)))?;
+
+                let output = serde_json::json!({
+                    "status": "added",
+                    "id": id.to_string(),
+                    "content": content,
+                    "category": category,
+                    "confidence": confidence,
+                });
+                Ok(ToolOutput::success(output, start.elapsed()))
+            }
+            "update" => {
+                let id_str = require_str(&params, "id")?;
+                let id: uuid::Uuid = id_str
+                    .parse()
+                    .map_err(|_| ToolError::InvalidParameters("invalid fact ID".to_string()))?;
+
+                let content = require_str(&params, "content")?;
+                let confidence = params
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0) as f32;
+
+                self.db
+                    .update_fact(id, content, confidence)
+                    .await
+                    .map_err(|e| {
+                        ToolError::ExecutionFailed(format!("Update fact failed: {}", e))
+                    })?;
+
+                let output = serde_json::json!({
+                    "status": "updated",
+                    "id": id.to_string(),
+                    "content": content,
+                    "confidence": confidence,
+                });
+                Ok(ToolOutput::success(output, start.elapsed()))
+            }
+            "delete" => {
+                let id_str = require_str(&params, "id")?;
+                let id: uuid::Uuid = id_str
+                    .parse()
+                    .map_err(|_| ToolError::InvalidParameters("invalid fact ID".to_string()))?;
+
+                self.db.delete_fact(id).await.map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Delete fact failed: {}", e))
+                })?;
+
+                let output = serde_json::json!({
+                    "status": "deleted",
+                    "id": id.to_string(),
+                });
+                Ok(ToolOutput::success(output, start.elapsed()))
+            }
+            _ => Err(ToolError::InvalidParameters(format!(
+                "unknown action '{}': use add, update, or delete",
+                action
+            ))),
+        }
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false // Internal tool
+    }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(20, 200))
+    }
+}
+
 #[cfg(all(test, feature = "postgres"))]
 mod tests {
     use super::*;

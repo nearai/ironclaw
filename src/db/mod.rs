@@ -41,6 +41,46 @@ use crate::history::{
 use crate::workspace::{MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::{SearchConfig, SearchResult};
 
+// ==================== Memory Facts ====================
+
+/// A structured fact extracted from conversations.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Fact {
+    pub id: Uuid,
+    pub user_id: String,
+    pub agent_id: Option<Uuid>,
+    pub content: String,
+    pub category: String,
+    pub confidence: f32,
+    pub source_session_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub metadata: serde_json::Value,
+}
+
+/// Result of a fact search (fact + relevance score).
+#[derive(Debug, Clone)]
+pub struct FactSearchResult {
+    pub fact: Fact,
+    pub score: f32,
+}
+
+/// Log entry for a fact extraction run.
+#[derive(Debug, Clone)]
+pub struct ExtractionLogEntry {
+    pub id: Uuid,
+    pub session_id: String,
+    pub user_id: String,
+    pub agent_id: Option<Uuid>,
+    pub extracted_at: DateTime<Utc>,
+    pub facts_added: i32,
+    pub facts_updated: i32,
+    pub facts_skipped: i32,
+    pub duration_ms: Option<i64>,
+    pub model_used: Option<String>,
+}
+
 /// Create a database backend from configuration, run migrations, and return it.
 ///
 /// This is the shared helper for CLI commands and other call sites that need
@@ -401,6 +441,95 @@ pub trait WorkspaceStore: Send + Sync {
     ) -> Result<Vec<SearchResult>, WorkspaceError>;
 }
 
+#[async_trait]
+pub trait FactStore: Send + Sync {
+    /// Insert a new fact or update an existing one by ID.
+    async fn upsert_fact(
+        &self,
+        id: Uuid,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        content: &str,
+        category: &str,
+        confidence: f32,
+        source_session_id: Option<&str>,
+        embedding: Option<&[f32]>,
+        metadata: Option<&str>,
+    ) -> Result<(), WorkspaceError>;
+
+    /// Search facts using hybrid FTS + vector search.
+    async fn search_facts(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        query: &str,
+        embedding: Option<&[f32]>,
+        limit: usize,
+    ) -> Result<Vec<FactSearchResult>, WorkspaceError>;
+
+    /// Get facts by category.
+    async fn get_facts_by_category(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        category: &str,
+        limit: usize,
+    ) -> Result<Vec<Fact>, WorkspaceError>;
+
+    /// Get the most recently updated facts.
+    async fn get_recent_facts(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<Vec<Fact>, WorkspaceError>;
+
+    /// Get a single fact by ID.
+    async fn get_fact(&self, id: Uuid) -> Result<Option<Fact>, WorkspaceError>;
+
+    /// Update a fact's content and confidence.
+    async fn update_fact(
+        &self,
+        id: Uuid,
+        content: &str,
+        confidence: f32,
+    ) -> Result<(), WorkspaceError>;
+
+    /// Delete a fact by ID.
+    async fn delete_fact(&self, id: Uuid) -> Result<(), WorkspaceError>;
+
+    /// Delete all expired facts. Returns the count deleted.
+    async fn delete_expired_facts(&self) -> Result<u64, WorkspaceError>;
+
+    /// Log a fact extraction run.
+    async fn log_extraction(
+        &self,
+        entry: &ExtractionLogEntry,
+    ) -> Result<(), WorkspaceError>;
+
+    /// Find facts similar to the given embedding (for dedup).
+    /// Returns facts with cosine similarity > threshold.
+    async fn find_similar_facts(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        embedding: &[f32],
+        threshold: f32,
+        limit: usize,
+    ) -> Result<Vec<FactSearchResult>, WorkspaceError>;
+
+    /// Get recent conversation transcript for a user (for extraction).
+    ///
+    /// Returns `(role, content)` pairs from the user's most recently active
+    /// conversation, ordered chronologically. Used by the memory extraction
+    /// hook to build a transcript for fact extraction.
+    async fn get_recent_transcript_for_user(
+        &self,
+        user_id: &str,
+        max_messages: usize,
+    ) -> Result<Vec<(String, String)>, WorkspaceError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -414,6 +543,7 @@ pub trait Database:
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore
+    + FactStore
     + Send
     + Sync
 {

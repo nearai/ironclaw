@@ -7,6 +7,7 @@
 //! - In-memory (for testing)
 
 mod conversations;
+mod facts;
 mod jobs;
 mod routines;
 mod sandbox;

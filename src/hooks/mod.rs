@@ -15,6 +15,7 @@
 pub mod bootstrap;
 pub mod bundled;
 pub mod hook;
+pub mod memory_extractor;
 pub mod registry;
 
 pub use bootstrap::{HookBootstrapSummary, bootstrap_hooks};
@@ -22,4 +23,5 @@ pub use bundled::{
     HookBundleConfig, HookRegistrationSummary, register_bundle, register_bundled_hooks,
 };
 pub use hook::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint};
+pub use memory_extractor::MemoryExtractorHook;
 pub use registry::HookRegistry;

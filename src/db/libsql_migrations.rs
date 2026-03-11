@@ -565,4 +565,80 @@ INSERT OR IGNORE INTO leak_detection_patterns (id, name, pattern, severity, acti
     ('550e8400-e29b-41d4-a716-446655440011', 'mailchimp_api_key', '[a-f0-9]{32}-us[0-9]{1,2}', 'medium', 'block', 1, datetime('now')),
     ('550e8400-e29b-41d4-a716-446655440012', 'high_entropy_hex', '(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])', 'medium', 'warn', 1, datetime('now'));
 
+-- ==================== Memory Facts (auto-extracted structured knowledge) ====================
+
+CREATE TABLE IF NOT EXISTS memory_facts (
+    _rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    agent_id TEXT,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'general',
+    confidence REAL NOT NULL DEFAULT 1.0,
+    source_session_id TEXT,
+    embedding F32_BLOB(1536),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_facts_user ON memory_facts(user_id, agent_id);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_category ON memory_facts(user_id, category);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_updated ON memory_facts(updated_at DESC);
+
+-- Vector index for semantic dedup/search
+CREATE INDEX IF NOT EXISTS idx_memory_facts_embedding
+    ON memory_facts (libsql_vector_idx(embedding));
+
+-- FTS5 for full-text search on facts
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5(
+    content,
+    content='memory_facts',
+    content_rowid='_rowid'
+);
+
+-- Triggers to keep FTS5 in sync with memory_facts
+CREATE TRIGGER IF NOT EXISTS memory_facts_fts_insert AFTER INSERT ON memory_facts BEGIN
+    INSERT INTO memory_facts_fts(rowid, content) VALUES (new._rowid, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_facts_fts_delete AFTER DELETE ON memory_facts BEGIN
+    INSERT INTO memory_facts_fts(memory_facts_fts, rowid, content)
+        VALUES ('delete', old._rowid, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_facts_fts_update AFTER UPDATE ON memory_facts BEGIN
+    INSERT INTO memory_facts_fts(memory_facts_fts, rowid, content)
+        VALUES ('delete', old._rowid, old.content);
+    INSERT INTO memory_facts_fts(rowid, content) VALUES (new._rowid, new.content);
+END;
+
+-- Auto-update updated_at on memory_facts
+CREATE TRIGGER IF NOT EXISTS update_memory_facts_updated_at
+    AFTER UPDATE ON memory_facts
+    FOR EACH ROW
+    WHEN NEW.updated_at = OLD.updated_at
+    BEGIN
+        UPDATE memory_facts SET updated_at = datetime('now') WHERE id = NEW.id;
+    END;
+
+-- ==================== Memory Extraction Log ====================
+
+CREATE TABLE IF NOT EXISTS memory_extraction_log (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    agent_id TEXT,
+    extracted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    facts_added INTEGER NOT NULL DEFAULT 0,
+    facts_updated INTEGER NOT NULL DEFAULT 0,
+    facts_skipped INTEGER NOT NULL DEFAULT 0,
+    duration_ms INTEGER,
+    model_used TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_extraction_log_session ON memory_extraction_log(session_id);
+CREATE INDEX IF NOT EXISTS idx_extraction_log_user ON memory_extraction_log(user_id);
+
 "#;

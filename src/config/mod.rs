@@ -14,6 +14,7 @@ mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
 mod llm;
+mod memory;
 mod routines;
 mod safety;
 mod sandbox;
@@ -40,6 +41,7 @@ pub use self::llm::{
     AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
     OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
 };
+pub use self::memory::MemoryConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
@@ -74,6 +76,7 @@ pub struct Config {
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
     pub skills: SkillsConfig,
+    pub memory: MemoryConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
 
@@ -145,6 +148,7 @@ impl Config {
                 installed_dir: installed_skills_dir,
                 ..SkillsConfig::default()
             },
+            memory: MemoryConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
         }
     }
@@ -269,6 +273,7 @@ impl Config {
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
+            memory: MemoryConfig::resolve(settings)?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },

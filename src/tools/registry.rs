@@ -18,10 +18,10 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    WriteFileTool,
+    MemoryFactsManageTool, MemoryFactsSearchTool, MemoryReadTool, MemorySearchTool,
+    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
+    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -300,6 +300,24 @@ impl ToolRegistry {
         self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
 
         tracing::info!("Registered 4 memory tools");
+    }
+
+    /// Register structured fact memory tools.
+    ///
+    /// Fact tools provide search and manage operations on the `memory_facts`
+    /// table. They complement the document-based memory tools.
+    pub fn register_memory_facts_tools(
+        &self,
+        db: Arc<dyn Database>,
+        workspace: Arc<Workspace>,
+    ) {
+        self.register_sync(Arc::new(MemoryFactsSearchTool::new(
+            Arc::clone(&db),
+            workspace,
+        )));
+        self.register_sync(Arc::new(MemoryFactsManageTool::new(db)));
+
+        tracing::info!("Registered 2 memory facts tools");
     }
 
     /// Register job management tools.
