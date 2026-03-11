@@ -30,7 +30,7 @@ I18n.register('zh-CN', {
   'tab.jobs': '任务',
   'tab.routines': '定时任务',
   'tab.extensions': '插件扩展',
-  'tab.skills': 'AI 技能',
+  'tab.skills': '技能',
   'tab.logs': '日志',
   
   // 状态

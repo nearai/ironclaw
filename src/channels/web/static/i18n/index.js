@@ -1,4 +1,3 @@
-// IronClaw i18n 核心模块
 // Lightweight internationalization implementation with dynamic language switching
 
 const I18n = {

@@ -5,7 +5,7 @@ I18n.register('en', {
   'auth.title': 'IronClaw',
   'auth.tagline': 'Secure AI Assistant',
   'auth.tokenLabel': 'Gateway Token',
-  'auth.tokenPlaceholder': 'Paste your gateway token',
+  'auth.tokenPlaceholder': 'Paste your token',
   'auth.connect': 'Connect',
   'auth.errorRequired': 'Token required',
   'auth.errorInvalid': 'Invalid token',

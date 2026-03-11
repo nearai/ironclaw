@@ -1151,7 +1151,9 @@ function showAuthCard(data) {
 
   const tokenInput = document.createElement('input');
   tokenInput.type = 'password';
-  tokenInput.placeholder = data.instructions || I18n.t('auth.tokenPlaceholder');
+  tokenInput.placeholder = data.instructions
+    || I18n.t('auth.extensionTokenPlaceholder')
+    || I18n.t('auth.tokenPlaceholder');
   tokenInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
   });
@@ -2227,7 +2229,7 @@ function renderMcpServerCard(entry, installedExt) {
         body: { name: entry.name, kind: entry.kind },
       }).then(function(res) {
         if (res.success) {
-          showToast(I18n.t('ext.installed', { name: entry.display_name }), 'success');
+          showToast(I18n.t('extensions.installedSuccess', { name: entry.display_name }), 'success');
         } else {
           showToast(I18n.t('ext.install') + ': ' + (res.message || 'unknown error'), 'error');
         }

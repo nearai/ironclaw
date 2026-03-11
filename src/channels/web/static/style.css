@@ -3917,7 +3917,7 @@ mark {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 4px;
-  min-width: 140px;
+  min-width: 120px;
   z-index: 1000;
   box-shadow: var(--shadow);
 }

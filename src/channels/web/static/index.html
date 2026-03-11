@@ -45,7 +45,8 @@
     <div class="restart-modal-content">
       <div class="restart-modal-header">
         <h2 data-i18n="restart.title">Restart IronClaw Instance</h2>
-        <button class="restart-modal-close" onclick="cancelRestart()" data-i18n-attr="title" title="Close">×</button>
+        <button class="restart-modal-close" onclick="cancelRestart()" data-i18n="restart.closeTooltip" data-i18n-attr="title"
+          title="Close">×</button>
       </div>
       <div class="restart-modal-body">
         <p class="restart-modal-description" data-i18n="restart.description">
@@ -95,10 +96,11 @@
       
       <!-- Language Switcher -->
       <div class="language-switcher">
-        <button class="language-btn" id="language-btn" onclick="toggleLanguageMenu()" title="Switch Language">🌐</button>
+        <button class="language-btn" id="language-btn" type="button" onclick="toggleLanguageMenu()" title="Switch Language"
+          aria-label="Switch language" aria-haspopup="true" aria-expanded="false" aria-controls="language-menu">🌐</button>
         <div class="language-menu" id="language-menu" style="display: none;">
-          <div class="language-option" onclick="switchLanguage('en')" data-lang="en">English</div>
-          <div class="language-option" onclick="switchLanguage('zh-CN')" data-lang="zh-CN">简体中文</div>
+          <button type="button" class="language-option" onclick="switchLanguage('en')" data-lang="en">English</button>
+          <button type="button" class="language-option" onclick="switchLanguage('zh-CN')" data-lang="zh-CN">简体中文</button>
         </div>
       </div>
       
@@ -115,7 +117,8 @@
         <span id="sse-status" data-i18n="status.connected">Connected</span>
         <div class="gateway-popover" id="gateway-popover"></div>
       </div>
-      <button class="restart-btn" id="restart-btn" onclick="triggerRestart()" data-i18n-attr="title" title="Gracefully restart the process" style="display: none;">
+      <button class="restart-btn" id="restart-btn" onclick="triggerRestart()" data-i18n="status.restartTooltip"
+        data-i18n-attr="title" title="Gracefully restart the process" style="display: none;">
         <svg id="restart-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M23 4v6h-6"></path>
           <path d="M1 20v-6h6"></path>
@@ -129,9 +132,11 @@
     <div class="tab-panel active" id="tab-chat">
       <div class="thread-sidebar" id="thread-sidebar">
         <div class="thread-sidebar-header">
-          <button class="thread-new-btn" onclick="createNewThread()" data-i18n-attr="title" title="New thread (Ctrl/Cmd+N)">+</button>
+          <button class="thread-new-btn" onclick="createNewThread()" data-i18n="chat.newThread" data-i18n-attr="title"
+            title="New thread (Ctrl/Cmd+N)">+</button>
           <div class="spacer"></div>
-          <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" data-i18n-attr="title" title="Toggle sidebar">&laquo;</button>
+          <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" data-i18n="chat.toggleSidebar"
+            data-i18n-attr="title" title="Toggle sidebar">&laquo;</button>
         </div>
         <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
           <span class="assistant-label" id="assistant-label" data-i18n="chat.assistant">Assistant</span>
@@ -149,7 +154,8 @@
           <div id="image-preview-strip" class="image-preview-strip"></div>
           <textarea id="chat-input" data-i18n="chat.inputPlaceholder" data-i18n-attr="placeholder" placeholder="Message or / for commands..." rows="1"></textarea>
           <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
-          <button id="attach-btn" class="attach-btn" data-i18n-attr="title" title="Attach images" aria-label="Attach images">&#x1F4CE;</button>
+          <button id="attach-btn" class="attach-btn" data-i18n="chat.attachImages" data-i18n-attr="title" title="Attach images"
+            aria-label="Attach images">&#x1F4CE;</button>
           <button id="send-btn" onclick="sendMessage()" data-i18n="chat.send">Send</button>
         </div>
       </div>
@@ -223,7 +229,7 @@
           </select>
           <input type="text" id="logs-target-filter" placeholder="Filter by target...">
           <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> <span data-i18n="logs.autoScroll">Auto-scroll</span></label>
-          <button id="logs-pause-btn" onclick="toggleLogsPause()" data-i18n="btn.cancel">Pause</button>
+          <button id="logs-pause-btn" onclick="toggleLogsPause()" data-i18n="logs.pause">Pause</button>
           <button onclick="clearLogs()" data-i18n="logs.clear">Clear</button>
         </div>
         <div class="logs-output" id="logs-output"></div>
