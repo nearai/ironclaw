@@ -108,6 +108,76 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 }
 ```
 
+### List Issue Comments
+
+```json
+{
+  "action": "list_issue_comments",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "issue_number": 42,
+  "limit": 10
+}
+```
+
+### Add Issue Comment
+
+```json
+{
+  "action": "create_issue_comment",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "issue_number": 42,
+  "body": "Thanks for reporting this!"
+}
+```
+
+### List PR Review Comments
+
+```json
+{
+  "action": "list_pull_request_comments",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "pr_number": 42,
+  "limit": 30
+}
+```
+
+### Reply to PR Review Comment
+
+```json
+{
+  "action": "reply_pull_request_comment",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "comment_id": 123456789,
+  "body": "Fixed in the latest commit."
+}
+```
+
+### Get PR Reviews
+
+```json
+{
+  "action": "get_pull_request_reviews",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "pr_number": 42
+}
+```
+
+### Get Combined Status
+
+```json
+{
+  "action": "get_combined_status",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "ref": "main"
+}
+```
+
 ### Get File Content
 
 ```json

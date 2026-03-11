@@ -160,7 +160,7 @@ enum GitHubAction {
     ReplyPullRequestComment {
         owner: String,
         repo: String,
-        comment_id: u32,
+        comment_id: u64,
         body: String,
     },
     #[serde(rename = "get_pull_request_reviews")]
@@ -803,7 +803,7 @@ fn list_pull_request_comments(
 fn reply_pull_request_comment(
     owner: &str,
     repo: &str,
-    comment_id: u32,
+    comment_id: u64,
     body: &str,
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
@@ -1042,11 +1042,11 @@ fn get_workflow_runs(
 }
 
 fn header_value<'a>(headers: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    let lower = key.to_ascii_lowercase();
     headers
-        .get(key)
-        .or_else(|| headers.get(&key.to_ascii_lowercase()))
-        .or_else(|| headers.get(&key.to_ascii_uppercase()))
-        .map(String::as_str)
+        .iter()
+        .find(|(k, _)| k.to_ascii_lowercase() == lower)
+        .map(|(_, v)| v.as_str())
 }
 
 fn handle_webhook(webhook: GitHubWebhookRequest) -> Result<String, String> {
@@ -1120,22 +1120,6 @@ fn github_enriched_payload(
         }
     }
 
-    fn put_string_normalized(
-        obj: &mut serde_json::Map<String, serde_json::Value>,
-        key: &str,
-        val: Option<String>,
-    ) {
-        let should_set = match obj.get(key) {
-            None => true,
-            Some(existing) => !existing.is_string(),
-        };
-        if should_set {
-            if let Some(v) = val {
-                obj.insert(key.to_string(), serde_json::Value::String(v));
-            }
-        }
-    }
-
     let mut obj = payload
         .as_object()
         .cloned()
@@ -1165,13 +1149,13 @@ fn github_enriched_payload(
             .and_then(|v| v.as_str())
             .map(|s| serde_json::Value::String(s.to_string())),
     );
-    put_string_normalized(
+    put_if_missing(
         &mut obj,
-        "repository",
+        "repository_name",
         payload
             .pointer("/repository/full_name")
             .and_then(|v| v.as_str())
-            .map(ToString::to_string),
+            .map(|s| serde_json::Value::String(s.to_string())),
     );
     put_if_missing(
         &mut obj,
@@ -1181,13 +1165,13 @@ fn github_enriched_payload(
             .and_then(|v| v.as_str())
             .map(|s| serde_json::Value::String(s.to_string())),
     );
-    put_string_normalized(
+    put_if_missing(
         &mut obj,
-        "sender",
+        "sender_login",
         payload
             .pointer("/sender/login")
             .and_then(|v| v.as_str())
-            .map(ToString::to_string),
+            .map(|s| serde_json::Value::String(s.to_string())),
     );
     put_if_missing(
         &mut obj,
@@ -1487,16 +1471,6 @@ const SCHEMA: &str = r#"{
                 "limit": { "type": "integer", "default": 30 }
             },
             "required": ["action", "owner", "repo"]
-        },
-        {
-            "properties": {
-                "action": { "const": "handle_webhook" },
-                "webhook": {
-                    "type": "object",
-                    "description": "Generic webhook payload envelope from core runtime"
-                }
-            },
-            "required": ["action", "webhook"]
         }
     ]
 }"#;
@@ -1524,19 +1498,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_event_in_create_pr_review() {
-        let valid = ["APPROVE", "REQUEST_CHANGES", "COMMENT"];
-        // Ensure valid inputs are accepted
-        for event in valid {
-            assert!(valid.contains(&event));
-        }
-    }
-
-    #[test]
-    fn test_validate_merge_method() {
-        let valid = ["merge", "squash", "rebase"];
-        assert!(valid.contains(&"merge"));
-        assert!(!valid.contains(&"invalid"));
+    fn test_header_value_case_insensitive() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Github-Event".to_string(), "push".to_string());
+        assert_eq!(header_value(&headers, "x-github-event"), Some("push"));
+        assert_eq!(header_value(&headers, "X-GITHUB-EVENT"), Some("push"));
+        assert_eq!(header_value(&headers, "X-Github-Event"), Some("push"));
+        assert_eq!(header_value(&headers, "x-nonexistent"), None);
     }
 
     #[test]
@@ -1592,9 +1560,11 @@ mod tests {
         let enriched =
             github_enriched_payload("issue_comment", &headers, &payload, "issue.comment.created");
         assert_eq!(
-            enriched.get("repository").and_then(|v| v.as_str()),
+            enriched.get("repository_name").and_then(|v| v.as_str()),
             Some("nearai/ironclaw")
         );
+        // Original repository object is preserved
+        assert!(enriched.get("repository").and_then(|v| v.as_object()).is_some());
         assert_eq!(
             enriched.get("issue_number").and_then(|v| v.as_i64()),
             Some(77)

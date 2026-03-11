@@ -24,6 +24,7 @@ use ironclaw::llm::registry::ProviderProtocol;
 use ironclaw::llm::{
     SessionConfig as LlmSessionConfig, SessionManager as LlmSessionManager, create_llm_provider,
 };
+use ironclaw::secrets::SecretsStore;
 use ironclaw::tools::{Tool, ToolError, ToolOutput};
 
 use crate::support::test_channel::{TestChannel, TestChannelHandle};
@@ -86,6 +87,14 @@ impl Tool for MockGithubWebhookTool {
             Duration::from_millis(1),
         ))
     }
+
+    fn webhook_capability(&self) -> Option<ironclaw::tools::wasm::WebhookCapability> {
+        Some(ironclaw::tools::wasm::WebhookCapability {
+            secret_name: Some("github_webhook_secret".to_string()),
+            secret_header: Some("x-webhook-secret".to_string()),
+            ..Default::default()
+        })
+    }
 }
 
 pub struct GatewayWorkflowHarness {
@@ -134,10 +143,13 @@ impl GatewayWorkflowHarness {
             model: model.to_string(),
             extra_headers: Vec::new(),
             oauth_token: None,
+            cache_retention: Default::default(),
+            unsupported_params: Vec::new(),
         });
 
         let llm_session = Arc::new(LlmSessionManager::new(LlmSessionConfig::default()));
         let llm = create_llm_provider(&config.llm, Arc::clone(&llm_session))
+            .await
             .expect("failed to create openai-compatible provider");
 
         let log_broadcaster = Arc::new(LogBroadcaster::new());
@@ -214,6 +226,7 @@ impl GatewayWorkflowHarness {
             skill_registry: components.skill_registry.clone(),
             skill_catalog: components.skill_catalog.clone(),
             chat_rate_limiter: RateLimiter::new(120, 60),
+            oauth_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: Some(Arc::clone(&components.cost_guard)),
             routine_engine: Arc::clone(&routine_slot),
@@ -249,6 +262,8 @@ impl GatewayWorkflowHarness {
                 max_concurrent_routines: 4,
                 default_cooldown_secs: 300,
                 max_lightweight_tokens: 4096,
+                lightweight_tools_enabled: true,
+                lightweight_max_iterations: 3,
             }),
             Some(Arc::clone(&components.context_manager)),
             Some(Arc::clone(&agent_session_manager)),
@@ -273,11 +288,27 @@ impl GatewayWorkflowHarness {
         .await
         .expect("failed to start gateway server");
 
+        let webhook_secrets = Arc::new(ironclaw::secrets::InMemorySecretsStore::new(Arc::new(
+            ironclaw::secrets::SecretsCrypto::new(SecretString::from(
+                "test-key-at-least-32-chars-long!!".to_string(),
+            ))
+            .expect("crypto"),
+        )));
+        webhook_secrets
+            .create(
+                &user_id,
+                ironclaw::secrets::CreateSecretParams::new(
+                    "github_webhook_secret",
+                    "test-webhook-secret",
+                ),
+            )
+            .await
+            .expect("store webhook secret");
         let webhook_state = ironclaw::webhooks::ToolWebhookState {
             tools: Arc::clone(gateway_state.tool_registry.as_ref().expect("tool registry")),
             routine_engine: Arc::clone(&routine_slot),
             user_id: user_id.clone(),
-            secrets_store: None,
+            secrets_store: Some(webhook_secrets as Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>),
         };
         let webhook_app = ironclaw::webhooks::routes(webhook_state);
         let webhook_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -445,6 +476,7 @@ impl GatewayWorkflowHarness {
         self.client
             .post(format!("{}/webhook/tools/github", self.webhook_base_url()))
             .header("x-github-event", event)
+            .header("x-webhook-secret", "test-webhook-secret")
             .json(&payload)
             .send()
             .await
