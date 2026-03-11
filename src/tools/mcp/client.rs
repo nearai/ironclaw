@@ -246,9 +246,19 @@ impl McpClient {
     }
 
     /// Build the headers map for a request (auth, session-id, custom headers).
+    ///
+    /// Custom headers are applied first. OAuth token injection is skipped if the
+    /// user has explicitly configured an Authorization header, so user-provided
+    /// credentials are never silently overwritten.
     async fn build_request_headers(&self) -> Result<HashMap<String, String>, ToolError> {
         let mut headers = self.custom_headers.clone();
-        if let Some(token) = self.get_access_token().await? {
+
+        // Only inject OAuth token if the user hasn't set a custom Authorization header.
+        let has_custom_auth = self
+            .custom_headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"));
+        if !has_custom_auth && let Some(token) = self.get_access_token().await? {
             headers.insert("Authorization".to_string(), format!("Bearer {}", token));
         }
         if let Some(ref session_manager) = self.session_manager
