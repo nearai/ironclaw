@@ -938,12 +938,24 @@ pub(super) async fn execute_chat_tool_standalone(
     job_ctx: &crate::context::JobContext,
     original_user_intent: &str,
 ) -> Result<String, Error> {
+    // Redact sensitive parameters before any external exposure (judge LLM, logs).
+    // This must happen before the judge call to avoid sending secrets to a
+    // third-party endpoint configured via SAFETY_LLM_JUDGE_BASE_URL.
+    let safe_params = {
+        let tool_opt = tools.get(tool_name).await;
+        let sensitive = tool_opt
+            .as_ref()
+            .map(|t| t.sensitive_params())
+            .unwrap_or(&[]);
+        redact_params(params, sensitive)
+    };
+
     // LLM-as-Judge: semantic evaluation AFTER heuristic checks, BEFORE execution.
     // No-op when SAFETY_LLM_JUDGE_ENABLED=false (default) or intent is empty
     // (approval-resumed calls where the user already explicitly authorised the tool).
     if !original_user_intent.is_empty() {
         safety
-            .llm_judge_tool_call(tool_name, params, original_user_intent)
+            .llm_judge_tool_call(tool_name, &safe_params, original_user_intent)
             .await?;
     }
     crate::tools::execute::execute_tool_with_safety(tools, safety, tool_name, params, job_ctx).await
