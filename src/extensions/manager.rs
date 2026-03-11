@@ -27,8 +27,8 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpClient;
 use crate::tools::mcp::auth::{
-    PkceChallenge, authorize_mcp_server, build_authorization_url, discover_full_oauth_metadata,
-    find_available_port, is_authenticated, register_client,
+    authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata, find_available_port,
+    is_authenticated, register_client,
 };
 use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::session::McpSessionManager;
@@ -1713,29 +1713,45 @@ impl ExtensionManager {
             return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
         }
 
-        // Run the full OAuth flow (opens browser, waits for callback)
+        // In gateway mode, build an auth URL and return it for the frontend to
+        // open in the same browser. The gateway's /oauth/callback handler will
+        // complete the token exchange.
+        if crate::cli::oauth_defaults::use_gateway_callback() {
+            return match self.auth_mcp_build_url(name, &server).await {
+                Ok(result) => Ok(result),
+                Err(_) => Ok(AuthResult::awaiting_token(
+                    name,
+                    ExtensionKind::McpServer,
+                    format!(
+                        "Server '{}' does not support OAuth. \
+                         Please provide an API token/key for this server.",
+                        name
+                    ),
+                    None,
+                )),
+            };
+        }
+
+        // CLI/local mode: run the full blocking OAuth flow (opens browser, waits for callback)
         match authorize_mcp_server(&server, &self.secrets, &self.user_id).await {
             Ok(_token) => {
                 tracing::info!("MCP server '{}' authenticated via OAuth", name);
                 Ok(AuthResult::authenticated(name, ExtensionKind::McpServer))
             }
             Err(crate::tools::mcp::auth::AuthError::NotSupported) => {
-                // Server doesn't support OAuth, try building a URL first
+                // Server doesn't support OAuth, try building a URL
                 match self.auth_mcp_build_url(name, &server).await {
                     Ok(result) => Ok(result),
-                    Err(_) => {
-                        // No OAuth, no DCR: fall back to manual token entry
-                        Ok(AuthResult::awaiting_token(
-                            name,
-                            ExtensionKind::McpServer,
-                            format!(
-                                "Server '{}' does not support OAuth. \
-                                 Please provide an API token/key for this server.",
-                                name
-                            ),
-                            None,
-                        ))
-                    }
+                    Err(_) => Ok(AuthResult::awaiting_token(
+                        name,
+                        ExtensionKind::McpServer,
+                        format!(
+                            "Server '{}' does not support OAuth. \
+                             Please provide an API token/key for this server.",
+                            name
+                        ),
+                        None,
+                    )),
                 }
             }
             Err(e) => {
@@ -1754,8 +1770,12 @@ impl ExtensionManager {
         }
     }
 
-    /// Build an auth URL for cases where non-interactive auth is needed
-    /// (e.g., running via Telegram where we can't open a browser).
+    /// Build an auth URL for MCP OAuth.
+    ///
+    /// In gateway mode, stores a `PendingOAuthFlow` so the web gateway's
+    /// `/oauth/callback` handler can complete the token exchange — the auth
+    /// URL is sent to the frontend which opens it in the same browser.
+    /// In local/CLI mode, builds the URL for the user to open manually.
     async fn auth_mcp_build_url(
         &self,
         name: &str,
@@ -1766,58 +1786,141 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
+        use crate::cli::oauth_defaults;
+
+        let is_gateway = oauth_defaults::use_gateway_callback();
+
+        // Build redirect URI: gateway uses the public callback URL,
+        // local mode binds a random port.
+        let redirect_uri = if is_gateway {
+            format!("{}/callback", oauth_defaults::callback_url())
+        } else {
+            let port = find_available_port()
+                .await
+                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+            format!("http://localhost:{}/callback", port.1)
+        };
+
         // Try DCR if no client_id configured
-        let (client_id, redirect_uri) = if let Some(ref oauth) = server.oauth {
-            let port = find_available_port()
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-            let redirect = format!("http://localhost:{}/callback", port.1);
-            (oauth.client_id.clone(), redirect)
+        let (client_id, client_secret) = if let Some(ref oauth) = server.oauth {
+            (oauth.client_id.clone(), None)
         } else if let Some(ref reg_endpoint) = metadata.registration_endpoint {
-            let port = find_available_port()
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-            let redirect = format!("http://localhost:{}/callback", port.1);
-
-            let registration = register_client(reg_endpoint, &redirect)
+            let registration = register_client(reg_endpoint, &redirect_uri)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
-            (registration.client_id, redirect)
+            (registration.client_id, None)
         } else {
             return Err(ExtensionError::AuthFailed(
                 "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
             ));
         };
 
-        let pkce = PkceChallenge::generate();
-        let auth_url = build_authorization_url(
+        // RFC 8707: resource parameter to scope the token to this MCP server
+        let resource = canonical_resource_uri(&server.url);
+
+        // Build authorization URL with CSRF state using the shared oauth_defaults
+        // builder, which generates PKCE + state for us.
+        let mut extra_params = server
+            .oauth
+            .as_ref()
+            .map(|o| o.extra_params.clone())
+            .unwrap_or_default();
+        extra_params.insert("resource".to_string(), resource.clone());
+
+        let scopes = server
+            .oauth
+            .as_ref()
+            .map(|o| o.scopes.clone())
+            .unwrap_or_else(|| metadata.scopes_supported.clone());
+
+        let oauth_result = oauth_defaults::build_oauth_url(
             &metadata.authorization_endpoint,
             &client_id,
             &redirect_uri,
-            &metadata.scopes_supported,
-            Some(&pkce),
-            &std::collections::HashMap::new(),
-            None,
+            &scopes,
+            true, // Always use PKCE for MCP
+            &extra_params,
         );
+        let expected_state = oauth_result.state;
+        let code_verifier = oauth_result.code_verifier;
 
-        // Store pending auth for later callback handling
-        self.pending_auth.write().await.insert(
-            name.to_string(),
-            PendingAuth {
-                _name: name.to_string(),
-                _kind: ExtensionKind::McpServer,
+        if is_gateway {
+            // Gateway mode: store pending flow for the /oauth/callback handler.
+            oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
+
+            // Platform routing: prepend instance name to state
+            let platform_state = oauth_defaults::build_platform_state(&expected_state);
+            let auth_url = if platform_state != expected_state {
+                oauth_result.url.replace(
+                    &format!("state={}", urlencoding::encode(&expected_state)),
+                    &format!("state={}", urlencoding::encode(&platform_state)),
+                )
+            } else {
+                oauth_result.url
+            };
+
+            let flow = oauth_defaults::PendingOAuthFlow {
+                extension_name: name.to_string(),
+                display_name: server.name.clone(),
+                token_url: metadata.token_endpoint,
+                client_id,
+                client_secret,
+                redirect_uri,
+                code_verifier,
+                access_token_field: "access_token".to_string(),
+                secret_name: server.token_secret_name(),
+                provider: Some(name.to_string()),
+                validation_endpoint: None,
+                scopes,
+                user_id: self.user_id.clone(),
+                secrets: Arc::clone(&self.secrets),
+                sse_sender: self.sse_sender.read().await.clone(),
+                gateway_token: self.gateway_token.clone(),
+                resource: Some(resource),
                 created_at: std::time::Instant::now(),
-                task_handle: None,
-            },
-        );
+            };
 
-        Ok(AuthResult::awaiting_authorization(
-            name,
-            ExtensionKind::McpServer,
-            auth_url,
-            "local".to_string(),
-        ))
+            self.pending_oauth_flows
+                .write()
+                .await
+                .insert(expected_state, flow);
+
+            self.pending_auth.write().await.insert(
+                name.to_string(),
+                PendingAuth {
+                    _name: name.to_string(),
+                    _kind: ExtensionKind::McpServer,
+                    created_at: std::time::Instant::now(),
+                    task_handle: None,
+                },
+            );
+
+            Ok(AuthResult::awaiting_authorization(
+                name,
+                ExtensionKind::McpServer,
+                auth_url,
+                "gateway".to_string(),
+            ))
+        } else {
+            // Local mode: return URL for manual opening
+            self.pending_auth.write().await.insert(
+                name.to_string(),
+                PendingAuth {
+                    _name: name.to_string(),
+                    _kind: ExtensionKind::McpServer,
+                    created_at: std::time::Instant::now(),
+                    task_handle: None,
+                },
+            );
+
+            Ok(AuthResult::awaiting_authorization(
+                name,
+                ExtensionKind::McpServer,
+                oauth_result.url,
+                "local".to_string(),
+            ))
+        }
     }
 
     async fn auth_wasm_tool(
@@ -2309,6 +2412,7 @@ impl ExtensionManager {
                 secrets: Arc::clone(&self.secrets),
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
+                resource: None,
                 created_at: std::time::Instant::now(),
             };
 

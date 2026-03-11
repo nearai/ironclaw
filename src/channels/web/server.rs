@@ -535,7 +535,7 @@ async fn oauth_callback_handler(
             .await
             .map_err(|e| e.to_string())?
         } else {
-            oauth_defaults::exchange_oauth_code(
+            oauth_defaults::exchange_oauth_code_with_resource(
                 &flow.token_url,
                 &flow.client_id,
                 flow.client_secret.as_deref(),
@@ -543,6 +543,7 @@ async fn oauth_callback_handler(
                 &flow.redirect_uri,
                 flow.code_verifier.as_deref(),
                 &flow.access_token_field,
+                flow.resource.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?
@@ -2853,6 +2854,7 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
+            resource: None,
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
                 .expect("System uptime is too low to run expired flow test"),
@@ -2962,6 +2964,7 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
+            resource: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
