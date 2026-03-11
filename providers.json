@@ -421,7 +421,7 @@
       "secret_name": "llm_zai_cn_api_key",
       "key_url": "https://open.bigmodel.cn",
       "display_name": "Z.AI (China)",
-      "can_list_models": false
+      "can_list_models": true
     }
   }
 ]
