@@ -4765,4 +4765,124 @@ mod tests {
         assert_eq!(result, url);
         assert!(result.contains("/v1/users/123/profile"));
     }
+
+    // ── Regression tests for PR #677 (unify-extension-lifecycle) ─────────
+
+    #[tokio::test]
+    async fn test_configure_token_picks_first_missing_secret() {
+        // Regression: configure_token() must pick the first *missing* secret,
+        // not the first non-optional one. This allows multi-secret channels
+        // to be configured one secret at a time.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        // Write a fake channel WASM + capabilities with two required secrets
+        std::fs::write(channels_dir.join("multi.wasm"), b"\0asm fake").unwrap();
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "multi",
+            "setup": {
+                "required_secrets": [
+                    {"name": "SECRET_A", "prompt": "Enter secret A (at least 30 chars for validation)"},
+                    {"name": "SECRET_B", "prompt": "Enter secret B (at least 30 chars for validation)"}
+                ]
+            }
+        });
+        std::fs::write(
+            channels_dir.join("multi.capabilities.json"),
+            serde_json::to_string(&caps).unwrap(),
+        )
+        .unwrap();
+
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+
+        // Pre-store SECRET_A so it's no longer missing
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("SECRET_A", "value-a"),
+            )
+            .await
+            .expect("store SECRET_A");
+
+        // configure_token should target SECRET_B (the first missing one)
+        let _result = mgr.configure_token("multi", "value-b").await;
+        // configure will fail at activation (no real WASM runtime), but the
+        // secret should still have been stored before activation was attempted.
+        // Check that SECRET_B was stored.
+        assert!(
+            mgr.secrets
+                .exists("test", "SECRET_B")
+                .await
+                .unwrap_or(false),
+            "configure_token should have stored SECRET_B (the first missing secret)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auth_is_read_only_for_wasm_channel() {
+        // Regression: auth() must be a pure status check — it must not store
+        // any secrets or modify state. The old API accepted a token parameter.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        std::fs::write(channels_dir.join("test-ch.wasm"), b"\0asm fake").unwrap();
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "test-ch",
+            "setup": {
+                "required_secrets": [
+                    {"name": "BOT_TOKEN", "prompt": "Enter bot token (at least 30 chars for prompt validation)"}
+                ]
+            }
+        });
+        std::fs::write(
+            channels_dir.join("test-ch.capabilities.json"),
+            serde_json::to_string(&caps).unwrap(),
+        )
+        .unwrap();
+
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+
+        // auth() should return a result without storing anything
+        let result = mgr.auth("test-ch").await;
+        assert!(result.is_ok(), "auth should succeed: {:?}", result.err());
+
+        // No secrets should have been created
+        assert!(
+            !mgr.secrets
+                .exists("test", "BOT_TOKEN")
+                .await
+                .unwrap_or(true),
+            "auth() must not create any secrets — it should be read-only"
+        );
+    }
+
+    #[test]
+    fn test_validation_failed_is_distinct_error_variant() {
+        // Regression: ValidationFailed must be a distinct error variant so
+        // callers can match on it instead of parsing error message strings.
+        let err = ExtensionError::ValidationFailed("Invalid token".to_string());
+
+        assert!(
+            matches!(err, ExtensionError::ValidationFailed(_)),
+            "Should match ValidationFailed variant"
+        );
+        assert!(
+            !matches!(err, ExtensionError::Other(_)),
+            "Must NOT match Other variant"
+        );
+        assert!(
+            !matches!(err, ExtensionError::AuthFailed(_)),
+            "Must NOT match AuthFailed variant"
+        );
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("validation failed"),
+            "Display should contain 'validation failed', got: {msg}"
+        );
+    }
 }
