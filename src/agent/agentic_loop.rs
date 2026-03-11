@@ -6,6 +6,7 @@
 //! via the `LoopDelegate` trait.
 
 use async_trait::async_trait;
+use chrono::{Datelike, Utc, Weekday};
 
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
@@ -174,6 +175,47 @@ pub async fn run_agentic_loop(
                     delegate.after_iteration(iteration).await;
                     continue;
                 }
+                if config.enable_tool_intent_nudge
+                    && consecutive_tool_intent_nudges < config.max_tool_intent_nudges
+                    && needs_fresh_calendar_tool_call(&text, reason_ctx)
+                {
+                    consecutive_tool_intent_nudges += 1;
+                    tracing::info!(
+                        iteration,
+                        "Calendar summary response lacked fresh calendar tool evidence, nudging for calendar tool call"
+                    );
+                    reason_ctx.messages.push(ChatMessage::assistant(&text));
+                    reason_ctx.messages.push(ChatMessage::user(
+                        "Do not answer from memory for calendar checks. \
+                         Call gws_bridge now with calendar events list args for current week \
+                         (singleEvents=true, orderBy=startTime, timeMin=now, timeMax=now+7d), \
+                         then answer from tool output only.",
+                    ));
+                    delegate.after_iteration(iteration).await;
+                    continue;
+                }
+                if config.enable_tool_intent_nudge
+                    && consecutive_tool_intent_nudges < config.max_tool_intent_nudges
+                    && needs_calendar_relative_day_rewrite(&text, reason_ctx)
+                {
+                    consecutive_tool_intent_nudges += 1;
+                    let today = Utc::now().date_naive();
+                    let tomorrow = today.succ_opt().unwrap_or(today);
+                    tracing::info!(
+                        iteration,
+                        "Calendar response used inconsistent today/tomorrow weekday labels, nudging for rewrite"
+                    );
+                    reason_ctx.messages.push(ChatMessage::assistant(&text));
+                    reason_ctx.messages.push(ChatMessage::user(&format!(
+                        "Rewrite the calendar summary with correct day mapping. \
+                         Today is {} and tomorrow is {}. \
+                         Use absolute dates and weekdays in the final answer.",
+                        today.format("%A %d %B %Y"),
+                        tomorrow.format("%A %d %B %Y")
+                    )));
+                    delegate.after_iteration(iteration).await;
+                    continue;
+                }
 
                 // Tool intent nudge: if the LLM says "let me search..." without
                 // actually calling a tool, inject a nudge message.
@@ -268,9 +310,111 @@ fn has_tool_result_since_last_user(reason_ctx: &ReasoningContext, tool_name: &st
         .iter()
         .rposition(|m| m.role == Role::User)
         .unwrap_or(0);
+    reason_ctx.messages[last_user_idx + 1..]
+        .iter()
+        .any(|m| m.role == Role::Tool && m.name.as_deref().is_some_and(|n| n.eq(tool_name)))
+}
+
+fn needs_fresh_calendar_tool_call(text: &str, reason_ctx: &ReasoningContext) -> bool {
+    let latest_user = latest_user_message(reason_ctx);
+    let Some(user_msg) = latest_user else {
+        return false;
+    };
+    let user_lower = user_msg.to_lowercase();
+    let calendar_request = user_lower.contains("calendar")
+        && (user_lower.contains("week") || user_lower.contains("remaining"));
+    if !calendar_request {
+        return false;
+    }
+
+    let text_lower = text.to_lowercase();
+    let claims_empty_calendar = text_lower.contains("calendar")
+        && (text_lower.contains("no events")
+            || text_lower.contains("zero events")
+            || text_lower.contains("completely empty")
+            || text_lower.contains("empty"));
+    if !claims_empty_calendar {
+        return false;
+    }
+
+    // Require a fresh calendar events list tool call after the latest user message.
+    !has_calendar_events_tool_call_since_last_user(reason_ctx)
+}
+
+fn has_calendar_events_tool_call_since_last_user(reason_ctx: &ReasoningContext) -> bool {
+    let last_user_idx = reason_ctx
+        .messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .unwrap_or(0);
+
     reason_ctx.messages[last_user_idx + 1..].iter().any(|m| {
-        m.role == Role::Tool && m.name.as_deref().is_some_and(|n| n.eq(tool_name))
+        if m.role != Role::Assistant {
+            return false;
+        }
+        let Some(calls) = m.tool_calls.as_ref() else {
+            return false;
+        };
+        calls.iter().any(|tc| {
+            if tc.name != "gws_bridge" {
+                return false;
+            }
+            let Some(args) = tc.arguments.get("args").and_then(|v| v.as_array()) else {
+                return false;
+            };
+            let as_str: Vec<&str> = args.iter().filter_map(|v| v.as_str()).collect();
+            as_str.len() >= 3
+                && as_str[0] == "calendar"
+                && as_str[1] == "events"
+                && as_str[2] == "list"
+        })
     })
+}
+
+fn needs_calendar_relative_day_rewrite(text: &str, reason_ctx: &ReasoningContext) -> bool {
+    let latest_user = latest_user_message(reason_ctx);
+    let Some(user_msg) = latest_user else {
+        return false;
+    };
+    let user_lower = user_msg.to_lowercase();
+    let calendar_request = user_lower.contains("calendar");
+    if !calendar_request {
+        return false;
+    }
+    calendar_relative_day_mismatch_for_date(text, Utc::now().date_naive())
+}
+
+fn calendar_relative_day_mismatch_for_date(text: &str, today: chrono::NaiveDate) -> bool {
+    let text_lower = text.to_lowercase();
+    let today_mismatch =
+        extract_labeled_weekday(&text_lower, "today").is_some_and(|w| w != today.weekday());
+    let tomorrow_mismatch = extract_labeled_weekday(&text_lower, "tomorrow").is_some_and(|w| {
+        let tomorrow = today.succ_opt().unwrap_or(today);
+        w != tomorrow.weekday()
+    });
+    today_mismatch || tomorrow_mismatch
+}
+
+fn extract_labeled_weekday(text_lower: &str, label: &str) -> Option<Weekday> {
+    let marker = format!("{label} (");
+    let pos = text_lower.find(&marker)?;
+    let day_start = pos + marker.len();
+    let rem = &text_lower[day_start..];
+    let day_end = rem.find(')')?;
+    parse_weekday_name(&rem[..day_end])
+}
+
+fn parse_weekday_name(s: &str) -> Option<Weekday> {
+    match s.trim() {
+        "monday" => Some(Weekday::Mon),
+        "tuesday" => Some(Weekday::Tue),
+        "wednesday" => Some(Weekday::Wed),
+        "thursday" => Some(Weekday::Thu),
+        "friday" => Some(Weekday::Fri),
+        "saturday" => Some(Weekday::Sat),
+        "sunday" => Some(Weekday::Sun),
+        _ => None,
+    }
 }
 
 /// Truncate a string for log/status previews.
@@ -672,5 +816,58 @@ mod tests {
         ));
         let text = "Your Gmail spam folder is empty.";
         assert!(!needs_fresh_spam_tool_call(text, &ctx));
+    }
+
+    #[test]
+    fn test_needs_fresh_calendar_tool_call_true_when_empty_claim_without_calendar_call() {
+        let mut ctx = ReasoningContext::new();
+        ctx.messages.push(ChatMessage::user(
+            "summarise the remaining calendar entries for this week",
+        ));
+        // Wrong tool call (gmail), should not satisfy calendar evidence.
+        let wrong_call = crate::llm::ToolCall {
+            id: "turn0_0".to_string(),
+            name: "gws_bridge".to_string(),
+            arguments: serde_json::json!({"args":["gmail","users","messages","list"]}),
+        };
+        ctx.messages.push(ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![wrong_call],
+        ));
+        let text = "Your calendar has zero events this week.";
+        assert!(needs_fresh_calendar_tool_call(text, &ctx));
+    }
+
+    #[test]
+    fn test_needs_fresh_calendar_tool_call_false_when_calendar_call_present() {
+        let mut ctx = ReasoningContext::new();
+        ctx.messages.push(ChatMessage::user(
+            "summarise the remaining calendar entries for this week",
+        ));
+        let calendar_call = crate::llm::ToolCall {
+            id: "turn0_0".to_string(),
+            name: "gws_bridge".to_string(),
+            arguments: serde_json::json!({"args":["calendar","events","list","--params={\"calendarId\":\"primary\"}"]}),
+        };
+        ctx.messages.push(ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![calendar_call],
+        ));
+        let text = "Your calendar has zero events this week.";
+        assert!(!needs_fresh_calendar_tool_call(text, &ctx));
+    }
+
+    #[test]
+    fn test_calendar_relative_day_mismatch_detects_wrong_today_weekday() {
+        let text = "You have a job interview today (Thursday).";
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 11).expect("valid date");
+        assert!(calendar_relative_day_mismatch_for_date(text, today));
+    }
+
+    #[test]
+    fn test_calendar_relative_day_mismatch_allows_correct_tomorrow_weekday() {
+        let text = "You have a job interview tomorrow (Thursday).";
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 11).expect("valid date");
+        assert!(!calendar_relative_day_mismatch_for_date(text, today));
     }
 }

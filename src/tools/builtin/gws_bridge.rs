@@ -14,6 +14,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{Duration as ChronoDuration, Utc};
 use regex::Regex;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -33,16 +34,6 @@ impl GwsBridgeTool {
     pub fn new() -> Self {
         Self
     }
-}
-
-fn default_spam_list_args() -> Vec<String> {
-    vec![
-        "gmail".to_string(),
-        "users".to_string(),
-        "messages".to_string(),
-        "list".to_string(),
-        "--params={\"userId\":\"me\",\"q\":\"in:spam\",\"maxResults\":50}".to_string(),
-    ]
 }
 
 fn strip_wrapping_quotes(s: &str) -> &str {
@@ -95,6 +86,82 @@ fn prepend(head: &[&str], tail: &[String]) -> Vec<String> {
     out
 }
 
+fn parse_params_json(args: &[String]) -> Option<serde_json::Value> {
+    for i in 0..args.len() {
+        if let Some(raw) = args[i].strip_prefix("--params=") {
+            return serde_json::from_str::<serde_json::Value>(raw).ok();
+        }
+        if args[i] == "--params" && i + 1 < args.len() {
+            return serde_json::from_str::<serde_json::Value>(&args[i + 1]).ok();
+        }
+    }
+    None
+}
+
+fn default_calendar_week_args() -> Vec<String> {
+    vec![
+        "calendar".to_string(),
+        "events".to_string(),
+        "list".to_string(),
+    ]
+}
+
+fn parse_args_from_params(params: &serde_json::Value) -> Result<Vec<String>, ToolError> {
+    if let Some(args_val) = params.get("args") {
+        return serde_json::from_value(args_val.clone()).map_err(|e| {
+            ToolError::InvalidParameters(format!("'args' must be an array of strings: {}", e))
+        });
+    }
+
+    let Some(obj) = params.as_object() else {
+        tracing::warn!(
+            "gws_bridge called with non-object params; defaulting to calendar week list"
+        );
+        return Ok(default_calendar_week_args());
+    };
+
+    // Compatibility shape:
+    // { "service":"calendar","resource":"events","method":"list","params":{...} }
+    let service = obj.get("service").and_then(|v| v.as_str());
+    let resource = obj.get("resource").and_then(|v| v.as_str());
+    let sub_resource = obj
+        .get("sub_resource")
+        .or_else(|| obj.get("subResource"))
+        .and_then(|v| v.as_str());
+    let method = obj.get("method").and_then(|v| v.as_str());
+
+    if let (Some(service), Some(resource), Some(method)) = (service, resource, method) {
+        let mut args = vec![service.to_string(), resource.to_string()];
+        if let Some(sr) = sub_resource {
+            args.push(sr.to_string());
+        }
+        args.push(method.to_string());
+        if let Some(p) = obj.get("params")
+            && p.is_object()
+        {
+            let ptxt = serde_json::to_string(p).map_err(|e| {
+                ToolError::InvalidParameters(format!("Failed to serialize 'params': {}", e))
+            })?;
+            args.push(format!("--params={}", ptxt));
+        }
+        if let Some(j) = obj.get("json")
+            && (j.is_object() || j.is_array())
+        {
+            let jtxt = serde_json::to_string(j).map_err(|e| {
+                ToolError::InvalidParameters(format!("Failed to serialize 'json': {}", e))
+            })?;
+            args.push(format!("--json={}", jtxt));
+        }
+        return Ok(args);
+    }
+
+    tracing::warn!(
+        keys = ?obj.keys().collect::<Vec<_>>(),
+        "gws_bridge called without recognized argument shape; defaulting to calendar week list"
+    );
+    Ok(default_calendar_week_args())
+}
+
 /// Canonicalize common shorthand emitted by models into valid `gws` syntax.
 ///
 /// `gws` requires: `<service> <resource> [sub-resource] <method>`.
@@ -105,8 +172,33 @@ fn canonicalize_args(args: &[String]) -> Vec<String> {
     }
 
     match args[0].as_str() {
-        // Bare verbs/resources often appear for Gmail spam summarization flows.
-        "list" => prepend(&["gmail", "users", "messages", "list"], &args[1..]),
+        // Ambiguous bare `list` can occur; disambiguate by params.
+        "list" => {
+            if let Some(params) = parse_params_json(args)
+                && let Some(obj) = params.as_object()
+            {
+                let has_calendar_keys = obj.contains_key("timeMin")
+                    || obj.contains_key("timeMax")
+                    || obj.contains_key("singleEvents")
+                    || obj.contains_key("orderBy")
+                    || obj.get("calendarId").and_then(|v| v.as_str()).is_some();
+                if has_calendar_keys {
+                    return prepend(&["calendar", "events", "list"], &args[1..]);
+                }
+                let looks_like_spam = obj
+                    .get("q")
+                    .and_then(|v| v.as_str())
+                    .map(|q| q.to_lowercase().contains("in:spam"))
+                    .unwrap_or(false)
+                    || obj.get("labelIds").is_some();
+                if looks_like_spam {
+                    return prepend(&["gmail", "users", "messages", "list"], &args[1..]);
+                }
+            }
+            // Unknown `list` should fail allowlist so the model is forced
+            // to provide an explicit service/resource/method.
+            args.to_vec()
+        }
         "messages" => {
             if args.len() >= 2 && matches!(args[1].as_str(), "list" | "get") {
                 let mut out = vec![
@@ -202,10 +294,7 @@ fn normalize_gmail_list_params(args: &[String]) -> Vec<String> {
                 .collect::<Vec<_>>()
                 .join(",");
             if !joined.is_empty() {
-                obj.insert(
-                    "labelIds".to_string(),
-                    serde_json::Value::String(joined),
-                );
+                obj.insert("labelIds".to_string(), serde_json::Value::String(joined));
                 return serde_json::to_string(&parsed).ok();
             }
         }
@@ -227,6 +316,56 @@ fn normalize_gmail_list_params(args: &[String]) -> Vec<String> {
         }
     }
 
+    out
+}
+
+fn normalize_calendar_list_params(args: &[String]) -> Vec<String> {
+    if args.len() < 3 || args[0] != "calendar" || args[1] != "events" || args[2] != "list" {
+        return args.to_vec();
+    }
+
+    let mut out = args.to_vec();
+    let start = Utc::now();
+    let end = start + ChronoDuration::days(7);
+
+    let ensure_window = |raw: &str| -> Option<String> {
+        let mut parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+        let obj = parsed.as_object_mut()?;
+        obj.entry("calendarId".to_string())
+            .or_insert_with(|| serde_json::Value::String("primary".to_string()));
+        obj.entry("singleEvents".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+        obj.entry("orderBy".to_string())
+            .or_insert_with(|| serde_json::Value::String("startTime".to_string()));
+        obj.entry("maxResults".to_string())
+            .or_insert_with(|| serde_json::Value::Number(50.into()));
+        obj.entry("timeMin".to_string())
+            .or_insert_with(|| serde_json::Value::String(start.to_rfc3339()));
+        obj.entry("timeMax".to_string())
+            .or_insert_with(|| serde_json::Value::String(end.to_rfc3339()));
+        serde_json::to_string(&parsed).ok()
+    };
+
+    for i in 0..out.len() {
+        if let Some(raw) = out[i].strip_prefix("--params=") {
+            if let Some(rewritten) = ensure_window(raw) {
+                out[i] = format!("--params={}", rewritten);
+            }
+            return out;
+        }
+        if out[i] == "--params" && i + 1 < out.len() {
+            if let Some(rewritten) = ensure_window(&out[i + 1]) {
+                out[i + 1] = rewritten;
+            }
+            return out;
+        }
+    }
+
+    out.push(format!(
+        "--params={{\"calendarId\":\"primary\",\"singleEvents\":true,\"orderBy\":\"startTime\",\"maxResults\":50,\"timeMin\":\"{}\",\"timeMax\":\"{}\"}}",
+        start.to_rfc3339(),
+        end.to_rfc3339()
+    ));
     out
 }
 
@@ -320,18 +459,6 @@ fn extract_message_count(args: &[String], parsed: &serde_json::Value) -> Option<
         .get("resultSizeEstimate")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
-}
-
-fn parse_params_json(args: &[String]) -> Option<serde_json::Value> {
-    for i in 0..args.len() {
-        if let Some(raw) = args[i].strip_prefix("--params=") {
-            return serde_json::from_str::<serde_json::Value>(raw).ok();
-        }
-        if args[i] == "--params" && i + 1 < args.len() {
-            return serde_json::from_str::<serde_json::Value>(&args[i + 1]).ok();
-        }
-    }
-    None
 }
 
 fn should_retry_spam_zero(args: &[String], message_count: Option<usize>) -> bool {
@@ -428,7 +555,10 @@ async fn run_gws_command(bin_path: &str, args: &[String]) -> Result<(String, i32
 
     match result {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!("Execution error: {}", e))),
+        Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!(
+            "Execution error: {}",
+            e
+        ))),
         Err(_) => {
             let _ = child.kill().await;
             Err(ToolError::Timeout(DEFAULT_TIMEOUT))
@@ -485,18 +615,10 @@ impl Tool for GwsBridgeTool {
         }
 
         // 2. Parse arguments
-        let args: Vec<String> = match params.get("args") {
-            Some(args_val) => serde_json::from_value(args_val.clone()).map_err(|e| {
-                ToolError::InvalidParameters(format!("'args' must be an array of strings: {}", e))
-            })?,
-            None => {
-                tracing::warn!(
-                    "gws_bridge called without args; defaulting to safe spam preflight list"
-                );
-                default_spam_list_args()
-            }
-        };
-        let args = normalize_gmail_list_params(&canonicalize_args(&normalize_args(&args)));
+        let args = parse_args_from_params(&params)?;
+        let args = normalize_calendar_list_params(&normalize_gmail_list_params(
+            &canonicalize_args(&normalize_args(&args)),
+        ));
 
         // 3. Strict allowlist validation
         if let Err(reason) = check_allowlist(&args) {
@@ -519,7 +641,6 @@ impl Tool for GwsBridgeTool {
         // 5. Execute command directly (no shell interpolation)
         match run_gws_command(&bin_path, &args).await {
             Ok((mut combined, code)) => {
-
                 // Truncate if somehow larger than limit (safety)
                 if combined.len() > MAX_OUTPUT_SIZE {
                     let half = MAX_OUTPUT_SIZE / 2;
@@ -545,7 +666,8 @@ impl Tool for GwsBridgeTool {
                 // Retry for known false-zero spam list cases.
                 if should_retry_spam_zero(&args, message_count) {
                     let retry_args = build_spam_retry_args(&args);
-                    if let Ok((retry_out, retry_code)) = run_gws_command(&bin_path, &retry_args).await
+                    if let Ok((retry_out, retry_code)) =
+                        run_gws_command(&bin_path, &retry_args).await
                         && retry_code == 0
                     {
                         let retry_redacted = redact_secrets(&retry_out);
@@ -863,13 +985,109 @@ mod tests {
     }
 
     #[test]
-    fn test_default_spam_list_args_shape() {
-        let args = default_spam_list_args();
-        assert_eq!(args[0], "gmail");
-        assert_eq!(args[1], "users");
-        assert_eq!(args[2], "messages");
-        assert_eq!(args[3], "list");
-        assert!(args[4].contains("\"q\":\"in:spam\""));
+    fn test_parse_params_json_equals_form() {
+        let args = vec![
+            "calendar".to_string(),
+            "events".to_string(),
+            "list".to_string(),
+            "--params={\"calendarId\":\"primary\"}".to_string(),
+        ];
+        let parsed = parse_params_json(&args).expect("params parsed");
+        assert_eq!(parsed["calendarId"], "primary");
+    }
+
+    #[test]
+    fn test_normalize_calendar_list_params_adds_default_window_when_missing() {
+        let input = vec![
+            "calendar".to_string(),
+            "events".to_string(),
+            "list".to_string(),
+        ];
+        let out = normalize_calendar_list_params(&input);
+        assert_eq!(out[0], "calendar");
+        assert_eq!(out[1], "events");
+        assert_eq!(out[2], "list");
+        assert!(out.iter().any(|a| a.starts_with("--params=")));
+        let params = out
+            .iter()
+            .find_map(|a| a.strip_prefix("--params="))
+            .expect("params present");
+        let parsed: serde_json::Value = serde_json::from_str(params).expect("valid json");
+        assert_eq!(parsed["calendarId"], "primary");
+        assert_eq!(parsed["singleEvents"], true);
+        assert_eq!(parsed["orderBy"], "startTime");
+        assert!(parsed.get("timeMin").is_some());
+        assert!(parsed.get("timeMax").is_some());
+    }
+
+    #[test]
+    fn test_normalize_calendar_list_params_preserves_existing_and_fills_missing() {
+        let input = vec![
+            "calendar".to_string(),
+            "events".to_string(),
+            "list".to_string(),
+            "--params={\"calendarId\":\"work\",\"maxResults\":10}".to_string(),
+        ];
+        let out = normalize_calendar_list_params(&input);
+        let params = out[3]
+            .strip_prefix("--params=")
+            .expect("params form retained");
+        let parsed: serde_json::Value = serde_json::from_str(params).expect("valid json");
+        assert_eq!(parsed["calendarId"], "work");
+        assert_eq!(parsed["maxResults"], 10);
+        assert_eq!(parsed["singleEvents"], true);
+        assert_eq!(parsed["orderBy"], "startTime");
+        assert!(parsed.get("timeMin").is_some());
+        assert!(parsed.get("timeMax").is_some());
+    }
+
+    #[test]
+    fn test_canonicalize_bare_list_to_calendar_when_calendar_params_present() {
+        let input = vec![
+            "list".to_string(),
+            "--params={\"calendarId\":\"primary\",\"timeMin\":\"2026-03-11T00:00:00Z\"}"
+                .to_string(),
+        ];
+        let out = canonicalize_args(&input);
+        assert_eq!(
+            out,
+            vec![
+                "calendar".to_string(),
+                "events".to_string(),
+                "list".to_string(),
+                "--params={\"calendarId\":\"primary\",\"timeMin\":\"2026-03-11T00:00:00Z\"}"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_bare_list_kept_when_untyped() {
+        let input = vec!["list".to_string()];
+        let out = canonicalize_args(&input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn test_parse_args_from_params_compat_shape() {
+        let params = serde_json::json!({
+            "service": "calendar",
+            "resource": "events",
+            "method": "list",
+            "params": { "calendarId": "primary" }
+        });
+        let out = parse_args_from_params(&params).expect("parsed");
+        assert_eq!(out[0], "calendar");
+        assert_eq!(out[1], "events");
+        assert_eq!(out[2], "list");
+        assert!(out[3].starts_with("--params="));
+    }
+
+    #[test]
+    fn test_parse_args_from_params_fallback_default_calendar() {
+        let params = serde_json::json!({});
+        let out = parse_args_from_params(&params).expect("fallback parsed");
+        assert_eq!(out, default_calendar_week_args());
     }
 
     #[tokio::test]

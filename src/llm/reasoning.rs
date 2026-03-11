@@ -2484,7 +2484,9 @@ That's my plan."#;
         assert!(llm_signals_tool_intent(
             "I've checked your Gmail spam folder and it's empty."
         ));
-        assert!(llm_signals_tool_intent("I checked the logs and found errors."));
+        assert!(llm_signals_tool_intent(
+            "I checked the logs and found errors."
+        ));
         assert!(llm_signals_tool_intent("Let me add it now."));
         assert!(llm_signals_tool_intent("I will run the tests to verify."));
         assert!(llm_signals_tool_intent("I'll look up the documentation."));
