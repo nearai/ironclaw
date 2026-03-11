@@ -156,9 +156,15 @@ jobs:
           while IFS= read -r line; do
             sha256=$(echo "$line" | awk '{print $1}')
             filename=$(echo "$line" | awk '{print $2}')
+            # Skip non-WASM entries (e.g. binary tarballs from cargo-dist)
+            case "$filename" in *-wasm32-wasip2.tar.gz) ;; *) continue ;; esac
             # Parse kind-prefixed filename: "tool-slack-0.2.1-wasm32-wasip2.tar.gz"
             # → kind=tool, name=slack
             kind=$(echo "$filename" | cut -d'-' -f1)
+            if [ "$kind" != "tool" ] && [ "$kind" != "channel" ]; then
+              echo "::warning::Skipping '$filename': unrecognized kind prefix '$kind'"
+              continue
+            fi
             name=$(echo "$filename" | sed "s/^${kind}-//" | sed 's/-[0-9].*-wasm32-wasip2\.tar\.gz$//')
             url="https://github.com/nearai/ironclaw/releases/download/${RELEASE_TAG}/${filename}"
 
@@ -280,6 +286,10 @@ jobs:
             # kind: "tool" or "channel" — used as bundle filename prefix to avoid
             # collisions when a tool and channel share the same file_stem (e.g. slack).
             kind=$(jq -r '.kind' "$manifest")
+            if [ "$kind" != "tool" ] && [ "$kind" != "channel" ]; then
+              echo "::error::Manifest '$manifest' has invalid or missing .kind ('$kind'); expected 'tool' or 'channel'"
+              exit 1
+            fi
             # ext_name: the manifest's .name field (e.g. "slack-tool").
             # Used for file names *inside* the archive — the installer extracts by manifest.name.
             ext_name=$(jq -r '.name' "$manifest")
@@ -476,9 +486,15 @@ jobs:
           while IFS= read -r line; do
             sha256=$(echo "$line" | awk '{print $1}')
             filename=$(echo "$line" | awk '{print $2}')
+            # Skip non-WASM entries (defensive — this checksums.txt should only have WASM)
+            case "$filename" in *-wasm32-wasip2.tar.gz) ;; *) continue ;; esac
             # Parse kind-prefixed filename: "tool-slack-0.2.1-wasm32-wasip2.tar.gz"
             # → kind=tool, name=slack
             kind=$(echo "$filename" | cut -d'-' -f1)
+            if [ "$kind" != "tool" ] && [ "$kind" != "channel" ]; then
+              echo "::warning::Skipping '$filename': unrecognized kind prefix '$kind'"
+              continue
+            fi
             name=$(echo "$filename" | sed "s/^${kind}-//" | sed 's/-[0-9].*-wasm32-wasip2\.tar\.gz$//')
             url="https://github.com/nearai/ironclaw/releases/download/${RELEASE_TAG}/${filename}"
 
