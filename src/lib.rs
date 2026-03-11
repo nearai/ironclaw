@@ -54,6 +54,8 @@ pub mod evaluation;
 pub mod extensions;
 pub mod history;
 pub mod hooks;
+#[cfg(feature = "import")]
+pub mod import;
 pub mod llm;
 pub mod observability;
 pub mod orchestrator;

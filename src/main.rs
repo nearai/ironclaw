@@ -86,6 +86,12 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return completion.run();
         }
+        #[cfg(feature = "import")]
+        Some(Command::Import(import_cmd)) => {
+            init_cli_tracing();
+            let config = ironclaw::config::Config::from_env().await?;
+            return ironclaw::cli::run_import_command(import_cmd, &config).await;
+        }
         Some(Command::Worker {
             job_id,
             orchestrator_url,
@@ -564,35 +570,39 @@ async fn async_main() -> anyhow::Result<()> {
             .await;
         tracing::debug!("Channel runtime wired into extension manager for hot-activation");
 
-        // Auto-activate channels that were active in a previous session.
+        // Auto-activate WASM channels that were active in a previous session.
+        // Relay channels are handled separately below via restore_relay_channels().
         let persisted = ext_mgr.load_persisted_active_channels().await;
         for name in &persisted {
-            if !active_at_startup.contains(name) {
-                match ext_mgr.activate(name).await {
-                    Ok(result) => {
-                        tracing::debug!(
-                            channel = %name,
-                            message = %result.message,
-                            "Auto-activated persisted channel"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            channel = %name,
-                            error = %e,
-                            "Failed to auto-activate persisted channel"
-                        );
-                    }
+            if active_at_startup.contains(name) || ext_mgr.is_relay_channel(name).await {
+                continue;
+            }
+            match ext_mgr.activate(name).await {
+                Ok(result) => {
+                    tracing::debug!(
+                        channel = %name,
+                        message = %result.message,
+                        "Auto-activated persisted WASM channel"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %name,
+                        error = %e,
+                        "Failed to auto-activate persisted WASM channel"
+                    );
                 }
             }
         }
     }
 
-    // Ensure the relay channel manager is always set (even without WASM runtime).
+    // Ensure the relay channel manager is always set (even without WASM runtime),
+    // then restore any persisted relay channels.
     if let Some(ref ext_mgr) = components.extension_manager {
         ext_mgr
             .set_relay_channel_manager(Arc::clone(&channels))
             .await;
+        ext_mgr.restore_relay_channels().await;
     }
 
     // Wire SSE sender into extension manager for broadcasting status events.
@@ -775,10 +785,10 @@ async fn async_main() -> anyhow::Result<()> {
                         }
                     };
 
-                // Restart listener if addr changed
+                // Restart listener if addr changed.
+                // Minimize lock scope: acquire, read old addr, release, then restart.
                 let mut restart_failed = false;
                 if let Some(ref ws_arc) = sighup_webhook_server {
-                    // Read old address while holding lock, then drop immediately
                     let old_addr = {
                         let ws = ws_arc.lock().await;
                         ws.current_addr()
@@ -790,8 +800,10 @@ async fn async_main() -> anyhow::Result<()> {
                             old_addr,
                             new_addr
                         );
-                        // Wait for restart to complete before proceeding with secret update.
-                        // This ensures atomicity: if restart fails, secret is not updated (partial state corruption).
+                        // NOTE: Lock is held across restart_with_addr().await. This is
+                        // acceptable because SIGHUP is infrequent and restart is fast. A full
+                        // fix would require refactoring restart_with_addr to separate state
+                        // mutation from async I/O.
                         let mut ws = ws_arc.lock().await;
                         match ws.restart_with_addr(new_addr).await {
                             Ok(()) => {

@@ -251,9 +251,10 @@ impl Channel for RelayChannel {
                             "team_id": event.team_id(),
                             "channel_id": event.channel_id,
                             "sender_id": event.sender_id,
+                            "sender_name": event.display_name(),
+                            "event_type": event.event_type,
                             "thread_id": event.thread_id,
                             "provider": event.provider,
-                            "event_type": event.event_type,
                         }));
 
                     let msg = if let Some(ref thread_id) = event.thread_id {
@@ -338,23 +339,27 @@ impl Channel for RelayChannel {
                     }
                 }
 
-                // Check if the team is still valid (with backoff on failure)
-                match client.list_connections(&instance_id).await {
-                    Ok(conns) => {
-                        let has_team = conns.iter().any(|c| c.team_id == team_id && c.connected);
-                        if !has_team {
-                            tracing::warn!(
-                                team_id = %team_id,
-                                "Team no longer connected, stopping relay channel"
-                            );
-                            return;
+                // Check if the team is still valid (skip when team_id is unknown,
+                // e.g. when no DB store was available at activation time)
+                if !team_id.is_empty() {
+                    match client.list_connections(&instance_id).await {
+                        Ok(conns) => {
+                            let has_team =
+                                conns.iter().any(|c| c.team_id == team_id && c.connected);
+                            if !has_team {
+                                tracing::warn!(
+                                    team_id = %team_id,
+                                    "Team no longer connected, stopping relay channel"
+                                );
+                                return;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Could not verify team connection, will retry next iteration"
-                        );
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Could not verify team connection, will retry next iteration"
+                            );
+                        }
                     }
                 }
             }
@@ -403,116 +408,12 @@ impl Channel for RelayChannel {
         Ok(())
     }
 
-    /// Forward approval-needed status updates as Slack Block Kit messages with
-    /// interactive Approve/Deny buttons. Only sends buttons in DM contexts;
-    /// other status updates remain no-ops.
+    /// Status updates are not forwarded to messaging providers to avoid noise.
     async fn send_status(
         &self,
-        status: StatusUpdate,
-        metadata: &serde_json::Value,
+        _status: StatusUpdate,
+        _metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
-        let StatusUpdate::ApprovalNeeded {
-            request_id,
-            tool_name,
-            description,
-            parameters,
-        } = status
-        else {
-            return Ok(());
-        };
-
-        // Only send approval buttons in DMs — channels are gated upstream
-        // by the dispatcher, but guard here too as a safety net.
-        let event_type = metadata
-            .get("event_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if event_type != "direct_message" {
-            tracing::warn!(
-                tool = %tool_name,
-                event_type = %event_type,
-                "Relay: approval requested in non-DM context, skipping buttons"
-            );
-            return Ok(());
-        }
-
-        let channel_id = metadata
-            .get("channel_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ChannelError::SendFailed {
-                name: self.name().to_string(),
-                reason: "Missing channel_id for approval buttons".into(),
-            })?;
-        let thread_id = metadata.get("thread_id").and_then(|v| v.as_str());
-        let team_id = metadata
-            .get("team_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&self.team_id);
-        let sender_id = metadata
-            .get("sender_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let value_payload = serde_json::json!({
-            "instance_id": self.instance_id,
-            "team_id": team_id,
-            "channel_id": channel_id,
-            "thread_ts": thread_id,
-            "request_id": request_id,
-            "sender_id": sender_id,
-        });
-        let value_str = value_payload.to_string();
-
-        let params_display =
-            serde_json::to_string_pretty(&parameters).unwrap_or_else(|_| parameters.to_string());
-
-        let blocks = serde_json::json!([
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": format!(
-                        "*Tool approval required*\n`{tool_name}`: {description}\n```{params_display}```"
-                    )
-                }
-            },
-            {
-                "type": "actions",
-                "elements": [
-                    {
-                        "type": "button",
-                        "text": { "type": "plain_text", "text": "Approve" },
-                        "style": "primary",
-                        "action_id": "approve_tool",
-                        "value": value_str,
-                    },
-                    {
-                        "type": "button",
-                        "text": { "type": "plain_text", "text": "Deny" },
-                        "style": "danger",
-                        "action_id": "deny_tool",
-                        "value": value_str,
-                    }
-                ]
-            }
-        ]);
-
-        let mut body = serde_json::json!({
-            "channel": channel_id,
-            "text": format!("Tool approval required: {tool_name} - {description}"),
-            "blocks": blocks,
-        });
-        if let Some(tid) = thread_id {
-            body["thread_ts"] = serde_json::Value::String(tid.to_string());
-        }
-
-        self.proxy_send(team_id, "chat.postMessage", body)
-            .await
-            .map_err(|e| ChannelError::SendFailed {
-                name: self.name().to_string(),
-                reason: e.to_string(),
-            })?;
-
         Ok(())
     }
 
@@ -626,6 +527,31 @@ mod tests {
     }
 
     #[test]
+    fn metadata_shape_includes_event_type_and_sender_name() {
+        // Regression: metadata JSON must include event_type and sender_name
+        // for downstream routing (DM vs channel) and conversation_context().
+        let metadata = serde_json::json!({
+            "team_id": "T123",
+            "channel_id": "C456",
+            "sender_id": "U789",
+            "sender_name": "alice",
+            "event_type": "direct_message",
+            "thread_id": null,
+            "provider": "slack",
+        });
+        // event_type must be present for DM-vs-channel routing
+        assert_eq!(
+            metadata.get("event_type").and_then(|v| v.as_str()),
+            Some("direct_message")
+        );
+        // sender_name must be present for conversation_context
+        assert_eq!(
+            metadata.get("sender_name").and_then(|v| v.as_str()),
+            Some("alice")
+        );
+    }
+
+    #[test]
     fn with_timeouts_sets_values() {
         let channel = RelayChannel::new(
             test_client(),
@@ -696,5 +622,21 @@ mod tests {
             "user1".into(),
         );
         assert_eq!(channel.max_consecutive_failures, 50);
+    }
+
+    #[test]
+    fn empty_team_id_accepted_at_construction() {
+        // Regression: empty team_id (when no DB store is available) must not
+        // prevent channel construction or cause immediate shutdown.
+        let channel = RelayChannel::new(
+            test_client(),
+            "token".into(),
+            String::new(), // empty team_id
+            "inst1".into(),
+            "user1".into(),
+        );
+        assert_eq!(channel.team_id, "");
+        // The reconnect loop now skips team validation when team_id is empty,
+        // so the channel remains alive.
     }
 }

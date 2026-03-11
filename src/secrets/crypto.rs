@@ -153,11 +153,11 @@ mod tests {
     use secrecy::SecretString;
 
     use crate::secrets::crypto::SecretsCrypto;
+    use crate::testing::credentials::TEST_CRYPTO_KEY;
 
     fn test_crypto() -> SecretsCrypto {
         // 32-byte test key
-        let key = "0123456789abcdef0123456789abcdef";
-        SecretsCrypto::new(SecretString::from(key.to_string())).unwrap()
+        SecretsCrypto::new(SecretString::from(TEST_CRYPTO_KEY.to_string())).unwrap()
     }
 
     #[test]

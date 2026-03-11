@@ -115,6 +115,34 @@ pub struct ExtensionManager {
     /// Gateway auth token for authenticating with the platform token exchange proxy.
     /// Read once at construction from `GATEWAY_AUTH_TOKEN` env var.
     gateway_token: Option<String>,
+    /// Relay config captured at startup. Used by `auth_channel_relay` and
+    /// `activate_channel_relay` instead of re-reading env vars.
+    relay_config: Option<crate::config::RelayConfig>,
+}
+
+/// Sanitize a URL for logging by removing query parameters and credentials.
+/// Prevents accidental logging of API keys, OAuth tokens, or other sensitive data in URLs.
+fn sanitize_url_for_logging(url: &str) -> String {
+    // If URL is very short or doesn't look like a URL, just use as-is
+    if url.len() < 10 || !url.contains("://") {
+        return url.to_string();
+    }
+
+    // Try to parse and remove sensitive components
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        // Remove query string and fragment
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+
+        // Remove userinfo (username and password) if present
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+
+        parsed.to_string()
+    } else {
+        // Fallback: strip after ? or #
+        url.split(['?', '#']).next().unwrap_or(url).to_string()
+    }
 }
 
 impl ExtensionManager {
@@ -162,7 +190,17 @@ impl ExtensionManager {
             sse_sender: RwLock::new(None),
             pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
             gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
+            relay_config: crate::config::RelayConfig::from_env(),
         }
+    }
+
+    /// Get the relay config stored at startup.
+    fn relay_config(&self) -> Result<&crate::config::RelayConfig, ExtensionError> {
+        self.relay_config.as_ref().ok_or_else(|| {
+            ExtensionError::Config(
+                "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
+            )
+        })
     }
 
     /// Configure the channel runtime infrastructure for hot-activating WASM channels.
@@ -195,6 +233,45 @@ impl ExtensionManager {
     /// still need to be hot-added.
     pub async fn set_relay_channel_manager(&self, channel_manager: Arc<ChannelManager>) {
         *self.relay_channel_manager.write().await = Some(channel_manager);
+    }
+
+    /// Check if a channel name corresponds to a relay extension (has stored stream token).
+    pub async fn is_relay_channel(&self, name: &str) -> bool {
+        self.secrets
+            .exists(&self.user_id, &format!("relay:{}:stream_token", name))
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Restore persisted relay channels after startup.
+    ///
+    /// Loads the persisted active channel list, filters to relay types (those with
+    /// a stored stream token), and activates each via `activate_stored_relay()`.
+    /// Skips channels that are already active. Call this after `set_relay_channel_manager()`.
+    pub async fn restore_relay_channels(&self) {
+        let persisted = self.load_persisted_active_channels().await;
+        let already_active = self.active_channel_names.read().await.clone();
+
+        for name in &persisted {
+            if already_active.contains(name) {
+                continue;
+            }
+            if !self.is_relay_channel(name).await {
+                continue;
+            }
+            match self.activate_stored_relay(name).await {
+                Ok(_) => {
+                    tracing::debug!(channel = %name, "Restored persisted relay channel");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %name,
+                        error = %e,
+                        "Failed to restore persisted relay channel"
+                    );
+                }
+            }
+        }
     }
 
     /// Access the secrets store (used by OAuth callback handlers).
@@ -320,7 +397,8 @@ impl ExtensionManager {
         url: Option<&str>,
         kind_hint: Option<ExtensionKind>,
     ) -> Result<InstallResult, ExtensionError> {
-        tracing::info!(extension = %name, url = ?url, kind = ?kind_hint, "Installing extension");
+        let sanitized_url = url.map(sanitize_url_for_logging);
+        tracing::info!(extension = %name, url = ?sanitized_url, kind = ?kind_hint, "Installing extension");
         Self::validate_extension_name(name)?;
 
         // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
@@ -348,7 +426,8 @@ impl ExtensionManager {
                 }
             }
             .map_err(|e| {
-                tracing::error!(extension = %name, url = %url, error = %e, "Extension install from URL failed");
+                let sanitized = sanitize_url_for_logging(url);
+                tracing::error!(extension = %name, url = %sanitized, error = %e, "Extension install from URL failed");
                 e
             });
         }
@@ -749,9 +828,17 @@ impl ExtensionManager {
                     .delete(&self.user_id, &format!("relay:{}:stream_token", name))
                     .await;
 
-                // Shut down the channel if the channel runtime is available
+                // Shut down the channel (check both runtime paths for WASM+relay and relay-only modes)
+                let mut shut_down = false;
                 if let Some(ref rt) = *self.channel_runtime.read().await
                     && let Some(channel) = rt.channel_manager.get_channel(name).await
+                {
+                    let _ = channel.shutdown().await;
+                    shut_down = true;
+                }
+                if !shut_down
+                    && let Some(ref cm) = *self.relay_channel_manager.read().await
+                    && let Some(channel) = cm.get_channel(name).await
                 {
                     let _ = channel.shutdown().await;
                 }
@@ -1322,10 +1409,11 @@ impl ExtensionManager {
             .build()
             .map_err(|e| ExtensionError::DownloadFailed(e.to_string()))?;
 
-        tracing::debug!(extension = %name, url = %url, "Downloading WASM extension");
+        let sanitized_url = sanitize_url_for_logging(url);
+        tracing::debug!(extension = %name, url = %sanitized_url, "Downloading WASM extension");
 
         let response = client.get(url).send().await.map_err(|e| {
-            tracing::error!(extension = %name, url = %url, error = %e, "Download request failed");
+            tracing::error!(extension = %name, url = %sanitized_url, error = %e, "Download request failed");
             ExtensionError::DownloadFailed(e.to_string())
         })?;
 
@@ -1333,7 +1421,7 @@ impl ExtensionManager {
             let status = response.status();
             tracing::error!(
                 extension = %name,
-                url = %url,
+                url = %sanitized_url,
                 status = %status,
                 "Download returned non-success HTTP status"
             );
@@ -3146,21 +3234,17 @@ impl ExtensionManager {
             return Ok(AuthResult::authenticated(name, ExtensionKind::ChannelRelay));
         }
 
-        // Get the relay config
-        let relay_config = crate::config::RelayConfig::from_env().ok_or_else(|| {
-            ExtensionError::Config(
-                "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
-            )
-        })?;
+        // Use relay config captured at startup
+        let relay_config = self.relay_config()?;
 
-        let instance_id = self.relay_instance_id(&relay_config);
+        let instance_id = self.relay_instance_id(relay_config);
         let user_id_uuid = std::env::var("IRONCLAW_USER_ID").unwrap_or_else(|_| {
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, self.user_id.as_bytes()).to_string()
         });
 
         let client = crate::channels::relay::RelayClient::new(
-            relay_config.url,
-            relay_config.api_key,
+            relay_config.url.clone(),
+            relay_config.api_key.clone(),
             relay_config.request_timeout_secs,
         )
         .map_err(|e| ExtensionError::Config(e.to_string()))?;
@@ -3234,17 +3318,13 @@ impl ExtensionManager {
             String::new()
         };
 
-        // Get relay config
-        let relay_config = crate::config::RelayConfig::from_env().ok_or_else(|| {
-            ExtensionError::Config(
-                "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
-            )
-        })?;
+        // Use relay config captured at startup
+        let relay_config = self.relay_config()?;
 
-        let instance_id = self.relay_instance_id(&relay_config);
+        let instance_id = self.relay_instance_id(relay_config);
 
         let client = crate::channels::relay::RelayClient::new(
-            relay_config.url,
+            relay_config.url.clone(),
             relay_config.api_key.clone(),
             relay_config.request_timeout_secs,
         )
@@ -3306,6 +3386,10 @@ impl ExtensionManager {
     }
 
     /// Determine what kind of installed extension this is.
+    ///
+    /// This is a read-only check — it never modifies `installed_relay_extensions`.
+    /// To mark a relay extension as installed, use `activate_stored_relay()` or
+    /// the explicit install flow.
     async fn determine_installed_kind(&self, name: &str) -> Result<ExtensionKind, ExtensionError> {
         // Check MCP servers first
         if self.get_mcp_server(name).await.is_ok() {
@@ -3335,28 +3419,7 @@ impl ExtensionManager {
             .await
             .unwrap_or(false)
         {
-            // Re-populate the installed set
-            self.installed_relay_extensions
-                .write()
-                .await
-                .insert(name.to_string());
             return Ok(ExtensionKind::ChannelRelay);
-        }
-        // Check if there's a ChannelRelay registry entry with this name
-        if let Some(entry) = self
-            .registry
-            .get_with_kind(name, Some(ExtensionKind::ChannelRelay))
-            .await
-        {
-            // ChannelRelay entries from the registry are always "installable"
-            // (no artifact needed). Mark as installed if config is available.
-            if matches!(entry.source, ExtensionSource::ChannelRelay { .. }) {
-                self.installed_relay_extensions
-                    .write()
-                    .await
-                    .insert(name.to_string());
-                return Ok(ExtensionKind::ChannelRelay);
-            }
         }
 
         Err(ExtensionError::NotInstalled(format!(
@@ -4325,6 +4388,7 @@ mod tests {
         channels_dir: std::path::PathBuf,
     ) -> ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::testing::credentials::TEST_CRYPTO_KEY;
         use crate::tools::ToolRegistry;
         use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
@@ -4332,8 +4396,7 @@ mod tests {
         std::fs::create_dir_all(&tools_dir).ok();
         std::fs::create_dir_all(&channels_dir).ok();
 
-        let master_key =
-            secrecy::SecretString::from("0123456789abcdef0123456789abcdef".to_string());
+        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
         let crypto = Arc::new(SecretsCrypto::new(master_key).unwrap());
 
         ExtensionManager::new(
@@ -4441,5 +4504,186 @@ mod tests {
 
         unsafe { std::env::remove_var("_TOKEN") };
         unsafe { std::env::remove_var("ICTEST6_TOKEN") };
+    }
+
+    #[tokio::test]
+    async fn test_determine_installed_kind_does_not_auto_install_relay() {
+        // Regression: determine_installed_kind used to auto-insert into
+        // installed_relay_extensions when a ChannelRelay registry entry existed,
+        // even though the user never installed it. It should be read-only.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        // The manager has no relay extensions installed
+        assert!(
+            mgr.installed_relay_extensions.read().await.is_empty(),
+            "Should start with no installed relay extensions"
+        );
+
+        // Calling determine_installed_kind for a non-installed name returns NotInstalled
+        let result = mgr.determine_installed_kind("slack-relay").await;
+        assert!(result.is_err(), "Should return NotInstalled");
+
+        // Crucially: installed_relay_extensions must still be empty
+        assert!(
+            mgr.installed_relay_extensions.read().await.is_empty(),
+            "determine_installed_kind must not modify installed_relay_extensions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_relay_channel_detects_stored_token() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        // No token stored → not a relay channel
+        assert!(!mgr.is_relay_channel("slack-relay").await);
+
+        // Store a stream token
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("relay:slack-relay:stream_token", "tok123"),
+            )
+            .await
+            .expect("store token");
+
+        // Now it's detected as a relay channel
+        assert!(mgr.is_relay_channel("slack-relay").await);
+    }
+
+    #[tokio::test]
+    async fn test_remove_relay_shuts_down_via_relay_channel_manager() {
+        // Regression: remove() only checked channel_runtime for shutdown, missing
+        // relay-only mode where only relay_channel_manager is set.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        // Set up relay channel manager with a stub channel
+        let cm = Arc::new(crate::channels::ChannelManager::new());
+        let (stub, _tx) = crate::testing::StubChannel::new("slack-relay");
+        cm.add(Box::new(stub)).await;
+        mgr.set_relay_channel_manager(Arc::clone(&cm)).await;
+
+        // Mark as installed + store a token so determine_installed_kind finds it
+        mgr.installed_relay_extensions
+            .write()
+            .await
+            .insert("slack-relay".to_string());
+        mgr.secrets
+            .create(
+                "test",
+                crate::secrets::CreateSecretParams::new("relay:slack-relay:stream_token", "tok123"),
+            )
+            .await
+            .expect("store token");
+
+        // Verify channel exists before removal
+        assert!(cm.get_channel("slack-relay").await.is_some());
+
+        // Remove should succeed and shut down the channel
+        let result = mgr.remove("slack-relay").await;
+        assert!(result.is_ok(), "remove should succeed: {:?}", result.err());
+
+        // installed_relay_extensions should be cleared
+        assert!(
+            !mgr.installed_relay_extensions
+                .read()
+                .await
+                .contains("slack-relay"),
+            "Should be removed from installed set"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_url_with_query_params() {
+        let url = "https://api.example.com/path?api_key=secret123&token=abc";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, "https://api.example.com/path");
+        assert!(!result.contains("api_key"));
+        assert!(!result.contains("secret123"));
+        assert!(!result.contains("token"));
+    }
+
+    #[test]
+    fn test_sanitize_url_with_credentials() {
+        let url = "https://user:password@api.example.com:8080/path";
+        let result = super::sanitize_url_for_logging(url);
+        assert!(!result.contains("user"));
+        assert!(!result.contains("password"));
+        assert!(!result.contains("@"));
+        assert!(result.contains("api.example.com"));
+        assert!(result.contains(":8080"));
+    }
+
+    #[test]
+    fn test_sanitize_url_with_fragment() {
+        let url = "https://api.example.com/path#section";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, "https://api.example.com/path");
+        assert!(!result.contains("#"));
+        assert!(!result.contains("section"));
+    }
+
+    #[test]
+    fn test_sanitize_url_with_port() {
+        let url = "https://api.example.com:9443/path?key=value";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, "https://api.example.com:9443/path");
+        assert!(result.contains(":9443"));
+        assert!(!result.contains("key"));
+    }
+
+    #[test]
+    fn test_sanitize_url_with_all_components() {
+        let url = "https://admin:secret@api.example.com:8080/v1/data?api_key=xyz#results";
+        let result = super::sanitize_url_for_logging(url);
+        assert!(!result.contains("admin"));
+        assert!(!result.contains("secret"));
+        assert!(!result.contains("@"));
+        assert!(!result.contains("api_key"));
+        assert!(!result.contains("xyz"));
+        assert!(!result.contains("#"));
+        assert!(!result.contains("results"));
+        assert!(result.contains("api.example.com:8080"));
+        assert!(result.contains("/v1/data"));
+    }
+
+    #[test]
+    fn test_sanitize_url_malformed() {
+        // Malformed URL should fallback to string splitting
+        let url = "https://[invalid-url";
+        let result = super::sanitize_url_for_logging(url);
+        // Malformed URL without query should return as-is via fallback
+        assert_eq!(result, url);
+
+        // Should still strip query params via fallback
+        let url_with_query = "https://[invalid-url?key=secret";
+        let result_with_query = super::sanitize_url_for_logging(url_with_query);
+        assert_eq!(result_with_query, "https://[invalid-url");
+        assert!(!result_with_query.contains("?"));
+        assert!(!result_with_query.contains("secret"));
+    }
+
+    #[test]
+    fn test_sanitize_url_short_string() {
+        let url = "short";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, "short");
+    }
+
+    #[test]
+    fn test_sanitize_url_not_url_like() {
+        let input = "this is not a url";
+        let result = super::sanitize_url_for_logging(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_sanitize_url_preserves_path() {
+        let url = "https://api.example.com/v1/users/123/profile";
+        let result = super::sanitize_url_for_logging(url);
+        assert_eq!(result, url);
+        assert!(result.contains("/v1/users/123/profile"));
     }
 }
