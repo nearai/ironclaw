@@ -334,22 +334,21 @@ impl RepairTask {
             // Check for stuck jobs
             let stuck_jobs = self.repair.detect_stuck_jobs().await;
             for job in stuck_jobs {
-                tracing::info!("Attempting to repair stuck job {}", job.job_id);
                 match self.repair.repair_stuck_job(&job).await {
                     Ok(RepairResult::Success { message }) => {
-                        tracing::info!("Repair succeeded: {}", message);
+                        tracing::info!(job = %job.job_id, status = "success", "Stuck job repair completed: {}", message);
                     }
                     Ok(RepairResult::Retry { message }) => {
-                        tracing::warn!("Repair needs retry: {}", message);
+                        tracing::debug!(job = %job.job_id, status = "retry", "Stuck job repair needs retry: {}", message);
                     }
                     Ok(RepairResult::Failed { message }) => {
-                        tracing::error!("Repair failed: {}", message);
+                        tracing::error!(job = %job.job_id, status = "failed", "Stuck job repair failed: {}", message);
                     }
                     Ok(RepairResult::ManualRequired { message }) => {
-                        tracing::warn!("Manual intervention needed: {}", message);
+                        tracing::warn!(job = %job.job_id, status = "manual", "Stuck job repair requires manual intervention: {}", message);
                     }
                     Err(e) => {
-                        tracing::error!("Repair error: {}", e);
+                        tracing::error!(job = %job.job_id, "Stuck job repair error: {}", e);
                     }
                 }
             }
@@ -357,13 +356,12 @@ impl RepairTask {
             // Check for broken tools
             let broken_tools = self.repair.detect_broken_tools().await;
             for tool in broken_tools {
-                tracing::info!("Attempting to repair broken tool: {}", tool.name);
                 match self.repair.repair_broken_tool(&tool).await {
                     Ok(result) => {
-                        tracing::info!("Tool repair result: {:?}", result);
+                        tracing::debug!(tool = %tool.name, status = "completed", "Tool repair completed: {:?}", result);
                     }
                     Err(e) => {
-                        tracing::error!("Tool repair error: {}", e);
+                        tracing::error!(tool = %tool.name, "Tool repair error: {}", e);
                     }
                 }
             }

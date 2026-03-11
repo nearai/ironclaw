@@ -96,6 +96,10 @@ pub struct RegistryProviderConfig {
     pub auth_path: Option<PathBuf>,
     /// Prompt cache retention (Anthropic-specific).
     pub cache_retention: CacheRetention,
+    /// Parameter names that this provider does not support (e.g., `["temperature"]`).
+    /// Supported keys: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
+    /// Listed parameters are stripped from requests before sending to avoid 400 errors.
+    pub unsupported_params: Vec<String>,
 }
 
 /// Configuration for AWS Bedrock (native Converse API).

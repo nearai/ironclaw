@@ -32,8 +32,13 @@ use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::{ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry, redact_params};
+use crate::tools::{ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry};
 use crate::workspace::Workspace;
+
+enum EventMatcher {
+    Message { routine: Routine, regex: Regex },
+    System { routine: Routine },
+}
 
 /// The routine execution engine.
 pub struct RoutineEngine {
@@ -45,8 +50,8 @@ pub struct RoutineEngine {
     notify_tx: mpsc::Sender<OutgoingResponse>,
     /// Currently running routine count (across all routines).
     running_count: Arc<AtomicUsize>,
-    /// Compiled event regex cache: routine_id -> compiled regex.
-    event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
+    /// Cached matchers for all event-driven routines.
+    event_cache: Arc<RwLock<Vec<EventMatcher>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
     /// Tool registry for lightweight routine tool execution.
@@ -87,9 +92,12 @@ impl RoutineEngine {
             Ok(routines) => {
                 let mut cache = Vec::new();
                 for routine in routines {
-                    if let Trigger::Event { ref pattern, .. } = routine.trigger {
-                        match Regex::new(pattern) {
-                            Ok(re) => cache.push((routine.id, routine.clone(), re)),
+                    match &routine.trigger {
+                        Trigger::Event { pattern, .. } => match Regex::new(pattern) {
+                            Ok(re) => cache.push(EventMatcher::Message {
+                                routine: routine.clone(),
+                                regex: re,
+                            }),
                             Err(e) => {
                                 tracing::warn!(
                                     routine = %routine.name,
@@ -97,12 +105,18 @@ impl RoutineEngine {
                                     pattern, e
                                 );
                             }
+                        },
+                        Trigger::SystemEvent { .. } => {
+                            cache.push(EventMatcher::System {
+                                routine: routine.clone(),
+                            });
                         }
+                        _ => {}
                     }
                 }
                 let count = cache.len();
                 *self.event_cache.write().await = cache;
-                tracing::debug!("Refreshed event cache: {} routines", count);
+                tracing::trace!("Refreshed event cache: {} routines", count);
             }
             Err(e) => {
                 tracing::error!("Failed to refresh event cache: {}", e);
@@ -118,7 +132,11 @@ impl RoutineEngine {
         let cache = self.event_cache.read().await;
         let mut fired = 0;
 
-        for (_, routine, re) in cache.iter() {
+        for matcher in cache.iter() {
+            let (routine, re) = match matcher {
+                EventMatcher::Message { routine, regex } => (routine, regex),
+                EventMatcher::System { .. } => continue,
+            };
             // Channel filter
             if let Trigger::Event {
                 channel: Some(ch), ..
@@ -135,13 +153,13 @@ impl RoutineEngine {
 
             // Cooldown check
             if !self.check_cooldown(routine) {
-                tracing::debug!(routine = %routine.name, "Skipped: cooldown active");
+                tracing::trace!(routine = %routine.name, "Skipped: cooldown active");
                 continue;
             }
 
             // Concurrent run check
             if !self.check_concurrent(routine).await {
-                tracing::debug!(routine = %routine.name, "Skipped: max concurrent reached");
+                tracing::trace!(routine = %routine.name, "Skipped: max concurrent reached");
                 continue;
             }
 
@@ -153,6 +171,88 @@ impl RoutineEngine {
 
             let detail = truncate(&message.content, 200);
             self.spawn_fire(routine.clone(), "event", Some(detail));
+            fired += 1;
+        }
+
+        fired
+    }
+
+    /// Emit a structured event to system-event routines.
+    ///
+    /// Returns the number of routines that were fired.
+    pub async fn emit_system_event(
+        &self,
+        source: &str,
+        event_type: &str,
+        payload: &serde_json::Value,
+        user_id: Option<&str>,
+    ) -> usize {
+        let cache = self.event_cache.read().await;
+        let mut fired = 0;
+
+        for matcher in cache.iter() {
+            let routine = match matcher {
+                EventMatcher::System { routine } => routine,
+                EventMatcher::Message { .. } => continue,
+            };
+
+            let Trigger::SystemEvent {
+                source: expected_source,
+                event_type: expected_event,
+                filters,
+            } = &routine.trigger
+            else {
+                continue;
+            };
+
+            if !expected_source.eq_ignore_ascii_case(source)
+                || !expected_event.eq_ignore_ascii_case(event_type)
+            {
+                continue;
+            }
+
+            if let Some(uid) = user_id
+                && routine.user_id != uid
+            {
+                continue;
+            }
+
+            let mut matched = true;
+            for (key, expected) in filters {
+                let Some(actual) = payload
+                    .get(key)
+                    .and_then(crate::agent::routine::json_value_as_filter_string)
+                else {
+                    tracing::debug!(routine = %routine.name, filter_key = %key, "Filter key not found in payload");
+                    matched = false;
+                    break;
+                };
+                if !actual.eq_ignore_ascii_case(expected) {
+                    matched = false;
+                    break;
+                }
+            }
+            if !matched {
+                continue;
+            }
+
+            if !self.check_cooldown(routine) {
+                tracing::debug!(routine = %routine.name, "Skipped: cooldown active");
+                continue;
+            }
+
+            if !self.check_concurrent(routine).await {
+                tracing::debug!(routine = %routine.name, "Skipped: max concurrent reached");
+                continue;
+            }
+
+            if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
+                tracing::warn!(routine = %routine.name, "Skipped: global max concurrent reached");
+                continue;
+            }
+
+            let detail = truncate(&format!("{source}:{event_type}"), 200);
+            self.spawn_fire(routine.clone(), "system_event", Some(detail));
             fired += 1;
         }
 
@@ -913,13 +1013,6 @@ async fn execute_routine_tool(
         return Err(format!("Invalid tool parameters: {}", details).into());
     }
 
-    let safe_params = redact_params(&tc.arguments, tool.sensitive_params());
-    tracing::debug!(
-        tool = %tc.name,
-        params = %safe_params,
-        "Lightweight routine tool call started"
-    );
-
     // Execute with per-tool timeout
     let timeout = tool.execution_timeout();
     let start = std::time::Instant::now();
@@ -929,12 +1022,14 @@ async fn execute_routine_tool(
     .await;
     let elapsed = start.elapsed();
 
+    // Log tool execution result (single consolidated log)
     match &result {
         Ok(Ok(_)) => {
             tracing::debug!(
                 tool = %tc.name,
                 elapsed_ms = elapsed.as_millis() as u64,
-                "Lightweight routine tool call succeeded"
+                status = "succeeded",
+                "Lightweight routine tool execution completed"
             );
         }
         Ok(Err(e)) => {
@@ -942,7 +1037,8 @@ async fn execute_routine_tool(
                 tool = %tc.name,
                 elapsed_ms = elapsed.as_millis() as u64,
                 error = %e,
-                "Lightweight routine tool call failed"
+                status = "failed",
+                "Lightweight routine tool execution completed"
             );
         }
         Err(_) => {
@@ -950,7 +1046,8 @@ async fn execute_routine_tool(
                 tool = %tc.name,
                 elapsed_ms = elapsed.as_millis() as u64,
                 timeout_secs = timeout.as_secs(),
-                "Lightweight routine tool call timed out"
+                status = "timeout",
+                "Lightweight routine tool execution completed"
             );
         }
     }

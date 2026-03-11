@@ -1,0 +1,64 @@
+{
+  "model_name": "test-routine-system-event-emit",
+  "expects": {
+    "tools_used": ["routine_create", "event_emit"],
+    "all_tools_succeeded": true,
+    "tool_results_contain": {
+      "event_emit": "fired_routines"
+    }
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_rc_1",
+            "name": "routine_create",
+            "arguments": {
+              "name": "gh-issue-emit-test",
+              "description": "React to GitHub issue.opened events",
+              "trigger_type": "system_event",
+              "event_source": "github",
+              "event_type": "issue.opened",
+              "action_type": "full_job",
+              "prompt": "Summarize the new issue and propose next steps."
+            }
+          }
+        ],
+        "input_tokens": 80,
+        "output_tokens": 30
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_ee_1",
+            "name": "event_emit",
+            "arguments": {
+              "event_source": "github",
+              "event_type": "issue.opened",
+              "payload": {
+                "repository": "nearai/ironclaw",
+                "issue_number": 123,
+                "title": "Support event-driven project workflow"
+              }
+            }
+          }
+        ],
+        "input_tokens": 140,
+        "output_tokens": 28
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Created a system-event routine and emitted a matching GitHub event. The routine fired successfully.",
+        "input_tokens": 200,
+        "output_tokens": 18
+      }
+    }
+  ]
+}

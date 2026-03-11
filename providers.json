@@ -9,8 +9,9 @@
     "api_key_required": true,
     "base_url_env": "OPENAI_BASE_URL",
     "model_env": "OPENAI_MODEL",
-    "default_model": "gpt-4o",
+    "default_model": "gpt-5-mini",
     "description": "OpenAI GPT models (direct API)",
+    "unsupported_params": ["temperature"],
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_openai_api_key",
@@ -86,6 +87,7 @@
     "model_env": "TINFOIL_MODEL",
     "default_model": "kimi-k2-5",
     "description": "Tinfoil private inference (hardware-attested TEE)",
+    "unsupported_params": ["temperature"],
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_tinfoil_api_key",

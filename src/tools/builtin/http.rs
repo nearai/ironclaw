@@ -609,6 +609,7 @@ impl Tool for HttpTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::{TEST_OPENAI_API_KEY, test_secrets_store};
 
     #[test]
     fn test_http_tool_schema_headers_is_array() {
@@ -868,12 +869,7 @@ mod tests {
         let tool = HttpTool::new().with_credentials(
             registry,
             // secrets_store is not used in requires_approval, just needs to be present
-            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
-                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "0123456789abcdef0123456789abcdef".to_string(),
-                ))
-                .unwrap(),
-            ))),
+            Arc::new(test_secrets_store()),
         );
 
         let params = serde_json::json!({
@@ -890,15 +886,7 @@ mod tests {
         let registry = Arc::new(SharedCredentialRegistry::new());
         // Empty registry - no credential mappings
 
-        let tool = HttpTool::new().with_credentials(
-            registry,
-            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
-                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "0123456789abcdef0123456789abcdef".to_string(),
-                ))
-                .unwrap(),
-            ))),
-        );
+        let tool = HttpTool::new().with_credentials(registry, Arc::new(test_secrets_store()));
 
         let params = serde_json::json!({
             "method": "GET",
@@ -926,7 +914,7 @@ mod tests {
         let params = serde_json::json!({
             "method": "GET",
             "url": "https://example.com",
-            "headers": {"X-Custom": "Bearer sk-test123"}
+            "headers": {"X-Custom": format!("Bearer {TEST_OPENAI_API_KEY}")}
         });
         assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
     }
@@ -957,15 +945,7 @@ mod tests {
         let registry = Arc::new(SharedCredentialRegistry::new());
         registry.add_mappings(vec![CredentialMapping::bearer("test_key", "api.test.com")]);
 
-        let tool = HttpTool::new().with_credentials(
-            registry,
-            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
-                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                    "0123456789abcdef0123456789abcdef".to_string(),
-                ))
-                .unwrap(),
-            ))),
-        );
+        let tool = HttpTool::new().with_credentials(registry, Arc::new(test_secrets_store()));
 
         // These calls should not panic in multi-thread runtime
         let params_no_auth = serde_json::json!({
