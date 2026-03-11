@@ -48,6 +48,13 @@
   --accent-tee-bg: rgba(52, 211, 153, 0.1);
   --accent-tee-border: rgba(52, 211, 153, 0.25);
   --accent-tee-hover: rgba(52, 211, 153, 0.18);
+  --text-on-danger: #fff;
+  --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  --danger-error-border: rgba(230, 76, 76, 0.2);
+  --note-bg: rgba(255, 255, 255, 0.04);
+  --overlay-heavy: rgba(0, 0, 0, 0.6);
+  --highlight-bg: rgba(52, 211, 153, 0.3);
+  --hover-subtle: rgba(255, 255, 255, 0.06);
 }
 
 * {
@@ -86,7 +93,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 24px;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 24px var(--shadow);
 }
 
 .auth-brand {
@@ -365,7 +372,7 @@ body {
   background-color: var(--bg-modal);
   border: 1px solid var(--border-modal);
   border-radius: 0.75rem;
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-lg);
   width: 100%;
   max-width: 28rem;
   margin: 0 1rem;
@@ -421,7 +428,7 @@ body {
   background-color: var(--bg-modal);
   border: 1px solid var(--border-modal);
   border-radius: 0.75rem;
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-lg);
   width: 100%;
   max-width: 28rem;
   margin: 0 1rem;
@@ -1114,7 +1121,7 @@ body {
 .approval-card .approval-actions button.deny {
   background: var(--danger);
   border-color: var(--danger);
-  color: var(--text-on-accent);
+  color: var(--text-on-danger);
 }
 
 .approval-resolved {
@@ -2620,7 +2627,7 @@ body {
   font-size: 11px;
   color: var(--danger);
   background: var(--danger-error-bg);
-  border: 1px solid rgba(230, 76, 76, 0.2);
+  border: 1px solid var(--danger-error-border);
   border-radius: var(--radius);
   padding: 6px 8px;
   margin-top: 6px;
@@ -2629,7 +2636,7 @@ body {
 .ext-note {
   font-size: 11px;
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--note-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 6px 8px;
@@ -2702,7 +2709,7 @@ body {
 }
 
 .btn-ext.configure:hover {
-  background: rgba(136, 132, 216, 0.15);
+  background: var(--badge-sandbox-bg);
 }
 
 /* Pairing requests */
@@ -2750,7 +2757,7 @@ body {
   left: 0;
   width: 100%;
   height: 100%;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--overlay-heavy);
   z-index: 1000;
   display: flex;
   align-items: center;
@@ -2879,7 +2886,7 @@ body {
 
 .activity-event {
   padding: 4px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid var(--note-bg);
 }
 
 .activity-event-message .activity-role {
@@ -3065,13 +3072,13 @@ body {
   padding: 10px 16px;
   border-radius: var(--radius);
   font-size: 13px;
-  color: var(--text-on-accent);
+  color: var(--text-on-danger);
   pointer-events: auto;
   transform: translateX(120%);
   transition: transform 0.25s ease;
   max-width: 360px;
   word-break: break-word;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 12px var(--shadow);
 }
 
 .toast.visible {
@@ -3093,7 +3100,7 @@ body {
 /* --- Memory search highlighting --- */
 
 mark {
-  background: rgba(52, 211, 153, 0.3);
+  background: var(--highlight-bg);
   color: inherit;
   border-radius: 2px;
   padding: 0 1px;
@@ -3178,7 +3185,7 @@ mark {
 }
 
 .assistant-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--hover-subtle);
 }
 
 .assistant-item.active {
@@ -3267,7 +3274,7 @@ mark {
   letter-spacing: 0.5px;
   padding: 1px 5px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--border);
   color: var(--text-secondary);
   margin-right: 6px;
   flex-shrink: 0;
@@ -3933,6 +3940,13 @@ mark {
   --accent-tee-bg: rgba(5, 150, 105, 0.08);
   --accent-tee-border: rgba(5, 150, 105, 0.2);
   --accent-tee-hover: rgba(5, 150, 105, 0.15);
+  --text-on-danger: #fff;
+  --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
+  --danger-error-border: rgba(220, 38, 38, 0.15);
+  --note-bg: rgba(0, 0, 0, 0.02);
+  --overlay-heavy: rgba(0, 0, 0, 0.4);
+  --highlight-bg: rgba(5, 150, 105, 0.2);
+  --hover-subtle: rgba(0, 0, 0, 0.04);
 }
 
 /* ============================================================
@@ -3941,7 +3955,7 @@ mark {
 
 body.theme-transition,
 body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
-  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
 }
 
 /* ============================================================

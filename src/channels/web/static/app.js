@@ -16,18 +16,20 @@ function resolveTheme(mode) {
 }
 
 function applyTheme(mode) {
-  var resolved = resolveTheme(mode);
+  const resolved = resolveTheme(mode);
   document.documentElement.setAttribute('data-theme', resolved);
   document.documentElement.setAttribute('data-theme-mode', mode);
-  var titles = { dark: 'Theme: Dark (click for Light)', light: 'Theme: Light (click for System)', system: 'Theme: System (click for Dark)' };
-  var btn = document.getElementById('theme-toggle');
+  const titles = { dark: 'Theme: Dark (click for Light)', light: 'Theme: Light (click for System)', system: 'Theme: System (click for Dark)' };
+  const btn = document.getElementById('theme-toggle');
   if (btn) btn.title = titles[mode] || '';
+  const announce = document.getElementById('theme-announce');
+  if (announce) announce.textContent = 'Theme: ' + mode;
 }
 
 function toggleTheme() {
-  var cycle = { dark: 'light', light: 'system', system: 'dark' };
-  var current = getThemeMode();
-  var next = cycle[current] || 'dark';
+  const cycle = { dark: 'light', light: 'system', system: 'dark' };
+  const current = getThemeMode();
+  const next = cycle[current] || 'dark';
   localStorage.setItem('ironclaw-theme', next);
   applyTheme(next);
 }
