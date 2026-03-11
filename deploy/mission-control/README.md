@@ -3,6 +3,9 @@
 This directory contains the local observability and staging assets for the WSL-first
 IronClaw mission-control path.
 
+- [MANUAL_VERIFICATION_CHECKLIST.md](./MANUAL_VERIFICATION_CHECKLIST.md) — operator checklist after restart or config change
+- [IRONCLAW_SELF_SETUP_GUIDE.md](./IRONCLAW_SELF_SETUP_GUIDE.md) — exact env values and startup order for this workstation
+
 ## Local Monitoring
 
 ```bash
@@ -62,7 +65,8 @@ Current post-restart local proof:
 - local Ollama serves `qwen3.5-9b`
 - the router exposes the proof lane on `127.0.0.1:8080`
 - the benchmark and `ironclaw_chat` smoke path are both green again
-- the paired GPU probe shows the resident model load on the RTX 3090
+- the paired GPU probe keeps the router-backed small-model lane on the `RTX 4070 Ti Super`
+- a direct Ollama comparison run currently drives the same small model on the `RTX 3090`
 
 ## Ollama Comparison Track
 
@@ -74,6 +78,8 @@ Current comparison outcome on this host after the restart:
 
 - the router-backed proof lane is healthy
 - direct Ollama also benchmarks successfully with the same small model
+- the router-backed lane currently exercises the `RTX 4070 Ti Super`, while direct Ollama
+  lands on the `RTX 3090`
 - keep the router-backed path as the primary IronClaw endpoint because it preserves the
   single-endpoint contract, queue metrics, and mission-control health surface
 - treat direct Ollama as a latency/throughput comparison artifact, not as the default app
