@@ -5164,7 +5164,6 @@ mod tests {
             Some("https://my-gateway.example.com/oauth/callback".to_string()),
         );
     }
-
     // ── Regression tests for PR #677 (unify-extension-lifecycle) ─────────
 
     #[tokio::test]
@@ -5314,7 +5313,6 @@ mod tests {
             "configure should have stored the relay stream token"
         );
     }
-
     #[test]
     fn test_validation_failed_is_distinct_error_variant() {
         // Regression: ValidationFailed must be a distinct error variant so
