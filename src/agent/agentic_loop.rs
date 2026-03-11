@@ -6,6 +6,7 @@
 //! via the `LoopDelegate` trait.
 
 use async_trait::async_trait;
+use std::borrow::Cow;
 
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
@@ -211,12 +212,12 @@ pub async fn run_agentic_loop(
 ///
 /// `max` is a byte budget. The result is truncated at the last valid char
 /// boundary at or before `max` bytes, so it is always valid UTF-8.
-pub fn truncate_for_preview(s: &str, max: usize) -> String {
+pub fn truncate_for_preview(s: &str, max: usize) -> Cow<'_, str> {
     if s.len() <= max {
-        s.to_string()
+        Cow::Borrowed(s)
     } else {
         let end = crate::util::floor_char_boundary(s, max);
-        format!("{}...", &s[..end])
+        Cow::Owned(format!("{}...", &s[..end]))
     }
 }
 
@@ -574,9 +575,21 @@ mod tests {
     }
 
     #[test]
+    fn test_truncate_short_string_borrowed() {
+        let result = truncate_for_preview("hello", 10);
+        assert!(matches!(result, Cow::Borrowed("hello")));
+    }
+
+    #[test]
     fn test_truncate_long_string_adds_ellipsis() {
         let result = truncate_for_preview("hello world", 5);
         assert_eq!(result, "hello...");
+    }
+
+    #[test]
+    fn test_truncate_long_string_owned() {
+        let result = truncate_for_preview("hello world", 5);
+        assert!(matches!(result, Cow::Owned(_)));
     }
 
     #[test]

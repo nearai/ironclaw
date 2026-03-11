@@ -472,7 +472,7 @@ impl LoopDelegate for ContainerDelegate {
                     "tool_name": tc.name,
                     "output": match &result {
                         Ok(output) => truncate_for_preview(output, 2000),
-                        Err(e) => format!("Error: {}", truncate_for_preview(e, 500)),
+                        Err(e) => format!("Error: {}", truncate_for_preview(e, 500)).into(),
                     },
                     "success": result.is_ok(),
                 }),
