@@ -363,6 +363,27 @@
     }
   },
   {
+    "id": "minimax",
+    "aliases": [
+      "mini_max"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://api.minimax.io/v1",
+    "api_key_env": "MINIMAX_API_KEY",
+    "api_key_required": true,
+    "base_url_env": "MINIMAX_BASE_URL",
+    "model_env": "MINIMAX_MODEL",
+    "default_model": "MiniMax-M2.5",
+    "description": "MiniMax API (MiniMax-M2.5 and MiniMax-M2.5-highspeed models)",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_minimax_api_key",
+      "key_url": "https://platform.minimax.io",
+      "display_name": "MiniMax",
+      "can_list_models": false
+    }
+  },
+  {
     "id": "cloudflare",
     "aliases": [
       "cloudflare_ai",
