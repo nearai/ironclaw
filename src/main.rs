@@ -9,7 +9,7 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, ChannelSecretUpdater, GatewayChannel, HttpChannel, ReplChannel,
+        ChannelManager, GatewayChannel, HttpChannel, ReplChannel,
         SignalChannel, WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
@@ -682,6 +682,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     #[cfg(unix)]
     {
+        use ironclaw::channels::ChannelSecretUpdater;
         // Collect all channels that support secret updates
         let mut secret_updaters: Vec<Arc<dyn ChannelSecretUpdater>> = Vec::new();
         if let Some(ref state) = http_channel_state {
