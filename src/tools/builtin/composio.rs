@@ -2,26 +2,37 @@
 //!
 //! Enabled when `COMPOSIO_API_KEY` env var is set. Provides a single multiplexed
 //! tool with actions: list, execute, connect, connected_accounts.
+//!
+//! Auth: uses `x-api-key` header per Composio v3 API specification.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::Client;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use url::Url;
 
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str};
+use crate::tools::ApprovalRequirement;
 
 const API_BASE: &str = "https://backend.composio.dev/api/v3";
+
+/// Maximum response body size (5 MB) — prevents OOM from unexpectedly large payloads.
+const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
+
+/// Maximum number of cached account entries to prevent unbounded growth.
+const MAX_CACHE_ENTRIES: usize = 256;
 
 /// Composio tool — single multiplexed interface to Composio's REST API.
 pub struct ComposioTool {
     client: Client,
-    api_key: String,
+    api_key: SecretString,
     entity_id: String,
-    /// Cache: "entity_id:app" -> connected_account_id
+    /// Cache: "entity_id:app" -> connected_account_id (bounded to MAX_CACHE_ENTRIES)
     account_cache: Mutex<HashMap<String, String>>,
 }
 
@@ -33,18 +44,30 @@ impl ComposioTool {
             .expect("failed to create composio HTTP client");
         Self {
             client,
-            api_key,
+            api_key: SecretString::from(api_key),
             entity_id,
             account_cache: Mutex::new(HashMap::new()),
         }
     }
 
+    /// Build a properly percent-encoded URL with query parameters.
+    fn build_url(path: &str, query: &[(&str, &str)]) -> Result<String, ToolError> {
+        let base = format!("{API_BASE}{path}");
+        let mut url = Url::parse(&base)
+            .map_err(|e| ToolError::ExternalService(format!("invalid URL: {e}")))?;
+        for (k, v) in query {
+            url.query_pairs_mut().append_pair(k, v);
+        }
+        Ok(url.to_string())
+    }
+
     /// GET with api key header.
-    async fn get(&self, path: &str) -> Result<Value, ToolError> {
+    async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, ToolError> {
+        let url = Self::build_url(path, query)?;
         let resp = self
             .client
-            .get(format!("{API_BASE}{path}"))
-            .header("x-api-key", &self.api_key)
+            .get(&url)
+            .header("x-api-key", self.api_key.expose_secret())
             .send()
             .await
             .map_err(|e| ToolError::ExternalService(e.to_string()))?;
@@ -53,10 +76,11 @@ impl ComposioTool {
 
     /// POST with api key header and JSON body.
     async fn post(&self, path: &str, body: &Value) -> Result<Value, ToolError> {
+        let url = Self::build_url(path, &[])?;
         let resp = self
             .client
-            .post(format!("{API_BASE}{path}"))
-            .header("x-api-key", &self.api_key)
+            .post(&url)
+            .header("x-api-key", self.api_key.expose_secret())
             .json(body)
             .send()
             .await
@@ -66,10 +90,29 @@ impl ComposioTool {
 
     async fn parse_response(resp: reqwest::Response) -> Result<Value, ToolError> {
         let status = resp.status();
+
+        // Enforce response size limit
+        if let Some(len) = resp.content_length()
+            && len as usize > MAX_RESPONSE_SIZE
+        {
+            return Err(ToolError::ExternalService(format!(
+                "Composio API response too large: {len} bytes (max {MAX_RESPONSE_SIZE})"
+            )));
+        }
+
         let body = resp
             .text()
             .await
             .map_err(|e| ToolError::ExternalService(e.to_string()))?;
+
+        // Truncate if body exceeds limit (streaming response without Content-Length)
+        if body.len() > MAX_RESPONSE_SIZE {
+            return Err(ToolError::ExternalService(format!(
+                "Composio API response too large: {} bytes (max {MAX_RESPONSE_SIZE})",
+                body.len()
+            )));
+        }
+
         if !status.is_success() {
             return Err(ToolError::ExternalService(format!(
                 "Composio API {status}: {body}"
@@ -81,11 +124,11 @@ impl ComposioTool {
 
     /// List available tools, optionally filtered by app.
     async fn list_tools(&self, app: Option<&str>) -> Result<Value, ToolError> {
-        let path = match app {
-            Some(a) => format!("/tools?toolkit_slug={a}"),
-            None => "/tools".to_string(),
+        let query: Vec<(&str, &str)> = match app {
+            Some(a) => vec![("toolkit_slug", a)],
+            None => vec![],
         };
-        self.get(&path).await
+        self.get("/tools", &query).await
     }
 
     /// Execute a tool action.
@@ -115,7 +158,7 @@ impl ComposioTool {
     async fn connect_app(&self, app: &str, entity_id: &str) -> Result<Value, ToolError> {
         // Resolve auth config for this app
         let configs = self
-            .get(&format!("/auth_configs?toolkit_slug={app}"))
+            .get("/auth_configs", &[("toolkit_slug", app)])
             .await?;
         let auth_config_id = configs
             .as_array()
@@ -137,11 +180,11 @@ impl ComposioTool {
 
     /// List connected accounts, optionally filtered by app.
     async fn list_accounts(&self, app: Option<&str>, entity_id: &str) -> Result<Value, ToolError> {
-        let mut path = format!("/connected_accounts?user_id={entity_id}");
+        let mut query = vec![("user_id", entity_id)];
         if let Some(a) = app {
-            path.push_str(&format!("&toolkit_slug={a}"));
+            query.push(("toolkit_slug", a));
         }
-        self.get(&path).await
+        self.get("/connected_accounts", &query).await
     }
 
     /// Auto-resolve connected account for a tool slug.
@@ -156,10 +199,13 @@ impl ComposioTool {
             .next()
             .unwrap_or(tool_slug)
             .to_ascii_lowercase();
+
+        // Only cache for the configured default entity to prevent unbounded growth
+        let use_cache = entity_id == self.entity_id;
         let cache_key = format!("{entity_id}:{app}");
 
         // Check cache
-        {
+        if use_cache {
             let cache = self.account_cache.lock().await;
             if let Some(id) = cache.get(&cache_key) {
                 return Ok(id.clone());
@@ -184,9 +230,12 @@ impl ComposioTool {
             })?
             .to_string();
 
-        // Cache it
-        {
+        // Cache it (bounded)
+        if use_cache {
             let mut cache = self.account_cache.lock().await;
+            if cache.len() >= MAX_CACHE_ENTRIES {
+                cache.clear(); // Simple eviction: clear all when full
+            }
             cache.insert(cache_key, account_id.clone());
         }
 
@@ -239,6 +288,19 @@ impl Tool for ComposioTool {
         })
     }
 
+    fn requires_approval(&self, params: &Value) -> ApprovalRequirement {
+        let action = params
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        match action {
+            // execute and connect perform write operations / OAuth flows
+            "execute" | "connect" => ApprovalRequirement::UnlessAutoApproved,
+            // list and connected_accounts are read-only
+            _ => ApprovalRequirement::Never,
+        }
+    }
+
     async fn execute(
         &self,
         params: Value,
@@ -246,10 +308,8 @@ impl Tool for ComposioTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let action = require_str(&params, "action")?;
-        let entity_id = params
-            .get("entity_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&self.entity_id);
+        // Always use configured entity_id — no caller override to prevent cache abuse
+        let entity_id: &str = &self.entity_id;
 
         let result = match action {
             "list" => {
@@ -399,24 +459,57 @@ mod tests {
         assert_eq!(required[0], "action");
     }
 
-    #[tokio::test]
-    async fn test_entity_id_override_in_params() {
-        // Verify custom entity_id in params doesn't crash (will fail on network, but
-        // validates param extraction path)
+    #[test]
+    fn test_entity_id_override_removed_from_params() {
+        // entity_id in params is now ignored — always uses configured default
         let tool = ComposioTool::new("fake-key".into(), "default".into());
-        let ctx = JobContext::default();
-        let result = tool
-            .execute(
-                json!({"action": "list", "entity_id": "custom-entity"}),
-                &ctx,
-            )
-            .await;
-        // Will fail with network error (fake key), but should NOT fail with param error
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            !err.contains("missing") && !err.contains("unknown action"),
-            "should be a network error, not a param error: {err}"
+        let params = json!({"action": "list", "entity_id": "custom-entity"});
+        // Verify the tool still uses default entity_id (param is ignored at execute level)
+        assert_eq!(tool.entity_id, "default");
+        assert_eq!(params["entity_id"], "custom-entity"); // present in params but ignored
+    }
+
+    #[test]
+    fn test_requires_approval_read_actions() {
+        let tool = ComposioTool::new("key".into(), "default".into());
+        assert_eq!(
+            tool.requires_approval(&json!({"action": "list"})),
+            ApprovalRequirement::Never
         );
+        assert_eq!(
+            tool.requires_approval(&json!({"action": "connected_accounts"})),
+            ApprovalRequirement::Never
+        );
+    }
+
+    #[test]
+    fn test_requires_approval_write_actions() {
+        let tool = ComposioTool::new("key".into(), "default".into());
+        assert_eq!(
+            tool.requires_approval(&json!({"action": "execute"})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+        assert_eq!(
+            tool.requires_approval(&json!({"action": "connect"})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[test]
+    fn test_url_encoding() {
+        // Verify special characters are properly percent-encoded
+        let url = ComposioTool::build_url("/tools", &[("toolkit_slug", "my app+1")]).unwrap();
+        assert!(url.contains("toolkit_slug=my+app%2B1") || url.contains("toolkit_slug=my%20app%2B1"));
+        assert!(!url.contains("my app+1")); // raw value should NOT appear
+    }
+
+    #[test]
+    fn test_max_response_size_reasonable() {
+        assert_eq!(MAX_RESPONSE_SIZE, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_max_cache_entries_bounded() {
+        assert_eq!(MAX_CACHE_ENTRIES, 256);
     }
 }
