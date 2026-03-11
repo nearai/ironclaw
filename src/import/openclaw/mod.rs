@@ -77,7 +77,7 @@ impl OpenClawImporter {
         // Pre-read all conversation data to validate before writing
         let mut all_conversations = Vec::new();
         for (_agent_name, db_path) in &agent_dbs {
-            match reader.read_conversations(db_path) {
+            match reader.read_conversations(db_path).await {
                 Ok(convs) => all_conversations.extend(convs),
                 Err(e) => {
                     tracing::warn!("Failed to read conversations: {}", e);
@@ -88,7 +88,7 @@ impl OpenClawImporter {
         // Pre-read all memory chunks
         let mut all_chunks = Vec::new();
         for (_agent_name, db_path) in &agent_dbs {
-            match reader.read_memory_chunks(db_path) {
+            match reader.read_memory_chunks(db_path).await {
                 Ok(chunks) => all_chunks.extend(chunks),
                 Err(e) => {
                     tracing::warn!("Failed to read memory chunks: {}", e);
