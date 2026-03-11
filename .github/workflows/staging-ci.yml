@@ -222,11 +222,12 @@ jobs:
           echo "Created promotion PR #${PR_NUM}"
 
           # Output commit summary for use in merge commit message
+          DELIM="COMMIT_SUMMARY_$(uuidgen)"
           {
-            echo "commit_summary<<COMMIT_SUMMARY_DELIM"
+            echo "commit_summary<<${DELIM}"
             echo "Commits in this batch (${COMMIT_COUNT}):"
             echo "${COMMIT_MD}"
-            echo "COMMIT_SUMMARY_DELIM"
+            echo "${DELIM}"
           } >> "$GITHUB_OUTPUT"
 
   # ── Gate: wait for review, process findings, merge or block ─────
