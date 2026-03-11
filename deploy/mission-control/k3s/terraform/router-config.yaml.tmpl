@@ -1,0 +1,28 @@
+listen: ":8080"
+metrics_addr: ":9091"
+log_level: info
+
+defaults:
+  max_queue_depth: 8
+  max_concurrency: 2
+  request_timeout: 120s
+  max_body_size: 1048576
+
+health_check:
+  interval: 15s
+  timeout: 5s
+  path: /health
+  unhealthy_threshold: 3
+  healthy_threshold: 1
+
+nodes:
+  - name: k3s-3090-agent
+    url: ${primary_upstream_url}
+    tier: agent
+    weight: 4
+    models: ["qwen3.5-27b"]
+  - name: k3s-4070-fast
+    url: ${secondary_upstream_url}
+    tier: fast
+    weight: 2
+    models: ["qwen3.5-9b"]

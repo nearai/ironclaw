@@ -78,6 +78,7 @@ function authenticate() {
       loadThreads();
       loadMemoryTree();
       loadJobs();
+      loadMissionControl();
       // Apply URL log_level param if present, otherwise just sync the dropdown
       if (urlLogLevel) {
         setServerLogLevel(urlLogLevel);
@@ -1626,6 +1627,7 @@ function switchTab(tab) {
 
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
+  if (tab === 'mission-control') loadMissionControl();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
   if (tab === 'extensions') {
@@ -3485,6 +3487,91 @@ function formatRelativeTime(isoString) {
 // --- Gateway status widget ---
 
 let gatewayStatusInterval = null;
+
+function loadMissionControl() {
+  apiFetch('/api/mission-control/status').then(function(data) {
+    var gateway = document.getElementById('mission-gateway-summary');
+    var router = document.getElementById('mission-router-summary');
+    var benchmark = document.getElementById('mission-benchmark-summary');
+    var models = document.getElementById('mission-models');
+    var health = document.getElementById('mission-router-health');
+    var latestBenchmark = data.latest_benchmark || null;
+    var benchmarkHealth = latestBenchmark && latestBenchmark.health_snapshot
+      ? latestBenchmark.health_snapshot
+      : null;
+    var effectiveHealth = data.router_health || benchmarkHealth;
+    var benchmarkAge = latestBenchmark && latestBenchmark.captured_at
+      ? formatRelativeTime(latestBenchmark.captured_at)
+      : 'unknown';
+    var benchmarkIsStale = latestBenchmark && latestBenchmark.captured_at
+      ? isOlderThanMinutes(latestBenchmark.captured_at, 15)
+      : true;
+    var liveHealthLabel = data.router_health
+      ? 'Live router health'
+      : (benchmarkHealth ? 'Last benchmark router snapshot' : 'Router health unavailable');
+
+    gateway.innerHTML = ''
+      + '<div>Uptime: ' + formatDuration(data.gateway.uptime_secs || 0) + '</div>'
+      + '<div>SSE: ' + (data.gateway.sse_connections || 0) + '</div>'
+      + '<div>WebSocket: ' + (data.gateway.ws_connections || 0) + '</div>';
+
+    router.innerHTML = ''
+      + '<div>Configured URL: ' + escapeHtml(data.router_url || 'not configured') + '</div>'
+      + '<div>Reachable: ' + (data.router_reachable ? 'yes' : 'no') + '</div>'
+      + '<div>Health source: ' + escapeHtml(liveHealthLabel) + '</div>'
+      + '<div>Benchmark path: ' + escapeHtml(data.benchmark_path || '') + '</div>';
+
+    if (latestBenchmark) {
+      benchmark.innerHTML = ''
+        + '<div>Captured: ' + escapeHtml(latestBenchmark.captured_at || 'unknown') + ' (' + escapeHtml(benchmarkAge) + ')</div>'
+        + '<div>Status: ' + (benchmarkIsStale ? 'stale evidence' : 'fresh evidence') + '</div>'
+        + '<div>p50 TTFT: ' + formatMetric(latestBenchmark.p50_ttft_ms, ' ms') + '</div>'
+        + '<div>p95 latency: ' + formatMetric(latestBenchmark.p95_latency_ms, ' ms') + '</div>'
+        + '<div>Prompt tok/s: ' + formatMetric(latestBenchmark.avg_prompt_tokens_per_sec, '') + '</div>'
+        + '<div>Gen tok/s: ' + formatMetric(latestBenchmark.avg_generation_tokens_per_sec, '') + '</div>'
+        + '<div>Success rate: ' + formatMetric(latestBenchmark.success_rate, '%') + '</div>'
+        + '<div>Queue depth: ' + formatMetric(latestBenchmark.observed_max_queue_depth, '') + '</div>'
+        + '<div>Cancel probe: ' + formatCancelProbe(latestBenchmark.cancel_probe) + '</div>';
+    } else {
+      benchmark.textContent = 'No benchmark report yet.';
+    }
+
+    models.innerHTML = '';
+    (data.available_models || []).forEach(function(model) {
+      var pill = document.createElement('span');
+      pill.className = 'mission-model-pill';
+      pill.textContent = model;
+      models.appendChild(pill);
+    });
+    if (!data.available_models || data.available_models.length === 0) {
+      models.innerHTML = '<div class="empty-state">No healthy models exposed yet.</div>';
+    }
+
+    health.textContent = effectiveHealth
+      ? JSON.stringify(effectiveHealth, null, 2)
+      : 'Router health not available.';
+  }).catch(function(err) {
+    document.getElementById('mission-gateway-summary').textContent = 'Mission control unavailable: ' + err.message;
+  });
+}
+
+function formatMetric(value, suffix) {
+  if (value == null || Number.isNaN(Number(value))) return 'n/a';
+  return Number(value).toFixed(2) + suffix;
+}
+
+function formatCancelProbe(cancelProbe) {
+  if (!cancelProbe) return 'n/a';
+  if (cancelProbe.cancelled_cleanly) return 'clean';
+  return 'not clean (' + formatMetric(cancelProbe.elapsed_ms, ' ms') + ')';
+}
+
+function isOlderThanMinutes(isoString, minutes) {
+  if (!isoString) return true;
+  var captured = new Date(isoString).getTime();
+  if (Number.isNaN(captured)) return true;
+  return (Date.now() - captured) > (minutes * 60 * 1000);
+}
 
 function startGatewayStatusPolling() {
   fetchGatewayStatus();

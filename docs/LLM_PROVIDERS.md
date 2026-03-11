@@ -128,6 +128,125 @@ Set `BEDROCK_CROSS_REGION` to route requests across AWS regions for capacity:
 All providers below use `LLM_BACKEND=openai_compatible`. Set `LLM_BASE_URL` to the
 provider's OpenAI-compatible endpoint and `LLM_API_KEY` to your API key.
 
+### Local llm-cluster-router Baseline
+
+For the supported local IronClaw path, place the Go `llm-cluster-router` in front of
+all local vLLM backends and point IronClaw at the router as a single
+OpenAI-compatible endpoint:
+
+```env
+LLM_BACKEND=openai_compatible
+LLM_BASE_URL=http://127.0.0.1:8080/v1
+LLM_API_KEY=local
+LLM_MODEL=qwen3.5-27b
+LLM_REQUEST_TIMEOUT_SECS=120
+```
+
+Recommended host baseline for the current workstation:
+
+| Role | GPU | Model | Purpose | Guardrails |
+|---|---|---|---|---|
+| Primary agent tier | RTX 3090 24 GB | `Qwen 3.5 27B` | Default IronClaw reasoning and tool calling | `--gpu-memory-utilization 0.88`, `--max-model-len 32768`, queue depth `<= 8`, concurrency `1-2` |
+| Secondary fast tier | RTX 4070 Ti Super 16 GB | `Qwen 3.5 9B` or `Qwen 3.5 35B-A3B` | Burst capacity, drafts, lighter tasks | `--gpu-memory-utilization 0.85`; prefer `9B` for stability, keep `35B-A3B` as optional secondary capacity only |
+
+Operational rules for this host:
+
+- Keep `Qwen 3.5 27B` as the default IronClaw model. Do not promote `35B-A3B` to the primary agent tier.
+- Route all local traffic through the external Go router so IronClaw sees one stable endpoint and upstream health/queue state can be enforced centrally.
+- Treat the 4070 Ti Super as a swap-able secondary tier: run either `9B` for safer headroom or `35B-A3B` when throughput matters more than first-pass tool reliability.
+- Cap router queue depth and concurrency before raising vLLM memory limits. Backpressure is safer than running GPUs above their stable VRAM envelope.
+- Consider any sustained GPU memory usage above 90%, queue growth without drain, or repeated request timeouts as a failing configuration that should trigger a lower `max-model-len` or lower concurrency.
+
+Recommended `llm-cluster-router` baseline for this workstation:
+
+```yaml
+listen: ":8080"
+metrics_addr: ":9091"
+log_level: info
+
+defaults:
+  max_queue_depth: 8
+  max_concurrency: 2
+  request_timeout: 120s
+  max_body_size: 1048576
+
+nodes:
+  - name: workstation-3090-agent
+    url: http://127.0.0.1:8001
+    tier: agent
+    weight: 4
+    models: ["qwen3.5-27b"]
+  - name: workstation-4070-fast
+    url: http://127.0.0.1:8002
+    tier: fast
+    weight: 2
+    models: ["qwen3.5-9b"]
+
+tiers:
+  agent:
+    models: ["qwen3.5-27b"]
+    prefer_nodes: ["workstation-3090-agent"]
+  fast:
+    models: ["qwen3.5-9b"]
+    prefer_nodes: ["workstation-4070-fast"]
+  heavy:
+    models: ["qwen3.5-27b"]
+    prefer_nodes: ["workstation-3090-agent"]
+
+health_check:
+  interval: 15s
+  timeout: 5s
+  path: /health
+  unhealthy_threshold: 3
+  healthy_threshold: 1
+```
+
+Notes for the mixed-GPU host:
+
+- Start with `Qwen 3.5 9B` on the 4070 Ti Super, not `35B-A3B`. Only promote `35B-A3B` after the `9B` path is stable and you still have headroom for the required context window.
+- Keep the primary 3090 queue shallow. A queue depth of `8` and concurrency of `1-2` is preferred over a larger queue that hides overload until latency spikes.
+- Use router backpressure as the first safety valve. If requests start timing out or queue depth stops draining, lower concurrency or `max-model-len` before touching GPU memory utilization.
+
+Validation checklist for the local 27B path:
+
+1. Upstreams are healthy:
+   - `curl -sf http://127.0.0.1:8001/health`
+   - `curl -sf http://127.0.0.1:8002/health`
+   - `curl -sf http://127.0.0.1:8080/healthz`
+2. The router exposes the expected models:
+   - `curl -sf http://127.0.0.1:8080/v1/models`
+   - Confirm `qwen3.5-27b` is present and is the model IronClaw uses via `LLM_MODEL`
+3. VRAM stays inside the supported envelope during a real IronClaw run:
+   - RTX 3090 remains below ~90% VRAM
+   - RTX 4070 Ti Super remains below ~88% VRAM
+   - No CUDA OOM or repeated allocator warnings appear in vLLM logs
+4. Queue and latency remain bounded:
+   - router queue depth returns to zero after the burst
+   - first-token latency stays acceptable for the agent tier
+   - request timeouts remain rare or zero
+5. IronClaw remains stable under tool-calling load:
+   - `ironclaw_chat` completes through the gateway
+   - the end-to-end smoke harness finishes without OOM
+
+If the validation checklist fails, reduce `max-model-len`, reduce router concurrency, or demote the 4070 tier back to `9B` before changing any other variable.
+
+### Gemini CLI (secondary operator track)
+
+`gemini-cli` is not a first-class `LLM_BACKEND` in the current Rust provider registry.
+Treat it as an operator-side or MCP-adjacent fallback, not as the primary local
+runtime path.
+
+Use this positioning rule:
+
+- Primary local path: `ironclaw-mcp -> IronClaw -> llm-cluster-router -> local Qwen 27B`
+- Secondary fallback path: Gemini CLI invoked externally by the operator or bridged through a separate tool/MCP layer
+
+Operational guidance:
+
+- Do not replace the default local `openai_compatible` router path with Gemini CLI in the overnight proof path.
+- Do not add a `gemini_cli` backend to `providers.json` or `src/config/llm.rs` without a separate implementation task.
+- If Gemini CLI is introduced later, keep it modular so future IronClaw installs can enable or disable it without changing the core local Qwen path.
+
 ### OpenRouter
 
 [OpenRouter](https://openrouter.ai) routes to 300+ models from a single API key.

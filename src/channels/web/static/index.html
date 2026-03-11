@@ -94,6 +94,7 @@
       <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
+      <button data-tab="mission-control">Mission Control</button>
       <button data-tab="routines" data-i18n="tab.routines">Routines</button>
       <button data-tab="extensions" data-i18n="tab.extensions">Extensions</button>
       <button data-tab="skills" data-i18n="tab.skills">Skills</button>
@@ -212,6 +213,34 @@
           <tbody id="jobs-tbody"></tbody>
         </table>
         <div class="empty-state" id="jobs-empty" style="display:none" data-i18n="jobs.empty">No jobs found</div>
+      </div>
+    </div>
+
+    <!-- Mission Control Tab -->
+    <div class="tab-panel" id="tab-mission-control">
+      <div class="mission-control-container">
+        <div class="mission-grid">
+          <div class="mission-card">
+            <h3>Gateway</h3>
+            <div id="mission-gateway-summary" class="mission-summary">Loading...</div>
+          </div>
+          <div class="mission-card">
+            <h3>Router</h3>
+            <div id="mission-router-summary" class="mission-summary">Loading...</div>
+          </div>
+          <div class="mission-card">
+            <h3>Latest Benchmark</h3>
+            <div id="mission-benchmark-summary" class="mission-summary">No benchmark report yet.</div>
+          </div>
+        </div>
+        <div class="mission-card mission-card-wide">
+          <h3>Available Models</h3>
+          <div id="mission-models" class="mission-model-list"></div>
+        </div>
+        <div class="mission-card mission-card-wide">
+          <h3>Router Health Snapshot</h3>
+          <pre id="mission-router-health" class="mission-json">Waiting for router...</pre>
+        </div>
       </div>
     </div>
 

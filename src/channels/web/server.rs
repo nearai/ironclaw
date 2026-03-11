@@ -302,6 +302,10 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        .route(
+            "/api/mission-control/status",
+            get(mission_control_status_handler),
+        )
         // OpenAI-compatible API
         .route(
             "/v1/chat/completions",
@@ -2612,6 +2616,90 @@ async fn gateway_status_handler(
     })
 }
 
+async fn mission_control_status_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Json<MissionControlStatusResponse> {
+    let benchmark_path = std::env::var("MISSION_CONTROL_BENCHMARK_PATH").unwrap_or_else(|_| {
+        ironclaw_base_dir()
+            .join("benchmarks/latest.json")
+            .display()
+            .to_string()
+    });
+    let router_url = mission_control_router_url();
+    let benchmark = match tokio::fs::read_to_string(&benchmark_path).await {
+        Ok(data) => serde_json::from_str::<serde_json::Value>(&data).ok(),
+        Err(_) => None,
+    };
+
+    let (router_health, available_models) = if let Some(ref base_url) = router_url {
+        let health = fetch_external_json(format!("{base_url}/healthz")).await;
+        let models_payload = fetch_external_json(format!("{base_url}/v1/models")).await;
+        let models = models_payload
+            .as_ref()
+            .and_then(extract_model_ids)
+            .unwrap_or_default();
+        (health, models)
+    } else {
+        (None, Vec::new())
+    };
+
+    Json(MissionControlStatusResponse {
+        router_url,
+        benchmark_path,
+        router_reachable: router_health.is_some(),
+        available_models,
+        router_health,
+        latest_benchmark: benchmark,
+        gateway: GatewaySnapshot {
+            uptime_secs: state.startup_time.elapsed().as_secs(),
+            sse_connections: state.sse.connection_count(),
+            ws_connections: state
+                .ws_tracker
+                .as_ref()
+                .map(|t| t.connection_count())
+                .unwrap_or(0),
+        },
+    })
+}
+
+fn mission_control_router_url() -> Option<String> {
+    if let Ok(value) = std::env::var("MISSION_CONTROL_ROUTER_URL")
+        && !value.trim().is_empty()
+    {
+        return Some(value.trim_end_matches('/').to_string());
+    }
+    if let Ok(value) = std::env::var("LLM_BASE_URL") {
+        let trimmed = value.trim_end_matches('/');
+        if let Some(stripped) = trimmed.strip_suffix("/v1") {
+            return Some(stripped.to_string());
+        }
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+async fn fetch_external_json(target: String) -> Option<serde_json::Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .ok()?;
+    let response = client.get(target).send().await.ok()?;
+    response.json::<serde_json::Value>().await.ok()
+}
+
+fn extract_model_ids(payload: &serde_json::Value) -> Option<Vec<String>> {
+    let data = payload.get("data")?.as_array()?;
+    let mut models = Vec::new();
+    for item in data {
+        if let Some(model) = item.get("id").and_then(|id| id.as_str()) {
+            models.push(model.to_string());
+        }
+    }
+    Some(models)
+}
+
 #[derive(serde::Serialize)]
 struct ModelUsageEntry {
     model: String,
@@ -2634,6 +2722,27 @@ struct GatewayStatusResponse {
     actions_this_hour: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_usage: Option<Vec<ModelUsageEntry>>,
+}
+
+#[derive(serde::Serialize)]
+struct GatewaySnapshot {
+    uptime_secs: u64,
+    sse_connections: u64,
+    ws_connections: u64,
+}
+
+#[derive(serde::Serialize)]
+struct MissionControlStatusResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    router_url: Option<String>,
+    benchmark_path: String,
+    router_reachable: bool,
+    available_models: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    router_health: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latest_benchmark: Option<serde_json::Value>,
+    gateway: GatewaySnapshot,
 }
 
 #[cfg(test)]

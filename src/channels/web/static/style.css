@@ -230,6 +230,72 @@ body {
   background: var(--danger);
 }
 
+.mission-control-container {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+}
+
+.mission-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.mission-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  box-shadow: var(--shadow);
+}
+
+.mission-card h3 {
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+.mission-card-wide {
+  width: 100%;
+}
+
+.mission-summary {
+  color: var(--text-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.mission-model-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mission-model-pill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text);
+  background: var(--bg-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.mission-json {
+  background: var(--code-bg);
+  border-radius: var(--radius);
+  padding: 12px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
 /* TEE Shield */
 .tee-shield {
   display: flex;

@@ -380,8 +380,8 @@ async fn async_main() -> anyhow::Result<()> {
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
         .is_empty()
     {
-        let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        let addr = webhook_server_addr
+            .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \
@@ -505,6 +505,13 @@ async fn async_main() -> anyhow::Result<()> {
             gw.auth_token()
         ));
 
+        if gw_config.host == "0.0.0.0" || gw_config.host == "::" {
+            tracing::warn!(
+                "Gateway is binding to {} — reachable from all interfaces. \
+                 For local Cursor/MCP use, set GATEWAY_HOST=127.0.0.1",
+                gw_config.host
+            );
+        }
         tracing::debug!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
         // Capture SSE sender and routine engine slot before moving gw into channels.

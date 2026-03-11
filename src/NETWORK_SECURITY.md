@@ -2,7 +2,7 @@
 
 This document catalogs every network-facing surface in IronClaw, its authentication mechanism, bind address, security controls, and known findings. Use this as the authoritative reference during code reviews that touch network-facing code.
 
-**Last updated:** 2026-02-18
+**Last updated:** 2026-03-10
 
 ---
 
@@ -31,7 +31,7 @@ IronClaw operates across four trust boundaries:
 | Listener | Default Port | Default Bind | Auth Mechanism | Config Env Var | Source |
 |----------|-------------|-------------|----------------|----------------|--------|
 | Web Gateway | 3000 | `127.0.0.1` | Bearer token (constant-time) | `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN` | `server.rs` — `start_server()` |
-| HTTP Webhook Server | 8080 | `0.0.0.0` | Shared secret (body field) | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET` | `webhook_server.rs` — `start()` |
+| HTTP Webhook Server | 8080 | `127.0.0.1` | Shared secret (body field) | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET` | `webhook_server.rs` — `start()` |
 | Orchestrator Internal API | 50051 | `127.0.0.1` (macOS/Win) / `0.0.0.0` (Linux) | Per-job bearer token (constant-time) | `ORCHESTRATOR_PORT` | `api.rs` — `OrchestratorApi::start()` |
 | OAuth Callback Listener | 9876 | `127.0.0.1` | None (ephemeral, 5-min timeout) | N/A (hardcoded) | `oauth_defaults.rs` — `bind_callback_listener()` |
 | Sandbox HTTP Proxy | OS-assigned (ephemeral) | `127.0.0.1` | None (loopback only) | N/A (auto-assigned) | `proxy/http.rs` — `SandboxProxy::start()` |
@@ -134,11 +134,11 @@ Shutdown is triggered via a `oneshot::Sender` stored in `GatewayState::shutdown_
 
 ### Bind Address
 
-Configurable via `HTTP_HOST` (default `0.0.0.0`) and `HTTP_PORT` (default `8080`).
+Configurable via `HTTP_HOST` (default `127.0.0.1`) and `HTTP_PORT` (default `8080`).
 
-**WARNING:** The default bind address is `0.0.0.0`, meaning the webhook server listens on **all interfaces** by default. This is intentional (webhooks must be reachable from external services like Telegram/Slack), but operators should be aware of the exposure.
+The supported local-default posture is loopback-only. Operators who need externally reachable webhooks must explicitly set `HTTP_HOST=0.0.0.0` (or another non-loopback address), at which point IronClaw emits a startup warning.
 
-**Reference:** `src/config.rs` — `http_host` default (`"0.0.0.0"`), `http_port` default (`8080`)
+**Reference:** `src/config/channels.rs` — `HTTP_HOST` default (`"127.0.0.1"`), `HTTP_PORT` default (`8080`); `src/main.rs` startup warning for unspecified binds
 
 ### Authentication
 
@@ -503,11 +503,11 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 **Location:** `src/channels/http.rs` — `webhook_handler()`
 **Status:** Resolved — webhook secret now uses `subtle::ConstantTimeEq` (`ct_eq`), consistent with web gateway and orchestrator auth.
 
-#### F-4. ~~HTTP webhook server binds to `0.0.0.0` by default~~ (Mitigated)
+#### F-4. ~~HTTP webhook server binds to `0.0.0.0` by default~~ (Resolved)
 
 **Severity:** Low
 **Location:** `src/config.rs`, `src/main.rs`
-**Status:** Mitigated — a `tracing::warn!` is now emitted at startup when the webhook server binds to an unspecified address (`0.0.0.0` or `::`), advising operators to set `HTTP_HOST=127.0.0.1` to restrict to localhost. The default bind address remains `0.0.0.0`, so webhook exposure is still controlled by operator configuration and external network controls (firewalls, ingress rules).
+**Status:** Resolved — the default bind address is now `127.0.0.1`, and a `tracing::warn!` is emitted only when an operator explicitly opts into an unspecified bind (`0.0.0.0` or `::`). Public webhook exposure is now explicit opt-in rather than the default posture.
 
 #### F-5. ~~Missing security headers on web gateway~~ (Mitigated)
 

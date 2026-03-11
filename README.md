@@ -181,6 +181,22 @@ LLM_MODEL=anthropic/claude-sonnet-4
 
 See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
 
+### Recommended Local Runtime Path
+
+For a secured local workstation deployment, the preferred path is:
+
+```text
+Cursor -> ironclaw-mcp -> IronClaw gateway -> llm-cluster-router -> local vLLM
+```
+
+Operational guidance:
+
+- Keep IronClaw bound to loopback unless you intentionally need remote access.
+- Keep the Go router as the single OpenAI-compatible endpoint IronClaw uses for local models.
+- Keep `Qwen 3.5 27B` as the primary local reasoning tier on the 3090-class GPU.
+- Treat smaller or faster secondary models as optional capacity, not as the default agent tier.
+- Validate the local stack with the `ironclaw-mcp` smoke harness before relying on it for day-to-day agent work.
+
 ## Security
 
 IronClaw implements defense in depth to protect your data and prevent misuse.

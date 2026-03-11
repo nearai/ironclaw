@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: llm-cluster-router
+    static_configs:
+      - targets: ["127.0.0.1:9091", "127.0.0.1:8080"]
+
+  - job_name: vllm-primary
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8001"]
+
+  - job_name: vllm-secondary
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:8002"]
+
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+
+  - job_name: dcgm-exporter
+    static_configs:
+      - targets: ["127.0.0.1:9400"]

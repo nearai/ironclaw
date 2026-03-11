@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: IronClaw Mission Control
+    orgId: 1
+    folder: IronClaw Mission Control
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards
