@@ -666,6 +666,7 @@ body {
   font-size: 14px;
   line-height: 1.5;
   word-wrap: break-word;
+  position: relative;
 }
 
 .message.user {
@@ -684,6 +685,58 @@ body {
   padding: 14px 18px;
   font-size: 15px;
   line-height: 1.6;
+}
+
+.message.has-copy {
+  padding-right: 52px;
+}
+
+.message-content {
+  min-width: 0;
+}
+
+.message-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  font-size: 11px;
+  padding: 2px 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.message.user:hover .message-copy-btn,
+.message.assistant:hover .message-copy-btn,
+.message.user:focus-within .message-copy-btn,
+.message.assistant:focus-within .message-copy-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.message-copy-btn:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.message-copy-btn:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+@media (hover: none) {
+  .message.user .message-copy-btn,
+  .message.assistant .message-copy-btn {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .message.system {
