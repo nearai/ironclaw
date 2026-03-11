@@ -25,6 +25,7 @@ pub fn llm_signals_completion(response: &str) -> bool {
     let lower = response.to_lowercase();
 
     // Superset of phrases from agent/worker.rs and worker/runtime.rs.
+    // Also includes routine-specific signals like HEARTBEAT_OK.
     let positive_phrases = [
         "job is complete",
         "job is done",
@@ -46,6 +47,16 @@ pub fn llm_signals_completion(response: &str) -> bool {
         "i've completed",
         "all done",
         "all tasks complete",
+        "heartbeat_ok",
+        "scan complete",
+        "scan is complete",
+        "report is complete",
+        "report complete",
+        "health check complete",
+        "check is complete",
+        "job completed successfully",
+        "routine complete",
+        "nothing to report",
     ];
 
     let negative_phrases = [

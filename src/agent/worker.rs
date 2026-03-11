@@ -300,6 +300,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let mut iteration = 0;
         const MAX_CONSECUTIVE_RATE_LIMITS: usize = 10;
         let mut consecutive_rate_limits = 0usize;
+        // Track consecutive "empty" / no-op text responses from the LLM.
+        // When the LLM has genuinely finished (e.g. a heartbeat report) but
+        // doesn't include an explicit completion phrase, it will return empty
+        // responses on subsequent turns.  After MAX_CONSECUTIVE_EMPTY no-op
+        // texts, we treat the job as complete rather than looping forever.
+        const MAX_CONSECUTIVE_EMPTY: usize = 2;
+        let mut consecutive_empty = 0usize;
 
         // Initial tool definitions for planning (will be refreshed in loop)
         reason_ctx.available_tools = self.tools().tool_definitions().await;
@@ -484,6 +491,29 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             return Ok(());
                         }
 
+                        // Detect the no-op fallback inserted by rig_adapter when
+                        // the API returns an empty content array.  Consecutive
+                        // no-ops mean the LLM genuinely has nothing left to say;
+                        // treat this as an implicit completion signal.
+                        let is_empty_fallback = response.contains(
+                            "I was unable to produce a response",
+                        );
+                        if is_empty_fallback {
+                            consecutive_empty += 1;
+                            if consecutive_empty >= MAX_CONSECUTIVE_EMPTY {
+                                tracing::info!(
+                                    job_id = %self.job_id,
+                                    consecutive_empty,
+                                    "LLM returned {} consecutive empty responses; treating as implicit completion",
+                                    consecutive_empty,
+                                );
+                                self.mark_completed().await?;
+                                return Ok(());
+                            }
+                        } else {
+                            consecutive_empty = 0;
+                        }
+
                         // Add assistant response to context
                         reason_ctx.messages.push(ChatMessage::assistant(&response));
 
@@ -507,6 +537,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         content,
                     } => {
                         // Model returned tool calls - execute them
+                        consecutive_empty = 0;
                         tracing::debug!(
                             "Job {} respond_with_tools returned {} tool calls",
                             self.job_id,
@@ -551,6 +582,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }
                 }
             } else {
+                // The LLM selected tools — reset the empty-response counter.
+                consecutive_empty = 0;
                 // Build and push an assistant_with_tool_calls message so that
                 // subsequent tool_result messages have a matching parent.
                 // Without this, sanitize_tool_messages() treats tool_results
