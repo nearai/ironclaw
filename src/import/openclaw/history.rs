@@ -10,47 +10,6 @@ use crate::import::{ImportError, ImportOptions};
 
 use super::reader::OpenClawConversation;
 
-/// Import a conversation and its messages into IronClaw.
-///
-/// Returns (conversation_id, message_count) on success.
-///
-/// **Deprecated**: Use `import_conversation_atomic` for better safety.
-#[allow(dead_code)]
-pub async fn import_conversation(
-    db: &Arc<dyn Database>,
-    conv: OpenClawConversation,
-    opts: &ImportOptions,
-) -> Result<(Uuid, usize), ImportError> {
-    // Create conversation with metadata that includes original OpenClaw ID for deduplication
-    let metadata = json!({
-        "openclaw_conversation_id": conv.id,
-        "openclaw_channel": conv.channel,
-    });
-
-    let conv_id = db
-        .create_conversation_with_metadata(&conv.channel, &opts.user_id, &metadata)
-        .await
-        .map_err(|e| ImportError::Database(e.to_string()))?;
-
-    // Add messages
-    let mut message_count = 0;
-    for msg in &conv.messages {
-        let role = match msg.role.to_lowercase().as_str() {
-            "user" | "human" => "user",
-            "assistant" | "ai" => "assistant",
-            _ => &msg.role,
-        };
-
-        db.add_conversation_message(conv_id, role, &msg.content)
-            .await
-            .map_err(|e| ImportError::Database(e.to_string()))?;
-
-        message_count += 1;
-    }
-
-    Ok((conv_id, message_count))
-}
-
 /// Import a conversation and its messages atomically.
 ///
 /// This function attempts to create a conversation and add all its messages as a logical unit.

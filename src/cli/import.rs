@@ -127,7 +127,7 @@ async fn run_import_openclaw(
     let stats = importer.import().await?;
 
     // Print results
-    println!("✅ Import Complete");
+    println!("Import Complete");
     println!();
     println!("Summary:");
     println!("  Documents:    {}", stats.documents);
@@ -147,7 +147,7 @@ async fn run_import_openclaw(
 
     if dry_run {
         println!();
-        println!("⚠️  This was a DRY RUN. No data was written.");
+        println!("[DRY RUN] No data was written.");
     }
 
     Ok(())

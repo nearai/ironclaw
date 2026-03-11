@@ -206,12 +206,15 @@ impl OpenClawReader {
             let entry = entry.map_err(ImportError::Io)?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("sqlite") {
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                dbs.push((name, path));
+                match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(name) => dbs.push((name.to_string(), path)),
+                    None => {
+                        tracing::warn!(
+                            "Skipping agent database with non-UTF-8 filename: {:?}",
+                            path
+                        );
+                    }
+                }
             }
         }
 
