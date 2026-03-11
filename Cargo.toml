@@ -176,8 +176,9 @@ readabilityrs = { version = "0.1.2", optional = true }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
 hex = "0.4.3"
 
-# OpenClaw import (feature gated)
-rusqlite = { version = "0.32", optional = true, features = ["bundled"] }
+# OpenClaw import (feature gated). Reuse libsql's SQLite FFI so --all-features
+# test/link steps do not pull in a second bundled sqlite3 implementation.
+rusqlite = { package = "libsql-rusqlite", version = "0.33", optional = true }
 json5 = { version = "0.4", optional = true }
 
 # macOS keychain

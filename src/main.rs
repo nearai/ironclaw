@@ -9,8 +9,8 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, ChannelSecretUpdater, GatewayChannel, HttpChannel, ReplChannel,
-        SignalChannel, WebhookServer, WebhookServerConfig,
+        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
+        WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -27,6 +27,8 @@ use ironclaw::{
     webhooks::{self, ToolWebhookState},
 };
 
+#[cfg(unix)]
+use ironclaw::channels::ChannelSecretUpdater;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use ironclaw::setup::{SetupConfig, SetupWizard};
 
