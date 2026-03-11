@@ -31,6 +31,12 @@ const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 /// in memory for LLM context. Matches the WASM attachment size cap.
 const MAX_SAVE_TO_SIZE: usize = 50 * 1024 * 1024;
 
+/// Default request timeout when the caller does not provide one.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum allowed request timeout to bound resource usage from LLM-controlled inputs.
+const MAX_TIMEOUT_SECS: u64 = 300;
+
 /// Tool for making HTTP requests.
 pub struct HttpTool {
     client: Client,
@@ -211,6 +217,39 @@ fn is_html_response(headers: &HashMap<String, String>) -> bool {
 fn parse_headers_param(
     headers: Option<&serde_json::Value>,
 ) -> Result<Vec<(String, String)>, ToolError> {
+    fn parse_header_object(
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Vec<(String, String)>, ToolError> {
+        let mut out = Vec::with_capacity(map.len());
+        for (k, v) in map {
+            let value = v.as_str().ok_or_else(|| {
+                ToolError::InvalidParameters(format!("header '{}' must have a string value", k))
+            })?;
+            out.push((k.clone(), value.to_string()));
+        }
+        Ok(out)
+    }
+
+    fn parse_header_array(items: &[serde_json::Value]) -> Result<Vec<(String, String)>, ToolError> {
+        let mut out = Vec::with_capacity(items.len());
+        for (idx, item) in items.iter().enumerate() {
+            let obj = item.as_object().ok_or_else(|| {
+                ToolError::InvalidParameters(format!(
+                    "headers[{}] must be an object with 'name' and 'value'",
+                    idx
+                ))
+            })?;
+            let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                ToolError::InvalidParameters(format!("headers[{}].name must be a string", idx))
+            })?;
+            let value = obj.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
+                ToolError::InvalidParameters(format!("headers[{}].value must be a string", idx))
+            })?;
+            out.push((name.to_string(), value.to_string()));
+        }
+        Ok(out)
+    }
+
     match headers {
         None => Ok(Vec::new()),
         Some(serde_json::Value::String(raw)) => {
@@ -224,37 +263,16 @@ fn parse_headers_param(
                     e
                 ))
             })?;
-            parse_headers_param(Some(&parsed))
-        }
-        Some(serde_json::Value::Object(map)) => {
-            let mut out = Vec::with_capacity(map.len());
-            for (k, v) in map {
-                let value = v.as_str().ok_or_else(|| {
-                    ToolError::InvalidParameters(format!("header '{}' must have a string value", k))
-                })?;
-                out.push((k.clone(), value.to_string()));
+            match parsed {
+                serde_json::Value::Object(map) => parse_header_object(&map),
+                serde_json::Value::Array(items) => parse_header_array(&items),
+                _ => Err(ToolError::InvalidParameters(
+                    "headers string must decode to a JSON object or array".to_string(),
+                )),
             }
-            Ok(out)
         }
-        Some(serde_json::Value::Array(items)) => {
-            let mut out = Vec::with_capacity(items.len());
-            for (idx, item) in items.iter().enumerate() {
-                let obj = item.as_object().ok_or_else(|| {
-                    ToolError::InvalidParameters(format!(
-                        "headers[{}] must be an object with 'name' and 'value'",
-                        idx
-                    ))
-                })?;
-                let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
-                    ToolError::InvalidParameters(format!("headers[{}].name must be a string", idx))
-                })?;
-                let value = obj.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
-                    ToolError::InvalidParameters(format!("headers[{}].value must be a string", idx))
-                })?;
-                out.push((name.to_string(), value.to_string()));
-            }
-            Ok(out)
-        }
+        Some(serde_json::Value::Object(map)) => parse_header_object(map),
+        Some(serde_json::Value::Array(items)) => parse_header_array(items),
         Some(_) => Err(ToolError::InvalidParameters(
             "'headers' must be an object or an array of {name, value}".to_string(),
         )),
@@ -262,7 +280,7 @@ fn parse_headers_param(
 }
 
 fn parse_timeout_secs_param(timeout: Option<&serde_json::Value>) -> Result<Option<u64>, ToolError> {
-    match timeout {
+    let parsed = match timeout {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::Number(n)) => n.as_u64().map(Some).ok_or_else(|| {
             ToolError::InvalidParameters("timeout_secs must be a non-negative integer".to_string())
@@ -282,7 +300,18 @@ fn parse_timeout_secs_param(timeout: Option<&serde_json::Value>) -> Result<Optio
         Some(_) => Err(ToolError::InvalidParameters(
             "timeout_secs must be an integer".to_string(),
         )),
+    }?;
+
+    if let Some(secs) = parsed
+        && secs > MAX_TIMEOUT_SECS
+    {
+        return Err(ToolError::InvalidParameters(format!(
+            "timeout_secs must be <= {}",
+            MAX_TIMEOUT_SECS
+        )));
     }
+
+    Ok(parsed)
 }
 
 fn parse_save_to_param(save_to: Option<&serde_json::Value>) -> Result<Option<String>, ToolError> {
@@ -388,6 +417,7 @@ impl Tool for HttpTool {
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
         let timeout_secs = parse_timeout_secs_param(params.get("timeout_secs"))?;
         let save_to = parse_save_to_param(params.get("save_to"))?;
+        let effective_timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
 
         // Build request
         let mut request = match method_upper.as_str() {
@@ -404,9 +434,7 @@ impl Tool for HttpTool {
             }
         };
 
-        if let Some(secs) = timeout_secs {
-            request = request.timeout(Duration::from_secs(secs));
-        }
+        request = request.timeout(effective_timeout);
 
         // Add headers
         for (key, value) in &headers_vec {
@@ -509,7 +537,7 @@ impl Tool for HttpTool {
         // Execute request
         let response = request.send().await.map_err(|e| {
             if e.is_timeout() {
-                ToolError::Timeout(Duration::from_secs(30))
+                ToolError::Timeout(effective_timeout)
             } else {
                 ToolError::ExternalService(e.to_string())
             }
@@ -573,10 +601,10 @@ impl Tool for HttpTool {
 
         // If save_to is specified, write raw bytes to file and return metadata.
         if let Some(save_to) = save_to {
-            let save_to_owned = save_to.clone();
+            let saved_to = save_to.clone();
             let bytes_clone = body_bytes.clone();
             tokio::task::spawn_blocking(move || {
-                let canonical = validate_save_to_path(&save_to_owned)?;
+                let canonical = validate_save_to_path(&save_to)?;
                 std::fs::write(&canonical, &bytes_clone).map_err(|e| {
                     ToolError::ExecutionFailed(format!("failed to write file: {}", e))
                 })?;
@@ -587,7 +615,7 @@ impl Tool for HttpTool {
             .map_err(|e: ToolError| e)?;
             let result = serde_json::json!({
                 "status": status,
-                "saved_to": save_to,
+                "saved_to": saved_to,
                 "size_bytes": body_bytes.len(),
                 "headers": headers,
             });
@@ -779,6 +807,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_headers_param_rejects_double_string_encoding() {
+        let headers = serde_json::json!("\"hello\"");
+        let err = parse_headers_param(Some(&headers)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("headers string must decode to a JSON object or array"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
     fn test_parse_timeout_secs_param_accepts_string_integer() {
         let timeout = serde_json::json!("30");
         assert_eq!(parse_timeout_secs_param(Some(&timeout)).unwrap(), Some(30));
@@ -788,6 +828,30 @@ mod tests {
     fn test_parse_timeout_secs_param_treats_empty_string_as_none() {
         let timeout = serde_json::json!("");
         assert_eq!(parse_timeout_secs_param(Some(&timeout)).unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_timeout_secs_param_rejects_value_above_cap() {
+        let timeout = serde_json::json!(MAX_TIMEOUT_SECS + 1);
+        let err = parse_timeout_secs_param(Some(&timeout)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("timeout_secs must be <= {}", MAX_TIMEOUT_SECS)),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_timeout_secs_param_rejects_string_value_above_cap() {
+        let timeout = serde_json::json!((MAX_TIMEOUT_SECS + 1).to_string());
+        let err = parse_timeout_secs_param(Some(&timeout)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("timeout_secs must be <= {}", MAX_TIMEOUT_SECS)),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
@@ -1029,14 +1093,14 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_host_from_params_error() {
+    fn test_requires_approval_with_stringified_http_params() {
         use crate::tools::wasm::SharedCredentialRegistry;
 
         let tool = HttpTool::new().with_credentials(
             Arc::new(SharedCredentialRegistry::new()),
             Arc::new(test_secrets_store()),
         );
-        let error = serde_json::json!({
+        let req = serde_json::json!({
             "body": "",
             "headers": "[]",
             "method": "GET",
@@ -1044,7 +1108,7 @@ mod tests {
             "timeout_secs": "30",
             "url": "https://r.jina.ai/http://news.baidu.com/"
         });
-        let _ = tool.requires_approval(&error);
+        let _ = tool.requires_approval(&req);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
