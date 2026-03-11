@@ -156,19 +156,19 @@ jobs:
           while IFS= read -r line; do
             sha256=$(echo "$line" | awk '{print $1}')
             filename=$(echo "$line" | awk '{print $2}')
-            # Strip -{version}-wasm32-wasip2.tar.gz to get the extension name.
-            # Use '.*' (greedy) so pre-release suffixes like -alpha.1 are consumed too.
-            name=$(echo "$filename" | sed 's/-[0-9].*-wasm32-wasip2\.tar\.gz$//')
+            # Parse kind-prefixed filename: "tool-slack-0.2.1-wasm32-wasip2.tar.gz"
+            # → kind=tool, name=slack
+            kind=$(echo "$filename" | cut -d'-' -f1)
+            name=$(echo "$filename" | sed "s/^${kind}-//" | sed 's/-[0-9].*-wasm32-wasip2\.tar\.gz$//')
             url="https://github.com/nearai/ironclaw/releases/download/${RELEASE_TAG}/${filename}"
 
-            for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
-              if [ -f "$manifest" ]; then
-                jq --arg sha "$sha256" --arg url "$url" \
-                  '.artifacts["wasm32-wasip2"].sha256 = $sha | .artifacts["wasm32-wasip2"].url = $url' \
-                  "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest with sha256=$sha256 url=$url"
-              fi
-            done
+            manifest="registry/${kind}s/${name}.json"
+            if [ -f "$manifest" ]; then
+              jq --arg sha "$sha256" --arg url "$url" \
+                '.artifacts["wasm32-wasip2"].sha256 = $sha | .artifacts["wasm32-wasip2"].url = $url' \
+                "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
+              echo "Patched $manifest with sha256=$sha256 url=$url"
+            fi
           done < "$CHECKSUMS"
       - name: Install dependencies
         run: |
@@ -276,9 +276,10 @@ jobs:
             [ -f "$manifest" ] || continue
 
             # file_stem: JSON filename without extension (e.g. "slack" for slack.json).
-            # Used for the bundle filename and CI manifest lookup, so patching always
-            # finds the right file regardless of whether manifest.name matches the filename.
             file_stem=$(basename "$manifest" .json)
+            # kind: "tool" or "channel" — used as bundle filename prefix to avoid
+            # collisions when a tool and channel share the same file_stem (e.g. slack).
+            kind=$(jq -r '.kind' "$manifest")
             # ext_name: the manifest's .name field (e.g. "slack-tool").
             # Used for file names *inside* the archive — the installer extracts by manifest.name.
             ext_name=$(jq -r '.name' "$manifest")
@@ -340,18 +341,19 @@ jobs:
               echo "::warning::No capabilities file at '$caps_path' for '$file_stem'"
             fi
 
-            # Bundle filename uses file_stem so CI patching can find the manifest by
-            # filename (e.g. slack-0.1.0-wasm32-wasip2.tar.gz → registry/tools/slack.json).
-            bundle="target/wasm-bundles/${file_stem}-${ext_version}-wasm32-wasip2.tar.gz"
+            # Bundle filename uses kind+file_stem to avoid collisions when a tool
+            # and channel share the same name (e.g. tool-slack vs channel-slack).
+            bundle_name="${kind}-${file_stem}-${ext_version}-wasm32-wasip2.tar.gz"
+            bundle="target/wasm-bundles/${bundle_name}"
             (cd target/wasm-bundles && if [ -f "${ext_name}.capabilities.json" ]; then
-              tar czf "${file_stem}-${ext_version}-wasm32-wasip2.tar.gz" "${ext_name}.wasm" "${ext_name}.capabilities.json"
+              tar czf "${bundle_name}" "${ext_name}.wasm" "${ext_name}.capabilities.json"
             else
-              tar czf "${file_stem}-${ext_version}-wasm32-wasip2.tar.gz" "${ext_name}.wasm"
+              tar czf "${bundle_name}" "${ext_name}.wasm"
             fi)
 
             # Compute SHA256
             sha256=$(sha256sum "$bundle" | cut -d' ' -f1)
-            echo "$sha256  ${file_stem}-${ext_version}-wasm32-wasip2.tar.gz" >> target/wasm-bundles/checksums.txt
+            echo "$sha256  ${bundle_name}" >> target/wasm-bundles/checksums.txt
 
             # Clean up intermediate files
             rm -f "target/wasm-bundles/${ext_name}.wasm" "target/wasm-bundles/${ext_name}.capabilities.json"
@@ -474,19 +476,19 @@ jobs:
           while IFS= read -r line; do
             sha256=$(echo "$line" | awk '{print $1}')
             filename=$(echo "$line" | awk '{print $2}')
-            # Strip -{version}-wasm32-wasip2.tar.gz to get the extension name.
-            # Use '.*' (greedy) so pre-release suffixes like -alpha.1 are consumed too.
-            name=$(echo "$filename" | sed 's/-[0-9].*-wasm32-wasip2\.tar\.gz$//')
+            # Parse kind-prefixed filename: "tool-slack-0.2.1-wasm32-wasip2.tar.gz"
+            # → kind=tool, name=slack
+            kind=$(echo "$filename" | cut -d'-' -f1)
+            name=$(echo "$filename" | sed "s/^${kind}-//" | sed 's/-[0-9].*-wasm32-wasip2\.tar\.gz$//')
             url="https://github.com/nearai/ironclaw/releases/download/${RELEASE_TAG}/${filename}"
 
-            for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
-              if [ -f "$manifest" ]; then
-                jq --arg sha "$sha256" --arg url "$url" \
-                  '.artifacts["wasm32-wasip2"].sha256 = $sha | .artifacts["wasm32-wasip2"].url = $url' \
-                  "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest with sha256=$sha256 url=$url"
-              fi
-            done
+            manifest="registry/${kind}s/${name}.json"
+            if [ -f "$manifest" ]; then
+              jq --arg sha "$sha256" --arg url "$url" \
+                '.artifacts["wasm32-wasip2"].sha256 = $sha | .artifacts["wasm32-wasip2"].url = $url' \
+                "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
+              echo "Patched $manifest with sha256=$sha256 url=$url"
+            fi
           done < "$CHECKSUMS"
       - name: Create PR with updated manifests
         run: |
