@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, Method, StatusCode},
     routing::{get, post},
 };
@@ -65,6 +65,7 @@ pub fn routes(state: ToolWebhookState) -> Router {
             post(tool_webhook_with_rest_handler),
         )
         .route("/webhook/tools/{tool}", get(tool_webhook_health))
+        .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
         .with_state(state)
 }
 
@@ -72,18 +73,22 @@ async fn tool_webhook_health(
     Path(tool): Path<String>,
     State(state): State<ToolWebhookState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let has_tool = state.tools.has(&tool).await;
-    if has_tool {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({ "status": "ok", "tool": tool })),
-        )
-    } else {
-        (
+    let Some(tool_impl) = state.tools.get(&tool).await else {
+        return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": format!("Tool not found: {tool}") })),
-        )
+        );
+    };
+    if tool_impl.webhook_capability().is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Tool does not support webhooks: {tool}") })),
+        );
     }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "ok", "tool": tool })),
+    )
 }
 
 async fn tool_webhook_handler(
@@ -253,6 +258,18 @@ async fn validate_webhook_auth(
             "Tool does not declare a webhook capability; webhook access denied".to_string(),
         );
     };
+
+    // Require at least one authentication mechanism to be configured.
+    if cfg.secret_name.is_none()
+        && cfg.signature_key_secret_name.is_none()
+        && cfg.hmac_secret_name.is_none()
+    {
+        return Err(
+            "Webhook capability misconfigured: at least one auth mechanism must be configured"
+                .to_string(),
+        );
+    }
+
     let Some(store) = secrets_store else {
         return Err("Secrets store not available for webhook verification".to_string());
     };
@@ -361,6 +378,8 @@ mod tests {
     struct TestWebhookTool;
     struct ProtectedWebhookTool;
     struct HmacWebhookTool;
+    /// Tool that declares webhook_capability() but with no auth mechanism configured.
+    struct MisconfiguredWebhookTool;
 
     #[async_trait]
     impl Tool for TestWebhookTool {
@@ -454,6 +473,36 @@ mod tests {
                 hmac_prefix: Some("sha256=".to_string()),
                 ..Default::default()
             })
+        }
+    }
+
+    #[async_trait]
+    impl Tool for MisconfiguredWebhookTool {
+        fn name(&self) -> &str {
+            "misconfigured_webhook"
+        }
+
+        fn description(&self) -> &str {
+            "misconfigured test"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({"emit_events":[]}),
+                Duration::from_millis(1),
+            ))
+        }
+
+        fn webhook_capability(&self) -> Option<crate::tools::wasm::WebhookCapability> {
+            Some(crate::tools::wasm::WebhookCapability::default())
         }
     }
 
@@ -584,5 +633,80 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_webhook_capability_as_misconfigured() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(MisconfiguredWebhookTool)).await;
+
+        let secrets = Arc::new(InMemorySecretsStore::new(Arc::new(
+            SecretsCrypto::new(secrecy::SecretString::from(
+                "test-key-at-least-32-chars-long!!".to_string(),
+            ))
+            .expect("crypto"),
+        )));
+
+        let app = routes(ToolWebhookState {
+            tools,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            user_id: "test".to_string(),
+            secrets_store: Some(secrets),
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/webhook/tools/misconfigured_webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"ok":true}"#))
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn health_check_returns_ok_for_webhook_capable_tool() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(ProtectedWebhookTool)).await;
+        let app = routes(ToolWebhookState {
+            tools,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            user_id: "test".to_string(),
+            secrets_store: None,
+        });
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/webhook/tools/protected_webhook")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_check_returns_not_found_for_non_webhook_tool() {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(TestWebhookTool)).await;
+        let app = routes(ToolWebhookState {
+            tools,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            user_id: "test".to_string(),
+            secrets_store: None,
+        });
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/webhook/tools/test_webhook")
+            .body(Body::empty())
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
