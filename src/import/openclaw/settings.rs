@@ -72,20 +72,14 @@ pub fn extract_credentials(config: &OpenClawConfig) -> Vec<(String, SecretString
     if let Some(ref llm) = config.llm
         && let Some(ref api_key) = llm.api_key
     {
-        credentials.push((
-            "llm_api_key".to_string(),
-            SecretString::new(api_key.clone().into_boxed_str()),
-        ));
+        credentials.push(("llm_api_key".to_string(), api_key.clone()));
     }
 
     // Extract embeddings API key if present
     if let Some(ref emb) = config.embeddings
         && let Some(ref api_key) = emb.api_key
     {
-        credentials.push((
-            "embeddings_api_key".to_string(),
-            SecretString::new(api_key.clone().into_boxed_str()),
-        ));
+        credentials.push(("embeddings_api_key".to_string(), api_key.clone()));
     }
 
     credentials
@@ -94,6 +88,7 @@ pub fn extract_credentials(config: &OpenClawConfig) -> Vec<(String, SecretString
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::import::openclaw::reader::{OpenClawConfig, OpenClawLlmConfig};
 
     #[test]
     fn test_map_llm_config() {
@@ -103,10 +98,10 @@ mod tests {
             other_settings: HashMap::new(),
         };
 
-        config.llm = Some(super::super::reader::OpenClawLlmConfig {
+        config.llm = Some(OpenClawLlmConfig {
             provider: Some("openai".to_string()),
             model: Some("gpt-4".to_string()),
-            api_key: Some("secret".to_string()),
+            api_key: Some(SecretString::new("secret".to_string().into_boxed_str())),
             base_url: None,
         });
 
@@ -130,10 +125,12 @@ mod tests {
             other_settings: HashMap::new(),
         };
 
-        config.llm = Some(super::super::reader::OpenClawLlmConfig {
+        config.llm = Some(OpenClawLlmConfig {
             provider: Some("anthropic".to_string()),
             model: Some("claude-3".to_string()),
-            api_key: Some("secret-key-value".to_string()),
+            api_key: Some(SecretString::new(
+                "secret-key-value".to_string().into_boxed_str(),
+            )),
             base_url: None,
         });
 

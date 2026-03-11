@@ -295,6 +295,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "import")]
     fn test_help_output() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
@@ -302,7 +303,24 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "import"))]
+    fn test_help_output_without_import() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_help().to_string();
+        assert_snapshot!(help);
+    }
+
+    #[test]
+    #[cfg(feature = "import")]
     fn test_long_help_output() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+        assert_snapshot!(help);
+    }
+
+    #[test]
+    #[cfg(not(feature = "import"))]
+    fn test_long_help_output_without_import() {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
         assert_snapshot!(help);

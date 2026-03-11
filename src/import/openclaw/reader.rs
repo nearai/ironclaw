@@ -3,7 +3,10 @@
 //! Handles opening OpenClaw SQLite databases and reading configuration
 //! without making any modifications.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+use secrecy::SecretString;
 
 use crate::import::ImportError;
 
@@ -15,19 +18,40 @@ pub struct OpenClawConfig {
     pub other_settings: std::collections::HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenClawLlmConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
-    pub api_key: Option<String>,
+    pub api_key: Option<SecretString>,
     pub base_url: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Debug for OpenClawLlmConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenClawLlmConfig")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "***REDACTED***"))
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct OpenClawEmbeddingsConfig {
     pub model: Option<String>,
-    pub api_key: Option<String>,
+    pub api_key: Option<SecretString>,
     pub provider: Option<String>,
+}
+
+impl fmt::Debug for OpenClawEmbeddingsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenClawEmbeddingsConfig")
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "***REDACTED***"))
+            .field("provider", &self.provider)
+            .finish()
+    }
 }
 
 /// A memory chunk from OpenClaw's database.
@@ -117,7 +141,7 @@ impl OpenClawReader {
                     api_key: llm_obj
                         .get("api_key")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                        .map(|s| SecretString::new(s.to_string().into_boxed_str())),
                     base_url: llm_obj
                         .get("base_url")
                         .and_then(|v| v.as_str())
@@ -136,7 +160,7 @@ impl OpenClawReader {
                     api_key: emb_obj
                         .get("api_key")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                        .map(|s| SecretString::new(s.to_string().into_boxed_str())),
                     provider: emb_obj
                         .get("provider")
                         .and_then(|v| v.as_str())
@@ -168,7 +192,7 @@ impl OpenClawReader {
         }
     }
 
-    /// List all agent `.sqlite` files in the agents/ directory.
+    /// List all agent `.sqlite` files in the agents/ directory, sorted by name for deterministic order.
     pub fn list_agent_dbs(&self) -> Result<Vec<(String, PathBuf)>, ImportError> {
         let agents_dir = self.openclaw_dir.join("agents");
 
@@ -190,6 +214,9 @@ impl OpenClawReader {
                 dbs.push((name, path));
             }
         }
+
+        // Sort by agent name for deterministic ordering
+        dbs.sort_by(|a, b| a.0.cmp(&b.0));
 
         Ok(dbs)
     }
@@ -340,25 +367,55 @@ impl OpenClawReader {
     }
 }
 
-#[cfg(not(feature = "import"))]
-impl OpenClawReader {
-    /// Stub implementation when import feature is disabled.
-    pub fn read_memory_chunks(
-        &self,
-        _db_path: &Path,
-    ) -> Result<Vec<OpenClawMemoryChunk>, ImportError> {
-        Err(ImportError::ConfigParse(
-            "Import feature not enabled".to_string(),
-        ))
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn test_llm_config_debug_redacts_api_key() {
+        let config = OpenClawLlmConfig {
+            provider: Some("openai".to_string()),
+            model: Some("gpt-4".to_string()),
+            api_key: Some(SecretString::new("sk-secret-key-12345".into())),
+            base_url: Some("https://api.openai.com".to_string()),
+        };
+
+        let debug_output = format!("{:?}", config);
+
+        // Verify the actual API key is never exposed in debug output
+        assert!(!debug_output.contains("sk-secret-key-12345"));
+        // Verify the redaction marker is present
+        assert!(debug_output.contains("***REDACTED***"));
     }
 
-    /// Stub implementation when import feature is disabled.
-    pub fn read_conversations(
-        &self,
-        _db_path: &Path,
-    ) -> Result<Vec<OpenClawConversation>, ImportError> {
-        Err(ImportError::ConfigParse(
-            "Import feature not enabled".to_string(),
-        ))
+    #[test]
+    fn test_embeddings_config_debug_redacts_api_key() {
+        let config = OpenClawEmbeddingsConfig {
+            model: Some("text-embedding-3-large".to_string()),
+            api_key: Some(SecretString::new("sk-embed-secret-67890".into())),
+            provider: Some("openai".to_string()),
+        };
+
+        let debug_output = format!("{:?}", config);
+
+        // Verify the actual API key is never exposed in debug output
+        assert!(!debug_output.contains("sk-embed-secret-67890"));
+        // Verify the redaction marker is present
+        assert!(debug_output.contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn test_llm_config_without_api_key() {
+        let config = OpenClawLlmConfig {
+            provider: Some("openai".to_string()),
+            model: Some("gpt-4".to_string()),
+            api_key: None,
+            base_url: None,
+        };
+
+        let debug_output = format!("{:?}", config);
+
+        // Should show None for missing API key
+        assert!(debug_output.contains("api_key: None"));
     }
 }

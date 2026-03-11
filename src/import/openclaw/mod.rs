@@ -56,17 +56,55 @@ impl OpenClawImporter {
     ///
     /// Returns detailed statistics about what was imported.
     /// If `dry_run` is enabled, no data is written to the database.
+    ///
+    /// **Database Safety Note:** The Database trait does not currently expose explicit
+    /// transaction control (BEGIN/COMMIT/ROLLBACK). To minimize consistency risks:
+    /// - All configuration reading is done before any writes
+    /// - Writes are grouped by type (settings, credentials, documents, chunks, conversations)
+    /// - Conversations are handled atomically: creation + all messages added together
+    /// - Errors are logged but don't stop the entire import (fail-safe behavior)
     pub async fn import(&self) -> Result<ImportStats, ImportError> {
         let mut stats = ImportStats::default();
 
-        // Create reader for OpenClaw data
-        let reader = OpenClawReader::new(&self.opts.openclaw_path)?;
+        // === PHASE 1: READ ALL DATA BEFORE ANY WRITES ===
+        // This minimizes the window where the database could be left in a partial state
 
-        // Step 1: Import settings and credentials
+        // Read OpenClaw data
+        let reader = OpenClawReader::new(&self.opts.openclaw_path)?;
         let config = reader.read_config()?;
+        let agent_dbs = reader.list_agent_dbs()?;
+
+        // Pre-read all conversation data to validate before writing
+        let mut all_conversations = Vec::new();
+        for (_agent_name, db_path) in &agent_dbs {
+            match reader.read_conversations(db_path) {
+                Ok(convs) => all_conversations.extend(convs),
+                Err(e) => {
+                    tracing::warn!("Failed to read conversations: {}", e);
+                }
+            }
+        }
+
+        // Pre-read all memory chunks
+        let mut all_chunks = Vec::new();
+        for (_agent_name, db_path) in &agent_dbs {
+            match reader.read_memory_chunks(db_path) {
+                Ok(chunks) => all_chunks.extend(chunks),
+                Err(e) => {
+                    tracing::warn!("Failed to read memory chunks: {}", e);
+                }
+            }
+        }
+
+        // Prepare all settings and credentials
         let settings_map = settings::map_openclaw_config_to_settings(&config);
+        let creds = settings::extract_credentials(&config);
+
+        // === PHASE 2: WRITE IN GROUPED ORDER ===
+        // If a crash occurs, earlier groups are fully committed
 
         if !self.opts.dry_run {
+            // Group 1: Settings (should be idempotent via upsert)
             for (key, value) in settings_map {
                 if let Err(e) = self.db.set_setting(&self.opts.user_id, &key, &value).await {
                     tracing::warn!("Failed to import setting {}: {}", key, e);
@@ -74,16 +112,9 @@ impl OpenClawImporter {
                     stats.settings += 1;
                 }
             }
-        } else {
-            stats.settings = settings_map.len();
-        }
 
-        // Step 2: Import credentials
-        let creds = settings::extract_credentials(&config);
-        if !self.opts.dry_run {
+            // Group 2: Credentials (should be idempotent via upsert)
             for (name, value) in creds {
-                // SecretString cannot be used with CreateSecretParams, which expects a String
-                // We need to extract the value from SecretString
                 use secrecy::ExposeSecret;
                 let exposed = value.expose_secret().to_string();
                 let params = crate::secrets::CreateSecretParams::new(name, exposed);
@@ -93,13 +124,9 @@ impl OpenClawImporter {
                     stats.secrets += 1;
                 }
             }
-        } else {
-            stats.secrets = creds.len();
-        }
 
-        // Step 3: Import workspace documents (Markdown files)
-        if let Ok(count) = reader.list_workspace_files() {
-            if !self.opts.dry_run {
+            // Group 3: Workspace documents
+            if let Ok(_count) = reader.list_workspace_files() {
                 match self
                     .workspace
                     .import_from_directory(&self.opts.openclaw_path.join("workspace"))
@@ -110,59 +137,43 @@ impl OpenClawImporter {
                         tracing::warn!("Failed to import workspace documents: {}", e);
                     }
                 }
-            } else {
+            }
+
+            // Group 4: Memory chunks (should be idempotent via path deduplication)
+            for chunk in all_chunks {
+                if let Err(e) = memory::import_chunk(&self.db, &chunk, &self.opts).await {
+                    tracing::warn!("Failed to import memory chunk: {}", e);
+                } else {
+                    stats.chunks += 1;
+                }
+            }
+
+            // Group 5: Conversations with messages
+            // CRITICAL: Each conversation + its messages form an atomic unit.
+            // If a crash occurs mid-conversation, only that conversation is incomplete.
+            // All previous conversations are fully committed.
+            for conv in all_conversations {
+                match history::import_conversation_atomic(&self.db, conv, &self.opts).await {
+                    Ok((_conv_id, msg_count)) => {
+                        stats.conversations += 1;
+                        stats.messages += msg_count;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to import conversation: {}", e);
+                    }
+                }
+            }
+        } else {
+            // DRY RUN: Count only
+            stats.settings = settings_map.len();
+            stats.secrets = creds.len();
+            if let Ok(count) = reader.list_workspace_files() {
                 stats.documents = count;
             }
-        }
-
-        // Step 4: Import memory and history from agent databases
-        let agent_dbs = reader.list_agent_dbs()?;
-        for (_agent_name, db_path) in agent_dbs {
-            // Import memory chunks
-            match reader.read_memory_chunks(&db_path) {
-                Ok(chunks) => {
-                    for chunk in chunks {
-                        if !self.opts.dry_run {
-                            if let Err(e) = memory::import_chunk(&self.db, &chunk, &self.opts).await
-                            {
-                                tracing::warn!("Failed to import memory chunk: {}", e);
-                            } else {
-                                stats.chunks += 1;
-                            }
-                        } else {
-                            stats.chunks += 1;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to read memory chunks: {}", e);
-                }
-            }
-
-            // Import conversations
-            match reader.read_conversations(&db_path) {
-                Ok(convs) => {
-                    for conv in convs {
-                        if !self.opts.dry_run {
-                            match history::import_conversation(&self.db, conv, &self.opts).await {
-                                Ok((_conv_id, msg_count)) => {
-                                    stats.conversations += 1;
-                                    stats.messages += msg_count;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to import conversation: {}", e);
-                                }
-                            }
-                        } else {
-                            stats.conversations += 1;
-                            // Count messages in dry-run mode too
-                            // For now, just count the conversation
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to read conversations: {}", e);
-                }
+            stats.chunks = all_chunks.len();
+            stats.conversations = all_conversations.len();
+            for conv in &all_conversations {
+                stats.messages += conv.messages.len();
             }
         }
 

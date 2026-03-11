@@ -1,47 +1,12 @@
 //! OpenClaw credential import with secure handling.
-
-use std::sync::Arc;
-
-use secrecy::ExposeSecret;
-use secrecy::SecretString;
-
-use crate::import::ImportError;
-use crate::secrets::{CreateSecretParams, SecretsStore};
-
-/// Import credentials from OpenClaw configuration into IronClaw.
-///
-/// Credentials are never logged or printed. This function uses the
-/// secrets store's upsert semantics to safely re-import without duplicates.
-pub async fn import_credentials(
-    secrets: &Arc<dyn SecretsStore>,
-    credentials: Vec<(String, SecretString)>,
-    user_id: &str,
-    dry_run: bool,
-) -> Result<usize, ImportError> {
-    let mut imported = 0;
-
-    for (name, value) in credentials {
-        if !dry_run {
-            let params = CreateSecretParams::new(name, value.expose_secret().to_string());
-
-            match secrets.create(user_id, params).await {
-                Ok(_) => imported += 1,
-                Err(e) => {
-                    // Log error without revealing secret
-                    tracing::warn!("Failed to import credential: {}", e);
-                }
-            }
-        } else {
-            imported += 1;
-        }
-    }
-
-    Ok(imported)
-}
+//!
+//! Credential extraction and import is handled in the main importer (mod.rs).
+//! The credentials module focuses on security validation and testing.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::secrets::CreateSecretParams;
+    use secrecy::SecretString;
 
     #[test]
     fn test_secret_string_not_logged() {
