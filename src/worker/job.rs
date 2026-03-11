@@ -1187,13 +1187,13 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 // TokenUsage; only respond_with_tools() usage is tracked here.
                 let total_tokens = output.usage.total() as u64;
                 if total_tokens > 0
-                    && let Err(msg) = self
+                    && let Err(err) = self
                         .worker
                         .context_manager()
                         .update_context(self.worker.job_id, |ctx| ctx.add_tokens(total_tokens))
                         .await?
                 {
-                    self.worker.mark_failed(&msg).await?;
+                    self.worker.mark_failed(&err.to_string()).await?;
                 }
 
                 Ok(output)
@@ -1796,7 +1796,7 @@ mod tests {
 
         // Verify that mark_failed transitions job to Failed
         worker
-            .mark_failed(&budget_result.unwrap_err())
+            .mark_failed(&budget_result.unwrap_err().to_string())
             .await
             .unwrap();
         let ctx = worker

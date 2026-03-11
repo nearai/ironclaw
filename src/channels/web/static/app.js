@@ -55,7 +55,7 @@ let _activityThinking = null;
 function authenticate() {
   token = document.getElementById('token-input').value.trim();
   if (!token) {
-    document.getElementById('auth-error').textContent = 'Token required';
+    document.getElementById('auth-error').textContent = I18n.t('auth.errorRequired');
     return;
   }
 
@@ -89,7 +89,7 @@ function authenticate() {
       sessionStorage.removeItem('ironclaw_token');
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('app').style.display = 'none';
-      document.getElementById('auth-error').textContent = 'Invalid token';
+      document.getElementById('auth-error').textContent = I18n.t('auth.errorInvalid');
     });
 }
 
@@ -144,7 +144,7 @@ let restartEnabled = false; // Track if restart is available in this deployment
 
 function triggerRestart() {
   if (!currentThreadId) {
-    alert('Please start a conversation first');
+    alert(I18n.t('error.startConversation'));
     return;
   }
 
@@ -155,7 +155,7 @@ function triggerRestart() {
 
 function confirmRestart() {
   if (!currentThreadId) {
-    alert('Please start a conversation first');
+    alert(I18n.t('error.startConversation'));
     return;
   }
 
@@ -190,7 +190,7 @@ function confirmRestart() {
     })
     .catch((err) => {
       console.error('[confirmRestart] Restart request failed:', err);
-      addMessage('system', 'Restart failed: ' + err.message);
+      addMessage('system', I18n.t('error.restartFailed', { message: err.message }));
       isRestarting = false;
       restartBtn.disabled = false;
       if (restartIcon) restartIcon.classList.remove('spinning');
@@ -234,7 +234,7 @@ function connectSSE() {
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
-    document.getElementById('sse-status').textContent = 'Connected';
+    document.getElementById('sse-status').textContent = I18n.t('status.connected');
 
     // If we were restarting, close the modal and reset button now that server is back
     if (isRestarting) {
@@ -256,7 +256,7 @@ function connectSSE() {
 
   eventSource.onerror = () => {
     document.getElementById('sse-dot').classList.add('disconnected');
-    document.getElementById('sse-status').textContent = 'Reconnecting...';
+    document.getElementById('sse-status').textContent = I18n.t('status.reconnecting');
   };
 
   eventSource.addEventListener('response', (e) => {
@@ -464,7 +464,7 @@ function enableChatInput() {
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = false;
-    input.placeholder = 'Message or / for commands...';
+    input.placeholder = I18n.t('chat.inputPlaceholder');
   }
   if (btn) btn.disabled = false;
 }
@@ -703,8 +703,8 @@ function copyCodeBlock(btn) {
   const code = pre.querySelector('code');
   const text = code ? code.textContent : pre.textContent;
   navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = 'Copied!';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    btn.textContent = I18n.t('btn.copied');
+    setTimeout(() => { btn.textContent = I18n.t('btn.copy'); }, 1500);
   });
 }
 
@@ -991,7 +991,7 @@ function showApproval(data) {
 
   const header = document.createElement('div');
   header.className = 'approval-header';
-  header.textContent = 'Tool requires approval';
+  header.textContent = I18n.t('approval.title');
   card.appendChild(header);
 
   const toolName = document.createElement('div');
@@ -1009,7 +1009,7 @@ function showApproval(data) {
   if (data.parameters) {
     const paramsToggle = document.createElement('button');
     paramsToggle.className = 'approval-params-toggle';
-    paramsToggle.textContent = 'Show parameters';
+    paramsToggle.textContent = I18n.t('approval.showParams');
     const paramsBlock = document.createElement('pre');
     paramsBlock.className = 'approval-params';
     paramsBlock.textContent = data.parameters;
@@ -1017,7 +1017,7 @@ function showApproval(data) {
     paramsToggle.addEventListener('click', () => {
       const visible = paramsBlock.style.display !== 'none';
       paramsBlock.style.display = visible ? 'none' : 'block';
-      paramsToggle.textContent = visible ? 'Show parameters' : 'Hide parameters';
+      paramsToggle.textContent = visible ? I18n.t('approval.showParams') : I18n.t('approval.hideParams');
     });
     card.appendChild(paramsToggle);
     card.appendChild(paramsBlock);
@@ -1028,17 +1028,17 @@ function showApproval(data) {
 
   const approveBtn = document.createElement('button');
   approveBtn.className = 'approve';
-  approveBtn.textContent = 'Approve';
+  approveBtn.textContent = I18n.t('approval.approve');
   approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
 
   const alwaysBtn = document.createElement('button');
   alwaysBtn.className = 'always';
-  alwaysBtn.textContent = 'Always';
+  alwaysBtn.textContent = I18n.t('approval.always');
   alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
 
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
-  denyBtn.textContent = 'Deny';
+  denyBtn.textContent = I18n.t('approval.deny');
   denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
 
   actions.appendChild(approveBtn);
@@ -1065,7 +1065,7 @@ function showJobCard(data) {
 
   const title = document.createElement('div');
   title.className = 'job-card-title';
-  title.textContent = data.title || 'Sandbox Job';
+  title.textContent = data.title || I18n.t('sandbox.job');
   info.appendChild(title);
 
   const id = document.createElement('div');
@@ -1077,7 +1077,7 @@ function showJobCard(data) {
 
   const viewBtn = document.createElement('button');
   viewBtn.className = 'job-card-view';
-  viewBtn.textContent = 'View Job';
+  viewBtn.textContent = I18n.t('jobs.viewJob');
   viewBtn.addEventListener('click', () => {
     switchTab('jobs');
     openJobDetail(data.job_id);
@@ -1089,7 +1089,7 @@ function showJobCard(data) {
     browseBtn.className = 'job-card-browse';
     browseBtn.href = data.browse_url;
     browseBtn.target = '_blank';
-    browseBtn.textContent = 'Browse';
+    browseBtn.textContent = I18n.t('jobs.browse');
     card.appendChild(browseBtn);
   }
 
@@ -1110,7 +1110,7 @@ function showAuthCard(data) {
 
   const header = document.createElement('div');
   header.className = 'auth-header';
-  header.textContent = 'Authentication required for ' + data.extension_name;
+  header.textContent = I18n.t('authRequired.title', {name: data.extension_name});
   card.appendChild(header);
 
   if (data.instructions) {
@@ -1126,7 +1126,7 @@ function showAuthCard(data) {
   if (data.auth_url) {
     const oauthBtn = document.createElement('button');
     oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = 'Authenticate with ' + data.extension_name;
+    oauthBtn.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
     oauthBtn.addEventListener('click', () => {
       openOAuthUrl(data.auth_url);
     });
@@ -1137,7 +1137,7 @@ function showAuthCard(data) {
     const setupLink = document.createElement('a');
     setupLink.href = data.setup_url;
     setupLink.target = '_blank';
-    setupLink.textContent = 'Get your token';
+    setupLink.textContent = I18n.t('authRequired.getToken');
     links.appendChild(setupLink);
   }
 
@@ -1151,7 +1151,9 @@ function showAuthCard(data) {
 
   const tokenInput = document.createElement('input');
   tokenInput.type = 'password';
-  tokenInput.placeholder = data.instructions || 'Paste your API key or token';
+  tokenInput.placeholder = data.instructions
+    || I18n.t('auth.extensionTokenPlaceholder')
+    || I18n.t('auth.tokenPlaceholder');
   tokenInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
   });
@@ -1170,12 +1172,12 @@ function showAuthCard(data) {
 
   const submitBtn = document.createElement('button');
   submitBtn.className = 'auth-submit';
-  submitBtn.textContent = 'Submit';
+  submitBtn.textContent = I18n.t('btn.submit');
   submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = I18n.t('btn.cancel');
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
 
   actions.appendChild(submitBtn);
@@ -1690,22 +1692,25 @@ function renderNodes(nodes, container, depth) {
     const row = document.createElement('div');
     row.className = 'tree-row';
     row.style.paddingLeft = (depth * 16 + 8) + 'px';
+    row.tabIndex = 0;
+    row.setAttribute('role', 'treeitem');
 
     if (node.is_dir) {
+      row.setAttribute('aria-expanded', node.expanded ? 'true' : 'false');
       const arrow = document.createElement('span');
       arrow.className = 'expand-arrow' + (node.expanded ? ' expanded' : '');
       arrow.textContent = '\u25B6';
-      arrow.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleExpand(node);
-      });
       row.appendChild(arrow);
 
       const label = document.createElement('span');
       label.className = 'tree-label dir';
       label.textContent = node.name;
-      label.addEventListener('click', () => toggleExpand(node));
       row.appendChild(label);
+
+      row.addEventListener('click', () => toggleExpand(node));
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(node); }
+      });
     } else {
       const spacer = document.createElement('span');
       spacer.className = 'expand-arrow-spacer';
@@ -1714,8 +1719,12 @@ function renderNodes(nodes, container, depth) {
       const label = document.createElement('span');
       label.className = 'tree-label file';
       label.textContent = node.name;
-      label.addEventListener('click', () => readMemoryFile(node.path));
       row.appendChild(label);
+
+      row.addEventListener('click', () => readMemoryFile(node.path));
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); readMemoryFile(node.path); }
+      });
     }
 
     container.appendChild(row);
@@ -1960,7 +1969,7 @@ function prependLogEntry(entry) {
 function toggleLogsPause() {
   logsPaused = !logsPaused;
   const btn = document.getElementById('logs-pause-btn');
-  btn.textContent = logsPaused ? 'Resume' : 'Pause';
+  btn.textContent = logsPaused ? I18n.t('logs.resume') : I18n.t('logs.pause');
 
   if (!logsPaused) {
     // Flush buffer: oldest-first + prepend naturally puts newest at top
@@ -2032,7 +2041,7 @@ function loadExtensions() {
   ]).then(([extData, toolData, registryData]) => {
     // Render installed extensions
     if (extData.extensions.length === 0) {
-      extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
+      extList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noInstalled') + '</div>';
     } else {
       extList.innerHTML = '';
       for (const ext of extData.extensions) {
@@ -2046,7 +2055,7 @@ function loadExtensions() {
 
     // Available WASM extensions
     if (wasmEntries.length === 0) {
-      wasmList.innerHTML = '<div class="empty-state">No additional WASM extensions available</div>';
+      wasmList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noAvailable') + '</div>';
     } else {
       wasmList.innerHTML = '';
       for (const entry of wasmEntries) {
@@ -2056,7 +2065,7 @@ function loadExtensions() {
 
     // MCP servers (show both installed and uninstalled)
     if (mcpEntries.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+      mcpList.innerHTML = '<div class="empty-state">' + I18n.t('mcp.noServers') + '</div>';
     } else {
       mcpList.innerHTML = '';
       for (const entry of mcpEntries) {
@@ -2121,16 +2130,16 @@ function renderAvailableExtensionCard(entry) {
 
   const installBtn = document.createElement('button');
   installBtn.className = 'btn-ext install';
-  installBtn.textContent = 'Install';
+  installBtn.textContent = I18n.t('extensions.install');
   installBtn.addEventListener('click', function() {
     installBtn.disabled = true;
-    installBtn.textContent = 'Installing...';
+    installBtn.textContent = I18n.t('extensions.installing');
     apiFetch('/api/extensions/install', {
       method: 'POST',
       body: { name: entry.name, kind: entry.kind },
     }).then(function(res) {
       if (res.success) {
-        showToast('Installed ' + entry.display_name, 'success');
+        showToast(I18n.t('extensions.installedSuccess', {name: entry.display_name}), 'success');
         // OAuth popup if auth started during install (builtin creds)
         if (res.auth_url) {
           showToast('Opening authentication for ' + entry.display_name, 'info');
@@ -2194,39 +2203,39 @@ function renderMcpServerCard(entry, installedExt) {
     if (!installedExt.active) {
       var activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      activateBtn.textContent = I18n.t('common.activate');
       activateBtn.addEventListener('click', function() { activateExtension(installedExt.name); });
       actions.appendChild(activateBtn);
     } else {
       var activeLabel = document.createElement('span');
       activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
+      activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
     }
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
-    removeBtn.textContent = 'Remove';
+    removeBtn.textContent = I18n.t('ext.remove');
     removeBtn.addEventListener('click', function() { removeExtension(installedExt.name); });
     actions.appendChild(removeBtn);
   } else {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
-    installBtn.textContent = 'Install';
+    installBtn.textContent = I18n.t('ext.install');
     installBtn.addEventListener('click', function() {
       installBtn.disabled = true;
-      installBtn.textContent = 'Installing...';
+      installBtn.textContent = I18n.t('ext.installing');
       apiFetch('/api/extensions/install', {
         method: 'POST',
         body: { name: entry.name, kind: entry.kind },
       }).then(function(res) {
         if (res.success) {
-          showToast('Installed ' + entry.display_name, 'success');
+          showToast(I18n.t('extensions.installedSuccess', { name: entry.display_name }), 'success');
         } else {
-          showToast('Install: ' + (res.message || 'unknown error'), 'error');
+          showToast(I18n.t('ext.install') + ': ' + (res.message || 'unknown error'), 'error');
         }
         loadExtensions();
       }).catch(function(err) {
-        showToast('Install failed: ' + err.message, 'error');
+        showToast(I18n.t('ext.installFailed', { message: err.message }), 'error');
         loadExtensions();
       });
     });
@@ -2240,7 +2249,7 @@ function renderMcpServerCard(entry, installedExt) {
 function createReconfigureButton(extName) {
   var btn = document.createElement('button');
   btn.className = 'btn-ext configure';
-  btn.textContent = 'Reconfigure';
+  btn.textContent = I18n.t('ext.reconfigure');
   btn.addEventListener('click', function() { showConfigureModal(extName); });
   return btn;
 }
@@ -2324,13 +2333,13 @@ function renderExtensionCard(ext) {
     if (status === 'active') {
       var activeLabel = document.createElement('span');
       activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
+      activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'pairing') {
       var pairingLabel = document.createElement('span');
       pairingLabel.className = 'ext-pairing-label';
-      pairingLabel.textContent = 'Awaiting Pairing';
+      pairingLabel.textContent = I18n.t('status.awaitingPairing');
       actions.appendChild(pairingLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'failed') {
@@ -2339,7 +2348,7 @@ function renderExtensionCard(ext) {
       // installed or configured: show Setup button
       var setupBtn = document.createElement('button');
       setupBtn.className = 'btn-ext configure';
-      setupBtn.textContent = 'Setup';
+      setupBtn.textContent = I18n.t('ext.setup');
       setupBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
       actions.appendChild(setupBtn);
     }
@@ -2347,14 +2356,14 @@ function renderExtensionCard(ext) {
     // WASM tools / MCP servers
     const activeLabel = document.createElement('span');
     activeLabel.className = 'ext-active-label';
-    activeLabel.textContent = ext.active ? 'Active' : 'Installed';
+    activeLabel.textContent = ext.active ? I18n.t('ext.active') : I18n.t('status.installed');
     actions.appendChild(activeLabel);
 
     // MCP servers and channel-relay extensions may be installed but inactive — show Activate button
     if ((ext.kind === 'mcp_server' || ext.kind === 'channel_relay') && !ext.active) {
       const activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      activateBtn.textContent = I18n.t('common.activate');
       activateBtn.addEventListener('click', () => activateExtension(ext.name));
       actions.appendChild(activateBtn);
     }
@@ -2366,7 +2375,7 @@ function renderExtensionCard(ext) {
     if (ext.needs_setup || (ext.has_auth && ext.authenticated)) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
-      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
+      configBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.configure');
       configBtn.addEventListener('click', () => showConfigureModal(ext.name));
       actions.appendChild(configBtn);
     }
@@ -2374,7 +2383,7 @@ function renderExtensionCard(ext) {
 
   const removeBtn = document.createElement('button');
   removeBtn.className = 'btn-ext remove';
-  removeBtn.textContent = 'Remove';
+  removeBtn.textContent = I18n.t('ext.remove');
   removeBtn.addEventListener('click', () => removeExtension(ext.name));
   actions.appendChild(removeBtn);
 
@@ -2419,17 +2428,17 @@ function activateExtension(name) {
 }
 
 function removeExtension(name) {
-  if (!confirm('Remove extension "' + name + '"?')) return;
+  if (!confirm(I18n.t('ext.confirmRemove', { name: name }))) return;
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
     .then((res) => {
       if (!res.success) {
-        showToast('Remove failed: ' + res.message, 'error');
+        showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
       } else {
-        showToast('Removed ' + name, 'success');
+        showToast(I18n.t('ext.removed', { name: name }), 'success');
       }
       loadExtensions();
     })
-    .catch((err) => showToast('Remove failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
 }
 
 function showConfigureModal(name) {
@@ -2456,7 +2465,7 @@ function renderConfigureModal(name, secrets) {
   modal.className = 'configure-modal';
 
   const header = document.createElement('h3');
-  header.textContent = 'Configure ' + name;
+  header.textContent = I18n.t('config.title', { name: name });
   modal.appendChild(header);
 
   const form = document.createElement('div');
@@ -2472,7 +2481,7 @@ function renderConfigureModal(name, secrets) {
     if (secret.optional) {
       const opt = document.createElement('span');
       opt.className = 'field-optional';
-      opt.textContent = ' (optional)';
+      opt.textContent = I18n.t('config.optional');
       label.appendChild(opt);
     }
     field.appendChild(label);
@@ -2483,7 +2492,7 @@ function renderConfigureModal(name, secrets) {
     const input = document.createElement('input');
     input.type = 'password';
     input.name = secret.name;
-    input.placeholder = secret.provided ? '(already set — leave empty to keep)' : '';
+    input.placeholder = secret.provided ? I18n.t('config.alreadySet') : '';
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') submitConfigureModal(name, fields);
     });
@@ -2493,13 +2502,13 @@ function renderConfigureModal(name, secrets) {
       const badge = document.createElement('span');
       badge.className = 'field-provided';
       badge.textContent = '\u2713';
-      badge.title = 'Already configured';
+      badge.title = I18n.t('config.alreadyConfigured');
       inputRow.appendChild(badge);
     }
     if (secret.auto_generate && !secret.provided) {
       const hint = document.createElement('span');
       hint.className = 'field-autogen';
-      hint.textContent = 'Auto-generated if empty';
+      hint.textContent = I18n.t('config.autoGenerate');
       inputRow.appendChild(hint);
     }
 
@@ -2515,13 +2524,13 @@ function renderConfigureModal(name, secrets) {
 
   const submitBtn = document.createElement('button');
   submitBtn.className = 'btn-ext activate';
-  submitBtn.textContent = 'Save';
+  submitBtn.textContent = I18n.t('config.save');
   submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
   actions.appendChild(submitBtn);
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = I18n.t('config.cancel');
   cancelBtn.addEventListener('click', closeConfigureModal);
   actions.appendChild(cancelBtn);
 
@@ -2761,11 +2770,11 @@ function loadJobs() {
 
 function renderJobsSummary(s) {
   document.getElementById('jobs-summary').innerHTML = ''
-    + summaryCard('Total', s.total, '')
-    + summaryCard('In Progress', s.in_progress, 'active')
-    + summaryCard('Completed', s.completed, 'completed')
-    + summaryCard('Failed', s.failed, 'failed')
-    + summaryCard('Stuck', s.stuck, 'stuck');
+    + summaryCard(I18n.t('jobs.summary.total'), s.total, '')
+    + summaryCard(I18n.t('jobs.summary.inProgress'), s.in_progress, 'active')
+    + summaryCard(I18n.t('jobs.summary.completed'), s.completed, 'completed')
+    + summaryCard(I18n.t('jobs.summary.failed'), s.failed, 'failed')
+    + summaryCard(I18n.t('jobs.summary.stuck'), s.stuck, 'stuck');
 }
 
 function summaryCard(label, count, cls) {
@@ -3295,11 +3304,11 @@ function loadRoutines() {
 
 function renderRoutinesSummary(s) {
   document.getElementById('routines-summary').innerHTML = ''
-    + summaryCard('Total', s.total, '')
-    + summaryCard('Enabled', s.enabled, 'active')
-    + summaryCard('Disabled', s.disabled, '')
-    + summaryCard('Failing', s.failing, 'failed')
-    + summaryCard('Runs Today', s.runs_today, 'completed');
+    + summaryCard(I18n.t('routines.summary.total'), s.total, '')
+    + summaryCard(I18n.t('routines.summary.enabled'), s.enabled, 'active')
+    + summaryCard(I18n.t('routines.summary.disabled'), s.disabled, '')
+    + summaryCard(I18n.t('routines.summary.failing'), s.failing, 'failed')
+    + summaryCard(I18n.t('routines.summary.runsToday'), s.runs_today, 'completed');
 }
 
 function renderRoutinesList(routines) {
@@ -3465,17 +3474,18 @@ function formatRelativeTime(isoString) {
   const absDiff = Math.abs(diffMs);
   const future = diffMs < 0;
 
-  if (absDiff < 60000) return future ? 'in <1m' : '<1m ago';
+  if (absDiff < 60000) 
+    return future ? I18n.t('time.lessThan1MinuteFromNow') : I18n.t('time.lessThan1MinuteAgo');
   if (absDiff < 3600000) {
     const m = Math.floor(absDiff / 60000);
-    return future ? 'in ' + m + 'm' : m + 'm ago';
+    return future ? I18n.t('time.minutesFromNow', { n: m }) : I18n.t('time.minutesAgo', { n: m });
   }
   if (absDiff < 86400000) {
     const h = Math.floor(absDiff / 3600000);
-    return future ? 'in ' + h + 'h' : h + 'h ago';
+    return future ? I18n.t('time.hoursFromNow', { n: h }) : I18n.t('time.hoursAgo', { n: h });
   }
   const days = Math.floor(absDiff / 86400000);
-  return future ? 'in ' + days + 'd' : days + 'd ago';
+  return future ? I18n.t('time.daysFromNow', { n: days }) : I18n.t('time.daysAgo', { n: days });
 }
 
 // --- Gateway status widget ---
@@ -3525,18 +3535,18 @@ function fetchGatewayStatus() {
     }
 
     // Connection info
-    html += '<div class="gw-section-label">Connections</div>';
-    html += '<div class="gw-stat"><span>SSE</span><span>' + (data.sse_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>WebSocket</span><span>' + (data.ws_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>Uptime</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
+    html += '<div class="gw-section-label">' + I18n.t('dashboard.connections') + '</div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.sse') + '</span><span>' + (data.sse_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.websocket') + '</span><span>' + (data.ws_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.uptime') + '</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
 
     // Cost tracker
     if (data.daily_cost != null) {
       html += '<div class="gw-divider"></div>';
-      html += '<div class="gw-section-label">Cost Today</div>';
-      html += '<div class="gw-stat"><span>Spent</span><span>' + formatCost(data.daily_cost) + '</span></div>';
+      html += '<div class="gw-section-label">' + I18n.t('dashboard.costToday') + '</div>';
+      html += '<div class="gw-stat"><span>' + I18n.t('dashboard.spent') + '</span><span>' + formatCost(data.daily_cost) + '</span></div>';
       if (data.actions_this_hour != null) {
-        html += '<div class="gw-stat"><span>Actions/hr</span><span>' + data.actions_this_hour + '</span></div>';
+        html += '<div class="gw-stat"><span>' + I18n.t('dashboard.actionsPerHour') + '</span><span>' + data.actions_this_hour + '</span></div>';
       }
     }
 
@@ -3744,7 +3754,7 @@ function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   apiFetch('/api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
-      skillsList.innerHTML = '<div class="empty-state">No skills installed</div>';
+      skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
       return;
     }
     skillsList.innerHTML = '';
@@ -3752,7 +3762,7 @@ function loadSkills() {
       skillsList.appendChild(renderSkillCard(data.skills[i]));
     }
   }).catch(function(err) {
-    skillsList.innerHTML = '<div class="empty-state">Failed to load skills: ' + escapeHtml(err.message) + '</div>';
+    skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.loadFailed', {message: escapeHtml(err.message)}) + '</div>';
   });
 }
 
@@ -3789,7 +3799,7 @@ function renderSkillCard(skill) {
   if (skill.keywords && skill.keywords.length > 0) {
     var kw = document.createElement('div');
     kw.className = 'ext-keywords';
-    kw.textContent = 'Activates on: ' + skill.keywords.join(', ');
+    kw.textContent = I18n.t('skills.activatesOn') + ': ' + skill.keywords.join(', ');
     card.appendChild(kw);
   }
 
@@ -3800,7 +3810,7 @@ function renderSkillCard(skill) {
   if (skill.trust.toLowerCase() !== 'trusted') {
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
-    removeBtn.textContent = 'Remove';
+    removeBtn.textContent = I18n.t('skills.remove');
     removeBtn.addEventListener('click', function() { removeSkill(skill.name); });
     actions.appendChild(removeBtn);
   }
@@ -3815,7 +3825,7 @@ function searchClawHub() {
   if (!query) return;
 
   var resultsDiv = document.getElementById('skill-search-results');
-  resultsDiv.innerHTML = '<div class="empty-state">Searching...</div>';
+  resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.searching') + '</div>';
 
   apiFetch('/api/skills/search', {
     method: 'POST',
@@ -3831,7 +3841,7 @@ function searchClawHub() {
       warning.style.borderLeft = '3px solid #f0ad4e';
       warning.style.paddingLeft = '12px';
       warning.style.marginBottom = '16px';
-      warning.textContent = 'Could not reach ClawHub registry: ' + data.catalog_error;
+      warning.textContent = I18n.t('skills.registryError', {message: data.catalog_error});
       resultsDiv.appendChild(warning);
     }
 
@@ -3863,10 +3873,10 @@ function searchClawHub() {
     }
 
     if (resultsDiv.children.length === 0) {
-      resultsDiv.innerHTML = '<div class="empty-state">No skills found for "' + escapeHtml(query) + '"</div>';
+      resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.noResults', {query: escapeHtml(query)}) + '</div>';
     }
   }).catch(function(err) {
-    resultsDiv.innerHTML = '<div class="empty-state">Search failed: ' + escapeHtml(err.message) + '</div>';
+    resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.searchFailed', {message: escapeHtml(err.message)}) + '</div>';
   });
 }
 
@@ -3960,17 +3970,17 @@ function renderCatalogSkillCard(entry, installedNames) {
   if (isInstalled) {
     var label = document.createElement('span');
     label.className = 'ext-active-label';
-    label.textContent = 'Installed';
+    label.textContent = I18n.t('status.installed');
     actions.appendChild(label);
   } else {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
-    installBtn.textContent = 'Install';
+    installBtn.textContent = I18n.t('extensions.install');
     installBtn.addEventListener('click', (function(s, btn) {
       return function() {
         if (!confirm('Install skill "' + s + '" from ClawHub?')) return;
         btn.disabled = true;
-        btn.textContent = 'Installing...';
+        btn.textContent = I18n.t('extensions.installing');
         installSkill(s, null, btn);
       };
     })(slug, installBtn));
@@ -4012,7 +4022,7 @@ function installSkill(nameOrSlug, url, btn) {
     body: body,
   }).then(function(res) {
     if (res.success) {
-      showToast('Installed skill "' + nameOrSlug + '"', 'success');
+      showToast(I18n.t('skills.installedSuccess', {name: nameOrSlug}), 'success');
     } else {
       showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
     }
@@ -4025,19 +4035,19 @@ function installSkill(nameOrSlug, url, btn) {
 }
 
 function removeSkill(name) {
-  if (!confirm('Remove skill "' + name + '"?')) return;
+  if (!confirm(I18n.t('skills.confirmRemove', { name: name }))) return;
   apiFetch('/api/skills/' + encodeURIComponent(name), {
     method: 'DELETE',
     headers: { 'X-Confirm-Action': 'true' },
   }).then(function(res) {
     if (res.success) {
-      showToast('Removed skill "' + name + '"', 'success');
+      showToast(I18n.t('skills.removed', { name: name }), 'success');
     } else {
-      showToast('Remove failed: ' + (res.message || 'unknown error'), 'error');
+      showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
     }
     loadSkills();
   }).catch(function(err) {
-    showToast('Remove failed: ' + err.message, 'error');
+    showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
   });
 }
 

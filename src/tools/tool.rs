@@ -328,6 +328,14 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Optional host-side webhook verification configuration for this tool.
+    ///
+    /// When present, `/webhook/tools/{tool}` validates shared secret/signatures
+    /// before invoking the tool. Tools should then only handle payload normalization.
+    fn webhook_capability(&self) -> Option<crate::tools::wasm::WebhookCapability> {
+        None
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
         ToolSchema {
