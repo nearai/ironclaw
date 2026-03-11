@@ -132,7 +132,8 @@ provider's OpenAI-compatible endpoint and `LLM_API_KEY` to your API key.
 
 For the supported local IronClaw path, place the Go `llm-cluster-router` in front of
 all local vLLM backends and point IronClaw at the router as a single
-OpenAI-compatible endpoint:
+OpenAI-compatible endpoint. Use Docker/Compose for control-plane services; host-only
+for GPU serving and probing.
 
 ```env
 LLM_BACKEND=openai_compatible
@@ -330,6 +331,12 @@ LLM_BASE_URL=http://localhost:1234/v1
 LLM_MODEL=llama-3.2-3b-instruct-q4_K_M
 # LLM_API_KEY is not required for LM Studio
 ```
+
+---
+
+## Experimental: llama.cpp 27B Track
+
+See [LLM_EXPERIMENTAL_LLAMACPP_27B.md](LLM_EXPERIMENTAL_LLAMACPP_27B.md) for the research-backed experimental lane. Do not use as the default path until it meets the KPI gate.
 
 ---
 

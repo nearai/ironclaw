@@ -191,6 +191,7 @@ Cursor -> ironclaw-mcp -> IronClaw gateway -> llm-cluster-router -> local vLLM
 
 Operational guidance:
 
+- Use Docker/Compose for control-plane services (Prometheus, Grafana, Mission Control); host-only for GPU serving and probing.
 - Keep IronClaw bound to loopback unless you intentionally need remote access.
 - Keep the Go router as the single OpenAI-compatible endpoint IronClaw uses for local models.
 - Keep `Qwen 3.5 27B` as the primary local reasoning tier on the 3090-class GPU.
