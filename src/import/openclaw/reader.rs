@@ -80,6 +80,16 @@ pub struct OpenClawMessage {
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Open an OpenClaw SQLite database file via libsql for read-only access.
+#[cfg(feature = "import")]
+async fn open_sqlite(db_path: &Path) -> Result<libsql::Connection, ImportError> {
+    let db = libsql::Builder::new_local(db_path)
+        .build()
+        .await
+        .map_err(|e| ImportError::Sqlite(e.to_string()))?;
+    db.connect().map_err(|e| ImportError::Sqlite(e.to_string()))
+}
+
 /// Reader for OpenClaw data files and databases.
 pub struct OpenClawReader {
     openclaw_dir: PathBuf,
@@ -226,51 +236,52 @@ impl OpenClawReader {
 
     /// Read all memory chunks from an OpenClaw SQLite database.
     #[cfg(feature = "import")]
-    pub fn read_memory_chunks(
+    pub async fn read_memory_chunks(
         &self,
         db_path: &Path,
     ) -> Result<Vec<OpenClawMemoryChunk>, ImportError> {
-        use rusqlite::Connection;
+        let conn = open_sqlite(db_path).await?;
 
-        let conn = Connection::open(db_path).map_err(|e| ImportError::Sqlite(e.to_string()))?;
-
-        let mut stmt = conn
-            .prepare("SELECT path, content, embedding, chunk_index FROM chunks")
-            .map_err(|e| ImportError::Sqlite(e.to_string()))?;
-
-        let chunks = stmt
-            .query_map([], |row| {
-                let path: String = row.get(0)?;
-                let content: String = row.get(1)?;
-                let embedding_bytes: Option<Vec<u8>> = row.get(2)?;
-                let chunk_index: i32 = row.get(3)?;
-
-                // Convert binary embedding blob to Vec<f32> if present
-                let embedding = embedding_bytes.map(|bytes| {
-                    bytes
-                        .chunks(4)
-                        .map(|chunk| {
-                            if chunk.len() == 4 {
-                                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-                            } else {
-                                0.0
-                            }
-                        })
-                        .collect()
-                });
-
-                Ok(OpenClawMemoryChunk {
-                    path,
-                    content,
-                    embedding,
-                    chunk_index,
-                })
-            })
+        let mut rows = conn
+            .query(
+                "SELECT path, content, embedding, chunk_index FROM chunks",
+                (),
+            )
+            .await
             .map_err(|e| ImportError::Sqlite(e.to_string()))?;
 
         let mut result = Vec::new();
-        for chunk_result in chunks {
-            result.push(chunk_result.map_err(|e| ImportError::Sqlite(e.to_string()))?);
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| ImportError::Sqlite(e.to_string()))?
+        {
+            let path: String = row.get(0).map_err(|e| ImportError::Sqlite(e.to_string()))?;
+            let content: String = row.get(1).map_err(|e| ImportError::Sqlite(e.to_string()))?;
+            let embedding_blob: Option<Vec<u8>> =
+                row.get(2).map_err(|e| ImportError::Sqlite(e.to_string()))?;
+            let chunk_index: i32 = row.get(3).map_err(|e| ImportError::Sqlite(e.to_string()))?;
+
+            // Convert binary embedding blob to Vec<f32> if present
+            let embedding = embedding_blob.map(|bytes| {
+                bytes
+                    .chunks(4)
+                    .map(|chunk| {
+                        if chunk.len() == 4 {
+                            f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            });
+
+            result.push(OpenClawMemoryChunk {
+                path,
+                content,
+                embedding,
+                chunk_index,
+            });
         }
 
         Ok(result)
@@ -278,63 +289,70 @@ impl OpenClawReader {
 
     /// Read all conversations from an OpenClaw SQLite database.
     #[cfg(feature = "import")]
-    pub fn read_conversations(
+    pub async fn read_conversations(
         &self,
         db_path: &Path,
     ) -> Result<Vec<OpenClawConversation>, ImportError> {
-        use rusqlite::Connection;
+        let conn = open_sqlite(db_path).await?;
 
-        let conn = Connection::open(db_path).map_err(|e| ImportError::Sqlite(e.to_string()))?;
-
-        // First, read all conversations
-        let mut conv_stmt = conn
-            .prepare("SELECT id, channel, created_at FROM conversations ORDER BY created_at DESC")
+        let mut conv_rows = conn
+            .query(
+                "SELECT id, channel, created_at FROM conversations ORDER BY created_at DESC",
+                (),
+            )
+            .await
             .map_err(|e| ImportError::Sqlite(e.to_string()))?;
 
         let mut conversations = Vec::new();
-        let conv_rows = conv_stmt
-            .query_map([], |row| {
-                let id: String = row.get(0)?;
-                let channel: String = row.get(1)?;
-                let created_at: Option<String> = row.get(2)?;
+        while let Some(row) = conv_rows
+            .next()
+            .await
+            .map_err(|e| ImportError::Sqlite(e.to_string()))?
+        {
+            let id: String = row.get(0).map_err(|e| ImportError::Sqlite(e.to_string()))?;
+            let channel: String = row.get(1).map_err(|e| ImportError::Sqlite(e.to_string()))?;
+            let created_at: Option<String> =
+                row.get(2).map_err(|e| ImportError::Sqlite(e.to_string()))?;
 
-                let created_at = created_at
+            let created_at = created_at
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+
+            // Read messages for this conversation
+            let mut msg_rows = conn
+                .query(
+                    "SELECT role, content, created_at FROM messages WHERE conversation_id = ?1 ORDER BY created_at",
+                    libsql::params![id.as_str()],
+                )
+                .await
+                .map_err(|e| ImportError::Sqlite(e.to_string()))?;
+
+            let mut messages = Vec::new();
+            while let Some(msg_row) = msg_rows
+                .next()
+                .await
+                .map_err(|e| ImportError::Sqlite(e.to_string()))?
+            {
+                let role: String = msg_row
+                    .get(0)
+                    .map_err(|e| ImportError::Sqlite(e.to_string()))?;
+                let content: String = msg_row
+                    .get(1)
+                    .map_err(|e| ImportError::Sqlite(e.to_string()))?;
+                let msg_created_at: Option<String> = msg_row
+                    .get(2)
+                    .map_err(|e| ImportError::Sqlite(e.to_string()))?;
+
+                let msg_created_at = msg_created_at
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
                     .map(|dt| dt.with_timezone(&chrono::Utc));
 
-                Ok((id, channel, created_at))
-            })
-            .map_err(|e| ImportError::Sqlite(e.to_string()))?;
-
-        for row_result in conv_rows {
-            let (id, channel, created_at) =
-                row_result.map_err(|e| ImportError::Sqlite(e.to_string()))?;
-
-            // Read messages for this conversation
-            let mut msg_stmt = conn.prepare(
-                "SELECT role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at"
-            )
-            .map_err(|e| ImportError::Sqlite(e.to_string()))?;
-
-            let messages = msg_stmt
-                .query_map([&id], |row| {
-                    let role: String = row.get(0)?;
-                    let content: String = row.get(1)?;
-                    let created_at: Option<String> = row.get(2)?;
-
-                    let created_at = created_at
-                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&chrono::Utc));
-
-                    Ok(OpenClawMessage {
-                        role,
-                        content,
-                        created_at,
-                    })
-                })
-                .map_err(|e| ImportError::Sqlite(e.to_string()))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| ImportError::Sqlite(e.to_string()))?;
+                messages.push(OpenClawMessage {
+                    role,
+                    content,
+                    created_at: msg_created_at,
+                });
+            }
 
             conversations.push(OpenClawConversation {
                 id,
