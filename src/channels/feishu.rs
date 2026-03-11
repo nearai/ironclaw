@@ -10,6 +10,22 @@
 //! 2. Connect via WSS, receive binary protobuf frames
 //! 3. Ping/pong heartbeat to keep the connection alive
 //! 4. Event payloads arrive as data frames; replies go via standard HTTP API
+//!
+//! # Why native instead of WASM
+//!
+//! IronClaw's current WASM channel contract is callback-oriented: the host owns
+//! webhook/polling infrastructure and invokes sandboxed `on-http-request` /
+//! `on-poll` handlers with a fresh instance per callback. That model works well
+//! for webhook or polling integrations, and the repository already ships a
+//! smaller Feishu webhook MVP through the WASM path.
+//!
+//! Feishu long-connection mode is a different shape entirely. The official
+//! protocol requires a persistent WSS session, binary protobuf frames, ongoing
+//! heartbeat handling, reconnect loops, reply-context tracking, and process-
+//! local dedup state. Those lifecycle and state requirements do not map cleanly
+//! onto the current stateless WASM callback boundary, so the long-connection
+//! implementation lives here as a native channel while webhook hardening remains
+//! relevant for the older WASM/webhook route.
 
 use std::collections::HashMap;
 use std::fs;
@@ -83,6 +99,7 @@ struct ClientConfig {
 #[allow(dead_code)]
 struct EventEnvelope {
     schema: Option<String>,
+    token: Option<String>,
     header: Option<EventHeader>,
     event: Option<serde_json::Value>,
 }
@@ -273,6 +290,21 @@ fn build_text_content_payload(content: &str) -> String {
     serde_json::json!({ "text": content }).to_string()
 }
 
+fn has_valid_verification_token(envelope: &EventEnvelope, expected: Option<&str>) -> bool {
+    let Some(expected) = expected.map(str::trim).filter(|token| !token.is_empty()) else {
+        return true;
+    };
+
+    let provided = envelope
+        .token
+        .as_deref()
+        .or_else(|| envelope.header.as_ref().and_then(|h| h.token.as_deref()))
+        .map(str::trim)
+        .unwrap_or("");
+
+    provided == expected
+}
+
 fn should_fallback_to_text(err: &ChannelError) -> bool {
     match err {
         ChannelError::SendFailed { reason, .. } => {
@@ -310,7 +342,7 @@ impl FeishuChannel {
             .build()
             .map_err(|e| ChannelError::Http(e.to_string()))?;
 
-        let cap = std::num::NonZeroUsize::new(10_000).unwrap();
+        let cap = std::num::NonZeroUsize::new(10_000).expect("reply map capacity is non-zero");
         let reply_map = Arc::new(tokio::sync::RwLock::new(lru::LruCache::new(cap)));
         let typing_map = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
@@ -1092,7 +1124,16 @@ async fn ws_session(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(WsMessage::Binary(data))) => {
-                        handle_binary_frame(&data, tx, reply_map, bot_open_id, dedup, boot_time).await;
+                        handle_binary_frame(
+                            &data,
+                            tx,
+                            reply_map,
+                            bot_open_id,
+                            dedup,
+                            boot_time,
+                            config.verification_token.as_deref(),
+                        )
+                        .await;
                     }
                     Some(Ok(WsMessage::Ping(data))) => {
                         let _ = ws_tx.send(WsMessage::Pong(data)).await;
@@ -1119,6 +1160,7 @@ async fn handle_binary_frame(
     bot_open_id: &Option<String>,
     dedup: &mut DedupCache,
     boot_time: u64,
+    verification_token: Option<&str>,
 ) {
     let frame = match Frame::decode(data) {
         Ok(f) => f,
@@ -1158,6 +1200,11 @@ async fn handle_binary_frame(
             return;
         }
     };
+
+    if !has_valid_verification_token(&envelope, verification_token) {
+        tracing::warn!("Feishu: verification token mismatch, dropping event");
+        return;
+    }
 
     let event_type = envelope
         .header
@@ -1354,17 +1401,18 @@ fn extract_text_content(raw: &str) -> Option<String> {
 /// Walks the content array and concatenates text/link elements.
 fn extract_post_text(raw: &str) -> Option<String> {
     // Post content may be locale-keyed: {"zh_cn": {title, content}} or flat {title, content}.
-    let post: PostContent = serde_json::from_str(raw)
+    let post: PostContent = serde_json::from_str::<PostContent>(raw)
         .ok()
+        .filter(|post| post.content.is_some())
         .or_else(|| {
             let map: HashMap<String, PostContent> = serde_json::from_str(raw).ok()?;
             map.into_values().next()
         })?;
 
     let content = post.content?;
-    let mut parts = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
     for line in &content {
-        let mut line_parts = Vec::new();
+        let mut line_parts: Vec<&str> = Vec::new();
         for elem in line {
             match elem.tag.as_deref() {
                 Some("text") => {
@@ -1420,4 +1468,194 @@ fn strip_mention_tags(text: &str, mentions: &[ImMention], bot_open_id: &Option<S
     }
 
     result.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mention(key: &str, name: &str, open_id: &str) -> ImMention {
+        ImMention {
+            key: Some(key.to_string()),
+            id: Some(ImSenderId {
+                open_id: Some(open_id.to_string()),
+                user_id: None,
+                union_id: None,
+            }),
+            name: Some(name.to_string()),
+            tenant_key: None,
+        }
+    }
+
+    fn make_dedup_cache(state_path: Option<PathBuf>) -> DedupCache {
+        DedupCache {
+            seen: HashMap::new(),
+            last_cleanup: Instant::now(),
+            last_persist: Instant::now(),
+            state_path,
+            dirty: false,
+        }
+    }
+
+    #[test]
+    fn test_truncate_for_feishu_preserves_unicode_boundary() {
+        let text = "你".repeat(MAX_REPLY_LEN + 1);
+        let truncated = truncate_for_feishu(&text);
+
+        assert!(truncated.ends_with('…'));
+        assert_eq!(truncated.chars().count(), MAX_REPLY_LEN + 1);
+        assert!(truncated.trim_end_matches('…').chars().all(|ch| ch == '你'));
+    }
+
+    #[test]
+    fn test_extract_post_text_flat_content() {
+        let raw = serde_json::json!({
+            "title": "ignored",
+            "content": [
+                [
+                    {"tag": "text", "text": "hello"},
+                    {"tag": "a", "text": " world"},
+                    {"tag": "img", "text": "ignored"}
+                ],
+                [
+                    {"tag": "text", "text": "next"}
+                ]
+            ]
+        })
+        .to_string();
+
+        assert_eq!(extract_post_text(&raw), Some("hello world\nnext".to_string()));
+    }
+
+    #[test]
+    fn test_extract_post_text_locale_keyed_content() {
+        let raw = serde_json::json!({
+            "zh_cn": {
+                "title": "ignored",
+                "content": [
+                    [
+                        {"tag": "text", "text": "你好"},
+                        {"tag": "a", "text": "世界"}
+                    ]
+                ]
+            }
+        })
+        .to_string();
+
+        assert_eq!(extract_post_text(&raw), Some("你好世界".to_string()));
+    }
+
+    #[test]
+    fn test_strip_mention_tags_only_removes_bot_mentions() {
+        let text = "@IronClaw @_bot hello @_user_2";
+        let mentions = vec![
+            mention("@_bot", "IronClaw", "bot-open-id"),
+            mention("@_user_2", "Alice", "user-open-id"),
+        ];
+
+        let stripped = strip_mention_tags(text, &mentions, &Some("bot-open-id".to_string()));
+
+        assert_eq!(stripped, "hello @_user_2");
+    }
+
+    #[test]
+    fn test_should_fallback_to_text_for_invalid_param_errors() {
+        let err = ChannelError::SendFailed {
+            name: "feishu".to_string(),
+            reason: "reply API error 230001: invalid request parameter msg_type".to_string(),
+        };
+
+        assert!(should_fallback_to_text(&err));
+    }
+
+    #[test]
+    fn test_should_not_fallback_to_text_for_unrelated_errors() {
+        let err = ChannelError::SendFailed {
+            name: "feishu".to_string(),
+            reason: "temporary upstream outage".to_string(),
+        };
+
+        assert!(!should_fallback_to_text(&err));
+    }
+
+    #[test]
+    fn test_has_valid_verification_token_accepts_root_or_header_token() {
+        let root_token = EventEnvelope {
+            schema: None,
+            token: Some("expected".to_string()),
+            header: None,
+            event: None,
+        };
+        let header_token = EventEnvelope {
+            schema: None,
+            token: None,
+            header: Some(EventHeader {
+                event_id: None,
+                event_type: None,
+                create_time: None,
+                token: Some("expected".to_string()),
+                tenant_key: None,
+            }),
+            event: None,
+        };
+
+        assert!(has_valid_verification_token(&root_token, Some("expected")));
+        assert!(has_valid_verification_token(&header_token, Some("expected")));
+        assert!(!has_valid_verification_token(&header_token, Some("other")));
+        assert!(has_valid_verification_token(&header_token, None));
+    }
+
+    #[test]
+    fn test_dedup_try_record_rejects_duplicates() {
+        let mut cache = make_dedup_cache(None);
+
+        assert!(cache.try_record("message_id", "abc"));
+        assert!(!cache.try_record("message_id", "abc"));
+        assert!(cache.try_record("message_id", "def"));
+    }
+
+    #[test]
+    fn test_dedup_cleanup_removes_expired_and_oversize_entries() {
+        let mut cache = make_dedup_cache(None);
+        let now = DEDUP_TTL.as_secs() + 10;
+
+        cache
+            .seen
+            .insert(DedupCache::key("message_id", "expired"), 0);
+        for idx in 0..(DEDUP_MAX_SIZE + 2) {
+            cache
+                .seen
+                .insert(DedupCache::key("message_id", &format!("fresh-{idx}")), now + idx as u64);
+        }
+
+        cache.cleanup_expired_and_oversize(now);
+
+        assert_eq!(cache.seen.len(), DEDUP_MAX_SIZE);
+        assert!(!cache.seen.contains_key("message_id:expired"));
+        assert!(!cache.seen.contains_key("message_id:fresh-0"));
+        assert!(!cache.seen.contains_key("message_id:fresh-1"));
+        assert!(cache.seen.contains_key("message_id:fresh-2"));
+    }
+
+    #[test]
+    fn test_dedup_persist_round_trip() {
+        let path =
+            std::env::temp_dir().join(format!("ironclaw-feishu-dedup-{}.json", Uuid::new_v4()));
+        let mut cache = make_dedup_cache(Some(path.clone()));
+        cache
+            .seen
+            .insert(DedupCache::key("message_id", "persisted"), 123);
+        cache.dirty = true;
+        cache.maybe_persist(true);
+
+        let mut loaded = make_dedup_cache(Some(path.clone()));
+        loaded.load_from_disk();
+
+        assert_eq!(
+            loaded.seen.get("message_id:persisted"),
+            Some(&123),
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
 }

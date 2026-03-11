@@ -58,6 +58,10 @@ pub struct ChatMessage {
     /// to appear on the assistant message preceding tool result messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Provider-specific signature to echo back on tool result messages
+    /// (e.g. Gemini `thought_signature`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 impl ChatMessage {
@@ -70,6 +74,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            signature: None,
         }
     }
 
@@ -82,6 +87,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            signature: None,
         }
     }
 
@@ -96,6 +102,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            signature: None,
         }
     }
 
@@ -108,6 +115,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             tool_calls: None,
+            signature: None,
         }
     }
 
@@ -127,6 +135,7 @@ impl ChatMessage {
             } else {
                 Some(tool_calls)
             },
+            signature: None,
         }
     }
 
@@ -143,7 +152,14 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
             tool_calls: None,
+            signature: None,
         }
+    }
+
+    /// Attach a provider-specific signature (e.g. Gemini thought_signature).
+    pub fn with_signature(mut self, signature: Option<String>) -> Self {
+        self.signature = signature;
+        self
     }
 }
 
@@ -539,11 +555,13 @@ mod tests {
             id: "call_sel_1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            signature: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
+            signature: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),

@@ -357,6 +357,7 @@ Work independently to complete this job. Report when done."#,
                                 reasoning: String::new(),
                                 alternatives: vec![],
                                 tool_call_id: tc.id.clone(),
+                                signature: tc.signature.clone(),
                             };
                             self.process_result(reason_ctx, &selection, result);
                         }
@@ -469,25 +470,27 @@ Work independently to complete this job. Report when done."#,
                     sanitized.was_modified,
                 );
 
-                reason_ctx.messages.push(ChatMessage::tool_result(
-                    &selection.tool_call_id,
-                    &selection.tool_name,
-                    wrapped,
-                ));
+                reason_ctx.messages.push(
+                    ChatMessage::tool_result(
+                        &selection.tool_call_id,
+                        &selection.tool_name,
+                        wrapped,
+                    )
+                    .with_signature(selection.signature.clone()),
+                );
 
-                // Tool output should never signal job completion. Only the LLM's
-                // natural language response should decide when a job is done. A
-                // tool could return text containing "TASK_COMPLETE" in its output
-                // (e.g. from file contents) and trigger a false positive.
                 false
             }
             Err(e) => {
                 tracing::warn!("Tool {} failed: {}", selection.tool_name, e);
-                reason_ctx.messages.push(ChatMessage::tool_result(
-                    &selection.tool_call_id,
-                    &selection.tool_name,
-                    format!("Error: {}", e),
-                ));
+                reason_ctx.messages.push(
+                    ChatMessage::tool_result(
+                        &selection.tool_call_id,
+                        &selection.tool_name,
+                        format!("Error: {}", e),
+                    )
+                    .with_signature(selection.signature.clone()),
+                );
                 false
             }
         }

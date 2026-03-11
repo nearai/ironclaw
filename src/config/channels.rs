@@ -103,6 +103,11 @@ pub struct FeishuConfig {
     pub api_base: String,
     /// Reconnect delay after WebSocket disconnect (seconds). Default: 5.
     pub reconnect_delay_secs: u64,
+    /// Optional verification token echoed in event payloads.
+    ///
+    /// When configured, native Feishu validates incoming event envelopes
+    /// before dispatching them to the agent as defense in depth.
+    pub verification_token: Option<String>,
 }
 
 impl ChannelsConfig {
@@ -196,6 +201,7 @@ impl ChannelsConfig {
                 reconnect_delay_secs: optional_env("FEISHU_RECONNECT_DELAY_SECS")?
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(5),
+                verification_token: optional_env("FEISHU_VERIFICATION_TOKEN")?,
             })
         } else {
             None

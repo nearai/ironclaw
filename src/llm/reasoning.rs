@@ -297,6 +297,9 @@ pub struct ToolSelection {
     /// be echoed back in the corresponding tool result message. Without this,
     /// the provider cannot match results to their originating calls.
     pub tool_call_id: String,
+    /// Provider-specific signature (e.g. Gemini `thought_signature`).
+    /// Must be echoed back on the corresponding tool result message.
+    pub signature: Option<String>,
 }
 
 /// Token usage from a single LLM call.
@@ -525,6 +528,7 @@ impl Reasoning {
                 reasoning: reasoning.clone(),
                 alternatives: vec![],
                 tool_call_id: tool_call.id,
+                signature: tool_call.signature,
             })
             .collect();
 
@@ -1390,7 +1394,7 @@ fn recover_tool_calls_from_content(
 /// 5. Strip pipe-delimited reasoning tags (code-aware)
 /// 6. Strip tool tags (string matching — no code-awareness needed)
 /// 7. Collapse triple+ newlines, trim
-fn clean_response(text: &str) -> String {
+pub(crate) fn clean_response(text: &str) -> String {
     // 1. Quick-check
     let mut result = if !QUICK_TAG_RE.is_match(text) {
         text.to_string()

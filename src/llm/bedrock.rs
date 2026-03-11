@@ -915,6 +915,7 @@ mod tests {
                 name: Some("echo".to_string()),
                 tool_calls: None,
                 content_parts: Vec::new(),
+                signature: None,
             },
         ];
 

@@ -165,6 +165,9 @@ pub struct PendingApproval {
     /// executed yet when approval was requested.
     #[serde(default)]
     pub deferred_tool_calls: Vec<ToolCall>,
+    /// Provider-specific signature (e.g. Gemini thought_signature) for the tool call.
+    #[serde(default)]
+    pub signature: Option<String>,
     /// User timezone at the time the approval was requested, so it persists
     /// through the approval flow even if the approval message lacks timezone.
     #[serde(default)]
@@ -350,19 +353,15 @@ impl Thread {
                         id: format!("turn{}_{}", turn.turn_number, i),
                         name: tc.name.clone(),
                         arguments: tc.parameters.clone(),
-                        signature: None,
+                        signature: tc.signature.clone(),
                     })
                     .collect();
 
-                // Assistant message declaring the tool calls (no text content)
                 messages.push(ChatMessage::assistant_with_tool_calls(None, tool_calls));
 
-                // Individual tool result messages, truncated to limit context size.
                 for (i, tc) in turn.tool_calls.iter().enumerate() {
                     let call_id = format!("turn{}_{}", turn.turn_number, i);
                     let content = if let Some(ref err) = tc.error {
-                        // .error already contains the full error text;
-                        // pass through without wrapping to avoid double-prefix.
                         truncate_preview(err, 1000)
                     } else if let Some(ref res) = tc.result {
                         let raw = match res {
@@ -373,7 +372,10 @@ impl Thread {
                     } else {
                         "OK".to_string()
                     };
-                    messages.push(ChatMessage::tool_result(call_id, &tc.name, content));
+                    messages.push(
+                        ChatMessage::tool_result(call_id, &tc.name, content)
+                            .with_signature(tc.signature.clone()),
+                    );
                 }
             }
             if let Some(ref response) = turn.response {
@@ -425,7 +427,11 @@ impl Thread {
                             && let Some(ref tcs) = assistant_msg.tool_calls
                         {
                             for tc in tcs {
-                                turn.record_tool_call(&tc.name, tc.arguments.clone());
+                                turn.record_tool_call_with_signature(
+                                    &tc.name,
+                                    tc.arguments.clone(),
+                                    tc.signature.clone(),
+                                );
                             }
                         }
 
@@ -559,6 +565,23 @@ impl Turn {
             parameters: params,
             result: None,
             error: None,
+            signature: None,
+        });
+    }
+
+    /// Record a tool call with provider-specific signature.
+    pub fn record_tool_call_with_signature(
+        &mut self,
+        name: impl Into<String>,
+        params: serde_json::Value,
+        signature: Option<String>,
+    ) {
+        self.tool_calls.push(TurnToolCall {
+            name: name.into(),
+            parameters: params,
+            result: None,
+            error: None,
+            signature,
         });
     }
 
@@ -588,6 +611,9 @@ pub struct TurnToolCall {
     pub result: Option<serde_json::Value>,
     /// Error from the tool (if failed).
     pub error: Option<String>,
+    /// Provider-specific signature (e.g. Gemini thought_signature).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 #[cfg(test)]
@@ -1067,6 +1093,7 @@ mod tests {
             tool_call_id: "call_123".to_string(),
             context_messages: vec![ChatMessage::user("do it")],
             deferred_tool_calls: vec![],
+            signature: None,
             user_timezone: None,
         };
 
@@ -1093,6 +1120,7 @@ mod tests {
             tool_call_id: "call_456".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            signature: None,
             user_timezone: None,
         };
 

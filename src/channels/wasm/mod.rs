@@ -80,6 +80,7 @@
 
 mod bundled;
 mod capabilities;
+mod credentials;
 mod error;
 mod host;
 mod loader;
@@ -96,6 +97,7 @@ pub use bundled::{available_channel_names, bundled_channel_names, install_bundle
 pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
 pub use error::WasmChannelError;
 pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
+pub use credentials::{inject_channel_credentials, resolve_channel_secret};
 pub use loader::{
     DiscoveredChannel, LoadResults, LoadedChannel, WasmChannelLoader, default_channels_dir,
     discover_channels,

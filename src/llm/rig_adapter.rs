@@ -30,6 +30,24 @@ use crate::llm::provider::{
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
     ToolDefinition as IronToolDefinition,
 };
+use crate::llm::registry::ProviderProtocol;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolSchemaStyle {
+    OpenAiStrict,
+    GeminiNative,
+}
+
+impl ToolSchemaStyle {
+    fn for_protocol(protocol: ProviderProtocol) -> Self {
+        match protocol {
+            ProviderProtocol::Gemini => Self::GeminiNative,
+            ProviderProtocol::OpenAiCompletions
+            | ProviderProtocol::Anthropic
+            | ProviderProtocol::Ollama => Self::OpenAiStrict,
+        }
+    }
+}
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
 pub struct RigAdapter<M: CompletionModel> {
@@ -45,6 +63,8 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Parameter names that this provider does not support (e.g., `"temperature"`).
     /// These are stripped from requests before sending to avoid 400 errors.
     unsupported_params: HashSet<String>,
+    /// Provider-specific tool schema normalization strategy.
+    tool_schema_style: ToolSchemaStyle,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -60,6 +80,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             output_cost,
             cache_retention: CacheRetention::None,
             unsupported_params: HashSet::new(),
+            tool_schema_style: ToolSchemaStyle::OpenAiStrict,
         }
     }
 
@@ -98,6 +119,12 @@ impl<M: CompletionModel> RigAdapter<M> {
         self
     }
 
+    /// Configure tool schema normalization based on provider protocol.
+    pub fn with_provider_protocol(mut self, protocol: ProviderProtocol) -> Self {
+        self.tool_schema_style = ToolSchemaStyle::for_protocol(protocol);
+        self
+    }
+
     /// Strip unsupported fields from a `CompletionRequest` in place.
     fn strip_unsupported_completion_params(&self, req: &mut CompletionRequest) {
         if self.unsupported_params.is_empty() {
@@ -130,51 +157,47 @@ impl<M: CompletionModel> RigAdapter<M> {
 
 // -- Type conversion helpers --
 
-/// Normalize a JSON Schema for OpenAI strict mode compliance.
+/// Normalize a JSON Schema at the provider boundary.
 ///
-/// OpenAI strict function calling requires:
-/// - Every object must have `"additionalProperties": false`
-/// - `"required"` must list ALL property keys
-/// - Optional fields use `"type": ["<original>", "null"]` instead of being omitted from `required`
-/// - Nested objects and array items are recursively normalized
-///
-/// This is applied as a clone-and-transform at the provider boundary so the
-/// original tool definitions remain unchanged for other providers.
-fn normalize_schema_strict(schema: &JsonValue) -> JsonValue {
+/// OpenAI-compatible strict mode expects optional fields as type arrays
+/// (e.g. `["string", "null"]`). Gemini native rejects empty types and
+/// prefers scalar `type` plus `"nullable": true`.
+fn normalize_schema_strict(schema: &JsonValue, style: ToolSchemaStyle) -> JsonValue {
     let mut schema = schema.clone();
-    normalize_schema_recursive(&mut schema);
+    normalize_schema_recursive(&mut schema, style);
     schema
 }
 
-fn normalize_schema_recursive(schema: &mut JsonValue) {
+fn normalize_schema_recursive(schema: &mut JsonValue, style: ToolSchemaStyle) {
     let obj = match schema.as_object_mut() {
         Some(o) => o,
         None => return,
     };
 
-    // Ensure every schema node has a valid, non-empty scalar "type".
-    // Strict providers (Gemini native) reject empty strings and may not
-    // handle type arrays like ["string", "null"].
-    sanitize_type_field(obj);
+    if style == ToolSchemaStyle::GeminiNative {
+        // Gemini native rejects empty strings and type arrays like
+        // ["string", "null"], so sanitize eagerly before recursing.
+        sanitize_type_field(obj);
+    }
 
     // Recurse into combinators: anyOf, oneOf, allOf
     for key in &["anyOf", "oneOf", "allOf"] {
         if let Some(JsonValue::Array(variants)) = obj.get_mut(*key) {
             for variant in variants.iter_mut() {
-                normalize_schema_recursive(variant);
+                normalize_schema_recursive(variant, style);
             }
         }
     }
 
     // Recurse into array items
     if let Some(items) = obj.get_mut("items") {
-        normalize_schema_recursive(items);
+        normalize_schema_recursive(items, style);
     }
 
     // Recurse into `not`, `if`, `then`, `else`
     for key in &["not", "if", "then", "else"] {
         if let Some(sub) = obj.get_mut(*key) {
-            normalize_schema_recursive(sub);
+            normalize_schema_recursive(sub, style);
         }
     }
 
@@ -233,15 +256,15 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
     if let Some(JsonValue::Object(props)) = obj.get_mut("properties") {
         for key in &all_keys {
             // Recurse into each property's schema FIRST (before make_nullable,
-            // which may change the type to an array and prevent object detection)
+            // which may change the type representation for optional fields)
             if let Some(prop_schema) = props.get_mut(key) {
-                normalize_schema_recursive(prop_schema);
+                normalize_schema_recursive(prop_schema, style);
             }
             // Then make originally-optional properties nullable
             if !current_required.contains(key)
                 && let Some(prop_schema) = props.get_mut(key)
             {
-                make_nullable(prop_schema);
+                make_nullable(prop_schema, style);
             }
         }
     }
@@ -252,22 +275,47 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
 }
 
 /// Make a property schema nullable.
-///
-/// Uses `"nullable": true` (Gemini-compatible) instead of type arrays.
-/// For schemas without a `type` key, adds a default before marking nullable.
-fn make_nullable(schema: &mut JsonValue) {
+fn make_nullable(schema: &mut JsonValue, style: ToolSchemaStyle) {
     let obj = match schema.as_object_mut() {
         Some(o) => o,
         None => return,
     };
 
-    // Ensure there's a scalar type before marking nullable.
-    if !obj.contains_key("type") {
-        let inferred = infer_type_from_context(obj);
-        obj.insert("type".to_string(), JsonValue::String(inferred));
+    match style {
+        ToolSchemaStyle::OpenAiStrict => {
+            let new_type = match obj.get("type").cloned() {
+                Some(JsonValue::Array(mut arr)) => {
+                    if !arr.iter().any(|value| value.as_str() == Some("null")) {
+                        arr.push(JsonValue::String("null".to_string()));
+                    }
+                    JsonValue::Array(arr)
+                }
+                Some(JsonValue::String(t)) if !t.is_empty() => JsonValue::Array(vec![
+                    JsonValue::String(t),
+                    JsonValue::String("null".to_string()),
+                ]),
+                _ => JsonValue::Array(vec![
+                    JsonValue::String(infer_type_from_context(obj)),
+                    JsonValue::String("null".to_string()),
+                ]),
+            };
+            obj.insert("type".to_string(), new_type);
+            obj.remove("nullable");
+        }
+        ToolSchemaStyle::GeminiNative => {
+            // Ensure there's a scalar type before marking nullable.
+            if !matches!(obj.get("type"), Some(JsonValue::String(t)) if !t.is_empty()) {
+                sanitize_type_field(obj);
+            }
+            if !matches!(obj.get("type"), Some(JsonValue::String(t)) if !t.is_empty()) {
+                obj.insert(
+                    "type".to_string(),
+                    JsonValue::String(infer_type_from_context(obj)),
+                );
+            }
+            obj.insert("nullable".to_string(), JsonValue::Bool(true));
+        }
     }
-
-    obj.insert("nullable".to_string(), JsonValue::Bool(true));
 }
 
 /// Ensure a schema object has a valid, non-empty, scalar `type` field.
@@ -421,13 +469,13 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 }
             }
             crate::llm::Role::Tool => {
-                // Tool result message: wrap as User { ToolResult }
                 let tool_id = normalized_tool_call_id(msg.tool_call_id.as_deref(), history.len());
                 history.push(RigMessage::User {
                     content: OneOrMany::one(UserContent::ToolResult(RigToolResult {
                         id: tool_id.clone(),
                         call_id: Some(tool_id),
                         content: OneOrMany::one(ToolResultContent::text(&msg.content)),
+                        signature: msg.signature.clone(),
                     })),
                 });
             }
@@ -449,13 +497,13 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
 ///
 /// Applies OpenAI strict-mode schema normalization to ensure all tool
 /// parameter schemas comply with OpenAI's function calling requirements.
-fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
+fn convert_tools(tools: &[IronToolDefinition], style: ToolSchemaStyle) -> Vec<RigToolDefinition> {
     tools
         .iter()
         .enumerate()
         .map(|(idx, t)| {
             check_empty_types(&t.parameters, &t.name, idx, "RAW.");
-            let params = normalize_schema_strict(&t.parameters);
+            let params = normalize_schema_strict(&t.parameters, style);
             check_empty_types(&params, &t.name, idx, "NORM.");
             RigToolDefinition {
                 name: t.name.clone(),
@@ -475,7 +523,7 @@ fn check_empty_types(val: &JsonValue, tool_name: &str, tool_idx: usize, path: &s
                 _ => false,
             };
             if is_empty {
-                tracing::warn!(
+                tracing::trace!(
                     tool_idx,
                     tool_name,
                     path,
@@ -522,13 +570,13 @@ fn extract_response(
     for content in choice.iter() {
         match content {
             AssistantContent::Text(t) => {
-                tracing::debug!(text_len = t.text.len(), "extract_response: Text part");
+                tracing::trace!(text_len = t.text.len(), "extract_response: Text part");
                 if !t.text.is_empty() {
                     text_parts.push(t.text.clone());
                 }
             }
             AssistantContent::ToolCall(tc) => {
-                tracing::debug!(name = %tc.function.name, "extract_response: ToolCall part");
+                tracing::trace!(name = %tc.function.name, "extract_response: ToolCall part");
                 tool_calls.push(IronToolCall {
                     id: tc.id.clone(),
                     name: tc.function.name.clone(),
@@ -537,7 +585,10 @@ fn extract_response(
                 });
             }
             other => {
-                tracing::debug!("extract_response: non-Text/ToolCall content: {:?}", std::mem::discriminant(other));
+                tracing::trace!(
+                    "extract_response: non-Text/ToolCall content: {:?}",
+                    std::mem::discriminant(other)
+                );
             }
         }
     }
@@ -757,7 +808,7 @@ where
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
-        let tools = convert_tools(&request.tools);
+        let tools = convert_tools(&request.tools, self.tool_schema_style);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let rig_req = build_rig_request(
@@ -907,6 +958,25 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_messages_tool_result_preserves_signature() {
+        let messages = vec![
+            ChatMessage::tool_result("call_123", "search", "result text")
+                .with_signature(Some("thought-signature".to_string())),
+        ];
+        let (_preamble, history) = convert_messages(&messages);
+
+        match &history[0] {
+            RigMessage::User { content } => match content.first() {
+                UserContent::ToolResult(r) => {
+                    assert_eq!(r.signature.as_deref(), Some("thought-signature"));
+                }
+                other => panic!("Expected tool result content, got: {:?}", other),
+            },
+            other => panic!("Expected User message, got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_convert_messages_assistant_with_tool_calls() {
         let tc = IronToolCall {
             id: "call_1".to_string(),
@@ -941,6 +1011,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            signature: None,
         }];
         let (_preamble, history) = convert_messages(&messages);
         match &history[0] {
@@ -967,10 +1038,123 @@ mod tests {
                 }
             }),
         }];
-        let rig_tools = convert_tools(&tools);
+        let rig_tools = convert_tools(&tools, ToolSchemaStyle::OpenAiStrict);
         assert_eq!(rig_tools.len(), 1);
         assert_eq!(rig_tools[0].name, "search");
         assert_eq!(rig_tools[0].description, "Search the web");
+    }
+
+    #[test]
+    fn test_make_nullable_openai_uses_type_array() {
+        let mut schema = serde_json::json!({"type": "string"});
+
+        make_nullable(&mut schema, ToolSchemaStyle::OpenAiStrict);
+
+        assert_eq!(schema["type"], serde_json::json!(["string", "null"]));
+        assert!(schema.get("nullable").is_none());
+    }
+
+    #[test]
+    fn test_make_nullable_gemini_sets_nullable_true() {
+        let mut schema = serde_json::json!({
+            "properties": {
+                "nested": {"type": "string"}
+            }
+        });
+
+        make_nullable(&mut schema, ToolSchemaStyle::GeminiNative);
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["nullable"], true);
+    }
+
+    #[test]
+    fn test_sanitize_type_field_infers_from_context() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".to_string(), JsonValue::String(String::new()));
+        obj.insert("properties".to_string(), serde_json::json!({}));
+        sanitize_type_field(&mut obj);
+        assert_eq!(obj.get("type"), Some(&JsonValue::String("object".to_string())));
+
+        let mut arr = serde_json::Map::new();
+        arr.insert("type".to_string(), JsonValue::String(String::new()));
+        arr.insert("items".to_string(), serde_json::json!({"type": "string"}));
+        sanitize_type_field(&mut arr);
+        assert_eq!(arr.get("type"), Some(&JsonValue::String("array".to_string())));
+
+        let mut enumeration = serde_json::Map::new();
+        enumeration.insert("type".to_string(), JsonValue::String(String::new()));
+        enumeration.insert("enum".to_string(), serde_json::json!(["on", "off"]));
+        sanitize_type_field(&mut enumeration);
+        assert_eq!(
+            enumeration.get("type"),
+            Some(&JsonValue::String("string".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_sanitize_type_field_flattens_nullable_array_for_gemini() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("type".to_string(), serde_json::json!(["string", "null"]));
+
+        sanitize_type_field(&mut obj);
+
+        assert_eq!(obj.get("type"), Some(&JsonValue::String("string".to_string())));
+        assert_eq!(obj.get("nullable"), Some(&JsonValue::Bool(true)));
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_openai_keeps_type_arrays_for_optional_fields() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "required_name": {"type": "string"},
+                "optional_settings": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {"type": "boolean"}
+                    },
+                    "required": []
+                }
+            },
+            "required": ["required_name"]
+        });
+
+        let normalized = normalize_schema_strict(&schema, ToolSchemaStyle::OpenAiStrict);
+
+        assert_eq!(
+            normalized["properties"]["optional_settings"]["type"],
+            serde_json::json!(["object", "null"])
+        );
+        assert!(normalized["properties"]["optional_settings"]
+            .get("nullable")
+            .is_none());
+        assert_eq!(normalized["required"], serde_json::json!(["optional_settings", "required_name"]));
+    }
+
+    #[test]
+    fn test_normalize_schema_strict_gemini_uses_nullable_true() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "required_name": {"type": "string"},
+                "optional_settings": {
+                    "properties": {
+                        "enabled": {"type": "boolean"}
+                    }
+                }
+            },
+            "required": ["required_name"]
+        });
+
+        let normalized = normalize_schema_strict(&schema, ToolSchemaStyle::GeminiNative);
+
+        assert_eq!(normalized["properties"]["optional_settings"]["type"], "object");
+        assert_eq!(normalized["properties"]["optional_settings"]["nullable"], true);
+        assert_eq!(
+            normalized["properties"]["optional_settings"]["required"],
+            serde_json::json!(["enabled"])
+        );
     }
 
     #[test]
@@ -1014,6 +1198,22 @@ mod tests {
         assert!(text.is_none());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "search");
+        assert_eq!(finish, FinishReason::ToolUse);
+    }
+
+    #[test]
+    fn test_extract_response_tool_call_preserves_signature() {
+        let tool_call = rig::message::ToolCall::new(
+            "call_1".to_string(),
+            ToolFunction::new("search".to_string(), serde_json::json!({"q": "test"})),
+        )
+        .with_signature(Some("thought-signature".to_string()));
+        let content = OneOrMany::one(AssistantContent::ToolCall(tool_call));
+        let usage = RigUsage::new();
+        let (_text, calls, finish) = extract_response(&content, &usage);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].signature.as_deref(), Some("thought-signature"));
         assert_eq!(finish, FinishReason::ToolUse);
     }
 
@@ -1094,6 +1294,7 @@ mod tests {
             tool_call_id: None,
             name: Some("search".to_string()),
             tool_calls: None,
+            signature: None,
         };
         let messages = vec![assistant_msg, tool_result_msg];
         let (_preamble, history) = convert_messages(&messages);

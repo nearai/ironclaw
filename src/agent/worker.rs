@@ -567,6 +567,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                                 reasoning: String::new(),
                                 alternatives: vec![],
                                 tool_call_id: tc.id.clone(),
+                                signature: tc.signature.clone(),
                             })
                             .collect();
 
@@ -990,11 +991,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     sanitized.was_modified,
                 );
 
-                reason_ctx.messages.push(ChatMessage::tool_result(
-                    &selection.tool_call_id,
-                    &selection.tool_name,
-                    wrapped,
-                ));
+                reason_ctx.messages.push(
+                    ChatMessage::tool_result(
+                        &selection.tool_call_id,
+                        &selection.tool_name,
+                        wrapped,
+                    )
+                    .with_signature(selection.signature.clone()),
+                );
 
                 self.log_event("tool_result", serde_json::json!({
                     "tool_name": selection.tool_name,
@@ -1037,11 +1041,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }),
                 );
 
-                reason_ctx.messages.push(ChatMessage::tool_result(
-                    &selection.tool_call_id,
-                    &selection.tool_name,
-                    format!("Error: {}", e),
-                ));
+                reason_ctx.messages.push(
+                    ChatMessage::tool_result(
+                        &selection.tool_call_id,
+                        &selection.tool_name,
+                        format!("Error: {}", e),
+                    )
+                    .with_signature(selection.signature.clone()),
+                );
 
                 Ok(false)
             }
@@ -1115,6 +1122,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 reasoning: action.reasoning.clone(),
                 alternatives: vec![],
                 tool_call_id: format!("plan_{}_{}", self.job_id, i),
+                signature: None,
             };
 
             // Record the assistant tool_calls message so that the tool_result
@@ -1384,6 +1392,7 @@ mod tests {
             reasoning: "Need to search memory".to_string(),
             alternatives: vec![],
             tool_call_id: "call_abc123".to_string(),
+            signature: None,
         };
 
         assert_eq!(selection.tool_call_id, "call_abc123");
@@ -1475,6 +1484,7 @@ mod tests {
                 reasoning: String::new(),
                 alternatives: vec![],
                 tool_call_id: format!("call_{}", i),
+                signature: None,
             })
             .collect();
 
@@ -1524,6 +1534,7 @@ mod tests {
                 reasoning: String::new(),
                 alternatives: vec![],
                 tool_call_id: "call_a".into(),
+                signature: None,
             },
             ToolSelection {
                 tool_name: "tool_b".into(),
@@ -1531,6 +1542,7 @@ mod tests {
                 reasoning: String::new(),
                 alternatives: vec![],
                 tool_call_id: "call_b".into(),
+                signature: None,
             },
             ToolSelection {
                 tool_name: "tool_c".into(),
@@ -1538,6 +1550,7 @@ mod tests {
                 reasoning: String::new(),
                 alternatives: vec![],
                 tool_call_id: "call_c".into(),
+                signature: None,
             },
         ];
 
@@ -1560,6 +1573,7 @@ mod tests {
             reasoning: String::new(),
             alternatives: vec![],
             tool_call_id: "call_x".into(),
+            signature: None,
         }];
 
         let results = worker.execute_tools_parallel(&selections).await;

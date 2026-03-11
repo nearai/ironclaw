@@ -349,10 +349,10 @@ impl Agent {
                         continue;
                     }
 
-                    // Strip internal "[Called tool ...]" text that can leak when
-                    // provider flattening (e.g. NEAR AI) converts tool_calls to
-                    // plain text and the LLM echoes it back.
-                    let sanitized = strip_internal_tool_call_text(&text);
+                    // Clean reasoning-model artifacts first, then strip any
+                    // provider-level tool markers that may still leak through.
+                    let cleaned = crate::llm::clean_response(&text);
+                    let sanitized = strip_internal_tool_call_text(&cleaned);
                     return Ok(AgenticLoopResult::Response(sanitized));
                 }
                 RespondResult::ToolCalls {
@@ -398,7 +398,11 @@ impl Agent {
                             && let Some(turn) = thread.last_turn_mut()
                         {
                             for (tc, safe_args) in tool_calls.iter().zip(redacted_args) {
-                                turn.record_tool_call(&tc.name, safe_args);
+                                turn.record_tool_call_with_signature(
+                                    &tc.name,
+                                    safe_args,
+                                    tc.signature.clone(),
+                                );
                             }
                         }
                     }
@@ -667,8 +671,10 @@ impl Agent {
                                         turn.record_tool_error(error_msg.clone());
                                     }
                                 }
-                                context_messages
-                                    .push(ChatMessage::tool_result(&tc.id, &tc.name, error_msg));
+                                context_messages.push(
+                                    ChatMessage::tool_result(&tc.id, &tc.name, error_msg)
+                                        .with_signature(tc.signature.clone()),
+                                );
                             }
                             PreflightOutcome::Runnable => {
                                 // Retrieve the execution result for this slot
@@ -813,11 +819,14 @@ impl Agent {
                                     }
                                 }
 
-                                context_messages.push(ChatMessage::tool_result(
-                                    &tc.id,
-                                    &tc.name,
-                                    result_content,
-                                ));
+                                context_messages.push(
+                                    ChatMessage::tool_result(
+                                        &tc.id,
+                                        &tc.name,
+                                        result_content,
+                                    )
+                                    .with_signature(tc.signature.clone()),
+                                );
                             }
                         }
                     }
@@ -842,6 +851,7 @@ impl Agent {
                             tool_call_id: tc.id.clone(),
                             context_messages: context_messages.clone(),
                             deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
+                            signature: tc.signature.clone(),
                             user_timezone: Some(user_tz.name().to_string()),
                         };
 
@@ -1235,9 +1245,9 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_destructive_command_requires_explicit_approval() {
-        // requires_explicit_approval() detects destructive commands that
-        // should return ApprovalRequirement::Always from ShellTool.
+    fn test_shell_destructive_command_classifier() {
+        // requires_explicit_approval() still classifies destructive commands,
+        // even though ShellTool itself is now fully trusted.
         use crate::tools::builtin::shell::requires_explicit_approval;
 
         let destructive_cmds = [
@@ -1309,6 +1319,7 @@ mod tests {
                     signature: None,
                 },
             ],
+            signature: None,
             user_timezone: None,
         };
 
@@ -2156,6 +2167,14 @@ mod tests {
         let input = "This is a normal response with [brackets] inside.";
         let result = super::strip_internal_tool_call_text(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_user_visible_response_sanitization_removes_think_tags() {
+        let input = "<think>Internal reasoning</think>\nVisible answer.";
+        let cleaned = crate::llm::clean_response(input);
+        let result = super::strip_internal_tool_call_text(&cleaned);
+        assert_eq!(result, "Visible answer.");
     }
 
     #[test]

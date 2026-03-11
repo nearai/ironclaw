@@ -48,6 +48,7 @@ pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
     TOOL_INTENT_NUDGE, TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
 };
+pub(crate) use reasoning::clean_response;
 pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
@@ -230,6 +231,7 @@ fn create_openai_compat_from_registry(
     );
 
     let adapter = RigAdapter::new(model, &config.model)
+        .with_provider_protocol(config.protocol)
         .with_unsupported_params(config.unsupported_params.clone());
     Ok(Arc::new(adapter))
 }
@@ -300,6 +302,7 @@ fn create_anthropic_from_registry(
 
     Ok(Arc::new(
         RigAdapter::new(model, &config.model)
+            .with_provider_protocol(config.protocol)
             .with_cache_retention(cache_retention)
             .with_unsupported_params(config.unsupported_params.clone()),
     ))
@@ -341,7 +344,9 @@ fn create_gemini_from_registry(
         "Using Gemini native provider (thought_signature supported)"
     );
 
-    Ok(Arc::new(RigAdapter::new(model, &config.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &config.model).with_provider_protocol(config.protocol),
+    ))
 }
 
 fn create_ollama_from_registry(
@@ -369,6 +374,7 @@ fn create_ollama_from_registry(
     );
 
     let adapter = RigAdapter::new(model, &config.model)
+        .with_provider_protocol(config.protocol)
         .with_unsupported_params(config.unsupported_params.clone());
     Ok(Arc::new(adapter))
 }

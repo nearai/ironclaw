@@ -491,6 +491,9 @@ impl Agent {
                 if let Some(ref error) = tc.error {
                     obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
                 }
+                if let Some(ref sig) = tc.signature {
+                    obj["signature"] = serde_json::Value::String(sig.clone());
+                }
                 obj
             })
             .collect();
@@ -857,11 +860,14 @@ impl Agent {
                 return Ok(SubmissionResult::response(instructions));
             }
 
-            context_messages.push(ChatMessage::tool_result(
-                &pending.tool_call_id,
-                &pending.tool_name,
-                result_content,
-            ));
+            context_messages.push(
+                ChatMessage::tool_result(
+                    &pending.tool_call_id,
+                    &pending.tool_name,
+                    result_content,
+                )
+                .with_signature(pending.signature.clone()),
+            );
 
             // Replay deferred tool calls from the same assistant message so
             // every tool_use ID gets a matching tool_result before the next
@@ -1107,7 +1113,10 @@ impl Agent {
                     deferred_auth = Some(instructions);
                 }
 
-                context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
+                context_messages.push(
+                    ChatMessage::tool_result(&tc.id, &tc.name, deferred_content)
+                        .with_signature(tc.signature.clone()),
+                );
             }
 
             // Return auth response after all results are recorded
@@ -1126,7 +1135,7 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
-                    // Carry forward the resolved timezone from the original pending approval
+                    signature: tc.signature.clone(),
                     user_timezone: pending.user_timezone.clone(),
                 };
 
@@ -1536,7 +1545,10 @@ fn rebuild_chat_messages_from_db(
                                     .get("parameters")
                                     .cloned()
                                     .unwrap_or(serde_json::json!({})),
-                                signature: None,
+                                signature: c
+                                    .get("signature")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
                             })
                             .collect();
 
@@ -1561,7 +1573,14 @@ fn rebuild_chat_messages_from_db(
                             } else {
                                 "OK".to_string()
                             };
-                            result.push(ChatMessage::tool_result(call_id, name, content));
+                            let sig = c
+                                .get("signature")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                            result.push(
+                                ChatMessage::tool_result(call_id, name, content)
+                                    .with_signature(sig),
+                            );
                         }
                     }
                     // Legacy rows without call_id: skip (will appear as

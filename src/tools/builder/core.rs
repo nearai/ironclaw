@@ -710,12 +710,14 @@ Create alongside the .wasm file to grant capabilities:
                                 let output_str = serde_json::to_string_pretty(&output.result)
                                     .unwrap_or_default();
 
-                                // Add to context
-                                reason_ctx.messages.push(ChatMessage::tool_result(
-                                    &tc.id,
-                                    &tc.name,
-                                    output_str.clone(),
-                                ));
+                                reason_ctx.messages.push(
+                                    ChatMessage::tool_result(
+                                        &tc.id,
+                                        &tc.name,
+                                        output_str.clone(),
+                                    )
+                                    .with_signature(tc.signature.clone()),
+                                );
 
                                 // Update phase based on tool
                                 current_phase = match tc.name.as_str() {
@@ -742,11 +744,14 @@ Create alongside the .wasm file to grant capabilities:
                                 let error_msg = format!("Tool error: {}", e);
                                 last_error = Some(error_msg.clone());
 
-                                reason_ctx.messages.push(ChatMessage::tool_result(
-                                    &tc.id,
-                                    &tc.name,
-                                    format!("Error: {}", e),
-                                ));
+                                reason_ctx.messages.push(
+                                    ChatMessage::tool_result(
+                                        &tc.id,
+                                        &tc.name,
+                                        format!("Error: {}", e),
+                                    )
+                                    .with_signature(tc.signature.clone()),
+                                );
 
                                 logs.push(BuildLog {
                                     timestamp: Utc::now(),
