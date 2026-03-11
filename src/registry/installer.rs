@@ -1183,16 +1183,20 @@ mod tests {
     #[test]
     fn test_extract_correct_wasm_from_tool_bundle() {
         // Tool bundle contains slack-tool.wasm — extraction by name="slack-tool" succeeds.
-        let gz_bytes =
-            build_test_tar_gz("slack-tool.wasm", Some("slack-tool.capabilities.json"));
+        let gz_bytes = build_test_tar_gz("slack-tool.wasm", Some("slack-tool.capabilities.json"));
 
         let tmp = tempfile::tempdir().unwrap();
         let wasm_path = tmp.path().join("slack-tool.wasm");
         let caps_path = tmp.path().join("slack-tool.capabilities.json");
 
-        let result =
-            extract_tar_gz(&gz_bytes, "slack-tool", &wasm_path, &caps_path, "test://url")
-                .unwrap();
+        let result = extract_tar_gz(
+            &gz_bytes,
+            "slack-tool",
+            &wasm_path,
+            &caps_path,
+            "test://url",
+        )
+        .unwrap();
 
         assert!(wasm_path.exists());
         assert!(caps_path.exists());
