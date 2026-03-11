@@ -117,6 +117,8 @@ I18n.register('en', {
   // Logs Tab
   'logs.serverLevel': 'Server: ERROR',
   'logs.clientLevel': 'Client Log Level',
+  'logs.pause': 'Pause',
+  'logs.resume': 'Resume',
   'logs.clear': 'Clear',
   'logs.autoScroll': 'Auto-scroll',
   'logs.filter': 'Filter logs...',

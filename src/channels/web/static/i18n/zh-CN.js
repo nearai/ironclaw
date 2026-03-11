@@ -5,7 +5,7 @@ I18n.register('zh-CN', {
   'auth.title': 'IronClaw',
   'auth.tagline': '安全可靠的 AI 助手',
   'auth.tokenLabel': '网关令牌',
-  'auth.tokenPlaceholder': '粘贴你的认证令牌',
+  'auth.tokenPlaceholder': '粘贴你的网关令牌',
   'auth.connect': '连接',
   'auth.errorRequired': '请输入令牌',
   'auth.errorInvalid': '令牌无效',
@@ -29,7 +29,7 @@ I18n.register('zh-CN', {
   'tab.memory': '记忆',
   'tab.jobs': '任务',
   'tab.routines': '定时任务',
-  'tab.extensions': '插件扩展',
+  'tab.extensions': '扩展',
   'tab.skills': '技能',
   'tab.logs': '日志',
   
@@ -117,6 +117,8 @@ I18n.register('zh-CN', {
   // 日志标签页
   'logs.serverLevel': '服务端日志级别',
   'logs.clientLevel': '客户端日志级别',
+  'logs.pause': '暂停',
+  'logs.resume': '继续',
   'logs.clear': '清空',
   'logs.autoScroll': '自动滚动',
   'logs.filter': '筛选日志...',
@@ -295,8 +297,8 @@ I18n.register('zh-CN', {
   
   
   // TEE
-  'tee.loadingReport': '加载认证报告中...',
-  'tee.loadFailed': '无法加载认证报告',
+  'tee.loadingReport': '正在加载证明报告...',
+  'tee.loadFailed': '无法加载证明报告',
   
   // 通用
   'common.loading': '加载中...',

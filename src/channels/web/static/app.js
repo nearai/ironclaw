@@ -1969,7 +1969,7 @@ function prependLogEntry(entry) {
 function toggleLogsPause() {
   logsPaused = !logsPaused;
   const btn = document.getElementById('logs-pause-btn');
-  btn.textContent = logsPaused ? 'Resume' : 'Pause';
+  btn.textContent = logsPaused ? I18n.t('logs.resume') : I18n.t('logs.pause');
 
   if (!logsPaused) {
     // Flush buffer: oldest-first + prepend naturally puts newest at top
