@@ -1695,17 +1695,14 @@ function renderNodes(nodes, container, depth) {
       const arrow = document.createElement('span');
       arrow.className = 'expand-arrow' + (node.expanded ? ' expanded' : '');
       arrow.textContent = '\u25B6';
-      arrow.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleExpand(node);
-      });
       row.appendChild(arrow);
 
       const label = document.createElement('span');
       label.className = 'tree-label dir';
       label.textContent = node.name;
-      label.addEventListener('click', () => toggleExpand(node));
       row.appendChild(label);
+
+      row.addEventListener('click', () => toggleExpand(node));
     } else {
       const spacer = document.createElement('span');
       spacer.className = 'expand-arrow-spacer';
@@ -1714,8 +1711,9 @@ function renderNodes(nodes, container, depth) {
       const label = document.createElement('span');
       label.className = 'tree-label file';
       label.textContent = node.name;
-      label.addEventListener('click', () => readMemoryFile(node.path));
       row.appendChild(label);
+
+      row.addEventListener('click', () => readMemoryFile(node.path));
     }
 
     container.appendChild(row);
