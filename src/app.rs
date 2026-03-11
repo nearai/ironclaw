@@ -572,7 +572,7 @@ impl AppBuilder {
         let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
 
         // Load registry catalog entries for extension discovery
-        let catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
+        let mut catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
             Ok(catalog) => {
                 let entries: Vec<_> = catalog
                     .all()
@@ -590,6 +590,15 @@ impl AppBuilder {
                 Vec::new()
             }
         };
+
+        // Append builtin entries (e.g. channel-relay integrations) so they appear
+        // in the web UI's available extensions list.
+        let builtin = crate::extensions::registry::builtin_entries();
+        for entry in builtin {
+            if !catalog_entries.iter().any(|e| e.name == entry.name) {
+                catalog_entries.push(entry);
+            }
+        }
 
         // Create extension manager. Use ephemeral in-memory secrets if no
         // persistent store is configured (listing/install/activate still work).

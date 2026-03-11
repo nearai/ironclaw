@@ -30,6 +30,7 @@
 mod channel;
 mod http;
 mod manager;
+pub mod relay;
 mod repl;
 mod signal;
 pub mod wasm;
