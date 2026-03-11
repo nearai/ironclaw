@@ -30,8 +30,56 @@ fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
     matches!(channel, "gateway" | "test")
 }
+const TOOL_APPROVALS_KEY: &str = "auto_approved_tools";
 
 impl Agent {
+    async fn sync_persistent_tool_approvals(
+        &self,
+        user_id: &str,
+        session: Arc<Mutex<Session>>,
+    ) {
+        let Some(store) = self.store() else {
+            return;
+        };
+
+        let value = match store.get_setting(user_id, TOOL_APPROVALS_KEY).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!("Failed to load persistent tool approvals: {}", e);
+                return;
+            }
+        };
+        let tools: std::collections::HashSet<String> = value
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+
+        let mut sess = session.lock().await;
+        sess.auto_approved_tools = tools;
+    }
+
+    async fn persist_tool_approvals(
+        &self,
+        user_id: &str,
+        tools: &std::collections::HashSet<String>,
+    ) {
+        let Some(store) = self.store() else {
+            return;
+        };
+        let value = serde_json::Value::Array(
+            tools
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        );
+        if let Err(e) = store.set_setting(user_id, TOOL_APPROVALS_KEY, &value).await {
+            tracing::warn!("Failed to persist tool approvals: {}", e);
+        }
+    }
+
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
     /// Called before `resolve_thread` so that the session manager finds the
@@ -179,6 +227,10 @@ impl Agent {
         thread_id: Uuid,
         content: &str,
     ) -> Result<SubmissionResult, Error> {
+        // Keep session "always allow" approvals synchronized from persistent settings.
+        self.sync_persistent_tool_approvals(&message.user_id, Arc::clone(&session))
+            .await;
+
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
@@ -889,13 +941,18 @@ impl Agent {
         if approved {
             // If always, add to auto-approved set
             if always {
-                let mut sess = session.lock().await;
-                sess.auto_approve_tool(&pending.tool_name);
-                tracing::info!(
-                    "Auto-approved tool '{}' for session {}",
-                    pending.tool_name,
-                    sess.id
-                );
+                let tools_snapshot = {
+                    let mut sess = session.lock().await;
+                    sess.auto_approve_tool(&pending.tool_name);
+                    tracing::info!(
+                        "Auto-approved tool '{}' for session {}",
+                        pending.tool_name,
+                        sess.id
+                    );
+                    sess.auto_approved_tools.clone()
+                };
+                self.persist_tool_approvals(&message.user_id, &tools_snapshot)
+                    .await;
             }
 
             // Reset thread state to processing
