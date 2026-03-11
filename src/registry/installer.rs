@@ -629,6 +629,7 @@ fn is_gzip(bytes: &[u8]) -> bool {
 }
 
 /// Result of extracting a tar.gz bundle.
+#[derive(Debug)]
 struct ExtractResult {
     has_capabilities: bool,
 }
@@ -1111,5 +1112,166 @@ mod tests {
             !should_attempt_source_fallback(&pinned_mismatch),
             "ChecksumMismatch on version-pinned URL must remain a hard block"
         );
+    }
+
+    // Regression tests for tool/channel artifact name collision (PR #964).
+    // When a tool and channel share the same registry filename (e.g. slack.json),
+    // CI produces kind-prefixed bundles (tool-slack-*.tar.gz vs channel-slack-*.tar.gz).
+    // The files *inside* each archive use manifest.name (slack-tool.wasm vs slack.wasm).
+    // These tests verify the installer extracts by manifest.name correctly.
+
+    fn build_test_tar_gz(wasm_name: &str, caps_name: Option<&str>) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use tar::Builder;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut builder = Builder::new(&mut encoder);
+
+            let wasm_data = b"\0asm\x01\x00\x00\x00";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(wasm_data.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, wasm_name, &wasm_data[..])
+                .unwrap();
+
+            if let Some(caps) = caps_name {
+                let caps_data = br#"{"auth":null}"#;
+                let mut header = tar::Header::new_gnu();
+                header.set_size(caps_data.len() as u64);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, caps, &caps_data[..])
+                    .unwrap();
+            }
+
+            builder.finish().unwrap();
+        }
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn test_extract_rejects_archive_with_wrong_wasm_name() {
+        // Simulates the collision bug: archive contains channel's slack.wasm,
+        // but installer tries to extract tool's slack-tool.wasm.
+        let gz_bytes = build_test_tar_gz("slack.wasm", Some("slack.capabilities.json"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_tar_gz(
+            &gz_bytes,
+            "slack-tool",
+            &tmp.path().join("slack-tool.wasm"),
+            &tmp.path().join("slack-tool.capabilities.json"),
+            "test://url",
+        );
+
+        let err = result.expect_err("should fail when archive has wrong wasm name");
+        match err {
+            RegistryError::DownloadFailed { reason, .. } => {
+                assert!(
+                    reason.contains("slack-tool.wasm"),
+                    "error should mention expected filename: {}",
+                    reason
+                );
+            }
+            other => panic!("expected DownloadFailed, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extract_correct_wasm_from_tool_bundle() {
+        // Tool bundle contains slack-tool.wasm — extraction by name="slack-tool" succeeds.
+        let gz_bytes =
+            build_test_tar_gz("slack-tool.wasm", Some("slack-tool.capabilities.json"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_path = tmp.path().join("slack-tool.wasm");
+        let caps_path = tmp.path().join("slack-tool.capabilities.json");
+
+        let result =
+            extract_tar_gz(&gz_bytes, "slack-tool", &wasm_path, &caps_path, "test://url")
+                .unwrap();
+
+        assert!(wasm_path.exists());
+        assert!(caps_path.exists());
+        assert!(result.has_capabilities);
+    }
+
+    #[test]
+    fn test_extract_correct_wasm_from_channel_bundle() {
+        // Channel bundle contains slack.wasm — extraction by name="slack" succeeds.
+        let gz_bytes = build_test_tar_gz("slack.wasm", Some("slack.capabilities.json"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_path = tmp.path().join("slack.wasm");
+        let caps_path = tmp.path().join("slack.capabilities.json");
+
+        let result =
+            extract_tar_gz(&gz_bytes, "slack", &wasm_path, &caps_path, "test://url").unwrap();
+
+        assert!(wasm_path.exists());
+        assert!(caps_path.exists());
+        assert!(result.has_capabilities);
+    }
+
+    #[tokio::test]
+    async fn test_tool_and_channel_install_to_separate_directories() {
+        // Tool and channel manifests with the same file_stem ("slack") install
+        // to different directories without collision.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        let tool_manifest = test_manifest_with_kind(
+            "slack-tool",
+            "tools-src/slack",
+            None,
+            None,
+            ManifestKind::Tool,
+        );
+        let channel_manifest = test_manifest_with_kind(
+            "slack",
+            "channels-src/slack",
+            None,
+            None,
+            ManifestKind::Channel,
+        );
+
+        // Both fail because source dirs don't exist, but the error path reveals
+        // the target directory — tool goes to tools/, channel goes to channels/.
+        let tool_err = installer
+            .install_from_source(&tool_manifest, false)
+            .await
+            .expect_err("no source dir");
+        let channel_err = installer
+            .install_from_source(&channel_manifest, false)
+            .await
+            .expect_err("no source dir");
+
+        match tool_err {
+            RegistryError::ManifestRead { path, .. } => {
+                assert!(
+                    path.ends_with("tools-src/slack"),
+                    "tool should resolve to tools-src/slack, got: {}",
+                    path.display()
+                );
+            }
+            other => panic!("expected ManifestRead for tool, got: {:?}", other),
+        }
+        match channel_err {
+            RegistryError::ManifestRead { path, .. } => {
+                assert!(
+                    path.ends_with("channels-src/slack"),
+                    "channel should resolve to channels-src/slack, got: {}",
+                    path.display()
+                );
+            }
+            other => panic!("expected ManifestRead for channel, got: {:?}", other),
+        }
     }
 }
