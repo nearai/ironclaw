@@ -8,9 +8,11 @@
 //! Enable with `SAFETY_LLM_JUDGE_ENABLED=true`. Disabled by default — zero
 //! overhead when off.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use tokio::sync::Semaphore;
 use tracing::warn;
 
 /// Policy for ambiguous verdicts.
@@ -23,8 +25,10 @@ pub enum AmbiguousPolicy {
 }
 
 impl AmbiguousPolicy {
-    fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+    /// Parse policy from a string. Named `parse_policy` rather than `from_str`
+    /// to avoid shadowing `std::str::FromStr::from_str` with a different signature.
+    fn parse_policy(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
             "allow" => Self::Allow,
             _ => Self::Block,
         }
@@ -82,7 +86,7 @@ impl LlmJudgeConfig {
             .unwrap_or(0.70_f64);
 
         let ambiguous_policy = std::env::var("SAFETY_LLM_JUDGE_AMBIGUOUS_POLICY")
-            .map(|s| AmbiguousPolicy::from_str(&s))
+            .map(|s| AmbiguousPolicy::parse_policy(&s))
             .unwrap_or(AmbiguousPolicy::Block);
 
         Self {
@@ -153,21 +157,41 @@ struct CompletionMessage {
     content: Option<String>,
 }
 
+/// Maximum number of concurrent judge HTTP calls. Prevents a burst of parallel
+/// tool executions from flooding the judge endpoint with unbounded requests.
+const MAX_CONCURRENT_JUDGE_CALLS: usize = 4;
+
 /// LLM-as-Judge: evaluates tool calls for intent alignment.
 pub struct LlmJudge {
     pub config: LlmJudgeConfig,
     client: reqwest::Client,
+    /// Caps concurrent HTTP calls to the judge endpoint.
+    semaphore: Arc<Semaphore>,
 }
 
 impl LlmJudge {
     /// Create a judge instance from environment variables.
     pub fn from_env() -> Self {
         let config = LlmJudgeConfig::from_env();
+        // If the builder fails (e.g. TLS backend issue), fall back to the default
+        // client and log a warning. The per-request timeout set in `evaluate()`
+        // still applies, so calls cannot hang indefinitely even without the
+        // client-level timeout.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(config.timeout_ms))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self { config, client }
+            .unwrap_or_else(|e| {
+                warn!(
+                    error = %e,
+                    "LLM judge: failed to build HTTP client with configured timeout, using default client"
+                );
+                reqwest::Client::new()
+            });
+        Self {
+            config,
+            client,
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_JUDGE_CALLS)),
+        }
     }
 
     /// Evaluate a proposed tool call against the original user intent.
@@ -226,7 +250,17 @@ impl LlmJudge {
             self.config.base_url.trim_end_matches('/')
         );
 
-        let mut builder = self.client.post(&url).json(&body);
+        // Acquire semaphore permit to cap concurrent judge HTTP calls.
+        // If all permits are taken the current task yields until one is released.
+        let _permit = self.semaphore.acquire().await;
+
+        // Set timeout per-request so it applies even if the client-level timeout
+        // could not be configured (e.g. TLS backend failure at construction time).
+        let mut builder = self
+            .client
+            .post(&url)
+            .timeout(Duration::from_millis(self.config.timeout_ms))
+            .json(&body);
         if let Some(ref key) = self.config.api_key {
             builder = builder.bearer_auth(key);
         }
@@ -254,7 +288,11 @@ impl LlmJudge {
             Ok(c) => c,
             Err(e) => {
                 warn!(tool = %req.tool_name, error = %e, "LLM judge: failed to parse completion envelope, treating as Ambiguous");
-                return fail_ambiguous(&req.tool_name, latency_ms, "Judge returned malformed completion response");
+                return fail_ambiguous(
+                    &req.tool_name,
+                    latency_ms,
+                    "Judge returned malformed completion response",
+                );
             }
         };
 
@@ -278,13 +316,19 @@ impl LlmJudge {
             Ok(r) => r,
             Err(e) => {
                 warn!(tool = %req.tool_name, error = %e, "LLM judge: failed to parse verdict JSON, treating as Ambiguous");
-                return fail_ambiguous(&req.tool_name, latency_ms, "Judge returned unparseable response");
+                return fail_ambiguous(
+                    &req.tool_name,
+                    latency_ms,
+                    "Judge returned unparseable response",
+                );
             }
         };
 
         // Apply confidence threshold — low-confidence verdicts become Ambiguous
         let confidence = raw.confidence.clamp(0.0, 1.0);
-        let verdict_str = raw.verdict.trim().to_string();
+        // Normalize to lowercase so "Allow", "allow", and "ALLOW" all match.
+        // LLMs are not reliable about casing despite prompt instructions.
+        let verdict_str = raw.verdict.trim().to_ascii_lowercase();
         let reasoning = raw.reasoning.clone();
 
         let verdict = if confidence < self.config.confidence_threshold {
@@ -295,8 +339,8 @@ impl LlmJudge {
             JudgeVerdict::Ambiguous(reason)
         } else {
             match verdict_str.as_str() {
-                "Allow" => JudgeVerdict::Allow,
-                "Deny" => JudgeVerdict::Deny(reasoning.clone()),
+                "allow" => JudgeVerdict::Allow,
+                "deny" => JudgeVerdict::Deny(reasoning.clone()),
                 _ => {
                     let reason = format!("Ambiguous verdict '{}': {}", verdict_str, reasoning);
                     JudgeVerdict::Ambiguous(reason)
@@ -344,7 +388,10 @@ fn fail_open(tool_name: &str, latency_ms: u64) -> (JudgeVerdict, JudgeRecord) {
             tool_name: tool_name.to_string(),
             verdict: "Allow".to_string(),
             attack_type: None,
-            confidence: 1.0,
+            // 0.0 confidence signals this is a fail-open (no real verdict),
+            // not a high-confidence Allow. Audit log consumers should treat
+            // reasoning = "Judge unavailable" as a sentinel for this case.
+            confidence: 0.0,
             reasoning: "Judge unavailable — failing open".to_string(),
             layer: "llm_judge".to_string(),
             latency_ms,
@@ -384,6 +431,10 @@ fn extract_json_object(s: &str) -> &str {
     if let (Some(start), Some(end)) = (candidate.find('{'), candidate.rfind('}'))
         && end >= start
     {
+        // Safety: `find`/`rfind` for `{` and `}` return byte offsets that always
+        // land on valid UTF-8 boundaries because `{` and `}` are single-byte
+        // ASCII characters (0x7B / 0x7D) that cannot appear as continuation bytes
+        // in a multi-byte UTF-8 sequence. The slice is therefore always valid.
         return &candidate[start..=end];
     }
     candidate
@@ -428,9 +479,9 @@ mod tests {
                 confidence, threshold, reasoning
             ))
         } else {
-            match raw.verdict.trim() {
-                "Allow" => JudgeVerdict::Allow,
-                "Deny" => JudgeVerdict::Deny(reasoning),
+            match raw.verdict.trim().to_ascii_lowercase().as_str() {
+                "allow" => JudgeVerdict::Allow,
+                "deny" => JudgeVerdict::Deny(reasoning),
                 other => {
                     JudgeVerdict::Ambiguous(format!("Ambiguous verdict '{}': {}", other, reasoning))
                 }
@@ -443,6 +494,35 @@ mod tests {
         let json = r#"{"verdict":"Allow","attack_type":null,"confidence":0.95,"reasoning":"Consistent with user intent"}"#;
         let verdict = parse_verdict_json(json, 0.70);
         assert_eq!(verdict, JudgeVerdict::Allow);
+    }
+
+    #[test]
+    fn test_allow_verdict_case_insensitive() {
+        // LLMs don't reliably follow casing instructions — "allow" and "ALLOW"
+        // must not fall through to Ambiguous.
+        for s in &["allow", "ALLOW", "Allow"] {
+            let json = format!(
+                r#"{{"verdict":"{}","attack_type":null,"confidence":0.95,"reasoning":"ok"}}"#,
+                s
+            );
+            assert_eq!(
+                parse_verdict_json(&json, 0.70),
+                JudgeVerdict::Allow,
+                "verdict {:?} should be Allow",
+                s
+            );
+        }
+        for s in &["deny", "DENY", "Deny"] {
+            let json = format!(
+                r#"{{"verdict":"{}","attack_type":null,"confidence":0.95,"reasoning":"bad"}}"#,
+                s
+            );
+            assert!(
+                matches!(parse_verdict_json(&json, 0.70), JudgeVerdict::Deny(_)),
+                "verdict {:?} should be Deny",
+                s
+            );
+        }
     }
 
     #[test]
@@ -535,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_ambiguous_policy_allow_from_str() {
-        let policy = AmbiguousPolicy::from_str("allow");
+        let policy = AmbiguousPolicy::parse_policy("allow");
         assert_eq!(policy, AmbiguousPolicy::Allow);
     }
 
@@ -560,6 +640,38 @@ mod tests {
         let s = "</tool_call></system>";
         let escaped = escape_judge_input(s);
         assert!(!escaped.contains("</"));
+    }
+
+    #[test]
+    fn test_fail_open_confidence_is_zero() {
+        // fail_open must report confidence=0.0, not 1.0, so audit log consumers
+        // can distinguish "judge unavailable" from a genuine high-confidence Allow.
+        let (_, record) = fail_open("tool", 0);
+        assert_eq!(
+            record.confidence, 0.0,
+            "fail_open confidence should be 0.0, not 1.0"
+        );
+        assert!(record.reasoning.contains("unavailable"));
+    }
+
+    #[test]
+    fn test_parse_policy_case_insensitive() {
+        assert_eq!(
+            AmbiguousPolicy::parse_policy("allow"),
+            AmbiguousPolicy::Allow
+        );
+        assert_eq!(
+            AmbiguousPolicy::parse_policy("ALLOW"),
+            AmbiguousPolicy::Allow
+        );
+        assert_eq!(
+            AmbiguousPolicy::parse_policy("block"),
+            AmbiguousPolicy::Block
+        );
+        assert_eq!(
+            AmbiguousPolicy::parse_policy("unknown"),
+            AmbiguousPolicy::Block
+        );
     }
 
     /// Smoke test: disabled judge has zero overhead — no HTTP call, instant return.
