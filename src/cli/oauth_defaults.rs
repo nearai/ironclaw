@@ -1036,7 +1036,9 @@ mod tests {
 
         // The resource parameter should be URL-encoded in the auth URL
         assert!(
-            result.url.contains("resource=https%3A%2F%2Fmcp.example.com"),
+            result
+                .url
+                .contains("resource=https%3A%2F%2Fmcp.example.com"),
             "Expected resource param in URL: {}",
             result.url
         );

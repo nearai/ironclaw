@@ -27,8 +27,8 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpClient;
 use crate::tools::mcp::auth::{
-    authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata, find_available_port,
-    is_authenticated, register_client,
+    authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
+    find_available_port, is_authenticated, register_client,
 };
 use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::session::McpSessionManager;
