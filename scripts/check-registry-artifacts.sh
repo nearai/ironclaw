@@ -45,8 +45,9 @@ checked=0
 check_manifest() {
   local manifest="$1"
 
-  local base
-  base="$(basename "$manifest" .json)"
+  local base_with_ext
+  base_with_ext="$(basename -- "$manifest")"
+  local base="${base_with_ext%.json}"
 
   local version
   version="$(jq -r '.version // empty' "$manifest")"
@@ -112,7 +113,9 @@ check_manifest() {
 }
 
 for manifest in registry/tools/*.json registry/channels/*.json; do
-  check_manifest "$manifest"
+  if [[ -f "$manifest" ]]; then
+    check_manifest "$manifest"
+  fi
 done
 
 if [[ "$checked" -eq 0 ]]; then
