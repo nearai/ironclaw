@@ -552,7 +552,7 @@ impl Scheduler {
             &tools,
             &safety,
             tool_name,
-            &normalized_params,
+            params,
             &job_ctx,
         )
         .await?;

@@ -463,8 +463,14 @@ impl LoopDelegate for ContainerDelegate {
             };
 
             let result =
-                execute_tool_simple(&self.tools, &self.safety, &tc.name, &tc.arguments, &job_ctx)
-                    .await;
+                execute_tool_simple(
+                    &self.tools,
+                    &self.safety,
+                    &tc.name,
+                    tc.arguments.clone(),
+                    &job_ctx,
+                )
+                .await;
 
             self.post_event(
                 "tool_result",
