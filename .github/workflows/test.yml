@@ -102,7 +102,7 @@ jobs:
       - name: Build all WASM extensions against current WIT
         run: ./scripts/build-wasm-extensions.sh
       - name: Instantiation test (host linker compatibility)
-        run: cargo test --all-features wit_compat -- --nocapture
+        run: cargo test --features postgres,libsql,html-to-markdown wit_compat -- --nocapture
 
   docker-build:
     name: Docker Build
