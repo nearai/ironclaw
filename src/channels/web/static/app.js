@@ -2350,8 +2350,8 @@ function renderExtensionCard(ext) {
     activeLabel.textContent = ext.active ? 'Active' : 'Installed';
     actions.appendChild(activeLabel);
 
-    // MCP servers may be installed but inactive — show Activate button
-    if (ext.kind === 'mcp_server' && !ext.active) {
+    // MCP servers and channel-relay extensions may be installed but inactive — show Activate button
+    if ((ext.kind === 'mcp_server' || ext.kind === 'channel_relay') && !ext.active) {
       const activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
       activateBtn.textContent = 'Activate';
