@@ -11,12 +11,24 @@ use std::io::{self, Write};
 
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, ClearType},
 };
 use secrecy::SecretString;
+
+/// Drain any residual key events already queued in the terminal buffer.
+///
+/// On Windows, transitioning between raw mode and cooked mode (or between
+/// successive raw-mode prompts) can leave stale events (e.g. the Release
+/// half of an Enter keypress) in the queue. Consuming them with a
+/// non-blocking poll prevents the next prompt from mis-firing.
+fn drain_pending_events() {
+    while event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+        let _ = event::read();
+    }
+}
 
 /// Display a numbered menu and get user selection.
 ///
@@ -94,6 +106,7 @@ pub fn select_many(prompt: &str, options: &[(&str, bool)]) -> io::Result<Vec<usi
     let mut cursor_pos = 0;
 
     terminal::enable_raw_mode()?;
+    drain_pending_events();
     execute!(stdout, cursor::Hide)?;
 
     let result = (|| {
@@ -124,9 +137,13 @@ pub fn select_many(prompt: &str, options: &[(&str, bool)]) -> io::Result<Vec<usi
 
             stdout.flush()?;
 
-            // Read key
+            // Read key — only act on Press events to avoid double-firing
+            // from Release/Repeat events on Windows.
             if let Event::Key(KeyEvent {
-                code, modifiers, ..
+                code,
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
             }) = event::read()?
             {
                 match code {
@@ -200,19 +217,16 @@ fn read_secret_line() -> io::Result<SecretString> {
     let mut input = String::new();
     let mut stdout = io::stdout();
 
-    // Drain any residual key events (e.g. Enter from a prior `read_line` prompt)
-    // that are already queued before we start reading. Without this, on
-    // Windows the leftover Enter is immediately consumed and the function
-    // returns an empty string before the user can type anything.
-    // Uses Duration::ZERO so we never block waiting for new input — only
-    // events already in the queue are consumed.
-    while event::poll(std::time::Duration::ZERO)? {
-        let _ = event::read()?;
-    }
+    drain_pending_events();
 
     loop {
+        // Only act on Press events to avoid double-firing from
+        // Release/Repeat events on Windows.
         if let Event::Key(KeyEvent {
-            code, modifiers, ..
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            ..
         }) = event::read()?
         {
             match code {
