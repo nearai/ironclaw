@@ -8,10 +8,10 @@
 
 #[cfg(feature = "import")]
 mod import_integration_tests {
-    use ironclaw::db::libsql::LibSqlBackend;
     use ironclaw::db::Database;
-    use ironclaw::import::openclaw::reader::OpenClawReader;
+    use ironclaw::db::libsql::LibSqlBackend;
     use ironclaw::import::ImportStats;
+    use ironclaw::import::openclaw::reader::OpenClawReader;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -151,8 +151,9 @@ mod import_integration_tests {
     #[tokio::test]
     async fn test_full_import_with_database_writes() {
         let (db, _db_temp) = create_test_db().await.expect("DB creation failed");
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().await.expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
 
         // Verify DB starts empty
         let before_docs = db
@@ -199,8 +200,9 @@ mod import_integration_tests {
 
     #[tokio::test]
     async fn test_import_command_execution() {
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().await.expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
         let (_db, _db_temp) = create_test_db().await.expect("DB creation failed");
 
         // Create import options
@@ -229,8 +231,9 @@ mod import_integration_tests {
     #[tokio::test]
     async fn test_dry_run_prevents_database_writes() {
         let (db, _db_temp) = create_test_db().await.expect("DB creation failed");
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().await.expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
 
         let user_id = "test_user";
 
@@ -273,8 +276,9 @@ mod import_integration_tests {
     #[tokio::test]
     async fn test_import_idempotency_no_duplicates_on_reimport() {
         let (_db, _db_temp) = create_test_db().await.expect("DB creation failed");
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().await.expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
 
         // Simulate first import: count what would be imported
         let reader1 = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
@@ -339,8 +343,9 @@ mod import_integration_tests {
 
     #[tokio::test]
     async fn test_embedding_dimension_mismatch_queues_reembedding() {
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().await.expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
 
         // Create an agent DB with embeddings (1536-dim)
         let agents_dir = openclaw_path.join("agents");

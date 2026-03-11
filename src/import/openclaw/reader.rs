@@ -87,8 +87,7 @@ async fn open_sqlite(db_path: &Path) -> Result<libsql::Connection, ImportError> 
         .build()
         .await
         .map_err(|e| ImportError::Sqlite(e.to_string()))?;
-    db.connect()
-        .map_err(|e| ImportError::Sqlite(e.to_string()))
+    db.connect().map_err(|e| ImportError::Sqlite(e.to_string()))
 }
 
 /// Reader for OpenClaw data files and databases.
@@ -244,7 +243,10 @@ impl OpenClawReader {
         let conn = open_sqlite(db_path).await?;
 
         let mut rows = conn
-            .query("SELECT path, content, embedding, chunk_index FROM chunks", ())
+            .query(
+                "SELECT path, content, embedding, chunk_index FROM chunks",
+                (),
+            )
             .await
             .map_err(|e| ImportError::Sqlite(e.to_string()))?;
 
@@ -331,12 +333,15 @@ impl OpenClawReader {
                 .await
                 .map_err(|e| ImportError::Sqlite(e.to_string()))?
             {
-                let role: String =
-                    msg_row.get(0).map_err(|e| ImportError::Sqlite(e.to_string()))?;
-                let content: String =
-                    msg_row.get(1).map_err(|e| ImportError::Sqlite(e.to_string()))?;
-                let msg_created_at: Option<String> =
-                    msg_row.get(2).map_err(|e| ImportError::Sqlite(e.to_string()))?;
+                let role: String = msg_row
+                    .get(0)
+                    .map_err(|e| ImportError::Sqlite(e.to_string()))?;
+                let content: String = msg_row
+                    .get(1)
+                    .map_err(|e| ImportError::Sqlite(e.to_string()))?;
+                let msg_created_at: Option<String> = msg_row
+                    .get(2)
+                    .map_err(|e| ImportError::Sqlite(e.to_string()))?;
 
                 let msg_created_at = msg_created_at
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
