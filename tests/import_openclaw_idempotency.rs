@@ -17,7 +17,7 @@ mod idempotency_tests {
     use ironclaw::import::{ImportOptions, ImportStats};
 
     /// Helper: Create minimal test OpenClaw
-    fn create_minimal_openclaw() -> Result<(TempDir, PathBuf), Box<dyn std::error::Error>> {
+    async fn create_minimal_openclaw() -> Result<(TempDir, PathBuf), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let openclaw_path = temp_dir.path().to_path_buf();
 
@@ -40,8 +40,8 @@ mod idempotency_tests {
         std::fs::create_dir_all(&agents_dir)?;
         let db_path = agents_dir.join("agent.sqlite");
 
-        use rusqlite::Connection;
-        let conn = Connection::open(&db_path)?;
+        let db = libsql::Builder::new_local(&db_path).build().await?;
+        let conn = db.connect()?;
 
         conn.execute(
             "CREATE TABLE chunks (
@@ -51,24 +51,27 @@ mod idempotency_tests {
                 embedding BLOB,
                 chunk_index INTEGER
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         conn.execute(
             "INSERT INTO chunks VALUES (?, ?, ?, ?, ?)",
-            rusqlite::params![
+            libsql::params![
                 Uuid::new_v4().to_string(),
                 "test.md",
                 "Test content",
-                None::<Vec<u8>>,
-                0
+                libsql::Value::Null,
+                0i64
             ],
-        )?;
+        )
+        .await?;
 
         conn.execute(
             "CREATE TABLE conversations (id TEXT PRIMARY KEY, channel TEXT, created_at TEXT)",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         conn.execute(
             "CREATE TABLE messages (
@@ -78,8 +81,9 @@ mod idempotency_tests {
                 content TEXT,
                 created_at TEXT
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         Ok((temp_dir, openclaw_path))
     }
@@ -88,9 +92,9 @@ mod idempotency_tests {
     // Idempotency Tests
     // ────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_reader_idempotent_config_reads() {
-        let (_temp, openclaw_path) = create_minimal_openclaw().expect("setup failed");
+    #[tokio::test]
+    async fn test_reader_idempotent_config_reads() {
+        let (_temp, openclaw_path) = create_minimal_openclaw().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
 
@@ -109,9 +113,9 @@ mod idempotency_tests {
         );
     }
 
-    #[test]
-    fn test_reader_idempotent_workspace_file_listing() {
-        let (_temp, openclaw_path) = create_minimal_openclaw().expect("setup failed");
+    #[tokio::test]
+    async fn test_reader_idempotent_workspace_file_listing() {
+        let (_temp, openclaw_path) = create_minimal_openclaw().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
 
@@ -123,9 +127,9 @@ mod idempotency_tests {
         assert_eq!(count1, 1); // MEMORY.md
     }
 
-    #[test]
-    fn test_reader_idempotent_memory_chunk_reads() {
-        let (_temp, openclaw_path) = create_minimal_openclaw().expect("setup failed");
+    #[tokio::test]
+    async fn test_reader_idempotent_memory_chunk_reads() {
+        let (_temp, openclaw_path) = create_minimal_openclaw().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let agent_dbs = reader.list_agent_dbs().expect("list agent dbs failed");
@@ -134,9 +138,11 @@ mod idempotency_tests {
         // Read chunks twice
         let chunks1 = reader
             .read_memory_chunks(db_path)
+            .await
             .expect("first read failed");
         let chunks2 = reader
             .read_memory_chunks(db_path)
+            .await
             .expect("second read failed");
 
         // Same number of chunks
@@ -197,10 +203,10 @@ mod idempotency_tests {
         assert!(!normal_opts.dry_run);
     }
 
-    #[test]
-    fn test_dry_run_stats_would_be_same() {
+    #[tokio::test]
+    async fn test_dry_run_stats_would_be_same() {
         // Simulating what import stats would be in dry-run vs real run
-        let (_temp, openclaw_path) = create_minimal_openclaw().expect("setup failed");
+        let (_temp, openclaw_path) = create_minimal_openclaw().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
 
@@ -235,9 +241,9 @@ mod idempotency_tests {
     // Duplicate Prevention Tests
     // ────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_chunk_deduplication_by_path() {
-        let (_temp, openclaw_path) = create_minimal_openclaw().expect("setup failed");
+    #[tokio::test]
+    async fn test_chunk_deduplication_by_path() {
+        let (_temp, openclaw_path) = create_minimal_openclaw().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let agent_dbs = reader.list_agent_dbs().expect("list agent dbs failed");
@@ -245,6 +251,7 @@ mod idempotency_tests {
 
         let chunks = reader
             .read_memory_chunks(db_path)
+            .await
             .expect("read chunks failed");
 
         // All chunks should have unique (path, chunk_index) pairs
