@@ -535,6 +535,41 @@ impl ChannelWorkspaceStore {
             }
         }
     }
+
+    /// Append a text frame to a JSON queue stored at `path`.
+    ///
+    /// The queue is stored as a JSON array of strings and bounded to the most
+    /// recent `max_items` entries so websocket runtimes cannot grow it without
+    /// limit.
+    pub fn append_json_text_queue(
+        &self,
+        path: &str,
+        text: &str,
+        max_items: usize,
+    ) -> Result<(), String> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| "workspace store lock poisoned".to_string())?;
+
+        let mut queue: Vec<String> = data
+            .get(path)
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+
+        queue.push(text.to_string());
+
+        if queue.len() > max_items {
+            let overflow = queue.len() - max_items;
+            queue.drain(0..overflow);
+        }
+
+        let serialized = serde_json::to_string(&queue)
+            .map_err(|error| format!("failed to serialize websocket queue: {error}"))?;
+
+        data.insert(path.to_string(), serialized);
+        Ok(())
+    }
 }
 
 impl crate::tools::wasm::WorkspaceReader for ChannelWorkspaceStore {
@@ -630,7 +665,7 @@ mod tests {
     use crate::channels::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
     use crate::channels::wasm::host::{
         Attachment, ChannelEmitRateLimiter, ChannelHostState, EmittedMessage,
-        MAX_ATTACHMENT_TOTAL_SIZE, MAX_ATTACHMENTS_PER_MESSAGE, MAX_EMITS_PER_EXECUTION,
+        MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_TOTAL_SIZE, MAX_EMITS_PER_EXECUTION,
     };
 
     #[test]
@@ -792,6 +827,22 @@ mod tests {
             store.read("channels/telegram/offset"),
             Some("200".to_string())
         );
+    }
+
+    #[test]
+    fn test_channel_workspace_store_append_json_text_queue_is_bounded() {
+        use crate::channels::wasm::host::ChannelWorkspaceStore;
+        use crate::tools::wasm::WorkspaceReader;
+
+        let store = ChannelWorkspaceStore::new();
+        let path = "channels/discord/state/gateway_event_queue";
+
+        store.append_json_text_queue(path, "frame-1", 2).unwrap();
+        store.append_json_text_queue(path, "frame-2", 2).unwrap();
+        store.append_json_text_queue(path, "frame-3", 2).unwrap();
+
+        let queue: Vec<String> = serde_json::from_str(&store.read(path).unwrap()).unwrap();
+        assert_eq!(queue, vec!["frame-2".to_string(), "frame-3".to_string()]);
     }
 
     // === QA Plan P2 - 2.3: WASM channel lifecycle tests ===
