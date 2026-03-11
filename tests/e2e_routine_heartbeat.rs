@@ -61,6 +61,8 @@ mod tests {
                 prompt: prompt.to_string(),
                 context_paths: vec![],
                 max_tokens: 1000,
+                use_tools: false,
+                max_tool_rounds: 3,
             },
             guardrails: RoutineGuardrails {
                 cooldown: Duration::from_secs(0),

@@ -459,7 +459,20 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             prompt,
             context_paths,
             max_tokens,
-        } => execute_lightweight(&ctx, &routine, prompt, context_paths, *max_tokens).await,
+            use_tools,
+            max_tool_rounds,
+        } => {
+            execute_lightweight(
+                &ctx,
+                &routine,
+                prompt,
+                context_paths,
+                *max_tokens,
+                *use_tools,
+                *max_tool_rounds,
+            )
+            .await
+        }
         RoutineAction::FullJob {
             title,
             description,
@@ -670,6 +683,8 @@ async fn execute_lightweight(
     prompt: &str,
     context_paths: &[String],
     max_tokens: u32,
+    use_tools: bool,
+    max_tool_rounds: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Load context from workspace
     let mut context_parts = Vec::new();
@@ -732,14 +747,15 @@ async fn execute_lightweight(
         Err(_) => max_tokens,
     };
 
-    // If tools are enabled, use the tool execution loop; otherwise, single LLM call
-    if ctx.config.lightweight_tools_enabled {
+    // If tools are enabled (both globally and per-routine), use the tool execution loop
+    if use_tools && ctx.config.lightweight_tools_enabled {
         execute_lightweight_with_tools(
             ctx,
             routine,
             &system_prompt,
             &full_prompt,
             effective_max_tokens,
+            max_tool_rounds,
         )
         .await
     } else {
@@ -850,6 +866,7 @@ async fn execute_lightweight_with_tools(
     system_prompt: &str,
     full_prompt: &str,
     effective_max_tokens: u32,
+    max_tool_rounds: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let mut messages = if system_prompt.is_empty() {
         vec![ChatMessage::user(full_prompt)]
@@ -860,7 +877,9 @@ async fn execute_lightweight_with_tools(
         ]
     };
 
-    let max_iterations = ctx.config.lightweight_max_iterations.min(5);
+    let max_iterations = max_tool_rounds
+        .min(ctx.config.lightweight_max_iterations)
+        .min(5);
     let mut iteration = 0;
     let mut total_input_tokens = 0;
     let mut total_output_tokens = 0;
