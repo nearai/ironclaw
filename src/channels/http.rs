@@ -372,30 +372,36 @@ async fn process_message(
         None
     };
 
-    // Send message to the channel
-    let tx_guard = state.tx.read().await;
-    if let Some(tx) = tx_guard.as_ref() {
-        if tx.send(msg).await.is_err() {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(WebhookResponse {
-                    message_id: msg_id,
-                    status: "error".to_string(),
-                    response: Some("Channel closed".to_string()),
-                }),
-            );
+    // Send message to the channel — clone sender to avoid holding lock across await.
+    // Note: after cloning, shutdown() can run and clear the Option while we still hold
+    // a valid Sender clone. This is safe: the send will succeed (receiver still alive
+    // in the agent loop) or fail cleanly if the receiver was dropped.
+    let tx = {
+        let tx_guard = state.tx.read().await;
+        match tx_guard.as_ref() {
+            Some(tx) => tx.clone(),
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(WebhookResponse {
+                        message_id: msg_id,
+                        status: "error".to_string(),
+                        response: Some("Channel not started".to_string()),
+                    }),
+                );
+            }
         }
-    } else {
+    };
+    if tx.send(msg).await.is_err() {
         return (
-            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(WebhookResponse {
                 message_id: msg_id,
                 status: "error".to_string(),
-                response: Some("Channel not started".to_string()),
+                response: Some("Channel closed".to_string()),
             }),
         );
     }
-    drop(tx_guard);
 
     // Wait for response if requested
     let response = if let Some(rx) = response_rx {
@@ -541,6 +547,67 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Regression test for issue #869: RwLock read guard was held across
+    /// tx.send(msg).await in `process_message()`, blocking shutdown() from
+    /// acquiring the write lock when the channel buffer was full.
+    ///
+    /// This test exercises the actual production code path (`process_message`)
+    /// with a full channel buffer, then verifies shutdown() can still complete.
+    #[tokio::test]
+    async fn shutdown_completes_while_process_message_blocked() {
+        let channel = Arc::new(test_channel(Some("secret")));
+        let stream = channel.start().await.unwrap();
+
+        // Fill all 256 slots in the channel buffer
+        {
+            let tx = {
+                let guard = channel.state.tx.read().await;
+                guard.as_ref().unwrap().clone()
+            };
+            for i in 0..256 {
+                let msg = IncomingMessage::new("http", "user", format!("fill-{}", i));
+                tx.send(msg).await.unwrap();
+            }
+        }
+
+        // Signal so we know the spawned task has started and is about to
+        // call process_message (which will block on the full channel).
+        let started = Arc::new(tokio::sync::Notify::new());
+        let started_clone = started.clone();
+
+        // Spawn a task that calls the actual production code path.
+        // process_message() internally acquires the RwLock read guard and
+        // sends on the channel. With the fix, the guard is released before
+        // send().await; without the fix, shutdown() would deadlock.
+        let state = channel.state.clone();
+        let blocked_send = tokio::spawn(async move {
+            started_clone.notify_one();
+            let msg = IncomingMessage::new("http", "user", "blocked-257th");
+            let _ = process_message(state, msg, false).await;
+        });
+
+        // Wait for the spawned task to start, then give it time to reach
+        // the send().await and verify that it is still pending (i.e., blocked).
+        started.notified().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !blocked_send.is_finished(),
+            "process_message task should still be pending before shutdown()"
+        );
+
+        // shutdown() must complete even though process_message is blocked on
+        // send(). Before the fix, the read guard held across send().await
+        // would prevent shutdown() from acquiring the write lock.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), channel.shutdown()).await;
+        assert!(result.is_ok(), "shutdown() must not deadlock");
+        assert!(result.unwrap().is_ok());
+
+        // Drop the stream (receiver) so the blocked send task can complete
+        drop(stream);
+        let _ = blocked_send.await;
     }
 
     #[tokio::test]

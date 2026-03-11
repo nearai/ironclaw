@@ -176,8 +176,12 @@ async fn handle_client_message(
                 incoming = incoming.with_attachments(attachments);
             }
 
-            let tx_guard = state.msg_tx.read().await;
-            if let Some(ref tx) = *tx_guard {
+            // Clone sender to avoid holding RwLock read guard across send().await
+            let tx = {
+                let tx_guard = state.msg_tx.read().await;
+                tx_guard.as_ref().cloned()
+            };
+            if let Some(tx) = tx {
                 if tx.send(incoming).await.is_err() {
                     let _ = direct_tx
                         .send(WsServerMessage::Error {
@@ -245,8 +249,12 @@ async fn handle_client_message(
             if let Some(ref tid) = thread_id {
                 msg = msg.with_thread(tid);
             }
-            let tx_guard = state.msg_tx.read().await;
-            if let Some(ref tx) = *tx_guard {
+            // Clone sender to avoid holding RwLock read guard across send().await
+            let tx = {
+                let tx_guard = state.msg_tx.read().await;
+                tx_guard.as_ref().cloned()
+            };
+            if let Some(tx) = tx {
                 let _ = tx.send(msg).await;
             }
         }
