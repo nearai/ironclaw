@@ -19,7 +19,7 @@ pub async fn execute_tool_with_safety(
     tools: &ToolRegistry,
     safety: &SafetyLayer,
     tool_name: &str,
-    params: &serde_json::Value,
+    params: serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, Error> {
     let tool = tools
@@ -30,7 +30,7 @@ pub async fn execute_tool_with_safety(
         })?;
 
     // Validate tool parameters
-    let validation = safety.validator().validate_tool_params(params);
+    let validation = safety.validator().validate_tool_params(&params);
     if !validation.is_valid {
         let details = validation
             .errors
@@ -45,7 +45,7 @@ pub async fn execute_tool_with_safety(
         .into());
     }
 
-    let safe_params = redact_params(params, tool.sensitive_params());
+    let safe_params = redact_params(&params, tool.sensitive_params());
     tracing::debug!(
         tool = %tool_name,
         params = %safe_params,
@@ -55,10 +55,7 @@ pub async fn execute_tool_with_safety(
     // Execute with per-tool timeout
     let timeout = tool.execution_timeout();
     let start = std::time::Instant::now();
-    let result = tokio::time::timeout(timeout, async {
-        tool.execute(params.clone(), job_ctx).await
-    })
-    .await;
+    let result = tokio::time::timeout(timeout, async { tool.execute(params, job_ctx).await }).await;
     let elapsed = start.elapsed();
 
     match &result {
@@ -141,7 +138,7 @@ pub async fn execute_tool_simple(
     tools: &ToolRegistry,
     safety: &SafetyLayer,
     tool_name: &str,
-    params: &serde_json::Value,
+    params: serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, String> {
     execute_tool_with_safety(tools, safety, tool_name, params, job_ctx)
@@ -263,7 +260,7 @@ mod tests {
         let params = serde_json::json!({"message": "hello"});
 
         let result =
-            execute_tool_with_safety(&registry, &safety, "echo", &params, &test_job_ctx()).await;
+            execute_tool_with_safety(&registry, &safety, "echo", params, &test_job_ctx()).await;
 
         assert!(result.is_ok(), "Echo tool should succeed");
         let output = result.unwrap();
@@ -282,7 +279,7 @@ mod tests {
             &registry,
             &safety,
             "nonexistent",
-            &serde_json::json!({}),
+            serde_json::json!({}),
             &test_job_ctx(),
         )
         .await;
@@ -305,7 +302,7 @@ mod tests {
             &registry,
             &safety,
             "fail_tool",
-            &serde_json::json!({}),
+            serde_json::json!({}),
             &test_job_ctx(),
         )
         .await;
@@ -329,7 +326,7 @@ mod tests {
             &registry,
             &safety,
             "slow_tool",
-            &serde_json::json!({}),
+            serde_json::json!({}),
             &test_job_ctx(),
         )
         .await;
