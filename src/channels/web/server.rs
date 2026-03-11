@@ -1868,7 +1868,7 @@ async fn extensions_activate_handler(
             // Activation loaded the WASM module. Check if the tool needs
             // OAuth scope expansion (e.g., adding google-docs when gmail
             // already has a token but missing the documents scope).
-            // Initial OAuth setup is triggered via save_setup_secrets.
+            // Initial OAuth setup is triggered via configure.
             let mut resp = ActionResponse::ok(result.message);
             if let Ok(auth_result) = ext_mgr.auth(&name).await
                 && auth_result.auth_url().is_some()
