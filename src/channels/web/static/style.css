@@ -9,6 +9,7 @@
   --text-secondary: #a1a1aa;
   --accent: #34d399;
   --accent-hover: #2fc48d;
+  --accent-soft: rgba(52, 211, 153, 0.15);
   --success: #34d399;
   --warning: #F5A623;
   --danger: #E64C4C;
@@ -669,7 +670,7 @@ body {
 
 .message.user {
   align-self: flex-end;
-  background: rgba(52, 211, 153, 0.15);
+  background: var(--accent-soft);
   color: var(--accent);
   border-bottom-right-radius: 2px;
   white-space: pre-wrap;
@@ -1322,7 +1323,7 @@ body {
   transition: background 0.2s, transform 0.2s;
 }
 
-.chat-input button:hover {
+.chat-input button:hover:not(:disabled) {
   background: var(--accent-hover);
   transform: translateY(-1px);
 }
