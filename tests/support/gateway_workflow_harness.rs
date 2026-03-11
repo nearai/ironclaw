@@ -308,7 +308,9 @@ impl GatewayWorkflowHarness {
             tools: Arc::clone(gateway_state.tool_registry.as_ref().expect("tool registry")),
             routine_engine: Arc::clone(&routine_slot),
             user_id: user_id.clone(),
-            secrets_store: Some(webhook_secrets as Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>),
+            secrets_store: Some(
+                webhook_secrets as Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>,
+            ),
         };
         let webhook_app = ironclaw::webhooks::routes(webhook_state);
         let webhook_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
