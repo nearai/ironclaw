@@ -570,6 +570,24 @@ async fn oauth_callback_handler(
         .await
         .map_err(|e| e.to_string())?;
 
+        // For MCP OAuth flows (identified by resource field), persist the
+        // client_id so token refresh works without re-authentication.
+        // The CLI flow stores this in authorize_mcp_server(); the gateway
+        // callback must do the same.
+        if let Some(ref client_id_secret) = flow.client_id_secret_name {
+            let params = crate::secrets::CreateSecretParams::new(client_id_secret, &flow.client_id)
+                .with_provider(
+                    flow.provider
+                        .as_ref()
+                        .map(|p| format!("mcp:{}", p))
+                        .unwrap_or_default(),
+                );
+            flow.secrets
+                .create(&flow.user_id, params)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+
         Ok(())
     }
     .await;
@@ -2855,6 +2873,7 @@ mod tests {
             sse_sender: None,
             gateway_token: None,
             resource: None,
+            client_id_secret_name: None,
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
                 .expect("System uptime is too low to run expired flow test"),
@@ -2965,6 +2984,7 @@ mod tests {
             sse_sender: None,
             gateway_token: None,
             resource: None,
+            client_id_secret_name: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))

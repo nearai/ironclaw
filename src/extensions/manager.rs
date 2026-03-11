@@ -1878,6 +1878,7 @@ impl ExtensionManager {
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
                 resource: Some(resource),
+                client_id_secret_name: Some(format!("mcp_{}_client_id", name)),
                 created_at: std::time::Instant::now(),
             };
 
@@ -2413,6 +2414,7 @@ impl ExtensionManager {
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
                 resource: None,
+                client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             };
 
