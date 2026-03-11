@@ -164,7 +164,7 @@ impl SafetyLayer {
             "<tool_output name=\"{}\" sanitized=\"{}\">\n{}\n</tool_output>",
             escape_xml_attr(tool_name),
             sanitized,
-            escape_xml_content(content)
+            content
         )
     }
 
@@ -213,13 +213,6 @@ fn escape_xml_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Escape XML content.
-fn escape_xml_content(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,7 +228,7 @@ mod tests {
         let wrapped = safety.wrap_for_llm("test_tool", "Hello <world>", true);
         assert!(wrapped.contains("name=\"test_tool\""));
         assert!(wrapped.contains("sanitized=\"true\""));
-        assert!(wrapped.contains("Hello &lt;world&gt;"));
+        assert!(wrapped.contains("Hello <world>"));
     }
 
     #[test]

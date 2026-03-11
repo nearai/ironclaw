@@ -113,6 +113,13 @@ impl Agent {
         thread_id: Uuid,
         content: &str,
     ) -> Result<SubmissionResult, Error> {
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            content_len = content.len(),
+            "Processing user input"
+        );
+
         // First check thread state without holding lock during I/O
         let thread_state = {
             let sess = session.lock().await;
@@ -123,19 +130,41 @@ impl Agent {
             thread.state
         };
 
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            thread_state = ?thread_state,
+            "Checked thread state"
+        );
+
         // Check thread state
         match thread_state {
             ThreadState::Processing => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    thread_id = %thread_id,
+                    "Thread is processing, rejecting new input"
+                );
                 return Ok(SubmissionResult::error(
                     "Turn in progress. Use /interrupt to cancel.",
                 ));
             }
             ThreadState::AwaitingApproval => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    thread_id = %thread_id,
+                    "Thread awaiting approval, rejecting new input"
+                );
                 return Ok(SubmissionResult::error(
                     "Waiting for approval. Use /interrupt to cancel.",
                 ));
             }
             ThreadState::Completed => {
+                tracing::warn!(
+                    message_id = %message.id,
+                    thread_id = %thread_id,
+                    "Thread completed, rejecting new input"
+                );
                 return Ok(SubmissionResult::error(
                     "Thread completed. Use /thread new.",
                 ));
@@ -269,8 +298,19 @@ impl Agent {
         };
 
         // Persist user message to DB immediately so it survives crashes
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            "Persisting user message to DB"
+        );
         self.persist_user_message(thread_id, &message.user_id, effective_content)
             .await;
+
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            "User message persisted, starting agentic loop"
+        );
 
         // Send thinking status
         let _ = self
@@ -812,19 +852,12 @@ impl Agent {
             // Sanitize tool result, then record the cleaned version in the
             // thread. Must happen before auth intercept check which may return early.
             let is_tool_error = tool_result.is_err();
-            let result_content = match &tool_result {
-                Ok(output) => {
-                    let sanitized = self
-                        .safety()
-                        .sanitize_tool_output(&pending.tool_name, output);
-                    self.safety().wrap_for_llm(
-                        &pending.tool_name,
-                        &sanitized.content,
-                        sanitized.was_modified,
-                    )
-                }
-                Err(e) => format!("Error: {}", e),
-            };
+            let (result_content, _) = crate::tools::execute::process_tool_result(
+                self.safety(),
+                &pending.tool_name,
+                &pending.tool_call_id,
+                &tool_result,
+            );
 
             // Record sanitized result in thread
             {
@@ -892,14 +925,20 @@ impl Agent {
 
             for (idx, tc) in deferred_tool_calls.iter().enumerate() {
                 if let Some(tool) = self.tools().get(&tc.name).await {
-                    use crate::tools::ApprovalRequirement;
-                    let needs_approval = match tool.requires_approval(&tc.arguments) {
-                        ApprovalRequirement::Never => false,
-                        ApprovalRequirement::UnlessAutoApproved => {
-                            let sess = session.lock().await;
-                            !sess.is_tool_auto_approved(&tc.name)
+                    // Match dispatcher.rs: when auto_approve_tools is true, skip
+                    // all approval checks (including ApprovalRequirement::Always).
+                    let needs_approval = if self.config.auto_approve_tools {
+                        false
+                    } else {
+                        use crate::tools::ApprovalRequirement;
+                        match tool.requires_approval(&tc.arguments) {
+                            ApprovalRequirement::Never => false,
+                            ApprovalRequirement::UnlessAutoApproved => {
+                                let sess = session.lock().await;
+                                !sess.is_tool_auto_approved(&tc.name)
+                            }
+                            ApprovalRequirement::Always => true,
                         }
-                        ApprovalRequirement::Always => true,
                     };
 
                     if needs_approval {
@@ -1064,17 +1103,12 @@ impl Agent {
                 // Sanitize first, then record the cleaned version in thread.
                 // Must happen before auth detection which may set deferred_auth.
                 let is_deferred_error = deferred_result.is_err();
-                let deferred_content = match &deferred_result {
-                    Ok(output) => {
-                        let sanitized = self.safety().sanitize_tool_output(&tc.name, output);
-                        self.safety().wrap_for_llm(
-                            &tc.name,
-                            &sanitized.content,
-                            sanitized.was_modified,
-                        )
-                    }
-                    Err(e) => format!("Error: {}", e),
-                };
+                let (deferred_content, _) = crate::tools::execute::process_tool_result(
+                    self.safety(),
+                    &tc.name,
+                    &tc.id,
+                    &deferred_result,
+                );
 
                 // Record sanitized result in thread
                 {

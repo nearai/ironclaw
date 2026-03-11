@@ -14,6 +14,8 @@
 mod completion;
 mod config;
 mod doctor;
+#[cfg(feature = "import")]
+pub mod import;
 mod mcp;
 pub mod memory;
 pub mod oauth_defaults;
@@ -26,6 +28,8 @@ mod tool;
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
+#[cfg(feature = "import")]
+pub use import::{ImportCommand, run_import_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 pub use memory::run_memory_command_with_db;
@@ -183,6 +187,15 @@ pub enum Command {
     )]
     Completion(Completion),
 
+    /// Import data from other AI systems
+    #[cfg(feature = "import")]
+    #[command(
+        subcommand,
+        about = "Import from other AI systems",
+        long_about = "Migrate data from other AI assistants like OpenClaw.\nExample: ironclaw import openclaw"
+    )]
+    Import(ImportCommand),
+
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
     #[command(hide = true)]
@@ -282,6 +295,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "import")]
     fn test_help_output() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
@@ -289,7 +303,24 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "import"))]
+    fn test_help_output_without_import() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_help().to_string();
+        assert_snapshot!(help);
+    }
+
+    #[test]
+    #[cfg(feature = "import")]
     fn test_long_help_output() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
+        assert_snapshot!(help);
+    }
+
+    #[test]
+    #[cfg(not(feature = "import"))]
+    fn test_long_help_output_without_import() {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
         assert_snapshot!(help);

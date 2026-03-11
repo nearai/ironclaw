@@ -738,6 +738,18 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+        // Log at info level only for tracking without exposing PII (user_id can be a phone number)
+        tracing::info!(message_id = %message.id, "Processing message");
+
+        // Log sensitive details at debug level for troubleshooting
+        tracing::debug!(
+            message_id = %message.id,
+            user_id = %message.user_id,
+            channel = %message.channel,
+            thread_id = ?message.thread_id,
+            "Message details"
+        );
+
         // Set message tool context for this turn (current channel and target)
         // For Signal, use signal_target from metadata (group:ID or phone number),
         // otherwise fall back to user_id
@@ -753,7 +765,7 @@ impl Agent {
 
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
-        tracing::debug!(
+        tracing::trace!(
             "[agent_loop] Parsed submission: {:?}",
             std::any::type_name_of_val(&submission)
         );
@@ -786,10 +798,19 @@ impl Agent {
 
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(ref external_thread_id) = message.thread_id {
+            tracing::trace!(
+                message_id = %message.id,
+                thread_id = %external_thread_id,
+                "Hydrating thread from DB"
+            );
             self.maybe_hydrate_thread(message, external_thread_id).await;
         }
 
         // Resolve session and thread
+        tracing::debug!(
+            message_id = %message.id,
+            "Resolving session and thread"
+        );
         let (session, thread_id) = self
             .session_manager
             .resolve_thread(
@@ -798,6 +819,11 @@ impl Agent {
                 message.thread_id.as_deref(),
             )
             .await;
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            "Resolved session and thread"
+        );
 
         // Auth mode interception: if the thread is awaiting a token, route
         // the message directly to the credential store. Nothing touches
@@ -827,7 +853,7 @@ impl Agent {
             }
         }
 
-        tracing::debug!(
+        tracing::trace!(
             "Received message from {} on {} ({} chars)",
             message.user_id,
             message.channel,

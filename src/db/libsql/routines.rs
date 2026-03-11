@@ -167,7 +167,7 @@ impl RoutineStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'event'",
+                    "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type IN ('event', 'system_event')",
                     ROUTINE_COLUMNS
                 ),
                 (),

@@ -9,7 +9,6 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
-use crate::agent::worker::{Worker, WorkerDeps};
 use crate::channels::web::types::SseEvent;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
@@ -19,6 +18,7 @@ use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
 use crate::tools::{ApprovalContext, ToolRegistry};
+use crate::worker::job::{Worker, WorkerDeps};
 
 /// Message to send to a worker.
 #[derive(Debug)]
@@ -160,24 +160,36 @@ impl Scheduler {
             .create_job_for_user(user_id, title, description)
             .await?;
 
-        // Apply token budget from config, allowing per-job metadata override.
-        let max_tokens = metadata
+        // Apply metadata and token budget in a single atomic update.
+        // This prevents concurrent workers from observing partial state.
+        // Cap user-supplied max_tokens at the configured limit (Issue #815).
+        let user_max_tokens = metadata
             .as_ref()
             .and_then(|m| m.get("max_tokens"))
-            .and_then(|v| v.as_u64())
+            .and_then(|v| v.as_u64());
+
+        let max_tokens = user_max_tokens
+            .map(|user_val| {
+                if self.config.max_tokens_per_job == 0 {
+                    // Config is "unlimited": use the user-supplied value directly.
+                    user_val
+                } else {
+                    std::cmp::min(user_val, self.config.max_tokens_per_job)
+                }
+            })
             .unwrap_or(self.config.max_tokens_per_job);
 
-        // Apply metadata if provided
+        // Apply both metadata and token budget in one closure (Issue #813: atomic update)
         if let Some(meta) = metadata {
             self.context_manager
                 .update_context(job_id, |ctx| {
                     ctx.metadata = meta;
+                    if max_tokens > 0 {
+                        ctx.max_tokens = max_tokens;
+                    }
                 })
                 .await?;
-        }
-
-        // Set token budget (separate update to avoid overwriting metadata)
-        if max_tokens > 0 {
+        } else if max_tokens > 0 {
             self.context_manager
                 .update_context(job_id, |ctx| {
                     ctx.max_tokens = max_tokens;
@@ -462,6 +474,9 @@ impl Scheduler {
     }
 
     /// Execute a single tool as a subtask.
+    ///
+    /// Performs scheduler-specific checks (approval, cancellation) then
+    /// delegates to the shared `execute_tool_with_safety` pipeline.
     async fn execute_tool_task(
         tools: Arc<ToolRegistry>,
         context_manager: Arc<ContextManager>,
@@ -473,7 +488,7 @@ impl Scheduler {
     ) -> Result<TaskOutput, Error> {
         let start = std::time::Instant::now();
 
-        // Get the tool
+        // Get the tool for approval check
         let tool = tools.get(tool_name).await.ok_or_else(|| {
             Error::Tool(crate::error::ToolError::NotFound {
                 name: tool_name.to_string(),
@@ -490,6 +505,7 @@ impl Scheduler {
             .into());
         }
 
+        // Scheduler-specific approval check
         let requirement = tool.requires_approval(&params);
         let blocked =
             ApprovalContext::is_blocked_or_default(&approval_context, tool_name, requirement);
@@ -500,41 +516,23 @@ impl Scheduler {
             .into());
         }
 
-        // Validate tool parameters
-        let validation = safety.validator().validate_tool_params(&params);
-        if !validation.is_valid {
-            let details = validation
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(crate::error::ToolError::InvalidParameters {
+        // Delegate to shared tool execution pipeline
+        let output_str = crate::tools::execute::execute_tool_with_safety(
+            &tools, &safety, tool_name, &params, &job_ctx,
+        )
+        .await?;
+
+        // Parse back to Value for TaskOutput; this should be infallible given
+        // `execute_tool_with_safety` uses `serde_json::to_string_pretty`, but if it
+        // ever fails we surface a clear error instead of silently changing types.
+        let result_value: serde_json::Value = serde_json::from_str(&output_str).map_err(|e| {
+            Error::Tool(crate::error::ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
-                reason: format!("Invalid tool parameters: {}", details),
-            }
-            .into());
-        }
+                reason: format!("Failed to parse tool output as JSON: {}", e),
+            })
+        })?;
 
-        // Execute with per-tool timeout
-        let tool_timeout = tool.execution_timeout();
-        let result =
-            tokio::time::timeout(tool_timeout, async { tool.execute(params, &job_ctx).await })
-                .await
-                .map_err(|_| {
-                    Error::Tool(crate::error::ToolError::Timeout {
-                        name: tool_name.to_string(),
-                        timeout: tool_timeout,
-                    })
-                })?
-                .map_err(|e| {
-                    Error::Tool(crate::error::ToolError::ExecutionFailed {
-                        name: tool_name.to_string(),
-                        reason: e.to_string(),
-                    })
-                })?;
-
-        Ok(TaskOutput::new(result.result, start.elapsed()))
+        Ok(TaskOutput::new(result_value, start.elapsed()))
     }
 
     /// Stop a running job.
@@ -699,8 +697,140 @@ impl Scheduler {
 mod tests {
     use super::*;
     use crate::config::SafetyConfig;
+    use crate::llm::{
+        CompletionRequest, CompletionResponse, LlmError, LlmProvider, ToolCompletionRequest,
+        ToolCompletionResponse,
+    };
     use crate::safety::SafetyLayer;
     use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+    use rust_decimal_macros::dec;
+
+    /// Minimal LLM provider stub for scheduler tests that don't exercise LLM calls.
+    struct StubLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StubLlm {
+        fn model_name(&self) -> &str {
+            "stub"
+        }
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (dec!(0), dec!(0))
+        }
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "stub".into(),
+                reason: "not implemented".into(),
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "stub".into(),
+                reason: "not implemented".into(),
+            })
+        }
+    }
+
+    /// Create a Scheduler for token-budget tests. The LLM stub will fail if a
+    /// worker actually tries to call it, but `dispatch_job` sets the token
+    /// budget *before* spawning the worker so we can inspect the context
+    /// immediately after dispatch.
+    fn make_test_scheduler(max_tokens_per_job: u64) -> Scheduler {
+        let config = AgentConfig {
+            name: "test".to_string(),
+            max_parallel_jobs: 5,
+            job_timeout: std::time::Duration::from_secs(30),
+            stuck_threshold: std::time::Duration::from_secs(300),
+            repair_check_interval: std::time::Duration::from_secs(3600),
+            max_repair_attempts: 0,
+            use_planning: false,
+            session_idle_timeout: std::time::Duration::from_secs(3600),
+            allow_local_tools: true,
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: None,
+            max_tool_iterations: 10,
+            auto_approve_tools: true,
+            default_timezone: "UTC".to_string(),
+            max_tokens_per_job,
+        };
+        let cm = Arc::new(ContextManager::new(5));
+        let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let tools = Arc::new(ToolRegistry::new());
+        let hooks = Arc::new(HookRegistry::default());
+
+        Scheduler::new(config, cm, llm, safety, tools, None, hooks)
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_job_caps_user_max_tokens() {
+        let sched = make_test_scheduler(1000);
+        let meta = serde_json::json!({ "max_tokens": 5000 });
+        let job_id = sched
+            .dispatch_job("user1", "test", "desc", Some(meta))
+            .await
+            .unwrap();
+
+        let ctx = sched.context_manager.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.max_tokens, 1000, "should cap at configured limit");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_job_unlimited_config_preserves_user_tokens() {
+        let sched = make_test_scheduler(0); // 0 = unlimited
+        let meta = serde_json::json!({ "max_tokens": 5000 });
+        let job_id = sched
+            .dispatch_job("user1", "test", "desc", Some(meta))
+            .await
+            .unwrap();
+
+        let ctx = sched.context_manager.get_context(job_id).await.unwrap();
+        assert_eq!(
+            ctx.max_tokens, 5000,
+            "unlimited config should preserve user value"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_job_no_user_tokens_uses_config() {
+        let sched = make_test_scheduler(2000);
+        let job_id = sched
+            .dispatch_job("user1", "test", "desc", None)
+            .await
+            .unwrap();
+
+        let ctx = sched.context_manager.get_context(job_id).await.unwrap();
+        assert_eq!(
+            ctx.max_tokens, 2000,
+            "should use config default when no user value"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_job_atomic_metadata_and_tokens() {
+        let sched = make_test_scheduler(10_000);
+        let meta = serde_json::json!({
+            "max_tokens": 3000,
+            "custom_key": "custom_value"
+        });
+        let job_id = sched
+            .dispatch_job("user1", "test", "desc", Some(meta))
+            .await
+            .unwrap();
+
+        let ctx = sched.context_manager.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.max_tokens, 3000, "should use user value within limit");
+        assert_eq!(
+            ctx.metadata.get("custom_key").and_then(|v| v.as_str()),
+            Some("custom_value"),
+            "metadata should be set atomically with token budget"
+        );
+    }
 
     #[test]
     fn test_scheduler_creation() {

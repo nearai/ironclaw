@@ -117,8 +117,6 @@ impl Validator {
 
     /// Validate input text.
     pub fn validate(&self, input: &str) -> ValidationResult {
-        let mut result = ValidationResult::ok();
-
         // Check empty
         if input.is_empty() {
             return ValidationResult::error(ValidationError {
@@ -128,10 +126,16 @@ impl Validator {
             });
         }
 
+        self.validate_non_empty_input(input, "input")
+    }
+
+    fn validate_non_empty_input(&self, input: &str, field: &str) -> ValidationResult {
+        let mut result = ValidationResult::ok();
+
         // Check length
         if input.len() > self.max_length {
             result = result.merge(ValidationResult::error(ValidationError {
-                field: "input".to_string(),
+                field: field.to_string(),
                 message: format!(
                     "Input too long: {} bytes (max {})",
                     input.len(),
@@ -143,7 +147,7 @@ impl Validator {
 
         if input.len() < self.min_length {
             result = result.merge(ValidationResult::error(ValidationError {
-                field: "input".to_string(),
+                field: field.to_string(),
                 message: format!(
                     "Input too short: {} bytes (min {})",
                     input.len(),
@@ -156,7 +160,7 @@ impl Validator {
         // Check for valid UTF-8 (should always pass since we have a &str, but check for weird chars)
         if input.chars().any(|c| c == '\x00') {
             result = result.merge(ValidationResult::error(ValidationError {
-                field: "input".to_string(),
+                field: field.to_string(),
                 message: "Input contains null bytes".to_string(),
                 code: ValidationErrorCode::InvalidEncoding,
             }));
@@ -167,7 +171,7 @@ impl Validator {
         for pattern in &self.forbidden_patterns {
             if lower_input.contains(pattern) {
                 result = result.merge(ValidationResult::error(ValidationError {
-                    field: "input".to_string(),
+                    field: field.to_string(),
                     message: format!("Input contains forbidden pattern: {}", pattern),
                     code: ValidationErrorCode::ForbiddenContent,
                 }));
@@ -193,32 +197,50 @@ impl Validator {
     pub fn validate_tool_params(&self, params: &serde_json::Value) -> ValidationResult {
         let mut result = ValidationResult::ok();
 
-        // Recursively check all string values in the JSON
+        // Recursively check all string values in the JSON.
+        // Depth is capped to prevent stack overflow on pathological input.
+        const MAX_DEPTH: usize = 32;
+
         fn check_strings(
             value: &serde_json::Value,
+            path: &str,
             validator: &Validator,
             result: &mut ValidationResult,
+            depth: usize,
         ) {
+            if depth > MAX_DEPTH {
+                return;
+            }
             match value {
                 serde_json::Value::String(s) => {
-                    let string_result = validator.validate(s);
+                    let string_result = if s.is_empty() {
+                        ValidationResult::ok()
+                    } else {
+                        validator.validate_non_empty_input(s, path)
+                    };
                     *result = std::mem::take(result).merge(string_result);
                 }
                 serde_json::Value::Array(arr) => {
-                    for item in arr {
-                        check_strings(item, validator, result);
+                    for (i, item) in arr.iter().enumerate() {
+                        let child_path = format!("{path}[{i}]");
+                        check_strings(item, &child_path, validator, result, depth + 1);
                     }
                 }
                 serde_json::Value::Object(obj) => {
-                    for (_, v) in obj {
-                        check_strings(v, validator, result);
+                    for (k, v) in obj {
+                        let child_path = if path.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{path}.{k}")
+                        };
+                        check_strings(v, &child_path, validator, result, depth + 1);
                     }
                 }
                 _ => {}
             }
         }
 
-        check_strings(params, self, &mut result);
+        check_strings(params, "", self, &mut result, 0);
         result
     }
 }
@@ -311,5 +333,139 @@ mod tests {
             validator.validate(&format!("Start of message{}End of message", "a".repeat(30)));
         assert!(result.is_valid); // Still valid, just a warning
         assert!(!result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_tool_params_allow_empty_strings() {
+        let validator = Validator::new();
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "path": "",
+            "nested": {
+                "label": ""
+            },
+            "items": [""]
+        }));
+
+        assert!(result.is_valid);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_tool_params_still_block_null_bytes() {
+        let validator = Validator::new();
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "path": "bad\u{0000}path"
+        }));
+
+        assert!(!result.is_valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == ValidationErrorCode::InvalidEncoding)
+        );
+    }
+
+    #[test]
+    fn test_tool_params_still_block_forbidden_patterns() {
+        let validator = Validator::new().forbid_pattern("forbidden");
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "path": "contains forbidden content"
+        }));
+
+        assert!(!result.is_valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == ValidationErrorCode::ForbiddenContent)
+        );
+    }
+
+    #[test]
+    fn test_tool_params_still_warn_on_repetition() {
+        let validator = Validator::new();
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "content": format!("prefix{}suffix", "x".repeat(50))
+        }));
+
+        assert!(result.is_valid);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("repetition")),
+            "expected repetition warning for tool params, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_tool_params_still_warn_on_whitespace_ratio() {
+        let validator = Validator::new();
+        // >100 chars, >90% whitespace
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "content": format!("a{}b", " ".repeat(200))
+        }));
+
+        assert!(result.is_valid);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("whitespace")),
+            "expected whitespace warning for tool params, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_tool_params_error_field_contains_json_path() {
+        let validator = Validator::new().forbid_pattern("evil");
+        let result = validator.validate_tool_params(&serde_json::json!({
+            "metadata": {
+                "tags": ["good", "evil"]
+            }
+        }));
+
+        assert!(!result.is_valid);
+        let error = result
+            .errors
+            .iter()
+            .find(|e| e.code == ValidationErrorCode::ForbiddenContent)
+            .expect("expected forbidden content error");
+        assert_eq!(error.field, "metadata.tags[1]");
+    }
+
+    #[test]
+    fn test_tool_params_depth_limit_prevents_stack_overflow() {
+        let validator = Validator::new().forbid_pattern("evil");
+
+        // Build a deeply nested JSON object (depth > MAX_DEPTH of 32)
+        let mut value = serde_json::json!("evil payload");
+        for _ in 0..50 {
+            value = serde_json::json!({ "nested": value });
+        }
+
+        let result = validator.validate_tool_params(&value);
+
+        // The "evil payload" is beyond the depth limit so it should NOT be
+        // detected — the traversal stops before reaching it.
+        assert!(
+            result.is_valid,
+            "Strings beyond depth limit should be silently skipped, got errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_tool_params_within_depth_limit_still_validated() {
+        let validator = Validator::new().forbid_pattern("evil");
+
+        // Build a nested object within the depth limit
+        let mut value = serde_json::json!("evil payload");
+        for _ in 0..5 {
+            value = serde_json::json!({ "nested": value });
+        }
+
+        let result = validator.validate_tool_params(&value);
+        assert!(
+            !result.is_valid,
+            "Strings within depth limit should still be validated"
+        );
     }
 }

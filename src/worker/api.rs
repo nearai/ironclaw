@@ -419,13 +419,14 @@ fn parse_finish_reason(s: &str) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::credentials::TEST_BEARER_TOKEN;
 
     #[test]
     fn test_url_construction() {
         let client = WorkerHttpClient::new(
             "http://host.docker.internal:50051".to_string(),
             Uuid::nil(),
-            "test-token".to_string(),
+            TEST_BEARER_TOKEN.to_string(),
         );
 
         assert_eq!(
@@ -449,7 +450,7 @@ mod tests {
         let client = WorkerHttpClient::new(
             "http://host.docker.internal:50051".to_string(),
             Uuid::nil(),
-            "test-token".to_string(),
+            TEST_BEARER_TOKEN.to_string(),
         );
 
         assert_eq!(

@@ -97,6 +97,7 @@ impl GatewayChannel {
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            oauth_rate_limiter: server::RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -133,6 +134,7 @@ impl GatewayChannel {
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            oauth_rate_limiter: server::RateLimiter::new(10, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             routine_engine: Arc::clone(&self.state.routine_engine),
@@ -239,6 +241,12 @@ impl GatewayChannel {
     /// Inject the cost guard for token/cost tracking in the status popover.
     pub fn with_cost_guard(mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
         self.rebuild_state(|s| s.cost_guard = Some(cg));
+        self
+    }
+
+    /// Inject a shared routine engine slot used by other HTTP ingress paths.
+    pub fn with_routine_engine_slot(mut self, slot: server::RoutineEngineSlot) -> Self {
+        self.rebuild_state(|s| s.routine_engine = slot);
         self
     }
 

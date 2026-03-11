@@ -183,7 +183,15 @@ pub fn verify_expects(
 
     // all_tools_succeeded
     if expects.all_tools_succeeded == Some(true) {
-        assert_all_tools_succeeded(completed);
+        let failed: Vec<&str> = completed
+            .iter()
+            .filter(|(_, success)| !*success)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "[{label}] Expected all tools to succeed, failed={failed:?}, completed={completed:?}, results={results:?}"
+        );
     }
 
     // max_tool_calls
