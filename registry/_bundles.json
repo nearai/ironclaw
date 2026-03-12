@@ -31,8 +31,12 @@
         "tools/github",
         "tools/gmail",
         "tools/google-calendar",
+        "tools/google-docs",
         "tools/google-drive",
+        "tools/google-sheets",
+        "tools/google-slides",
         "tools/slack-tool",
+        "tools/web-search",
         "channels/telegram",
         "channels/slack"
       ],
