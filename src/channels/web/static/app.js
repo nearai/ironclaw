@@ -342,8 +342,19 @@ function connectSSE() {
 
   eventSource.addEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
-    showApproval(data);
+    const hasThread = !!data.thread_id;
+    const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
+
+    if (forCurrentThread) {
+      showApproval(data);
+    } else {
+      // Keep thread list fresh when approval is requested in a background thread.
+      unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+      debouncedLoadThreads();
+    }
+
+    // Extension setup flows can surface approvals while user is on Extensions tab.
+    if (currentTab === 'extensions') loadExtensions();
   });
 
   eventSource.addEventListener('auth_required', (e) => {
@@ -991,6 +1002,10 @@ function finalizeActivityGroup() {
 }
 
 function showApproval(data) {
+  // Avoid duplicate cards on reconnect/history refresh.
+  const existing = document.querySelector('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
+  if (existing) return;
+
   const container = document.getElementById('chat-messages');
   const card = document.createElement('div');
   card.className = 'approval-card';
