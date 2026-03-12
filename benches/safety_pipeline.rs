@@ -1,6 +1,6 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ironclaw::config::SafetyConfig;
-use ironclaw::safety::SafetyLayer;
+use ironclaw::safety::{SafetyLayer, Validator};
 
 fn bench_safety_layer_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("safety_pipeline");
@@ -55,29 +55,55 @@ fn bench_safety_layer_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_json_tool_params(c: &mut Criterion) {
-    let mut group = c.benchmark_group("json_tool_params");
+fn bench_validate_tool_params(c: &mut Criterion) {
+    let mut group = c.benchmark_group("validate_tool_params");
 
-    let simple_params = r#"{"command": "echo hello"}"#;
-    let complex_params = r#"{
+    let validator = Validator::new();
+
+    let simple_params: serde_json::Value =
+        serde_json::from_str(r#"{"command": "echo hello"}"#).unwrap();
+
+    let complex_params: serde_json::Value = serde_json::from_str(
+        r#"{
         "command": "find",
         "args": ["-name", "*.rs", "-type", "f"],
         "working_dir": "/home/user/project",
         "env": {"RUST_LOG": "debug", "PATH": "/usr/bin"},
         "timeout": 30,
         "capture_output": true
-    }"#;
+    }"#,
+    )
+    .unwrap();
 
-    group.bench_function("parse_simple", |b| {
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(simple_params)).unwrap())
+    // Deeply nested JSON to stress the recursive validation walk
+    let nested_params: serde_json::Value = serde_json::from_str(
+        r#"{
+        "a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": "deep"}}}},
+        "list": [1, 2, {"nested": true, "values": ["x", "y", "z"]}]}}},
+        "command": "echo",
+        "env": {"KEY1": "val1", "KEY2": "val2", "KEY3": "val3", "KEY4": "val4"}
+    }"#,
+    )
+    .unwrap();
+
+    group.bench_function("simple", |b| {
+        b.iter(|| validator.validate_tool_params(black_box(&simple_params)))
     });
 
-    group.bench_function("parse_complex", |b| {
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(complex_params)).unwrap())
+    group.bench_function("complex", |b| {
+        b.iter(|| validator.validate_tool_params(black_box(&complex_params)))
+    });
+
+    group.bench_function("deeply_nested", |b| {
+        b.iter(|| validator.validate_tool_params(black_box(&nested_params)))
     });
 
     group.finish();
 }
 
-criterion_group!(benches, bench_safety_layer_pipeline, bench_json_tool_params);
+criterion_group!(
+    benches,
+    bench_safety_layer_pipeline,
+    bench_validate_tool_params
+);
 criterion_main!(benches);

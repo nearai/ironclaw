@@ -116,7 +116,7 @@ jobs:
         with:
           key: bench
       - name: Compile benchmarks
-        run: cargo bench --no-run
+        run: cargo bench --all-features --no-run
 
   docker-build:
     name: Docker Build

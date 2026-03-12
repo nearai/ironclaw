@@ -191,14 +191,14 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
 insta = "1.46.3"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = "0.5"
 
 [[bench]]
 name = "safety_check"
 harness = false
 
 [[bench]]
-name = "tool_dispatch"
+name = "safety_pipeline"
 harness = false
 
 [features]
