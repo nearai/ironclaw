@@ -219,6 +219,7 @@ import = ["dep:json5", "libsql"]
 
 [[test]]
 name = "html_to_markdown"
+path = "test/html_to_markdown.rs"
 required-features = ["html-to-markdown"]
 
 [profile.release]
