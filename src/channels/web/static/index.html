@@ -26,7 +26,7 @@
       <div class="auth-form">
         <label for="token-input">Gateway Token</label>
         <input type="password" id="token-input" placeholder="Paste your auth token" autofocus>
-        <button onclick="authenticate()">Connect</button>
+        <button id="auth-connect-btn">Connect</button>
       </div>
       <div id="auth-error"></div>
       <p class="auth-hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
@@ -35,11 +35,11 @@
 
   <!-- Restart Confirmation Modal -->
   <div id="restart-confirm-modal" class="restart-modal" style="display: none;">
-    <div class="restart-modal-overlay" onclick="cancelRestart()"></div>
+    <div class="restart-modal-overlay" id="restart-overlay"></div>
     <div class="restart-modal-content">
       <div class="restart-modal-header">
         <h2>Restart IronClaw Instance</h2>
-        <button class="restart-modal-close" onclick="cancelRestart()" title="Close">×</button>
+        <button class="restart-modal-close" id="restart-close-btn" title="Close">×</button>
       </div>
       <div class="restart-modal-body">
         <p class="restart-modal-description">
@@ -51,8 +51,8 @@
         </div>
       </div>
       <div class="restart-modal-footer">
-        <button class="restart-modal-btn cancel" onclick="cancelRestart()">Cancel</button>
-        <button class="restart-modal-btn confirm" onclick="confirmRestart()">Confirm Restart</button>
+        <button class="restart-modal-btn cancel" id="restart-cancel-btn">Cancel</button>
+        <button class="restart-modal-btn confirm" id="restart-confirm-btn">Confirm Restart</button>
       </div>
     </div>
   </div>
@@ -99,7 +99,7 @@
         <span id="sse-status">Connected</span>
         <div class="gateway-popover" id="gateway-popover"></div>
       </div>
-      <button class="restart-btn" id="restart-btn" onclick="triggerRestart()" title="Gracefully restart the process" style="display: none;">
+      <button class="restart-btn" id="restart-btn" title="Gracefully restart the process" style="display: none;">
         <svg id="restart-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M23 4v6h-6"></path>
           <path d="M1 20v-6h6"></path>
@@ -113,11 +113,11 @@
     <div class="tab-panel active" id="tab-chat">
       <div class="thread-sidebar" id="thread-sidebar">
         <div class="thread-sidebar-header">
-          <button class="thread-new-btn" onclick="createNewThread()" title="New thread (Ctrl/Cmd+N)">+</button>
+          <button class="thread-new-btn" id="thread-new-btn" title="New thread (Ctrl/Cmd+N)">+</button>
           <div class="spacer"></div>
-          <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" title="Toggle sidebar">&laquo;</button>
+          <button class="thread-toggle-btn" id="thread-toggle-btn" title="Toggle sidebar">&laquo;</button>
         </div>
-        <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
+        <div class="assistant-item" id="assistant-thread">
           <span class="assistant-label" id="assistant-label">Assistant</span>
           <span class="assistant-meta" id="assistant-meta"></span>
         </div>
@@ -134,7 +134,7 @@
           <textarea id="chat-input" placeholder="Message or / for commands..." rows="1"></textarea>
           <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
           <button id="attach-btn" class="attach-btn" title="Attach images" aria-label="Attach images">&#x1F4CE;</button>
-          <button id="send-btn" onclick="sendMessage()">Send</button>
+          <button id="send-btn">Send</button>
         </div>
       </div>
     </div>
@@ -151,7 +151,7 @@
         <div class="memory-content">
           <div class="memory-breadcrumb" id="memory-breadcrumb">
             <span id="memory-breadcrumb-path">workspace /</span>
-            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" onclick="startMemoryEdit()">Edit</button>
+            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none">Edit</button>
           </div>
           <div class="memory-viewer" id="memory-viewer">
             <div class="empty">Select a file to view its contents</div>
@@ -159,8 +159,8 @@
           <div class="memory-editor" id="memory-editor" style="display:none">
             <textarea id="memory-edit-textarea"></textarea>
             <div class="memory-editor-actions">
-              <button class="btn-save" onclick="saveMemoryEdit()">Save</button>
-              <button class="btn-cancel-edit" onclick="cancelMemoryEdit()">Cancel</button>
+              <button class="btn-save" id="memory-save-btn">Save</button>
+              <button class="btn-cancel-edit" id="memory-cancel-btn">Cancel</button>
             </div>
           </div>
         </div>
@@ -192,7 +192,7 @@
     <div class="tab-panel" id="tab-logs">
       <div class="logs-container">
         <div class="logs-toolbar">
-          <select id="logs-server-level" onchange="setServerLogLevel(this.value)" title="Server-side log level (changes what the server emits)">
+          <select id="logs-server-level" title="Server-side log level (changes what the server emits)">
             <option value="error">Server: ERROR</option>
             <option value="warn">Server: WARN</option>
             <option value="info" selected>Server: INFO</option>
@@ -207,8 +207,8 @@
           </select>
           <input type="text" id="logs-target-filter" placeholder="Filter by target...">
           <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> Auto-scroll</label>
-          <button id="logs-pause-btn" onclick="toggleLogsPause()">Pause</button>
-          <button onclick="clearLogs()">Clear</button>
+          <button id="logs-pause-btn">Pause</button>
+          <button id="logs-clear-btn">Clear</button>
         </div>
         <div class="logs-output" id="logs-output"></div>
       </div>
@@ -260,7 +260,7 @@
           <div class="ext-install-form">
             <input type="text" id="wasm-install-name" placeholder="Extension name">
             <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
-            <button onclick="installWasmExtension()">Install</button>
+            <button id="wasm-install-btn">Install</button>
           </div>
         </div>
         <div class="extensions-section">
@@ -272,7 +272,7 @@
           <div class="ext-install-form">
             <input type="text" id="mcp-install-name" placeholder="Server name">
             <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
-            <button onclick="addMcpServer()">Add</button>
+            <button id="mcp-add-btn">Add</button>
           </div>
         </div>
         <div class="extensions-section">
@@ -293,7 +293,7 @@
           <h3>Search ClawHub</h3>
           <div class="skill-search-box">
             <input type="text" id="skill-search-input" placeholder="Search for skills...">
-            <button onclick="searchClawHub()">Search</button>
+            <button id="skill-search-btn">Search</button>
           </div>
           <div class="extensions-list" id="skill-search-results"></div>
         </div>
@@ -308,7 +308,7 @@
           <div class="ext-install-form">
             <input type="text" id="skill-install-name" placeholder="Skill name or slug">
             <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
-            <button onclick="installSkillFromForm()">Install</button>
+            <button id="skill-install-btn">Install</button>
           </div>
         </div>
       </div>

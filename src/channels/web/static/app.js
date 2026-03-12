@@ -670,7 +670,7 @@ function renderMarkdown(text) {
     // Sanitize HTML output to prevent XSS from tool output or LLM responses.
     html = sanitizeRenderedHtml(html);
     // Inject copy buttons into <pre> blocks
-    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" onclick="copyCodeBlock(this)">Copy</button>');
+    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" data-action="copy-code">Copy</button>');
     return html;
   }
   return escapeHtml(text);
@@ -1823,13 +1823,11 @@ function saveMemoryEdit() {
 
 function buildBreadcrumb(path) {
   const parts = path.split('/');
-  let html = '<a onclick="loadMemoryTree()">workspace</a>';
+  let html = '<a data-action="breadcrumb-root" href="#">workspace</a>';
   let current = '';
   for (const part of parts) {
     current += (current ? '/' : '') + part;
-    // Store the path in data-path (HTML-escaped) and read it back via this.dataset.path
-    // to avoid single-quote injection in inline JS string literals.
-    html += ' / <a onclick="readMemoryFile(this.dataset.path)" data-path="' + escapeHtml(current) + '">' + escapeHtml(part) + '</a>';
+    html += ' / <a data-action="breadcrumb-file" data-path="' + escapeHtml(current) + '" href="#">' + escapeHtml(part) + '</a>';
   }
   return html;
 }
@@ -2799,11 +2797,11 @@ function renderJobsList(jobs) {
 
     let actionBtns = '';
     if (job.state === 'pending' || job.state === 'in_progress') {
-      actionBtns = '<button class="btn-cancel" onclick="event.stopPropagation(); cancelJob(\'' + job.id + '\')">Cancel</button>';
+      actionBtns = '<button class="btn-cancel" data-action="cancel-job" data-id="' + escapeHtml(job.id) + '">Cancel</button>';
     }
     // Retry is only shown in the detail view where can_restart is available.
 
-    return '<tr class="job-row" onclick="openJobDetail(\'' + job.id + '\')">'
+    return '<tr class="job-row" data-action="open-job" data-id="' + escapeHtml(job.id) + '">'
       + '<td title="' + escapeHtml(job.id) + '">' + shortId + '</td>'
       + '<td>' + escapeHtml(job.title) + '</td>'
       + '<td><span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span></td>'
@@ -2866,12 +2864,12 @@ function renderJobDetail(job) {
   const header = document.createElement('div');
   header.className = 'job-detail-header';
 
-  let headerHtml = '<button class="btn-back" onclick="closeJobDetail()">&larr; Back</button>'
+  let headerHtml = '<button class="btn-back" data-action="close-job-detail">&larr; Back</button>'
     + '<h2>' + escapeHtml(job.title) + '</h2>'
     + '<span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span>';
 
   if ((job.state === 'failed' || job.state === 'interrupted') && job.can_restart === true) {
-    headerHtml += '<button class="btn-restart" onclick="restartJob(\'' + job.id + '\')">Retry</button>';
+    headerHtml += '<button class="btn-restart" data-action="restart-job" data-id="' + escapeHtml(job.id) + '">Retry</button>';
   }
   if (job.browse_url) {
     headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">Browse Files</a>';
@@ -3328,7 +3326,7 @@ function renderRoutinesList(routines) {
     const toggleLabel = r.enabled ? 'Disable' : 'Enable';
     const toggleClass = r.enabled ? 'btn-cancel' : 'btn-restart';
 
-    return '<tr class="routine-row" onclick="openRoutineDetail(\'' + r.id + '\')">'
+    return '<tr class="routine-row" data-action="open-routine" data-id="' + escapeHtml(r.id) + '">'
       + '<td>' + escapeHtml(r.name) + '</td>'
       + '<td>' + escapeHtml(r.trigger_summary) + '</td>'
       + '<td>' + escapeHtml(r.action_type) + '</td>'
@@ -3337,9 +3335,9 @@ function renderRoutinesList(routines) {
       + '<td>' + r.run_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(r.status) + '</span></td>'
       + '<td>'
-      + '<button class="' + toggleClass + '" onclick="event.stopPropagation(); toggleRoutine(\'' + r.id + '\')">' + toggleLabel + '</button> '
-      + '<button class="btn-restart" onclick="event.stopPropagation(); triggerRoutine(\'' + r.id + '\')">Run</button> '
-      + '<button class="btn-cancel" onclick="event.stopPropagation(); deleteRoutine(\'' + r.id + '\', \'' + escapeHtml(r.name) + '\')">Delete</button>'
+      + '<button class="' + toggleClass + '" data-action="toggle-routine" data-id="' + escapeHtml(r.id) + '">' + toggleLabel + '</button> '
+      + '<button class="btn-restart" data-action="trigger-routine" data-id="' + escapeHtml(r.id) + '">Run</button> '
+      + '<button class="btn-cancel" data-action="delete-routine" data-id="' + escapeHtml(r.id) + '" data-name="' + escapeHtml(r.name) + '">Delete</button>'
       + '</td>'
       + '</tr>';
   }).join('');
@@ -3375,7 +3373,7 @@ function renderRoutineDetail(routine) {
     : 'active';
 
   let html = '<div class="job-detail-header">'
-    + '<button class="btn-back" onclick="closeRoutineDetail()">&larr; Back</button>'
+    + '<button class="btn-back" data-action="close-routine-detail">&larr; Back</button>'
     + '<h2>' + escapeHtml(routine.name) + '</h2>'
     + '<span class="badge ' + statusClass + '">' + escapeHtml(statusLabel) + '</span>'
     + '</div>';
@@ -3422,7 +3420,7 @@ function renderRoutineDetail(routine) {
         + '<td>' + formatDate(run.completed_at) + '</td>'
         + '<td><span class="badge ' + runStatusClass + '">' + escapeHtml(run.status) + '</span></td>'
         + '<td>' + escapeHtml(run.result_summary || '-')
-          + (run.job_id ? ' <a href="#" onclick="event.preventDefault(); switchTab(\'jobs\'); openJobDetail(\'' + run.job_id + '\')">[view job]</a>' : '')
+          + (run.job_id ? ' <a href="#" data-action="view-run-job" data-id="' + escapeHtml(run.job_id) + '">[view job]</a>' : '')
           + '</td>'
         + '<td>' + (run.tokens_used != null ? run.tokens_used : '-') + '</td>'
         + '</tr>';
@@ -3664,7 +3662,7 @@ function renderTeePopover(report) {
     + '<div class="tee-field"><div class="tee-field-label">VM Config</div>'
     + '<div class="tee-field-value">' + escapeHtml(vmConfig) + '</div></div>'
     + '<div class="tee-popover-actions">'
-    + '<button class="tee-btn-copy" onclick="copyTeeReport()">Copy Full Report</button></div>';
+    + '<button class="tee-btn-copy" data-action="copy-tee-report">Copy Full Report</button></div>';
 }
 
 function copyTeeReport() {
@@ -4146,3 +4144,87 @@ function formatDate(isoString) {
   const d = new Date(isoString);
   return d.toLocaleString();
 }
+
+// --- Event Listener Registration (CSP-safe, no inline handlers) ---
+
+document.getElementById('auth-connect-btn').addEventListener('click', () => authenticate());
+document.getElementById('restart-overlay').addEventListener('click', () => cancelRestart());
+document.getElementById('restart-close-btn').addEventListener('click', () => cancelRestart());
+document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());
+document.getElementById('restart-confirm-btn').addEventListener('click', () => confirmRestart());
+document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
+document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
+document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
+document.getElementById('assistant-thread').addEventListener('click', () => switchToAssistant());
+document.getElementById('send-btn').addEventListener('click', () => sendMessage());
+document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
+document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());
+document.getElementById('memory-cancel-btn').addEventListener('click', () => cancelMemoryEdit());
+document.getElementById('logs-server-level').addEventListener('change', (e) => setServerLogLevel(e.target.value));
+document.getElementById('logs-pause-btn').addEventListener('click', () => toggleLogsPause());
+document.getElementById('logs-clear-btn').addEventListener('click', () => clearLogs());
+document.getElementById('wasm-install-btn').addEventListener('click', () => installWasmExtension());
+document.getElementById('mcp-add-btn').addEventListener('click', () => addMcpServer());
+document.getElementById('skill-search-btn').addEventListener('click', () => searchClawHub());
+document.getElementById('skill-install-btn').addEventListener('click', () => installSkillFromForm());
+
+// --- Delegated Event Handlers (for dynamically generated HTML) ---
+
+document.addEventListener('click', function(e) {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+
+  switch (action) {
+    case 'copy-code':
+      copyCodeBlock(el);
+      break;
+    case 'breadcrumb-root':
+      e.preventDefault();
+      loadMemoryTree();
+      break;
+    case 'breadcrumb-file':
+      e.preventDefault();
+      readMemoryFile(el.dataset.path);
+      break;
+    case 'cancel-job':
+      e.stopPropagation();
+      cancelJob(el.dataset.id);
+      break;
+    case 'open-job':
+      openJobDetail(el.dataset.id);
+      break;
+    case 'close-job-detail':
+      closeJobDetail();
+      break;
+    case 'restart-job':
+      restartJob(el.dataset.id);
+      break;
+    case 'open-routine':
+      openRoutineDetail(el.dataset.id);
+      break;
+    case 'toggle-routine':
+      e.stopPropagation();
+      toggleRoutine(el.dataset.id);
+      break;
+    case 'trigger-routine':
+      e.stopPropagation();
+      triggerRoutine(el.dataset.id);
+      break;
+    case 'delete-routine':
+      e.stopPropagation();
+      deleteRoutine(el.dataset.id, el.dataset.name);
+      break;
+    case 'close-routine-detail':
+      closeRoutineDetail();
+      break;
+    case 'view-run-job':
+      e.preventDefault();
+      switchTab('jobs');
+      openJobDetail(el.dataset.id);
+      break;
+    case 'copy-tee-report':
+      copyTeeReport();
+      break;
+  }
+});
