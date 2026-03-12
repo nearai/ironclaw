@@ -12,6 +12,7 @@ Commands:
   config      Manage app configs
   tool        Manage WASM tools
   registry    Browse/install extensions
+  channels    Manage channels
   mcp         Manage MCP servers
   memory      Manage workspace memory
   pairing     Manage DM pairing
