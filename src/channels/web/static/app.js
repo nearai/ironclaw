@@ -1144,9 +1144,32 @@ function handleAuthCompleted(data) {
   enableChatInput();
 }
 
+function queryByDataAttribute(selector, attributeName, attributeValue) {
+  if (typeof attributeValue !== 'string') return document.querySelector(selector);
+
+  if (window.CSS && typeof window.CSS.escape === 'function') {
+    return document.querySelector(
+      selector + '[' + attributeName + '="' + window.CSS.escape(attributeValue) + '"]'
+    );
+  }
+
+  const candidates = document.querySelectorAll(selector);
+  for (const candidate of candidates) {
+    if (candidate.getAttribute(attributeName) === attributeValue) return candidate;
+  }
+  return null;
+}
+
 function getAuthOverlay(extensionName) {
-  if (!extensionName) return document.querySelector('.auth-overlay');
-  return document.querySelector('.auth-overlay[data-extension-name="' + extensionName + '"]');
+  return queryByDataAttribute('.auth-overlay', 'data-extension-name', extensionName);
+}
+
+function getAuthCard(extensionName) {
+  return queryByDataAttribute('.auth-card', 'data-extension-name', extensionName);
+}
+
+function getConfigureOverlay(extensionName) {
+  return queryByDataAttribute('.configure-overlay', 'data-extension-name', extensionName);
 }
 
 function showAuthCard(data) {
@@ -1252,7 +1275,7 @@ function removeAuthCard(extensionName) {
     overlay.remove();
     return;
   }
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
+  const card = getAuthCard(extensionName);
   if (card) {
     const parentOverlay = card.closest('.auth-overlay');
     if (parentOverlay) parentOverlay.remove();
@@ -1264,7 +1287,7 @@ function submitAuthToken(extensionName, tokenValue) {
   if (!tokenValue || !tokenValue.trim()) return;
 
   // Disable submit button while in flight
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
+  const card = getAuthCard(extensionName);
   if (card) {
     const btns = card.querySelectorAll('button');
     btns.forEach((b) => { b.disabled = true; });
@@ -1297,7 +1320,7 @@ function cancelAuth(extensionName) {
 }
 
 function showAuthCardError(extensionName, message) {
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
+  const card = getAuthCard(extensionName);
   if (!card) return;
   // Re-enable buttons
   const btns = card.querySelectorAll('button');
@@ -2648,8 +2671,7 @@ function submitConfigureModal(name, fields) {
   }
 
   // Disable buttons to prevent double-submit
-  const overlay = document.querySelector('.configure-overlay[data-extension-name="' + name + '"]')
-    || document.querySelector('.configure-overlay');
+  const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
   var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];
   btns.forEach(function(b) { b.disabled = true; });
 
@@ -2685,10 +2707,7 @@ function submitConfigureModal(name, fields) {
 
 function closeConfigureModal(extensionName) {
   if (typeof extensionName !== 'string') extensionName = null;
-  const selector = extensionName
-    ? '.configure-overlay[data-extension-name="' + extensionName + '"]'
-    : '.configure-overlay';
-  const existing = document.querySelector(selector);
+  const existing = getConfigureOverlay(extensionName);
   if (existing) existing.remove();
 }
 

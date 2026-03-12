@@ -23,8 +23,13 @@ async def test_pairing_list_returns_empty_for_unknown_channel(ironclaw_server):
     # Either empty list or error is acceptable
     if r.status_code == 200:
         data = r.json()
-        # Should have a requests or similar field
         assert isinstance(data, (dict, list))
+        if isinstance(data, dict):
+            assert "requests" in data
+            assert isinstance(data["requests"], list)
+            assert data["requests"] == []
+        else:
+            assert data == []
     else:
         # 404 or similar is fine for non-existent channel
         assert r.status_code in (404, 400)

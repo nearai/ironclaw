@@ -856,6 +856,35 @@ async def test_auth_card_for_different_extension_replaces_existing_prompt(page):
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="ext-b"]').count() == 1
 
 
+async def test_auth_and_configure_helpers_escape_selector_sensitive_extension_names(page):
+    """Quoted extension names should not break auth/configure modal helpers."""
+    result = await page.evaluate(
+        """({ name }) => {
+            showAuthCard({ extension_name: name, instructions: 'Paste token' });
+            showAuthCardError(name, 'Bad token');
+            const errorText = document.querySelector('.auth-error')?.textContent || '';
+            removeAuthCard(name);
+            const authStillPresent = Array.from(document.querySelectorAll('.auth-card'))
+              .some((card) => card.getAttribute('data-extension-name') === name);
+
+            const overlay = document.createElement('div');
+            overlay.className = 'configure-overlay';
+            overlay.setAttribute('data-extension-name', name);
+            document.body.appendChild(overlay);
+            closeConfigureModal(name);
+            const configureStillPresent = Array.from(document.querySelectorAll('.configure-overlay'))
+              .some((node) => node.getAttribute('data-extension-name') === name);
+
+            return { errorText, authStillPresent, configureStillPresent };
+        }""",
+        {"name": 'quoted "ext" name'},
+    )
+
+    assert result["errorText"] == "Bad token"
+    assert result["authStillPresent"] is False
+    assert result["configureStillPresent"] is False
+
+
 async def test_auth_completed_sse_dismisses_card(page):
     """Simulating the auth_completed SSE event removes the auth card."""
     await _show_auth_card(page, extension_name="myext")
