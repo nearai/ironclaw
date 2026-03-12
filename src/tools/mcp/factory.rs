@@ -109,10 +109,15 @@ mod tests {
         let session_manager = Arc::new(McpSessionManager::new());
         let process_manager = Arc::new(McpProcessManager::new());
 
-        let client =
-            create_client_from_config(server, &session_manager, &process_manager, None, "test-user")
-                .await
-                .expect("factory should succeed for HTTP config");
+        let client = create_client_from_config(
+            server,
+            &session_manager,
+            &process_manager,
+            None,
+            "test-user",
+        )
+        .await
+        .expect("factory should succeed for HTTP config");
 
         assert!(
             client.has_session_manager(),
