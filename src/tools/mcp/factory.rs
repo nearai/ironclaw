@@ -88,11 +88,35 @@ pub async fn create_client_from_config(
                         user_id,
                     ))
                 } else {
-                    Ok(McpClient::new_with_config(server))
+                    Ok(McpClient::new_with_config(server)
+                        .with_session_manager(Arc::clone(session_manager)))
                 }
             } else {
-                Ok(McpClient::new_with_config(server))
+                Ok(McpClient::new_with_config(server)
+                    .with_session_manager(Arc::clone(session_manager)))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_factory_non_oauth_http_has_session_manager() {
+        let server = McpServerConfig::new("test-server", "http://localhost:9999");
+        let session_manager = Arc::new(McpSessionManager::new());
+        let process_manager = Arc::new(McpProcessManager::new());
+
+        let client =
+            create_client_from_config(server, &session_manager, &process_manager, None, "test-user")
+                .await
+                .expect("factory should succeed for HTTP config");
+
+        assert!(
+            client.has_session_manager(),
+            "non-OAuth HTTP clients must carry a session manager"
+        );
     }
 }

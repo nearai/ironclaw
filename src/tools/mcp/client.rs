@@ -209,6 +209,12 @@ impl McpClient {
         }
     }
 
+    /// Attach a session manager for Streamable HTTP session tracking.
+    pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
+        self.session_manager = Some(session_manager);
+        self
+    }
+
     /// Get the server name.
     pub fn server_name(&self) -> &str {
         &self.server_name
@@ -217,6 +223,11 @@ impl McpClient {
     /// Get the server URL.
     pub fn server_url(&self) -> &str {
         &self.server_url
+    }
+
+    /// Whether this client has a session manager attached.
+    pub fn has_session_manager(&self) -> bool {
+        self.session_manager.is_some()
     }
 
     /// Get the next request ID.
@@ -714,6 +725,17 @@ mod tests {
         assert!(client.custom_headers.is_empty());
         assert!(client.secrets.is_none());
         assert!(client.session_manager.is_none());
+    }
+
+    #[test]
+    fn test_with_session_manager() {
+        let client = McpClient::new("http://localhost:8080");
+        assert!(!client.has_session_manager());
+
+        let session_manager = Arc::new(McpSessionManager::new());
+        let client = client.with_session_manager(session_manager);
+
+        assert!(client.has_session_manager());
     }
 
     #[test]
