@@ -533,7 +533,7 @@ impl ToolRegistry {
     /// and action execution for 250+ apps via Composio's REST API.
     pub fn register_composio_tools(&self, api_key: String, entity_id: String) {
         self.register_sync(Arc::new(ComposioTool::new(api_key, entity_id)));
-        tracing::info!("Registered composio tool");
+        tracing::debug!("Registered composio tool");
     }
 
     /// Register the software builder tool.

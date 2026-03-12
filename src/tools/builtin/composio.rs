@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
@@ -88,30 +89,34 @@ impl ComposioTool {
         Self::parse_response(resp).await
     }
 
+    /// Parse response with streaming body read capped at MAX_RESPONSE_SIZE.
     async fn parse_response(resp: reqwest::Response) -> Result<Value, ToolError> {
         let status = resp.status();
 
-        // Enforce response size limit
-        if let Some(len) = resp.content_length()
-            && len as usize > MAX_RESPONSE_SIZE
-        {
-            return Err(ToolError::ExternalService(format!(
-                "Composio API response too large: {len} bytes (max {MAX_RESPONSE_SIZE})"
-            )));
+        // Early reject if Content-Length exceeds limit
+        if let Some(len) = resp.content_length() {
+            if len as usize > MAX_RESPONSE_SIZE {
+                return Err(ToolError::ExternalService(format!(
+                    "Composio API response too large: {len} bytes (max {MAX_RESPONSE_SIZE})"
+                )));
+            }
         }
 
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| ToolError::ExternalService(e.to_string()))?;
-
-        // Truncate if body exceeds limit (streaming response without Content-Length)
-        if body.len() > MAX_RESPONSE_SIZE {
-            return Err(ToolError::ExternalService(format!(
-                "Composio API response too large: {} bytes (max {MAX_RESPONSE_SIZE})",
-                body.len()
-            )));
+        // Stream body with hard cap to prevent OOM on missing/wrong Content-Length
+        let mut buf = Vec::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e: reqwest::Error| ToolError::ExternalService(e.to_string()))?;
+            buf.extend_from_slice(&chunk);
+            if buf.len() > MAX_RESPONSE_SIZE {
+                return Err(ToolError::ExternalService(format!(
+                    "Composio API response too large (>{MAX_RESPONSE_SIZE} bytes)"
+                )));
+            }
         }
+
+        let body = String::from_utf8(buf)
+            .map_err(|e| ToolError::ExternalService(format!("non-UTF8 response: {e}")))?;
 
         if !status.is_success() {
             return Err(ToolError::ExternalService(format!(
@@ -275,10 +280,6 @@ impl Tool for ComposioTool {
                 "params": {
                     "description": "Parameters for the tool action (JSON object)"
                 },
-                "entity_id": {
-                    "type": "string",
-                    "description": "User/entity ID (defaults to config value)"
-                },
                 "connected_account_id": {
                     "type": "string",
                     "description": "Specific connected account ID (auto-resolved if omitted)"
@@ -296,7 +297,9 @@ impl Tool for ComposioTool {
         match action {
             // execute and connect perform write operations / OAuth flows
             "execute" | "connect" => ApprovalRequirement::UnlessAutoApproved,
-            // list and connected_accounts are read-only
+            // connected_accounts exposes sensitive third-party account info
+            "connected_accounts" => ApprovalRequirement::UnlessAutoApproved,
+            // list only browses available tools (no private data)
             _ => ApprovalRequirement::Never,
         }
     }
@@ -451,8 +454,8 @@ mod tests {
         assert!(props.contains_key("app"));
         assert!(props.contains_key("tool_slug"));
         assert!(props.contains_key("params"));
-        assert!(props.contains_key("entity_id"));
         assert!(props.contains_key("connected_account_id"));
+        assert!(!props.contains_key("entity_id")); // entity_id is server-configured, not exposed
         // Only action is required
         let required = schema.parameters["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);
@@ -460,13 +463,13 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_id_override_removed_from_params() {
-        // entity_id in params is now ignored — always uses configured default
+    fn test_entity_id_not_in_schema() {
+        // entity_id is server-configured only, not exposed to callers
         let tool = ComposioTool::new("fake-key".into(), "default".into());
-        let params = json!({"action": "list", "entity_id": "custom-entity"});
-        // Verify the tool still uses default entity_id (param is ignored at execute level)
+        let schema = tool.parameters_schema();
+        let props = schema["properties"].as_object().unwrap();
+        assert!(!props.contains_key("entity_id"));
         assert_eq!(tool.entity_id, "default");
-        assert_eq!(params["entity_id"], "custom-entity"); // present in params but ignored
     }
 
     #[test]
@@ -476,9 +479,10 @@ mod tests {
             tool.requires_approval(&json!({"action": "list"})),
             ApprovalRequirement::Never
         );
+        // connected_accounts exposes sensitive info, requires approval
         assert_eq!(
             tool.requires_approval(&json!({"action": "connected_accounts"})),
-            ApprovalRequirement::Never
+            ApprovalRequirement::UnlessAutoApproved
         );
     }
 
