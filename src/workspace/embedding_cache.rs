@@ -109,7 +109,7 @@ impl CachedEmbeddingProvider {
             let oldest_key = cache
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_accessed)
-                .map(|(k, _)| k.clone());
+                .map(|(k, _)| *k);
 
             if let Some(k) = oldest_key {
                 cache.remove(&k);
@@ -236,7 +236,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
                 Self::evict_lru(&mut guard, self.config.max_entries);
                 guard.insert(
-                    keys[orig_idx].clone(),
+                    keys[orig_idx],
                     CacheEntry {
                         embedding: emb.clone(),
                         last_accessed: now,
