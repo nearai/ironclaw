@@ -1,6 +1,5 @@
 ---
 source: src/cli/mod.rs
-assertion_line: 326
 expression: help
 ---
 IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.
@@ -20,6 +19,7 @@ Commands:
   memory      Manage workspace memory
   pairing     Manage DM pairing
   service     Manage OS service
+  skills      Manage skills
   doctor      Run diagnostics
   status      Show system status
   completion  Generate completions

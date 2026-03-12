@@ -165,7 +165,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing (shows subagent models) |
 | `memory` | ✅ | ✅ | - | Memory search CLI |
-| `skills` | ✅ | ✅ | - | Skills tools + web API endpoints (install, list, activate) |
+| `skills` | ✅ | ✅ | - | CLI subcommands (list, search, info) + agent tools + web API endpoints |
 | `pairing` | ✅ | ✅ | - | list/approve, account selector |
 | `nodes` | ✅ | ❌ | P3 | Device management, remove/clear flows |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
