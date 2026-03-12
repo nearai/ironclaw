@@ -841,6 +841,7 @@ pub(super) fn extract_wasm_metadata(
         Capabilities::default(),
         HashMap::new(),
         vec![],
+        None,
     );
     let mut store = Store::new(engine, store_data);
 
