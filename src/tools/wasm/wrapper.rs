@@ -2356,7 +2356,6 @@ mod tests {
 
     use crate::config::SafetyConfig;
     use crate::tools::executor::ToolExecutor;
-    use crate::tools::tool::Tool;
 
     fn wasm_binary_path() -> std::path::PathBuf {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
