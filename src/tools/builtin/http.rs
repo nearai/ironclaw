@@ -601,7 +601,7 @@ impl Tool for HttpTool {
                 let hop_client = build_pinned_client(
                     &hop_host,
                     &hop_addrs,
-                    Duration::from_secs(30),
+                    effective_timeout,
                     reqwest::redirect::Policy::none(),
                 )?;
 
@@ -615,7 +615,7 @@ impl Tool for HttpTool {
                     .await
                     .map_err(|e| {
                         if e.is_timeout() {
-                            ToolError::Timeout(Duration::from_secs(30))
+                            ToolError::Timeout(effective_timeout)
                         } else {
                             ToolError::ExternalService(e.to_string())
                         }
@@ -679,7 +679,7 @@ impl Tool for HttpTool {
         } else {
             let resp = request.send().await.map_err(|e| {
                 if e.is_timeout() {
-                    ToolError::Timeout(Duration::from_secs(30))
+                    ToolError::Timeout(effective_timeout)
                 } else {
                     ToolError::ExternalService(e.to_string())
                 }
@@ -1292,6 +1292,8 @@ mod tests {
             "url": "https://r.jina.ai/http://news.baidu.com/"
         });
         let _ = tool.requires_approval(&req);
+    }
+
     // ── DNS pinning tests ─────────────────────────────────────────────
 
     #[tokio::test]
