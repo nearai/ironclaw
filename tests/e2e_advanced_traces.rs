@@ -403,4 +403,134 @@ mod advanced {
         rig.verify_trace_expects(&trace, &responses);
         rig.shutdown();
     }
+
+    // -----------------------------------------------------------------------
+    // 8. MCP extension lifecycle (search → install → activate → use)
+    //
+    // Exercises the MCP extension flow with a mock MCP server:
+    //   Turn 1: tool_search → tool_install → text
+    //   (inject token + activate between turns)
+    //   Turn 2: mock-notion_notion-search → mock-notion_notion-fetch → text
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mcp_extension_lifecycle() {
+        use crate::support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
+        use ironclaw::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+
+        // 1. Start mock MCP server with pre-configured tool responses.
+        let mock_server = start_mock_mcp_server(vec![
+            MockToolResponse {
+                name: "notion-search".into(),
+                content: serde_json::json!({
+                    "results": [
+                        {"id": "page-001", "title": "Project Alpha", "type": "page"},
+                        {"id": "page-002", "title": "Sprint Planning", "type": "page"}
+                    ]
+                }),
+            },
+            MockToolResponse {
+                name: "notion-fetch".into(),
+                content: serde_json::json!({
+                    "id": "page-001",
+                    "title": "Project Alpha",
+                    "content": "Status: In Progress\n- Sprint planning on March 15\n- API redesign review pending"
+                }),
+            },
+        ])
+        .await;
+
+        // 2. Load trace fixture.
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/mcp_extension_lifecycle.json")).unwrap();
+
+        // 3. Build rig with auto-approve (so tool_install doesn't block).
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .with_max_tool_iterations(15)
+            .build()
+            .await;
+
+        // 4. Inject mock-notion registry entry pointing to the mock server.
+        let ext_mgr = rig
+            .extension_manager()
+            .expect("test rig must expose extension manager");
+        ext_mgr
+            .inject_registry_entry(RegistryEntry {
+                name: "mock-notion".to_string(),
+                display_name: "Mock Notion".to_string(),
+                kind: ExtensionKind::McpServer,
+                description: "Test MCP server for E2E lifecycle test".to_string(),
+                keywords: vec!["mock-notion".into(), "notion".into()],
+                source: ExtensionSource::McpUrl {
+                    url: mock_server.mcp_url(),
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::Dcr,
+                version: None,
+            })
+            .await;
+
+        // 5. Turn 1: "setup mock-notion" → search → install → text.
+        rig.send_message("setup mock-notion").await;
+        let r1 = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(!r1.is_empty(), "Turn 1: no response");
+
+        // 6. Simulate OAuth completion: inject token + activate.
+        // This mirrors what the gateway's oauth_callback_handler does after
+        // the user completes the OAuth flow in their browser.
+        let secret_name = "mcp_mock-notion_access_token";
+        ext_mgr
+            .secrets()
+            .create(
+                "default",
+                ironclaw::secrets::CreateSecretParams::new(secret_name, "mock-access-token")
+                    .with_provider("mcp:mock-notion".to_string()),
+            )
+            .await
+            .expect("failed to inject test token");
+
+        let activate_result = ext_mgr.activate("mock-notion").await;
+        assert!(
+            activate_result.is_ok(),
+            "activation failed: {:?}",
+            activate_result.err()
+        );
+
+        // 7. Turn 2: "check what's in my notion" → notion-search → notion-fetch → text.
+        rig.send_message("it's done, check what's in my notion")
+            .await;
+        let r2 = rig.wait_for_responses(2, TIMEOUT).await;
+        assert!(
+            r2.len() >= 2,
+            "Turn 2: expected at least 2 total responses, got {}",
+            r2.len()
+        );
+
+        // 8. Verify tool calls across both turns.
+        let started = rig.tool_calls_started();
+        assert!(
+            started.iter().any(|s| s == "tool_search"),
+            "tool_search not called: {started:?}"
+        );
+        assert!(
+            started.iter().any(|s| s == "tool_install"),
+            "tool_install not called: {started:?}"
+        );
+
+        // Verify MCP tools were called in turn 2.
+        assert!(
+            started.iter().any(|s| s.starts_with("mock-notion_")),
+            "No mock-notion MCP tools called: {started:?}"
+        );
+
+        // Verify all tools that completed did so successfully.
+        let completed = rig.tool_calls_completed();
+        let failed: Vec<_> = completed.iter().filter(|(_, success)| !success).collect();
+        assert!(failed.is_empty(), "Tools failed: {failed:?}");
+
+        mock_server.shutdown().await;
+        rig.shutdown();
+    }
 }

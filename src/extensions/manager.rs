@@ -266,6 +266,12 @@ impl ExtensionManager {
         })
     }
 
+    /// Inject a registry entry for testing. The entry is added to the discovery
+    /// cache so it appears in search results alongside built-in entries.
+    pub async fn inject_registry_entry(&self, entry: crate::extensions::RegistryEntry) {
+        self.registry.cache_discovered(vec![entry]).await;
+    }
+
     /// Configure the channel runtime infrastructure for hot-activating WASM channels.
     ///
     /// Call after construction (and after wrapping in `Arc`) once the channel
