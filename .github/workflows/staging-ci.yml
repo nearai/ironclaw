@@ -194,8 +194,7 @@ jobs:
             COMMIT_COUNT=$(echo "$COMMIT_LIST" | wc -l | tr -d ' ')
             if [ "$COMMIT_COUNT" -gt "$MAX_COMMITS" ]; then
               COMMIT_MD=$(echo "$COMMIT_LIST" | head -n "$MAX_COMMITS" | sed 's/^/- /')
-              COMMIT_MD="${COMMIT_MD}
-- ... and $((COMMIT_COUNT - MAX_COMMITS)) more (see compare view)"
+              COMMIT_MD+=$'\n'"- ... and $((COMMIT_COUNT - MAX_COMMITS)) more (see compare view)"
             else
               COMMIT_MD=$(echo "$COMMIT_LIST" | sed 's/^/- /')
             fi
