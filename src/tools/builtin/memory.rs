@@ -539,6 +539,26 @@ impl Tool for MemoryTreeTool {
     }
 }
 
+#[cfg(test)]
+mod path_routing_tests {
+    use super::looks_like_filesystem_path;
+
+    #[test]
+    fn detects_filesystem_paths() {
+        assert!(looks_like_filesystem_path("/Users/nige/file.md"));
+        assert!(looks_like_filesystem_path("C:\\Users\\nige\\file.md"));
+        assert!(looks_like_filesystem_path("D:/work/file.md"));
+        assert!(looks_like_filesystem_path("~/notes.md"));
+    }
+
+    #[test]
+    fn allows_workspace_memory_paths() {
+        assert!(!looks_like_filesystem_path("MEMORY.md"));
+        assert!(!looks_like_filesystem_path("daily/2026-03-11.md"));
+        assert!(!looks_like_filesystem_path("projects/alpha/notes.md"));
+    }
+}
+
 #[cfg(all(test, feature = "postgres"))]
 mod tests {
     use super::*;
@@ -614,25 +634,5 @@ mod tests {
         assert!(schema["properties"]["path"].is_object());
         assert!(schema["properties"]["depth"].is_object());
         assert_eq!(schema["properties"]["depth"]["default"], 1);
-    }
-}
-
-#[cfg(test)]
-mod path_routing_tests {
-    use super::looks_like_filesystem_path;
-
-    #[test]
-    fn detects_filesystem_paths() {
-        assert!(looks_like_filesystem_path("/Users/nige/file.md"));
-        assert!(looks_like_filesystem_path("C:\\Users\\nige\\file.md"));
-        assert!(looks_like_filesystem_path("D:/work/file.md"));
-        assert!(looks_like_filesystem_path("~/notes.md"));
-    }
-
-    #[test]
-    fn allows_workspace_memory_paths() {
-        assert!(!looks_like_filesystem_path("MEMORY.md"));
-        assert!(!looks_like_filesystem_path("daily/2026-03-11.md"));
-        assert!(!looks_like_filesystem_path("projects/alpha/notes.md"));
     }
 }
