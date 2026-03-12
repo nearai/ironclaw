@@ -375,7 +375,10 @@ mod tests {
 
         // Second Completed -> Completed must be a no-op
         let result = ctx.transition_to(JobState::Completed, Some("duplicate".into()));
-        assert!(result.is_ok(), "Completed -> Completed should be idempotent");
+        assert!(
+            result.is_ok(),
+            "Completed -> Completed should be idempotent"
+        );
         assert_eq!(ctx.state, JobState::Completed);
         assert_eq!(
             ctx.transitions.len(),
