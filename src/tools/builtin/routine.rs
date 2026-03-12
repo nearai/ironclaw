@@ -204,9 +204,7 @@ impl Tool for RoutineCreateTool {
                     .size_limit(64 * 1024)
                     .build()
                     .map_err(|e| {
-                        ToolError::InvalidParameters(format!(
-                            "invalid or too complex regex: {e}"
-                        ))
+                        ToolError::InvalidParameters(format!("invalid or too complex regex: {e}"))
                     })?;
                 let channel = params
                     .get("event_channel")

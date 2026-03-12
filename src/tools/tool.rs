@@ -427,11 +427,7 @@ pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<Strin
     validate_tool_schema_inner(schema, path, 0)
 }
 
-fn validate_tool_schema_inner(
-    schema: &serde_json::Value,
-    path: &str,
-    depth: usize,
-) -> Vec<String> {
+fn validate_tool_schema_inner(schema: &serde_json::Value, path: &str, depth: usize) -> Vec<String> {
     let mut errors = Vec::new();
 
     if depth > MAX_SCHEMA_DEPTH {

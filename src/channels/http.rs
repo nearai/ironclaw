@@ -279,9 +279,7 @@ async fn webhook_handler(
                 Json(WebhookResponse {
                     message_id: Uuid::nil(),
                     status: "error".to_string(),
-                    response: Some(
-                        "Webhook authentication not configured".to_string(),
-                    ),
+                    response: Some("Webhook authentication not configured".to_string()),
                 }),
             )
                 .into_response();

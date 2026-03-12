@@ -985,8 +985,8 @@ async fn execute_lightweight_with_tools(
                 // large payloads across iterations.
                 const MAX_TOOL_OUTPUT_CHARS: usize = 8192;
                 let result_content = if result_content.len() > MAX_TOOL_OUTPUT_CHARS {
-                    let truncated =
-                        &result_content[..result_content.floor_char_boundary(MAX_TOOL_OUTPUT_CHARS)];
+                    let truncated = &result_content
+                        [..result_content.floor_char_boundary(MAX_TOOL_OUTPUT_CHARS)];
                     format!("{truncated}\n... [output truncated to {MAX_TOOL_OUTPUT_CHARS} chars]")
                 } else {
                     result_content
