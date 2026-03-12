@@ -714,4 +714,63 @@ mod tests {
         ) -> tokio::task::JoinHandle<()> = spawn_heartbeat;
         let _ = _fn_ptr;
     }
+
+    // ==================== fire_at scheduling ====================
+
+    #[test]
+    fn test_default_config_has_no_fire_at() {
+        let config = HeartbeatConfig::default();
+        assert!(config.fire_at.is_none());
+        // Interval-based scheduling should be the default
+        assert_eq!(config.interval, Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn test_with_fire_at_builder() {
+        let time = chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        let config =
+            HeartbeatConfig::default().with_fire_at(time, Some("Pacific/Auckland".to_string()));
+        assert_eq!(config.fire_at, Some(time));
+        assert_eq!(config.timezone, Some("Pacific/Auckland".to_string()));
+    }
+
+    #[test]
+    fn test_duration_until_next_fire_is_bounded() {
+        // Result must always be between 1 second and ~24 hours
+        let time = chrono::NaiveTime::from_hms_opt(14, 0, 0).unwrap();
+        let dur = duration_until_next_fire(time, chrono_tz::UTC);
+        assert!(dur.as_secs() >= 1, "duration must be at least 1 second");
+        assert!(
+            dur.as_secs() <= 86_401,
+            "duration must be at most ~24 hours, got {}s",
+            dur.as_secs()
+        );
+    }
+
+    #[test]
+    fn test_duration_until_next_fire_dst_timezone_no_panic() {
+        // Use a timezone with DST (US Eastern) — should never panic
+        let tz: Tz = "America/New_York".parse().unwrap();
+        // Test a range of times including midnight boundaries
+        for hour in [0, 2, 3, 12, 23] {
+            let time = chrono::NaiveTime::from_hms_opt(hour, 30, 0).unwrap();
+            let dur = duration_until_next_fire(time, tz);
+            assert!(dur.as_secs() >= 1);
+            assert!(dur.as_secs() <= 86_401);
+        }
+    }
+
+    #[test]
+    fn test_resolved_tz_defaults_to_utc() {
+        let config = HeartbeatConfig::default();
+        assert_eq!(config.resolved_tz(), chrono_tz::UTC);
+    }
+
+    #[test]
+    fn test_resolved_tz_parses_iana() {
+        let time = chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        let config =
+            HeartbeatConfig::default().with_fire_at(time, Some("Europe/London".to_string()));
+        assert_eq!(config.resolved_tz(), chrono_tz::Europe::London);
+    }
 }
