@@ -374,7 +374,6 @@ mod tests {
     fn macos_plist_sets_cli_enabled_false() {
         let plist = macos_plist_content("/tmp/ironclaw", "/tmp/stdout.log", "/tmp/stderr.log");
         assert!(plist.contains("<key>EnvironmentVariables</key>"));
-        assert!(plist.contains("<key>CLI_ENABLED</key>"));
-        assert!(plist.contains("<string>false</string>"));
+        assert!(plist.contains("    <key>CLI_ENABLED</key>\n    <string>false</string>"));
     }
 }
