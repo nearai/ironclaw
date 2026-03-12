@@ -683,38 +683,37 @@ async fn oauth_callback_handler(
 
     // After successful OAuth, auto-activate the extension so it moves
     // from "Installed (Authenticate)" → "Active" without a second click.
-    let (final_success, final_message) = if success {
+    // OAuth success is independent of activation — tokens are already stored.
+    // Report auth as successful and attempt activation as a bonus step.
+    let final_message = if success {
         match ext_mgr.activate(&flow.extension_name).await {
-            Ok(result) => (true, result.message),
+            Ok(result) => result.message,
             Err(e) => {
                 tracing::warn!(
                     extension = %flow.extension_name,
                     error = %e,
                     "Auto-activation after OAuth failed"
                 );
-                (
-                    false,
-                    format!(
-                        "{} authenticated but activation failed: {}. Try activating manually.",
-                        flow.display_name, e
-                    ),
+                format!(
+                    "{} authenticated successfully. Activation failed: {}. Try activating manually.",
+                    flow.display_name, e
                 )
             }
         }
     } else {
-        (false, message)
+        message
     };
 
     // Broadcast SSE event to notify the web UI
     if let Some(ref sender) = flow.sse_sender {
         let _ = sender.send(SseEvent::AuthCompleted {
             extension_name: flow.extension_name,
-            success: final_success,
+            success,
             message: final_message.clone(),
         });
     }
 
-    let html = oauth_defaults::landing_html(&flow.display_name, final_success);
+    let html = oauth_defaults::landing_html(&flow.display_name, success);
     axum::response::Html(html).into_response()
 }
 

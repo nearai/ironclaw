@@ -499,12 +499,14 @@ mod advanced {
         );
 
         // 7. Turn 2: "check what's in my notion" → notion-search → notion-fetch → text.
+        // Wait for r1.len() + 1 to ensure we observe at least one new turn-2 response.
+        let turn1_count = r1.len();
         rig.send_message("it's done, check what's in my notion")
             .await;
-        let r2 = rig.wait_for_responses(2, TIMEOUT).await;
+        let r2 = rig.wait_for_responses(turn1_count + 1, TIMEOUT).await;
         assert!(
-            r2.len() >= 2,
-            "Turn 2: expected at least 2 total responses, got {}",
+            r2.len() > turn1_count,
+            "Turn 2: expected new responses beyond turn 1's {turn1_count}, got {}",
             r2.len()
         );
 
