@@ -256,6 +256,7 @@ impl GatewayWorkflowHarness {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                builder: None,
             },
             channels,
             None,
