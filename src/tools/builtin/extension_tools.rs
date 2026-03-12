@@ -159,6 +159,10 @@ impl Tool for ToolInstallTool {
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
 }
 
 // ── tool_auth ────────────────────────────────────────────────────────────
@@ -544,6 +548,10 @@ impl Tool for ToolUpgradeTool {
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
 }
 
 // ── extension_info ────────────────────────────────────────────────────
@@ -625,7 +633,7 @@ mod tests {
         assert_eq!(tool.name(), "tool_install");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::Never
+            ApprovalRequirement::UnlessAutoApproved
         );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
@@ -730,7 +738,7 @@ mod tests {
         assert_eq!(tool.name(), "tool_upgrade");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::Never
+            ApprovalRequirement::UnlessAutoApproved
         );
         let schema = tool.parameters_schema();
         // name is optional (omit to upgrade all)
