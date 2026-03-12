@@ -581,7 +581,12 @@ async fn oauth_callback_handler(
     let exchange_proxy_url = std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL").ok();
 
     let result: Result<(), String> = async {
-        let token_response = if let Some(ref proxy_url) = exchange_proxy_url {
+        let token_response = if let (Some(proxy_url), None) = (&exchange_proxy_url, &flow.resource)
+        {
+            // Use the platform exchange proxy when configured and no resource
+            // parameter is needed. The proxy holds client_secret server-side so
+            // the container never sees it. MCP flows (resource.is_some()) bypass
+            // the proxy because it doesn't forward the RFC 8707 resource param.
             let gateway_token = flow.gateway_token.as_deref().unwrap_or_default();
             oauth_defaults::exchange_via_proxy(
                 proxy_url,
@@ -594,6 +599,9 @@ async fn oauth_callback_handler(
             .await
             .map_err(|e| e.to_string())?
         } else {
+            // Direct token exchange: uses exchange_oauth_code_with_resource so MCP
+            // flows can include the RFC 8707 `resource` parameter to scope the
+            // issued token to the specific MCP server.
             oauth_defaults::exchange_oauth_code_with_resource(
                 &flow.token_url,
                 &flow.client_id,
@@ -635,12 +643,7 @@ async fn oauth_callback_handler(
         // callback must do the same.
         if let Some(ref client_id_secret) = flow.client_id_secret_name {
             let params = crate::secrets::CreateSecretParams::new(client_id_secret, &flow.client_id)
-                .with_provider(
-                    flow.provider
-                        .as_ref()
-                        .map(|p| format!("mcp:{}", p))
-                        .unwrap_or_default(),
-                );
+                .with_provider(flow.provider.as_ref().cloned().unwrap_or_default());
             flow.secrets
                 .create(&flow.user_id, params)
                 .await

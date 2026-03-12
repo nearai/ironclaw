@@ -237,7 +237,7 @@ impl ExtensionManager {
     async fn gateway_callback_redirect_uri(&self) -> Option<String> {
         use crate::cli::oauth_defaults;
         if oauth_defaults::use_gateway_callback() {
-            return Some(format!("{}/callback", oauth_defaults::callback_url()));
+            return Some(format!("{}/oauth/callback", oauth_defaults::callback_url()));
         }
         // Use gateway_base_url from enable_gateway_mode()
         if let Some(ref base) = *self.gateway_base_url.read().await {
@@ -1769,7 +1769,7 @@ impl ExtensionManager {
         if self.should_use_gateway_mode() {
             return match self.auth_mcp_build_url(name, &server).await {
                 Ok(result) => Ok(result),
-                Err(_) => Ok(AuthResult::awaiting_token(
+                Err(ExtensionError::AuthNotSupported(_)) => Ok(AuthResult::awaiting_token(
                     name,
                     ExtensionKind::McpServer,
                     format!(
@@ -1779,6 +1779,7 @@ impl ExtensionManager {
                     ),
                     None,
                 )),
+                Err(e) => Err(e),
             };
         }
 
@@ -1834,7 +1835,12 @@ impl ExtensionManager {
         // Try to discover OAuth metadata and build a URL the user can open manually
         let metadata = discover_full_oauth_metadata(&server.url)
             .await
-            .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+            .map_err(|e| match e {
+                crate::tools::mcp::auth::AuthError::NotSupported => {
+                    ExtensionError::AuthNotSupported(e.to_string())
+                }
+                _ => ExtensionError::AuthFailed(e.to_string()),
+            })?;
 
         use crate::cli::oauth_defaults;
 
@@ -1861,7 +1867,7 @@ impl ExtensionManager {
 
             (registration.client_id, None)
         } else {
-            return Err(ExtensionError::AuthFailed(
+            return Err(ExtensionError::AuthNotSupported(
                 "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
             ));
         };
@@ -1920,7 +1926,7 @@ impl ExtensionManager {
                 code_verifier,
                 access_token_field: "access_token".to_string(),
                 secret_name: server.token_secret_name(),
-                provider: Some(name.to_string()),
+                provider: Some(format!("mcp:{}", name)),
                 validation_endpoint: None,
                 scopes,
                 user_id: self.user_id.clone(),
@@ -1928,7 +1934,11 @@ impl ExtensionManager {
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
                 resource: Some(resource),
-                client_id_secret_name: Some(format!("mcp_{}_client_id", name)),
+                client_id_secret_name: if server.oauth.is_none() {
+                    Some(server.client_id_secret_name())
+                } else {
+                    None
+                },
                 created_at: std::time::Instant::now(),
             };
 

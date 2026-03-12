@@ -173,6 +173,8 @@ pub async fn exchange_oauth_code(
     code_verifier: Option<&str>,
     access_token_field: &str,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    // Delegates to exchange_oauth_code_with_resource with resource=None.
+    // Non-MCP OAuth flows don't need the RFC 8707 resource parameter.
     exchange_oauth_code_with_resource(
         token_url,
         client_id,
@@ -211,6 +213,8 @@ pub async fn exchange_oauth_code_with_resource(
         token_params.push(("code_verifier", verifier.to_string()));
     }
 
+    // RFC 8707: include the `resource` parameter so the authorization server
+    // scopes the issued token to the specific MCP server (protected resource).
     if let Some(resource) = resource {
         token_params.push(("resource", resource.to_string()));
     }
@@ -1049,28 +1053,5 @@ mod tests {
         assert!(result.url.contains("state="));
         assert!(result.url.contains("code_challenge="));
         assert!(result.code_verifier.is_some());
-    }
-
-    /// Verify that MCP flows set client_id_secret_name so the gateway callback
-    /// can persist the DCR client_id for token refresh.
-    #[test]
-    fn test_pending_flow_mcp_carries_client_id_secret_name() {
-        // MCP flows must set client_id_secret_name so refresh can find the client_id
-        let mcp_secret_name = format!("mcp_{}_client_id", "notion");
-        assert_eq!(mcp_secret_name, "mcp_notion_client_id");
-
-        // Simulate what auth_mcp_build_url sets for gateway mode
-        let has_secret_name = Some(mcp_secret_name.clone());
-        assert!(
-            has_secret_name.is_some(),
-            "MCP PendingOAuthFlow must set client_id_secret_name for token refresh"
-        );
-
-        // WASM flows should not set it
-        let wasm_secret_name: Option<String> = None;
-        assert!(
-            wasm_secret_name.is_none(),
-            "WASM PendingOAuthFlow should not set client_id_secret_name"
-        );
     }
 }

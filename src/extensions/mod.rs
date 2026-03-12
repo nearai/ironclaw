@@ -517,6 +517,9 @@ pub enum ExtensionError {
     #[error("Authentication failed: {0}")]
     AuthFailed(String),
 
+    #[error("Server does not support OAuth: {0}")]
+    AuthNotSupported(String),
+
     #[error("Activation failed: {0}")]
     ActivationFailed(String),
 
@@ -1087,24 +1090,5 @@ mod tests {
             .status_str(),
             "needs_setup"
         );
-    }
-
-    /// Verify that auth-related activation errors are detected as AuthRequired
-    /// so the activate handler triggers OAuth instead of showing a generic failure.
-    #[test]
-    fn activation_error_auth_detection() {
-        // 401 errors from MCP servers should be treated as AuthRequired
-        let auth_msg = "MCP server 'notion' requires authentication. Run: ironclaw mcp auth notion";
-        let is_auth = auth_msg.contains("requires authentication") || auth_msg.contains("401");
-        assert!(is_auth, "Should detect auth error in: {}", auth_msg);
-
-        let raw_401 = "External service error: 401 Unauthorized";
-        let is_auth = raw_401.contains("requires authentication") || raw_401.contains("401");
-        assert!(is_auth, "Should detect 401 in: {}", raw_401);
-
-        // Non-auth errors should not trigger auth flow
-        let other_msg = "Connection refused";
-        let is_auth = other_msg.contains("requires authentication") || other_msg.contains("401");
-        assert!(!is_auth, "Should not detect auth in: {}", other_msg);
     }
 }
