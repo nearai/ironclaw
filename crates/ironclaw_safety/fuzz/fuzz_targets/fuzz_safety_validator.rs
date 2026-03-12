@@ -1,6 +1,6 @@
 #![no_main]
+use ironclaw_safety::Validator;
 use libfuzzer_sys::fuzz_target;
-use ironclaw::safety::Validator;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
