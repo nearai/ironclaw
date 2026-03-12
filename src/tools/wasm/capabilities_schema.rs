@@ -101,15 +101,52 @@ pub struct CapabilitiesFile {
     pub capabilities: Option<Box<CapabilitiesFile>>,
 }
 
+/// Maximum length for the description field to prevent memory abuse.
+const MAX_DESCRIPTION_CHARS: usize = 4096;
+/// Maximum serialized size of the parameters schema JSON.
+const MAX_PARAMETERS_SCHEMA_BYTES: usize = 64 * 1024;
+
 impl CapabilitiesFile {
     /// Parse from JSON string.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str::<Self>(json).map(Self::resolve_nested)
+        let mut caps = serde_json::from_str::<Self>(json).map(Self::resolve_nested)?;
+        caps.enforce_limits();
+        Ok(caps)
     }
 
     /// Parse from JSON bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice::<Self>(bytes).map(Self::resolve_nested)
+        let mut caps = serde_json::from_slice::<Self>(bytes).map(Self::resolve_nested)?;
+        caps.enforce_limits();
+        Ok(caps)
+    }
+
+    /// Truncate oversized fields to prevent unbounded memory usage.
+    fn enforce_limits(&mut self) {
+        // Truncate oversized description (issue #976)
+        if let Some(ref desc) = self.description
+            && desc.len() > MAX_DESCRIPTION_CHARS
+        {
+            let truncated = &desc[..desc.floor_char_boundary(MAX_DESCRIPTION_CHARS)];
+            tracing::warn!(
+                "Capabilities description truncated from {} to {} chars",
+                desc.len(),
+                MAX_DESCRIPTION_CHARS,
+            );
+            self.description = Some(truncated.to_string());
+        }
+        // Drop oversized parameters schema (issue #977)
+        if let Some(ref params) = self.parameters {
+            let size = params.to_string().len();
+            if size > MAX_PARAMETERS_SCHEMA_BYTES {
+                tracing::warn!(
+                    "Capabilities parameters schema dropped ({} bytes exceeds {} limit)",
+                    size,
+                    MAX_PARAMETERS_SCHEMA_BYTES,
+                );
+                self.parameters = None;
+            }
+        }
     }
 
     /// Merge nested `capabilities` wrapper into top-level fields.
@@ -1412,5 +1449,48 @@ mod tests {
         }
         // Should not stack overflow — this is the primary assertion.
         let _caps = CapabilitiesFile::from_json(&json).unwrap();
+    }
+
+    /// Regression test for issue #976: oversized description strings are truncated.
+    #[test]
+    fn test_description_truncated_at_limit() {
+        let long_desc = "x".repeat(10_000);
+        let json = format!(r#"{{ "description": "{long_desc}" }}"#);
+        let caps = CapabilitiesFile::from_json(&json).unwrap();
+        let desc = caps.description.unwrap();
+        assert!(
+            desc.len() <= super::MAX_DESCRIPTION_CHARS + 50, // allow for minor overhead
+            "description should be truncated to ~{} chars, got {}",
+            super::MAX_DESCRIPTION_CHARS,
+            desc.len()
+        );
+    }
+
+    /// Regression test for issue #977: oversized parameters schema is dropped.
+    #[test]
+    fn test_oversized_parameters_schema_dropped() {
+        // Build a parameters schema larger than MAX_PARAMETERS_SCHEMA_BYTES
+        let mut properties = serde_json::Map::new();
+        for i in 0..2000 {
+            properties.insert(
+                format!("field_{i}"),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "x".repeat(50)
+                }),
+            );
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": properties,
+        });
+        let json = serde_json::json!({
+            "parameters": schema,
+        });
+        let caps = CapabilitiesFile::from_json(&json.to_string()).unwrap();
+        assert!(
+            caps.parameters.is_none(),
+            "oversized parameters schema should be dropped"
+        );
     }
 }
