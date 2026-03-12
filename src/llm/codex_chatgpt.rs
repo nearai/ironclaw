@@ -52,7 +52,8 @@ pub struct CodexChatGptProvider {
 }
 
 impl CodexChatGptProvider {
-    pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
+    #[cfg(test)]
+    fn new(base_url: &str, api_key: &str, model: &str) -> Self {
         Self {
             client: Client::new(),
             base_url: base_url.trim_end_matches('/').to_string(),

@@ -12,8 +12,8 @@ mod anthropic_oauth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
 pub mod circuit_breaker;
-pub mod codex_auth;
-pub mod codex_chatgpt;
+pub(crate) mod codex_auth;
+mod codex_chatgpt;
 pub mod config;
 pub mod costs;
 pub mod error;

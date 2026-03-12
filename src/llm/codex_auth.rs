@@ -74,7 +74,7 @@ struct CodexTokens {
 }
 
 /// Request body for OAuth token refresh.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct RefreshRequest<'a> {
     client_id: &'a str,
     grant_type: &'a str,
@@ -90,10 +90,14 @@ struct RefreshResponse {
 
 /// Default path used by Codex CLI: `~/.codex/auth.json`.
 pub fn default_codex_auth_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".codex")
-        .join("auth.json")
+    let home_dir = dirs::home_dir().unwrap_or_else(|| {
+        tracing::warn!(
+            "Could not determine home directory; falling back to current working directory for Codex auth.json path"
+        );
+        PathBuf::from(".")
+    });
+
+    home_dir.join(".codex").join("auth.json")
 }
 
 /// Load credentials from a Codex `auth.json` file.
@@ -267,6 +271,20 @@ fn persist_refreshed_tokens(
         let _ = std::fs::remove_file(&tmp_path);
         return Err(Box::new(e));
     }
+    set_auth_file_permissions(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_auth_file_permissions(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_auth_file_permissions(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
