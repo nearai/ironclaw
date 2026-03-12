@@ -12,7 +12,7 @@ Replace `{{...}}` placeholders before use.
   "event_source": "github",
   "event_type": "issue.opened",
   "event_filters": {
-    "repository": "{{repository}}"
+    "repository_name": "{{repository}}"
   },
   "action_type": "full_job",
   "prompt": "For issue #{{issue_number}} in {{repository}}, produce a concrete implementation plan with milestones, edge cases, and tests. Post/update an issue comment with the plan.",
@@ -32,7 +32,7 @@ Trigger per-maintainer by creating one routine per handle, or maintain a shared 
   "event_source": "github",
   "event_type": "pr.comment.created",
   "event_filters": {
-    "repository": "{{repository}}",
+    "repository_name": "{{repository}}",
     "comment_author": "{{maintainer}}"
   },
   "action_type": "full_job",
@@ -51,7 +51,7 @@ Trigger per-maintainer by creating one routine per handle, or maintain a shared 
   "event_source": "github",
   "event_type": "pr.synchronize",
   "event_filters": {
-    "repository": "{{repository}}"
+    "repository_name": "{{repository}}"
   },
   "action_type": "full_job",
   "prompt": "For PR #{{pr_number}}, collect open review comments and unresolved threads, apply fixes, push branch updates, and summarize remaining blockers. If conflict with {{main_branch}}, rebase/merge from origin/{{main_branch}} and resolve safely.",
@@ -69,7 +69,7 @@ Trigger per-maintainer by creating one routine per handle, or maintain a shared 
   "event_source": "github",
   "event_type": "ci.check_run.completed",
   "event_filters": {
-    "repository": "{{repository}}",
+    "repository_name": "{{repository}}",
     "ci_conclusion": "failure"
   },
   "action_type": "full_job",
@@ -102,7 +102,7 @@ Trigger per-maintainer by creating one routine per handle, or maintain a shared 
   "event_source": "github",
   "event_type": "pr.closed",
   "event_filters": {
-    "repository": "{{repository}}",
+    "repository_name": "{{repository}}",
     "pr_merged": "true"
   },
   "action_type": "full_job",
@@ -118,9 +118,9 @@ Trigger per-maintainer by creating one routine per handle, or maintain a shared 
   "source": "github",
   "event_type": "issue.opened",
   "payload": {
-    "repository": "{{repository}}",
+    "repository_name": "{{repository}}",
     "issue_number": 99999,
-    "sender": "test-bot"
+    "sender_login": "test-bot"
   }
 }
 ```

@@ -176,8 +176,12 @@ async fn handle_client_message(
                 incoming = incoming.with_attachments(attachments);
             }
 
-            let tx_guard = state.msg_tx.read().await;
-            if let Some(ref tx) = *tx_guard {
+            // Clone sender to avoid holding RwLock read guard across send().await
+            let tx = {
+                let tx_guard = state.msg_tx.read().await;
+                tx_guard.as_ref().cloned()
+            };
+            if let Some(tx) = tx {
                 if tx.send(incoming).await.is_err() {
                     let _ = direct_tx
                         .send(WsServerMessage::Error {
@@ -245,8 +249,12 @@ async fn handle_client_message(
             if let Some(ref tid) = thread_id {
                 msg = msg.with_thread(tid);
             }
-            let tx_guard = state.msg_tx.read().await;
-            if let Some(ref tx) = *tx_guard {
+            // Clone sender to avoid holding RwLock read guard across send().await
+            let tx = {
+                let tx_guard = state.msg_tx.read().await;
+                tx_guard.as_ref().cloned()
+            };
+            if let Some(tx) = tx {
                 let _ = tx.send(msg).await;
             }
         }
@@ -255,43 +263,31 @@ async fn handle_client_message(
             token,
         } => {
             if let Some(ref ext_mgr) = state.extension_manager {
-                match ext_mgr.auth(&extension_name, Some(&token)).await {
-                    Ok(result) if result.is_authenticated() => {
-                        let msg = match ext_mgr.activate(&extension_name).await {
-                            Ok(r) => format!(
-                                "{} authenticated ({} tools loaded)",
-                                extension_name,
-                                r.tools_loaded.len()
-                            ),
-                            Err(e) => format!(
-                                "{} authenticated but activation failed: {}",
-                                extension_name, e
-                            ),
-                        };
+                match ext_mgr.configure_token(&extension_name, &token).await {
+                    Ok(result) => {
                         crate::channels::web::server::clear_auth_mode(state).await;
                         state
                             .sse
                             .broadcast(crate::channels::web::types::SseEvent::AuthCompleted {
                                 extension_name,
                                 success: true,
-                                message: msg,
-                            });
-                    }
-                    Ok(result) => {
-                        state
-                            .sse
-                            .broadcast(crate::channels::web::types::SseEvent::AuthRequired {
-                                extension_name,
-                                instructions: result.instructions().map(String::from),
-                                auth_url: result.auth_url().map(String::from),
-                                setup_url: result.setup_url().map(String::from),
+                                message: result.message,
                             });
                     }
                     Err(e) => {
+                        let msg = format!("Auth failed: {}", e);
+                        if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
+                            state.sse.broadcast(
+                                crate::channels::web::types::SseEvent::AuthRequired {
+                                    extension_name: extension_name.clone(),
+                                    instructions: Some(msg.clone()),
+                                    auth_url: None,
+                                    setup_url: None,
+                                },
+                            );
+                        }
                         let _ = direct_tx
-                            .send(WsServerMessage::Error {
-                                message: format!("Auth failed: {}", e),
-                            })
+                            .send(WsServerMessage::Error { message: msg })
                             .await;
                     }
                 }

@@ -18,7 +18,9 @@ wit_bindgen::generate!({
     path: "../../wit/tool.wit",
 });
 
-use serde::Deserialize;
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 const MAX_TEXT_LENGTH: usize = 65536;
 
@@ -93,6 +95,21 @@ enum GitHubAction {
         repo: String,
         issue_number: u32,
     },
+    #[serde(rename = "list_issue_comments")]
+    ListIssueComments {
+        owner: String,
+        repo: String,
+        issue_number: u32,
+        page: Option<u32>,
+        limit: Option<u32>,
+    },
+    #[serde(rename = "create_issue_comment")]
+    CreateIssueComment {
+        owner: String,
+        repo: String,
+        issue_number: u32,
+        body: String,
+    },
     #[serde(rename = "list_pull_requests")]
     ListPullRequests {
         owner: String,
@@ -100,6 +117,16 @@ enum GitHubAction {
         state: Option<String>,
         page: Option<u32>,
         limit: Option<u32>,
+    },
+    #[serde(rename = "create_pull_request")]
+    CreatePullRequest {
+        owner: String,
+        repo: String,
+        title: String,
+        head: String,
+        base: String,
+        body: Option<String>,
+        draft: Option<bool>,
     },
     #[serde(rename = "get_pull_request")]
     GetPullRequest {
@@ -120,6 +147,44 @@ enum GitHubAction {
         pr_number: u32,
         body: String,
         event: String,
+    },
+    #[serde(rename = "list_pull_request_comments")]
+    ListPullRequestComments {
+        owner: String,
+        repo: String,
+        pr_number: u32,
+        page: Option<u32>,
+        limit: Option<u32>,
+    },
+    #[serde(rename = "reply_pull_request_comment")]
+    ReplyPullRequestComment {
+        owner: String,
+        repo: String,
+        comment_id: u64,
+        body: String,
+    },
+    #[serde(rename = "get_pull_request_reviews")]
+    GetPullRequestReviews {
+        owner: String,
+        repo: String,
+        pr_number: u32,
+        page: Option<u32>,
+        limit: Option<u32>,
+    },
+    #[serde(rename = "get_combined_status")]
+    GetCombinedStatus {
+        owner: String,
+        repo: String,
+        r#ref: String,
+    },
+    #[serde(rename = "merge_pull_request")]
+    MergePullRequest {
+        owner: String,
+        repo: String,
+        pr_number: u32,
+        commit_title: Option<String>,
+        commit_message: Option<String>,
+        merge_method: Option<String>,
     },
     #[serde(rename = "list_repos")]
     ListRepos {
@@ -150,6 +215,29 @@ enum GitHubAction {
         page: Option<u32>,
         limit: Option<u32>,
     },
+    #[serde(rename = "handle_webhook")]
+    HandleWebhook { webhook: GitHubWebhookRequest },
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubWebhookRequest {
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default)]
+    body_json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolWebhookResponse {
+    accepted: bool,
+    emit_events: Vec<SystemEventIntent>,
+}
+
+#[derive(Debug, Serialize)]
+struct SystemEventIntent {
+    source: String,
+    event_type: String,
+    payload: serde_json::Value,
 }
 
 impl exports::near::agent::tool::Guest for GitHubTool {
@@ -208,6 +296,19 @@ fn execute_inner(params: &str) -> Result<String, String> {
             repo,
             issue_number,
         } => get_issue(&owner, &repo, issue_number),
+        GitHubAction::ListIssueComments {
+            owner,
+            repo,
+            issue_number,
+            page,
+            limit,
+        } => list_issue_comments(&owner, &repo, issue_number, page, limit),
+        GitHubAction::CreateIssueComment {
+            owner,
+            repo,
+            issue_number,
+            body,
+        } => create_issue_comment(&owner, &repo, issue_number, &body),
         GitHubAction::ListPullRequests {
             owner,
             repo,
@@ -215,6 +316,23 @@ fn execute_inner(params: &str) -> Result<String, String> {
             page,
             limit,
         } => list_pull_requests(&owner, &repo, state.as_deref(), page, limit),
+        GitHubAction::CreatePullRequest {
+            owner,
+            repo,
+            title,
+            head,
+            base,
+            body,
+            draft,
+        } => create_pull_request(
+            &owner,
+            &repo,
+            &title,
+            &head,
+            &base,
+            body.as_deref(),
+            draft.unwrap_or(false),
+        ),
         GitHubAction::GetPullRequest {
             owner,
             repo,
@@ -232,6 +350,44 @@ fn execute_inner(params: &str) -> Result<String, String> {
             body,
             event,
         } => create_pr_review(&owner, &repo, pr_number, &body, &event),
+        GitHubAction::ListPullRequestComments {
+            owner,
+            repo,
+            pr_number,
+            page,
+            limit,
+        } => list_pull_request_comments(&owner, &repo, pr_number, page, limit),
+        GitHubAction::ReplyPullRequestComment {
+            owner,
+            repo,
+            comment_id,
+            body,
+        } => reply_pull_request_comment(&owner, &repo, comment_id, &body),
+        GitHubAction::GetPullRequestReviews {
+            owner,
+            repo,
+            pr_number,
+            page,
+            limit,
+        } => get_pull_request_reviews(&owner, &repo, pr_number, page, limit),
+        GitHubAction::GetCombinedStatus { owner, repo, r#ref } => {
+            get_combined_status(&owner, &repo, &r#ref)
+        }
+        GitHubAction::MergePullRequest {
+            owner,
+            repo,
+            pr_number,
+            commit_title,
+            commit_message,
+            merge_method,
+        } => merge_pull_request(
+            &owner,
+            &repo,
+            pr_number,
+            commit_title.as_deref(),
+            commit_message.as_deref(),
+            merge_method.as_deref(),
+        ),
         GitHubAction::ListRepos {
             username,
             page,
@@ -257,6 +413,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
             page,
             limit,
         } => get_workflow_runs(&owner, &repo, workflow_id.as_deref(), page, limit),
+        GitHubAction::HandleWebhook { webhook } => handle_webhook(webhook),
     }
 }
 
@@ -451,6 +608,49 @@ fn get_issue(owner: &str, repo: &str, issue_number: u32) -> Result<String, Strin
     )
 }
 
+fn list_issue_comments(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    page: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let limit = limit.unwrap_or(30).min(100);
+    let mut path = format!(
+        "/repos/{}/{}/issues/{}/comments?per_page={}",
+        encoded_owner, encoded_repo, issue_number, limit
+    );
+    if let Some(p) = page {
+        path.push_str(&format!("&page={}", p));
+    }
+    github_request("GET", &path, None)
+}
+
+fn create_issue_comment(
+    owner: &str,
+    repo: &str,
+    issue_number: u32,
+    body: &str,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_input_length(body, "body")?;
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!(
+        "/repos/{}/{}/issues/{}/comments",
+        encoded_owner, encoded_repo, issue_number
+    );
+    let req_body = serde_json::json!({ "body": body });
+    github_request("POST", &path, Some(req_body.to_string()))
+}
+
 fn list_pull_requests(
     owner: &str,
     repo: &str,
@@ -476,6 +676,40 @@ fn list_pull_requests(
     }
 
     github_request("GET", &path, None)
+}
+
+fn create_pull_request(
+    owner: &str,
+    repo: &str,
+    title: &str,
+    head: &str,
+    base: &str,
+    body: Option<&str>,
+    draft: bool,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_input_length(title, "title")?;
+    validate_input_length(head, "head")?;
+    validate_input_length(base, "base")?;
+    if let Some(b) = body {
+        validate_input_length(b, "body")?;
+    }
+
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!("/repos/{}/{}/pulls", encoded_owner, encoded_repo);
+    let mut req_body = serde_json::json!({
+        "title": title,
+        "head": head,
+        "base": base,
+        "draft": draft,
+    });
+    if let Some(body) = body {
+        req_body["body"] = serde_json::json!(body);
+    }
+    github_request("POST", &path, Some(req_body.to_string()))
 }
 
 fn get_pull_request(owner: &str, repo: &str, pr_number: u32) -> Result<String, String> {
@@ -541,6 +775,132 @@ fn create_pr_review(
         "event": event,
     });
     github_request("POST", &path, Some(req_body.to_string()))
+}
+
+fn list_pull_request_comments(
+    owner: &str,
+    repo: &str,
+    pr_number: u32,
+    page: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let limit = limit.unwrap_or(30).min(100);
+    let mut path = format!(
+        "/repos/{}/{}/pulls/{}/comments?per_page={}",
+        encoded_owner, encoded_repo, pr_number, limit
+    );
+    if let Some(p) = page {
+        path.push_str(&format!("&page={}", p));
+    }
+    github_request("GET", &path, None)
+}
+
+fn reply_pull_request_comment(
+    owner: &str,
+    repo: &str,
+    comment_id: u64,
+    body: &str,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_input_length(body, "body")?;
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!(
+        "/repos/{}/{}/pulls/comments/{}/replies",
+        encoded_owner, encoded_repo, comment_id
+    );
+    let req_body = serde_json::json!({ "body": body });
+    github_request("POST", &path, Some(req_body.to_string()))
+}
+
+fn get_pull_request_reviews(
+    owner: &str,
+    repo: &str,
+    pr_number: u32,
+    page: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let limit = limit.unwrap_or(30).min(100);
+    let mut path = format!(
+        "/repos/{}/{}/pulls/{}/reviews?per_page={}",
+        encoded_owner, encoded_repo, pr_number, limit
+    );
+    if let Some(p) = page {
+        path.push_str(&format!("&page={}", p));
+    }
+    github_request("GET", &path, None)
+}
+
+fn get_combined_status(owner: &str, repo: &str, r#ref: &str) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    validate_input_length(r#ref, "ref")?;
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let encoded_ref = url_encode_path(r#ref);
+    let path = format!(
+        "/repos/{}/{}/commits/{}/status",
+        encoded_owner, encoded_repo, encoded_ref
+    );
+    github_request("GET", &path, None)
+}
+
+fn merge_pull_request(
+    owner: &str,
+    repo: &str,
+    pr_number: u32,
+    commit_title: Option<&str>,
+    commit_message: Option<&str>,
+    merge_method: Option<&str>,
+) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    if let Some(v) = commit_title {
+        validate_input_length(v, "commit_title")?;
+    }
+    if let Some(v) = commit_message {
+        validate_input_length(v, "commit_message")?;
+    }
+    let method = merge_method.unwrap_or("merge");
+    let valid_methods = ["merge", "squash", "rebase"];
+    if !valid_methods.contains(&method) {
+        return Err(format!(
+            "Invalid merge_method: '{}'. Must be one of: {}",
+            method,
+            valid_methods.join(", ")
+        ));
+    }
+
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!(
+        "/repos/{}/{}/pulls/{}/merge",
+        encoded_owner, encoded_repo, pr_number
+    );
+    let mut req_body = serde_json::json!({
+        "merge_method": method,
+    });
+    if let Some(v) = commit_title {
+        req_body["commit_title"] = serde_json::json!(v);
+    }
+    if let Some(v) = commit_message {
+        req_body["commit_message"] = serde_json::json!(v);
+    }
+    github_request("PUT", &path, Some(req_body.to_string()))
 }
 
 fn list_repos(username: &str, page: Option<u32>, limit: Option<u32>) -> Result<String, String> {
@@ -681,6 +1041,239 @@ fn get_workflow_runs(
     github_request("GET", &path, None)
 }
 
+fn header_value<'a>(headers: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    let lower = key.to_ascii_lowercase();
+    headers
+        .iter()
+        .find(|(k, _)| k.to_ascii_lowercase() == lower)
+        .map(|(_, v)| v.as_str())
+}
+
+fn handle_webhook(webhook: GitHubWebhookRequest) -> Result<String, String> {
+    let event = header_value(&webhook.headers, "x-github-event")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "Missing X-GitHub-Event header".to_string())?;
+
+    let payload = webhook
+        .body_json
+        .ok_or_else(|| "Missing webhook.body_json".to_string())?;
+
+    let event_type = github_event_type(event, &payload);
+    let enriched_payload = github_enriched_payload(event, &webhook.headers, &payload, &event_type);
+
+    let resp = ToolWebhookResponse {
+        accepted: true,
+        emit_events: vec![SystemEventIntent {
+            source: "github".to_string(),
+            event_type,
+            payload: enriched_payload,
+        }],
+    };
+    serde_json::to_string(&resp).map_err(|e| format!("Failed to encode webhook response: {e}"))
+}
+
+fn github_event_type(event: &str, payload: &serde_json::Value) -> String {
+    let base = match event {
+        "issues" => "issue",
+        "pull_request" => "pr",
+        "issue_comment" => {
+            if payload.pointer("/issue/pull_request").is_some() {
+                "pr.comment"
+            } else {
+                "issue.comment"
+            }
+        }
+        "pull_request_review" => "pr.review",
+        "pull_request_review_comment" => "pr.review_comment",
+        "pull_request_review_thread" => "pr.review_thread",
+        "check_suite" => "ci.check_suite",
+        "check_run" => "ci.check_run",
+        "status" => "ci.status",
+        other => other,
+    };
+
+    if let Some(action) = payload.get("action").and_then(|v| v.as_str()) {
+        if !action.is_empty() {
+            return format!("{base}.{action}");
+        }
+    }
+
+    base.to_string()
+}
+
+fn github_enriched_payload(
+    raw_event: &str,
+    headers: &HashMap<String, String>,
+    payload: &serde_json::Value,
+    event_type: &str,
+) -> serde_json::Value {
+    fn put_if_missing(
+        obj: &mut serde_json::Map<String, serde_json::Value>,
+        key: &str,
+        val: Option<serde_json::Value>,
+    ) {
+        if !obj.contains_key(key) {
+            if let Some(v) = val {
+                obj.insert(key.to_string(), v);
+            }
+        }
+    }
+
+    let mut obj = payload
+        .as_object()
+        .cloned()
+        .unwrap_or_else(serde_json::Map::new);
+
+    put_if_missing(
+        &mut obj,
+        "event",
+        Some(serde_json::Value::String(raw_event.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "event_type",
+        Some(serde_json::Value::String(event_type.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "delivery_id",
+        header_value(headers, "x-github-delivery")
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "action",
+        payload
+            .get("action")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "repository_name",
+        payload
+            .pointer("/repository/full_name")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "repository_owner",
+        payload
+            .pointer("/repository/owner/login")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "sender_login",
+        payload
+            .pointer("/sender/login")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "issue_number",
+        payload.pointer("/issue/number").cloned(),
+    );
+    // For `issue_comment` webhooks on PRs, `/pull_request/number` is absent but
+    // `/issue/number` is present and `/issue/pull_request` exists. Fall back to
+    // `/issue/number` so PR-comment events carry `pr_number`.
+    let pr_number = payload
+        .pointer("/pull_request/number")
+        .cloned()
+        .or_else(|| {
+            if payload.pointer("/issue/pull_request").is_some() {
+                payload.pointer("/issue/number").cloned()
+            } else {
+                None
+            }
+        });
+    put_if_missing(&mut obj, "pr_number", pr_number);
+    put_if_missing(
+        &mut obj,
+        "comment_author",
+        payload
+            .pointer("/comment/user/login")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "comment_body",
+        payload
+            .pointer("/comment/body")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "review_state",
+        payload
+            .pointer("/review/state")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "pr_state",
+        payload
+            .pointer("/pull_request/state")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "pr_merged",
+        payload.pointer("/pull_request/merged").cloned(),
+    );
+    put_if_missing(
+        &mut obj,
+        "pr_draft",
+        payload.pointer("/pull_request/draft").cloned(),
+    );
+    put_if_missing(
+        &mut obj,
+        "base_branch",
+        payload
+            .pointer("/pull_request/base/ref")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "head_branch",
+        payload
+            .pointer("/pull_request/head/ref")
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "ci_status",
+        payload
+            .pointer("/check_run/status")
+            .or_else(|| payload.pointer("/check_suite/status"))
+            .or_else(|| payload.pointer("/status"))
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+    put_if_missing(
+        &mut obj,
+        "ci_conclusion",
+        payload
+            .pointer("/check_run/conclusion")
+            .or_else(|| payload.pointer("/check_suite/conclusion"))
+            .or_else(|| payload.pointer("/state"))
+            .and_then(|v| v.as_str())
+            .map(|s| serde_json::Value::String(s.to_string())),
+    );
+
+    serde_json::Value::Object(obj)
+}
+
 const SCHEMA: &str = r#"{
     "type": "object",
     "required": ["action"],
@@ -725,6 +1318,27 @@ const SCHEMA: &str = r#"{
         },
         {
             "properties": {
+                "action": { "const": "list_issue_comments" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "issue_number": { "type": "integer" },
+                "page": { "type": "integer" },
+                "limit": { "type": "integer", "default": 30 }
+            },
+            "required": ["action", "owner", "repo", "issue_number"]
+        },
+        {
+            "properties": {
+                "action": { "const": "create_issue_comment" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "issue_number": { "type": "integer" },
+                "body": { "type": "string" }
+            },
+            "required": ["action", "owner", "repo", "issue_number", "body"]
+        },
+        {
+            "properties": {
                 "action": { "const": "list_pull_requests" },
                 "owner": { "type": "string" },
                 "repo": { "type": "string" },
@@ -732,6 +1346,19 @@ const SCHEMA: &str = r#"{
                 "limit": { "type": "integer", "default": 30 }
             },
             "required": ["action", "owner", "repo"]
+        },
+        {
+            "properties": {
+                "action": { "const": "create_pull_request" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" },
+                "head": { "type": "string" },
+                "base": { "type": "string" },
+                "body": { "type": "string" },
+                "draft": { "type": "boolean", "default": false }
+            },
+            "required": ["action", "owner", "repo", "title", "head", "base"]
         },
         {
             "properties": {
@@ -761,6 +1388,59 @@ const SCHEMA: &str = r#"{
                 "event": { "type": "string", "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"] }
             },
             "required": ["action", "owner", "repo", "pr_number", "body", "event"]
+        },
+        {
+            "properties": {
+                "action": { "const": "list_pull_request_comments" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "pr_number": { "type": "integer" },
+                "page": { "type": "integer" },
+                "limit": { "type": "integer", "default": 30 }
+            },
+            "required": ["action", "owner", "repo", "pr_number"]
+        },
+        {
+            "properties": {
+                "action": { "const": "reply_pull_request_comment" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "comment_id": { "type": "integer" },
+                "body": { "type": "string" }
+            },
+            "required": ["action", "owner", "repo", "comment_id", "body"]
+        },
+        {
+            "properties": {
+                "action": { "const": "get_pull_request_reviews" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "pr_number": { "type": "integer" },
+                "page": { "type": "integer" },
+                "limit": { "type": "integer", "default": 30 }
+            },
+            "required": ["action", "owner", "repo", "pr_number"]
+        },
+        {
+            "properties": {
+                "action": { "const": "get_combined_status" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "ref": { "type": "string" }
+            },
+            "required": ["action", "owner", "repo", "ref"]
+        },
+        {
+            "properties": {
+                "action": { "const": "merge_pull_request" },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "pr_number": { "type": "integer" },
+                "commit_title": { "type": "string" },
+                "commit_message": { "type": "string" },
+                "merge_method": { "type": "string", "enum": ["merge", "squash", "rebase"], "default": "merge" }
+            },
+            "required": ["action", "owner", "repo", "pr_number"]
         },
         {
             "properties": {
@@ -827,12 +1507,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_event_in_create_pr_review() {
-        let valid = ["APPROVE", "REQUEST_CHANGES", "COMMENT"];
-        // Ensure valid inputs are accepted
-        for event in valid {
-            assert!(valid.contains(&event));
-        }
+    fn test_header_value_case_insensitive() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Github-Event".to_string(), "push".to_string());
+        assert_eq!(header_value(&headers, "x-github-event"), Some("push"));
+        assert_eq!(header_value(&headers, "X-GITHUB-EVENT"), Some("push"));
+        assert_eq!(header_value(&headers, "X-Github-Event"), Some("push"));
+        assert_eq!(header_value(&headers, "x-nonexistent"), None);
     }
 
     #[test]
@@ -841,5 +1522,137 @@ mod tests {
 
         let long = "a".repeat(MAX_TEXT_LENGTH + 1);
         assert!(validate_input_length(&long, "test").is_err());
+    }
+
+    #[test]
+    fn test_github_event_type_normalization() {
+        assert_eq!(
+            github_event_type("issues", &serde_json::json!({"action": "opened"})),
+            "issue.opened"
+        );
+        assert_eq!(
+            github_event_type(
+                "pull_request",
+                &serde_json::json!({"action": "synchronize"})
+            ),
+            "pr.synchronize"
+        );
+        assert_eq!(
+            github_event_type(
+                "issue_comment",
+                &serde_json::json!({
+                    "action": "created",
+                    "issue": { "pull_request": { "url": "https://api.github.com/repos/org/repo/pulls/1" } }
+                })
+            ),
+            "pr.comment.created"
+        );
+    }
+
+    #[test]
+    fn test_github_enriched_payload_extracts_common_fields() {
+        let headers = HashMap::new();
+        let payload = serde_json::json!({
+            "action": "created",
+            "repository": {
+                "full_name": "nearai/ironclaw",
+                "owner": { "login": "nearai" }
+            },
+            "sender": { "login": "maintainer1" },
+            "issue": { "number": 77 },
+            "comment": {
+                "body": "Please update the implementation plan",
+                "user": { "login": "maintainer1" }
+            }
+        });
+
+        let enriched =
+            github_enriched_payload("issue_comment", &headers, &payload, "issue.comment.created");
+        assert_eq!(
+            enriched.get("repository_name").and_then(|v| v.as_str()),
+            Some("nearai/ironclaw")
+        );
+        // Original repository object is preserved
+        assert!(enriched
+            .get("repository")
+            .and_then(|v| v.as_object())
+            .is_some());
+        assert_eq!(
+            enriched.get("issue_number").and_then(|v| v.as_i64()),
+            Some(77)
+        );
+        assert_eq!(
+            enriched.get("comment_body").and_then(|v| v.as_str()),
+            Some("Please update the implementation plan")
+        );
+    }
+
+    #[test]
+    fn test_enriched_payload_pr_number_from_issue_comment() {
+        let headers = HashMap::new();
+        let payload = serde_json::json!({
+            "action": "created",
+            "issue": {
+                "number": 42,
+                "pull_request": { "url": "https://api.github.com/repos/nearai/ironclaw/pulls/42" }
+            },
+            "comment": { "body": "LGTM", "user": { "login": "reviewer" } },
+            "repository": { "full_name": "nearai/ironclaw", "owner": { "login": "nearai" } },
+            "sender": { "login": "reviewer" }
+        });
+
+        let enriched =
+            github_enriched_payload("issue_comment", &headers, &payload, "pr.comment.created");
+        // pr_number should fall back to issue.number when issue.pull_request exists
+        assert_eq!(
+            enriched.get("pr_number").and_then(|v| v.as_i64()),
+            Some(42),
+            "pr_number should be set from issue.number for issue_comment on a PR"
+        );
+    }
+
+    #[test]
+    fn test_handle_webhook_requires_event_header() {
+        let err = handle_webhook(GitHubWebhookRequest {
+            headers: HashMap::new(),
+            body_json: Some(serde_json::json!({"action":"opened"})),
+        })
+        .expect_err("expected header validation error");
+        assert!(err.contains("X-GitHub-Event"));
+    }
+
+    #[test]
+    fn test_handle_webhook_emits_event_intent() {
+        let mut headers = HashMap::new();
+        headers.insert("x-github-event".to_string(), "issues".to_string());
+        headers.insert("x-github-delivery".to_string(), "abc-123".to_string());
+
+        let out = handle_webhook(GitHubWebhookRequest {
+            headers,
+            body_json: Some(serde_json::json!({
+                "action":"opened",
+                "issue":{"number":42},
+                "repository":{"full_name":"nearai/ironclaw"},
+                "sender":{"login":"maintainer1"}
+            })),
+        })
+        .expect("webhook handled");
+
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(
+            json.pointer("/emit_events/0/source")
+                .and_then(|v| v.as_str()),
+            Some("github")
+        );
+        assert_eq!(
+            json.pointer("/emit_events/0/event_type")
+                .and_then(|v| v.as_str()),
+            Some("issue.opened")
+        );
+        assert_eq!(
+            json.pointer("/emit_events/0/payload/issue_number")
+                .and_then(|v| v.as_i64()),
+            Some(42)
+        );
     }
 }

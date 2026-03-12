@@ -12,6 +12,7 @@
 //! Use `memory_write` to persist important facts that should be remembered
 //! across sessions.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -25,6 +26,28 @@ use crate::workspace::{Workspace, paths};
 /// injection if an attacker tricks the agent into overwriting them.
 const PROTECTED_IDENTITY_FILES: &[&str] =
     &[paths::IDENTITY, paths::SOUL, paths::AGENTS, paths::USER];
+
+/// Detect paths that are clearly local filesystem references, not workspace-memory docs.
+///
+/// Examples:
+/// - `/Users/.../file.md` (Unix absolute)
+/// - `C:\Users\...` or `D:/work/...` (Windows absolute)
+/// - `~/notes.md` (home expansion shorthand)
+fn looks_like_filesystem_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+
+    if Path::new(path).is_absolute() || path.starts_with("~/") {
+        return true;
+    }
+
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
 
 /// Tool for searching workspace memory.
 ///
@@ -143,7 +166,8 @@ impl Tool for MemoryWriteTool {
          be remembered across sessions. Targets: 'memory' for curated long-term facts, \
          'daily_log' for timestamped session notes, 'heartbeat' for the periodic \
          checklist (HEARTBEAT.md), 'bootstrap' to clear the first-run ritual file, \
-         or provide a custom path for arbitrary file creation."
+         or provide a custom workspace path for arbitrary file creation. \
+         Never pass absolute filesystem paths like '/Users/...' or 'C:\\...'."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -182,6 +206,14 @@ impl Tool for MemoryWriteTool {
             .get("target")
             .and_then(|v| v.as_str())
             .unwrap_or("daily_log");
+
+        if looks_like_filesystem_path(target) {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{}' looks like a local filesystem path. memory_write only works with workspace-memory paths. \
+                 Use write_file for filesystem writes. For opening files in an editor, use shell with: open \"<absolute_path>\".",
+                target
+            )));
+        }
 
         // Bootstrap target: clear BOOTSTRAP.md to mark first-run ritual complete.
         // Handled early because it accepts empty content (unlike other targets).
@@ -332,7 +364,8 @@ impl Tool for MemoryReadTool {
     fn description(&self) -> &str {
         "Read a file from the workspace memory (database-backed storage). \
          Use this to read files shown by memory_tree. NOT for local filesystem files \
-         (use read_file for those). Works with identity files, heartbeat checklist, \
+         (use read_file for those). Do not pass absolute paths like '/Users/...' or 'C:\\...'. \
+         Works with identity files, heartbeat checklist, \
          memory, daily logs, or any custom workspace path."
     }
 
@@ -357,6 +390,14 @@ impl Tool for MemoryReadTool {
         let start = std::time::Instant::now();
 
         let path = require_str(&params, "path")?;
+
+        if looks_like_filesystem_path(path) {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{}' looks like a local filesystem path. memory_read only works with workspace-memory paths. \
+                 Use read_file for filesystem reads. For opening files in an editor, use shell with: open \"<absolute_path>\".",
+                path
+            )));
+        }
 
         let doc = self
             .workspace
@@ -573,5 +614,25 @@ mod tests {
         assert!(schema["properties"]["path"].is_object());
         assert!(schema["properties"]["depth"].is_object());
         assert_eq!(schema["properties"]["depth"]["default"], 1);
+    }
+}
+
+#[cfg(test)]
+mod path_routing_tests {
+    use super::looks_like_filesystem_path;
+
+    #[test]
+    fn detects_filesystem_paths() {
+        assert!(looks_like_filesystem_path("/Users/nige/file.md"));
+        assert!(looks_like_filesystem_path("C:\\Users\\nige\\file.md"));
+        assert!(looks_like_filesystem_path("D:/work/file.md"));
+        assert!(looks_like_filesystem_path("~/notes.md"));
+    }
+
+    #[test]
+    fn allows_workspace_memory_paths() {
+        assert!(!looks_like_filesystem_path("MEMORY.md"));
+        assert!(!looks_like_filesystem_path("daily/2026-03-11.md"));
+        assert!(!looks_like_filesystem_path("projects/alpha/notes.md"));
     }
 }

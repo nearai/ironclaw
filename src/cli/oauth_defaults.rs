@@ -173,6 +173,35 @@ pub async fn exchange_oauth_code(
     code_verifier: Option<&str>,
     access_token_field: &str,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    // Delegates to exchange_oauth_code_with_resource with resource=None.
+    // Non-MCP OAuth flows don't need the RFC 8707 resource parameter.
+    exchange_oauth_code_with_resource(
+        token_url,
+        client_id,
+        client_secret,
+        code,
+        redirect_uri,
+        code_verifier,
+        access_token_field,
+        None,
+    )
+    .await
+}
+
+/// Exchange an OAuth authorization code for tokens, with optional RFC 8707 `resource` parameter.
+///
+/// The `resource` parameter scopes the issued token to a specific server (used by MCP OAuth).
+#[allow(clippy::too_many_arguments)]
+pub async fn exchange_oauth_code_with_resource(
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: Option<&str>,
+    access_token_field: &str,
+    resource: Option<&str>,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
     let client = reqwest::Client::new();
     let mut token_params = vec![
         ("grant_type", "authorization_code".to_string()),
@@ -182,6 +211,12 @@ pub async fn exchange_oauth_code(
 
     if let Some(verifier) = code_verifier {
         token_params.push(("code_verifier", verifier.to_string()));
+    }
+
+    // RFC 8707: include the `resource` parameter so the authorization server
+    // scopes the issued token to the specific MCP server (protected resource).
+    if let Some(resource) = resource {
+        token_params.push(("resource", resource.to_string()));
     }
 
     let mut request = client.post(token_url);
@@ -388,6 +423,12 @@ pub struct PendingOAuthFlow {
     pub sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
     /// Gateway auth token for authenticating with the platform token exchange proxy.
     pub gateway_token: Option<String>,
+    /// RFC 8707 resource parameter (MCP OAuth only).
+    /// Sent during token exchange to scope the token to a specific MCP server.
+    pub resource: Option<String>,
+    /// Secret name for persisting the client ID (MCP OAuth only).
+    /// Needed so token refresh can find the client_id after the session ends.
+    pub client_id_secret_name: Option<String>,
     /// When this flow was created (for expiry).
     pub created_at: std::time::Instant,
 }
@@ -974,5 +1015,43 @@ mod tests {
 
         assert_eq!(strip_instance_prefix("abc123"), "abc123");
         assert_eq!(strip_instance_prefix(""), "");
+    }
+
+    /// Verify that `build_oauth_url` includes the RFC 8707 `resource` parameter
+    /// when passed through `extra_params`, which is how MCP OAuth gateway mode
+    /// scopes tokens to a specific MCP server.
+    #[test]
+    fn test_build_oauth_url_includes_resource_via_extra_params() {
+        use std::collections::HashMap;
+
+        use crate::cli::oauth_defaults::build_oauth_url;
+
+        let mut extra = HashMap::new();
+        extra.insert(
+            "resource".to_string(),
+            "https://mcp.example.com".to_string(),
+        );
+
+        let result = build_oauth_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "https://gateway.example.com/oauth/callback",
+            &["read".to_string()],
+            true,
+            &extra,
+        );
+
+        // The resource parameter should be URL-encoded in the auth URL
+        assert!(
+            result
+                .url
+                .contains("resource=https%3A%2F%2Fmcp.example.com"),
+            "Expected resource param in URL: {}",
+            result.url
+        );
+        // State and PKCE should be present
+        assert!(result.url.contains("state="));
+        assert!(result.url.contains("code_challenge="));
+        assert!(result.code_verifier.is_some());
     }
 }

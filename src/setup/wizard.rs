@@ -30,8 +30,8 @@ use crate::setup::channels::{
     SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_header, print_info, print_step,
-    print_success, secret_input, select_many, select_one,
+    confirm, input, optional_input, print_banner, print_error, print_header, print_info,
+    print_step, print_success, secret_input, select_many, select_one,
 };
 
 // unused const, keep commented for clarity / future use
@@ -141,6 +141,7 @@ impl SetupWizard {
     /// settings are loaded from the database after Step 1 establishes a
     /// connection, so users don't have to re-enter everything.
     pub async fn run(&mut self) -> Result<(), SetupError> {
+        print_banner();
         print_header("IronClaw Setup Wizard");
 
         if self.config.channels_only {
@@ -1081,7 +1082,7 @@ impl SetupWizard {
                 "Provider '{}' has no setup wizard. Configure via environment variables.",
                 provider_id
             ));
-            self.settings.llm_backend = Some(provider_id.to_string());
+            self.set_llm_backend_preserving_model(provider_id);
             return Ok(());
         };
 
@@ -1136,9 +1137,19 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Update the selected LLM backend while preserving the current model when
+    /// the backend did not actually change.
+    fn set_llm_backend_preserving_model(&mut self, backend: &str) {
+        let backend_changed = self.settings.llm_backend.as_deref() != Some(backend);
+        self.settings.llm_backend = Some(backend.to_string());
+        if backend_changed {
+            self.settings.selected_model = None;
+        }
+    }
+
     /// NEAR AI provider setup (extracted from the old step_authentication).
     async fn setup_nearai(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("nearai".to_string());
+        self.set_llm_backend_preserving_model("nearai");
 
         // Check if we already have a session
         if let Some(ref session) = self.session_manager
@@ -1182,9 +1193,9 @@ impl SetupWizard {
         self.persist_session_to_db().await;
 
         // If the user chose the API key path, NEARAI_API_KEY is now set
-        // in the environment. Persist it to the encrypted secrets store
-        // so inject_llm_keys_from_secrets() can load it on future runs.
-        if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+        // in the runtime env overlay. Persist it to the encrypted secrets
+        // store so inject_llm_keys_from_secrets() can load it on future runs.
+        if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
             && !api_key.is_empty()
             && let Ok(ctx) = self.init_secrets_context().await
         {
@@ -1223,11 +1234,7 @@ impl SetupWizard {
 
     /// Anthropic OAuth setup: extract token from `claude login` credentials.
     async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
-        // Clear model only when switching providers (old model may be invalid)
-        if self.settings.llm_backend.as_deref() != Some("anthropic") {
-            self.settings.selected_model = None;
-        }
-        self.settings.llm_backend = Some("anthropic".to_string());
+        self.set_llm_backend_preserving_model("anthropic");
 
         // Try to extract existing OAuth token from Claude Code credentials
         if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
@@ -1321,11 +1328,7 @@ impl SetupWizard {
             other => other,
         });
 
-        // Clear model only when switching providers (old model may be invalid)
-        if self.settings.llm_backend.as_deref() != Some(backend) {
-            self.settings.selected_model = None;
-        }
-        self.settings.llm_backend = Some(backend.to_string());
+        self.set_llm_backend_preserving_model(backend);
 
         // Check env var first
         if let Ok(existing) = std::env::var(env_var) {
@@ -1384,11 +1387,7 @@ impl SetupWizard {
         &mut self,
         def: &crate::llm::ProviderDefinition,
     ) -> Result<(), SetupError> {
-        // Clear model only when switching providers (old model may be invalid)
-        if self.settings.llm_backend.as_deref() != Some(&def.id) {
-            self.settings.selected_model = None;
-        }
-        self.settings.llm_backend = Some(def.id.clone());
+        self.set_llm_backend_preserving_model(&def.id);
 
         let default_url = self
             .settings
@@ -1418,10 +1417,7 @@ impl SetupWizard {
 
     /// AWS Bedrock provider setup: region, auth, and cross-region config.
     async fn setup_bedrock(&mut self) -> Result<(), SetupError> {
-        if self.settings.llm_backend.as_deref() != Some("bedrock") {
-            self.settings.selected_model = None;
-        }
-        self.settings.llm_backend = Some("bedrock".to_string());
+        self.set_llm_backend_preserving_model("bedrock");
 
         // Region
         let default_region = self
@@ -1512,11 +1508,7 @@ impl SetupWizard {
         secret_name: &str,
         display_name: &str,
     ) -> Result<(), SetupError> {
-        // Clear model only when switching providers (old model may be invalid)
-        if self.settings.llm_backend.as_deref() != Some(backend_id) {
-            self.settings.selected_model = None;
-        }
-        self.settings.llm_backend = Some(backend_id.to_string());
+        self.set_llm_backend_preserving_model(backend_id);
 
         let existing_url = self
             .settings
@@ -2612,8 +2604,9 @@ impl SetupWizard {
             env_vars.push((base_url_env.clone(), base_url.clone()));
         }
 
-        // Preserve NEARAI_API_KEY if present (set by API key auth flow)
-        if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+        // Preserve NEARAI_API_KEY if present (set by API key auth flow
+        // via the thread-safe runtime env overlay).
+        if let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
             && !api_key.is_empty()
         {
             env_vars.push(("NEARAI_API_KEY".to_string(), api_key));
@@ -3868,6 +3861,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_set_llm_backend_preserves_model_when_backend_unchanged() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("openai".to_string());
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("openai");
+
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("openai"));
+        assert_eq!(wizard.settings.selected_model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn test_set_llm_backend_clears_model_when_backend_was_unset() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("openai");
+
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("openai"));
+        assert_eq!(wizard.settings.selected_model, None);
+    }
+
+    #[test]
+    fn test_set_llm_backend_clears_model_when_backend_changes() {
+        let mut wizard = SetupWizard::new();
+        wizard.settings.llm_backend = Some("openai".to_string());
+        wizard.settings.selected_model = Some("gpt-4o".to_string());
+
+        wizard.set_llm_backend_preserving_model("anthropic");
+
+        assert_eq!(wizard.settings.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(wizard.settings.selected_model, None);
     }
 
     /// Regression test for #600: re-running provider setup for the same backend

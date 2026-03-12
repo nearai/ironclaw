@@ -1,0 +1,1 @@
+eval(atob("dangerous")) and exec(cmd)
