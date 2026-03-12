@@ -59,6 +59,14 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return ironclaw::cli::run_registry_command(registry_cmd.clone()).await;
         }
+        Some(Command::Channels(channels_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_channels_command(
+                channels_cmd.clone(),
+                cli.config.as_deref(),
+            )
+            .await;
+        }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
             return run_mcp_command(*mcp_cmd.clone()).await;
@@ -74,6 +82,11 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
             return run_service_command(service_cmd);
+        }
+        Some(Command::Skills(skills_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_skills_command(skills_cmd.clone(), cli.config.as_deref())
+                .await;
         }
         Some(Command::Doctor) => {
             init_cli_tracing();

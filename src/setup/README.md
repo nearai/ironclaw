@@ -227,6 +227,8 @@ with its own secret name and env var. It is **not** stored as `openai_compatible
 2. Otherwise prompt for key entry via `secret_input()`
 3. Store encrypted in secrets via `init_secrets_context()`
 4. **Cache key in `self.llm_api_key`** for model fetching in Step 4
+5. Preserve `selected_model` on a same-backend re-run; clear it only when
+   switching to a different backend
 
 **NEAR AI** (`setup_nearai`):
 - Calls `session_manager.ensure_authenticated()` which shows the auth menu:

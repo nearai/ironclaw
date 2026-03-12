@@ -373,9 +373,10 @@ impl SessionManager {
     /// NEAR AI Cloud API key entry flow.
     ///
     /// Prompts the user to enter a NEAR AI Cloud API key from
-    /// cloud.near.ai. The key is set as `NEARAI_API_KEY` env var so
-    /// `LlmConfig::resolve()` auto-selects ChatCompletions mode, and
-    /// saved to `~/.ironclaw/.env` for persistence across restarts.
+    /// cloud.near.ai. The key is stored in the thread-safe runtime
+    /// env overlay (via `set_runtime_env`) so `LlmConfig::resolve()`
+    /// auto-selects ChatCompletions mode, and persisted to
+    /// `~/.ironclaw/.env` for survival across restarts.
     /// No session token is saved and no `/v1/users/me` validation is
     /// performed (different auth model).
     async fn api_key_login(&self) -> Result<(), LlmError> {
@@ -403,15 +404,11 @@ impl SessionManager {
             });
         }
 
-        // Set env var so Config picks it up immediately
-        // (LlmConfig::resolve() auto-selects ChatCompletions mode when
-        // NEARAI_API_KEY is present).
-        //
-        // SAFETY: called during single-threaded interactive login flow.
-        #[allow(unused_unsafe)]
-        unsafe {
-            std::env::set_var("NEARAI_API_KEY", &key);
-        }
+        // Make the key visible to Config resolution and `env_or_override()`
+        // callers for the remainder of this process. Uses a thread-safe
+        // overlay instead of `std::env::set_var`, which is UB in
+        // multi-threaded programs (Rust 1.82+).
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", &key);
 
         // Persist to ~/.ironclaw/.env so the key survives restarts
         // (bootstrap layer — available before DB is connected).
