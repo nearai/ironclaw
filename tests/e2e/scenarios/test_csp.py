@@ -19,10 +19,12 @@ async def test_no_csp_violations_on_load(page):
         else None
     ))
 
-    # Reload the page to catch violations from initial load
-    await page.reload(wait_until="networkidle")
+    # Reload the page to catch violations from initial load.
+    # Use "load" (not "networkidle") because the SSE stream keeps the
+    # connection open indefinitely, preventing networkidle from firing.
+    await page.reload(wait_until="load")
     # Wait a moment for any deferred script execution
-    await page.wait_for_timeout(1000)
+    await page.wait_for_timeout(2000)
 
     assert violations == [], (
         f"CSP violations detected on page load:\n" + "\n".join(violations)
@@ -63,8 +65,8 @@ async def test_no_js_errors_on_page_load(page):
     errors = []
     page.on("pageerror", lambda err: errors.append(str(err)))
 
-    await page.reload(wait_until="networkidle")
-    await page.wait_for_timeout(1000)
+    await page.reload(wait_until="load")
+    await page.wait_for_timeout(2000)
 
     assert errors == [], (
         f"JavaScript errors on page load:\n" + "\n".join(errors)
