@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "crates/ironclaw_safety"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
@@ -99,6 +99,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
 cron = "0.13"
 
 # Safety/sanitization
+ironclaw_safety = { path = "crates/ironclaw_safety" }
 regex = "1"
 aho-corasick = "1"
 
