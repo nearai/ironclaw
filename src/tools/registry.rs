@@ -252,7 +252,7 @@ impl ToolRegistry {
     /// schemas at runtime. Call after `register_builtin_tools()`.
     pub fn register_tool_info(self: &Arc<Self>) {
         use crate::tools::builtin::ToolInfoTool;
-        let tool = ToolInfoTool::new(Arc::clone(self));
+        let tool = ToolInfoTool::new(Arc::downgrade(self));
         self.register_sync(Arc::new(tool));
         tracing::debug!("Registered tool_info discovery tool");
     }

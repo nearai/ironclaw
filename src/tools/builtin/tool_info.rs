@@ -7,7 +7,7 @@
 //! Keeps the tools array compact (WASM tools use permissive schemas)
 //! while allowing precise discovery when needed.
 
-use std::sync::Arc;
+use std::sync::Weak;
 
 use async_trait::async_trait;
 
@@ -16,11 +16,11 @@ use crate::tools::registry::ToolRegistry;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
 pub struct ToolInfoTool {
-    registry: Arc<ToolRegistry>,
+    registry: Weak<ToolRegistry>,
 }
 
 impl ToolInfoTool {
-    pub fn new(registry: Arc<ToolRegistry>) -> Self {
+    pub fn new(registry: Weak<ToolRegistry>) -> Self {
         Self { registry }
     }
 }
@@ -66,7 +66,13 @@ impl Tool for ToolInfoTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let tool = self.registry.get(name).await.ok_or_else(|| {
+        let registry = self.registry.upgrade().ok_or_else(|| {
+            ToolError::ExecutionFailed(
+                "tool registry is no longer available for tool_info".to_string(),
+            )
+        })?;
+
+        let tool = registry.get(name).await.ok_or_else(|| {
             ToolError::InvalidParameters(format!("No tool named '{name}' is registered"))
         })?;
 
@@ -97,13 +103,14 @@ impl Tool for ToolInfoTool {
 mod tests {
     use super::*;
     use crate::tools::builtin::EchoTool;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_tool_info_default_returns_param_names() {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(EchoTool)).await;
 
-        let tool = ToolInfoTool::new(Arc::clone(&registry));
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
         let ctx = JobContext::default();
         let result = tool
             .execute(serde_json::json!({"name": "echo"}), &ctx)
@@ -133,7 +140,7 @@ mod tests {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(EchoTool)).await;
 
-        let tool = ToolInfoTool::new(Arc::clone(&registry));
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
         let ctx = JobContext::default();
         let result = tool
             .execute(
@@ -153,11 +160,24 @@ mod tests {
     #[tokio::test]
     async fn test_tool_info_unknown_tool() {
         let registry = Arc::new(ToolRegistry::new());
-        let tool = ToolInfoTool::new(registry);
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
         let ctx = JobContext::default();
         let result = tool
             .execute(serde_json::json!({"name": "nonexistent"}), &ctx)
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_registry_dropped() {
+        let registry = Arc::new(ToolRegistry::new());
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        drop(registry);
+
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(serde_json::json!({"name": "echo"}), &ctx)
+            .await;
+        assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
     }
 }
