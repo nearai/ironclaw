@@ -48,7 +48,7 @@ jobs:
       matrix:
         include:
           - group: core
-            files: "tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py tests/e2e/scenarios/test_sse_reconnect.py tests/e2e/scenarios/test_html_injection.py"
+            files: "tests/e2e/scenarios/test_connection.py tests/e2e/scenarios/test_chat.py tests/e2e/scenarios/test_sse_reconnect.py tests/e2e/scenarios/test_html_injection.py tests/e2e/scenarios/test_csp.py"
           - group: features
             files: "tests/e2e/scenarios/test_skills.py tests/e2e/scenarios/test_tool_approval.py"
           - group: extensions

@@ -32,7 +32,6 @@ pub mod task;
 mod thread_ops;
 pub mod undo;
 
-pub use crate::worker::{Worker, WorkerDeps};
 pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps};
 pub use compaction::{CompactionResult, ContextCompactor};

@@ -9,8 +9,8 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, ChannelSecretUpdater, GatewayChannel, HttpChannel, ReplChannel,
-        SignalChannel, WebhookServer, WebhookServerConfig,
+        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
+        WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -66,6 +66,10 @@ async fn async_main() -> anyhow::Result<()> {
                 cli.config.as_deref(),
             )
             .await;
+        }
+        Some(Command::Routines(routines_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_routines_cli(routines_cmd, cli.config.as_deref()).await;
         }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
@@ -429,9 +433,8 @@ async fn async_main() -> anyhow::Result<()> {
         "Lifecycle hooks initialized"
     );
 
-    // Create session manager (shared between agent and web gateway)
-    let session_manager =
-        Arc::new(ironclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
+    // Reuse the shared agent session manager prepared by AppBuilder.
+    let session_manager = Arc::clone(&components.agent_session_manager);
 
     // Lazy scheduler slot — filled after Agent::new creates the Scheduler.
     // Allows CreateJobTool to dispatch local jobs via the Scheduler even though
@@ -472,6 +475,14 @@ async fn async_main() -> anyhow::Result<()> {
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
         if let Some(ref ext_mgr) = components.extension_manager {
+            // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
+            // instead of calling open::that() on the server.
+            let gw_base = config
+                .tunnel
+                .public_url
+                .clone()
+                .unwrap_or_else(|| format!("http://{}:{}", gw_config.host, gw_config.port));
+            ext_mgr.enable_gateway_mode(gw_base).await;
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
         if !components.catalog_entries.is_empty() {
@@ -725,6 +736,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     #[cfg(unix)]
     {
+        use ironclaw::channels::ChannelSecretUpdater;
         // Collect all channels that support secret updates
         let mut secret_updaters: Vec<Arc<dyn ChannelSecretUpdater>> = Vec::new();
         if let Some(ref state) = http_channel_state {

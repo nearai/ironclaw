@@ -104,6 +104,14 @@ impl Tool for RoutineCreateTool {
                     "enum": ["lightweight", "full_job"],
                     "description": "Execution mode: 'lightweight' (single LLM call, default) or 'full_job' (multi-turn with tools)"
                 },
+                "use_tools": {
+                    "type": "boolean",
+                    "description": "Enable tool access in lightweight mode (default: false). Only safe tools (no approval required) are available. Ignored for full_job mode."
+                },
+                "max_tool_rounds": {
+                    "type": "integer",
+                    "description": "Max tool call rounds in lightweight mode (default: 3). Only used when use_tools is true."
+                },
                 "cooldown_secs": {
                     "type": "integer",
                     "description": "Minimum seconds between fires (default: 300)"
@@ -262,11 +270,24 @@ impl Tool for RoutineCreateTool {
             })
             .unwrap_or_default();
 
+        let use_tools = params
+            .get("use_tools")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let max_tool_rounds = params
+            .get("max_tool_rounds")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.clamp(1, crate::agent::routine::MAX_TOOL_ROUNDS_LIMIT as u64) as u32)
+            .unwrap_or(3);
+
         let action = match action_type {
             "lightweight" => RoutineAction::Lightweight {
                 prompt: prompt.to_string(),
                 context_paths,
                 max_tokens: 4096,
+                use_tools,
+                max_tool_rounds,
             },
             "full_job" => {
                 let tool_permissions = crate::agent::routine::parse_tool_permissions(&params);

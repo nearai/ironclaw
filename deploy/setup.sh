@@ -24,8 +24,15 @@ systemctl enable docker
 systemctl start docker
 
 echo "==> Installing Cloud SQL Auth Proxy"
+CLOUD_SQL_PROXY_VERSION="v2.14.3"
+CLOUD_SQL_PROXY_SHA256="75e7cc1f158ab6f97b7810e9d8419c55735cff40bc56d4f19673adfdf2406a59"
 curl -fsSL -o /usr/local/bin/cloud-sql-proxy \
-  https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.14.3/cloud-sql-proxy.linux.amd64
+  "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${CLOUD_SQL_PROXY_VERSION}/cloud-sql-proxy.linux.amd64"
+echo "${CLOUD_SQL_PROXY_SHA256}  /usr/local/bin/cloud-sql-proxy" | sha256sum -c - || {
+  echo "ERROR: Cloud SQL Auth Proxy checksum verification failed -- aborting"
+  rm -f /usr/local/bin/cloud-sql-proxy
+  exit 1
+}
 chmod +x /usr/local/bin/cloud-sql-proxy
 
 echo "==> Installing systemd services"

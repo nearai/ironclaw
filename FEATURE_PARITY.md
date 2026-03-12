@@ -170,7 +170,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `nodes` | ✅ | ❌ | P3 | Device management, remove/clear flows |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
 | `hooks` | ✅ | ✅ | P2 | Lifecycle hooks |
-| `cron` | ✅ | ❌ | P2 | Scheduled jobs (model/thinking fields in edit) |
+| `cron` | ✅ | 🚧 | P2 | list/create/edit/enable/disable/delete/history; TODO: `cron run`, model/thinking fields |
 | `webhooks` | ✅ | ❌ | P3 | Webhook config |
 | `message send` | ✅ | ❌ | P2 | Send to channels |
 | `browser` | ✅ | ❌ | P3 | Browser automation |
