@@ -1,5 +1,6 @@
 pub mod assertions;
 pub mod cleanup;
+#[cfg(feature = "libsql")]
 pub mod gateway_workflow_harness;
 pub mod instrumented_llm;
 pub mod metrics;

@@ -1178,11 +1178,20 @@ fn github_enriched_payload(
         "issue_number",
         payload.pointer("/issue/number").cloned(),
     );
-    put_if_missing(
-        &mut obj,
-        "pr_number",
-        payload.pointer("/pull_request/number").cloned(),
-    );
+    // For `issue_comment` webhooks on PRs, `/pull_request/number` is absent but
+    // `/issue/number` is present and `/issue/pull_request` exists. Fall back to
+    // `/issue/number` so PR-comment events carry `pr_number`.
+    let pr_number = payload
+        .pointer("/pull_request/number")
+        .cloned()
+        .or_else(|| {
+            if payload.pointer("/issue/pull_request").is_some() {
+                payload.pointer("/issue/number").cloned()
+            } else {
+                None
+            }
+        });
+    put_if_missing(&mut obj, "pr_number", pr_number);
     put_if_missing(
         &mut obj,
         "comment_author",
@@ -1564,7 +1573,10 @@ mod tests {
             Some("nearai/ironclaw")
         );
         // Original repository object is preserved
-        assert!(enriched.get("repository").and_then(|v| v.as_object()).is_some());
+        assert!(enriched
+            .get("repository")
+            .and_then(|v| v.as_object())
+            .is_some());
         assert_eq!(
             enriched.get("issue_number").and_then(|v| v.as_i64()),
             Some(77)
@@ -1572,6 +1584,30 @@ mod tests {
         assert_eq!(
             enriched.get("comment_body").and_then(|v| v.as_str()),
             Some("Please update the implementation plan")
+        );
+    }
+
+    #[test]
+    fn test_enriched_payload_pr_number_from_issue_comment() {
+        let headers = HashMap::new();
+        let payload = serde_json::json!({
+            "action": "created",
+            "issue": {
+                "number": 42,
+                "pull_request": { "url": "https://api.github.com/repos/nearai/ironclaw/pulls/42" }
+            },
+            "comment": { "body": "LGTM", "user": { "login": "reviewer" } },
+            "repository": { "full_name": "nearai/ironclaw", "owner": { "login": "nearai" } },
+            "sender": { "login": "reviewer" }
+        });
+
+        let enriched =
+            github_enriched_payload("issue_comment", &headers, &payload, "pr.comment.created");
+        // pr_number should fall back to issue.number when issue.pull_request exists
+        assert_eq!(
+            enriched.get("pr_number").and_then(|v| v.as_i64()),
+            Some(42),
+            "pr_number should be set from issue.number for issue_comment on a PR"
         );
     }
 
