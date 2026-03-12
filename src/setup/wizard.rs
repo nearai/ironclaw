@@ -3394,8 +3394,8 @@ fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
     // the runtime overlay is checked — otherwise resolve_bearer_token()
     // falls back to session-token auth and re-triggers the interactive
     // auth prompt.
-    let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")
-        .map(secrecy::SecretString::from);
+    let api_key =
+        crate::config::helpers::env_or_override("NEARAI_API_KEY").map(secrecy::SecretString::from);
 
     // Match the same base_url logic as LlmConfig::resolve(): use cloud-api
     // when an API key is present, private.near.ai for session-token auth.

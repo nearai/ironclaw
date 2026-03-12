@@ -180,10 +180,7 @@ impl Tool for RoutineCreateTool {
                 next_cron_fire(&schedule, timezone.as_deref()).map_err(|e| {
                     ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
                 })?;
-                Trigger::Cron {
-                    schedule,
-                    timezone,
-                }
+                Trigger::Cron { schedule, timezone }
             }
             "event" => {
                 let pattern = params
@@ -555,9 +552,7 @@ impl Tool for RoutineUpdateTool {
             };
 
             if let Some((old_schedule, old_tz)) = existing_cron {
-                let effective_schedule = new_schedule
-                    .as_deref()
-                    .unwrap_or(&old_schedule);
+                let effective_schedule = new_schedule.as_deref().unwrap_or(&old_schedule);
                 let effective_tz = new_timezone.or(old_tz);
                 // Validate
                 next_cron_fire(effective_schedule, effective_tz.as_deref()).map_err(|e| {

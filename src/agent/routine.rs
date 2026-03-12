@@ -748,7 +748,10 @@ mod tests {
     fn test_next_cron_fire_5_field_accepted() {
         // Standard 5-field cron should now work through normalization
         let result = next_cron_fire("0 9 * * 1", None);
-        assert!(result.is_ok(), "5-field cron should be accepted: {result:?}");
+        assert!(
+            result.is_ok(),
+            "5-field cron should be accepted: {result:?}"
+        );
         assert!(result.unwrap().is_some());
     }
 
