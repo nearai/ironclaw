@@ -60,12 +60,18 @@ pub trait EmbeddingProvider: Send + Sync {
     }
 }
 
+/// Default base URL for the OpenAI API.
+const OPENAI_API_BASE_URL: &str = "https://api.openai.com";
+
 /// OpenAI embedding provider using text-embedding-ada-002 or text-embedding-3-small.
+///
+/// Supports any OpenAI-compatible embedding endpoint via [`with_base_url`](Self::with_base_url).
 pub struct OpenAiEmbeddings {
     client: reqwest::Client,
     api_key: String,
     model: String,
     dimension: usize,
+    base_url: String,
 }
 
 impl OpenAiEmbeddings {
@@ -78,6 +84,7 @@ impl OpenAiEmbeddings {
             api_key: api_key.into(),
             model: "text-embedding-3-small".to_string(),
             dimension: 1536,
+            base_url: OPENAI_API_BASE_URL.to_string(),
         }
     }
 
@@ -88,6 +95,7 @@ impl OpenAiEmbeddings {
             api_key: api_key.into(),
             model: "text-embedding-ada-002".to_string(),
             dimension: 1536,
+            base_url: OPENAI_API_BASE_URL.to_string(),
         }
     }
 
@@ -98,6 +106,7 @@ impl OpenAiEmbeddings {
             api_key: api_key.into(),
             model: "text-embedding-3-large".to_string(),
             dimension: 3072,
+            base_url: OPENAI_API_BASE_URL.to_string(),
         }
     }
 
@@ -112,7 +121,30 @@ impl OpenAiEmbeddings {
             api_key: api_key.into(),
             model: model.into(),
             dimension,
+            base_url: OPENAI_API_BASE_URL.to_string(),
         }
+    }
+
+    /// Set a custom base URL for OpenAI-compatible embedding providers.
+    ///
+    /// The URL must use `http://` or `https://` scheme. If no scheme is present,
+    /// `https://` is prepended automatically. Trailing slashes are stripped.
+    pub fn with_base_url(mut self, base_url: &str) -> Self {
+        let url = base_url.trim();
+
+        // Auto-prepend https:// if no scheme is present.
+        let url = if !url.starts_with("http://") && !url.starts_with("https://") {
+            tracing::debug!(
+                "No scheme in embedding base URL '{}', prepending https://",
+                url
+            );
+            format!("https://{url}")
+        } else {
+            url.to_string()
+        };
+
+        self.base_url = url.trim_end_matches('/').to_string();
+        self
     }
 }
 
@@ -173,9 +205,11 @@ impl EmbeddingProvider for OpenAiEmbeddings {
             input: texts,
         };
 
+        let url = format!("{}/v1/embeddings", self.base_url);
+
         let response = self
             .client
-            .post("https://api.openai.com/v1/embeddings")
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request)
             .send()
@@ -575,9 +609,37 @@ mod tests {
         let provider = OpenAiEmbeddings::new("test-key");
         assert_eq!(provider.dimension(), 1536);
         assert_eq!(provider.model_name(), "text-embedding-3-small");
+        assert_eq!(provider.base_url, OPENAI_API_BASE_URL);
 
         let provider = OpenAiEmbeddings::large("test-key");
         assert_eq!(provider.dimension(), 3072);
         assert_eq!(provider.model_name(), "text-embedding-3-large");
+        assert_eq!(provider.base_url, OPENAI_API_BASE_URL);
+    }
+
+    #[test]
+    fn test_openai_with_base_url_valid() {
+        let provider =
+            OpenAiEmbeddings::new("test-key").with_base_url("https://custom.example.com");
+        assert_eq!(provider.base_url, "https://custom.example.com");
+    }
+
+    #[test]
+    fn test_openai_with_base_url_strips_trailing_slashes() {
+        let provider =
+            OpenAiEmbeddings::new("test-key").with_base_url("https://custom.example.com///");
+        assert_eq!(provider.base_url, "https://custom.example.com");
+    }
+
+    #[test]
+    fn test_openai_with_base_url_http_scheme() {
+        let provider = OpenAiEmbeddings::new("test-key").with_base_url("http://localhost:8080");
+        assert_eq!(provider.base_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_openai_with_base_url_schemeless_prepends_https() {
+        let provider = OpenAiEmbeddings::new("test-key").with_base_url("custom.example.com/v1");
+        assert_eq!(provider.base_url, "https://custom.example.com/v1");
     }
 }
