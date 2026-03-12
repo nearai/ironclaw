@@ -1057,6 +1057,11 @@ impl<'a> JobDelegate<'a> {
 
 #[async_trait]
 impl<'a> LoopDelegate for JobDelegate<'a> {
+    async fn on_turn_start(&self, _reason_ctx: &mut ReasoningContext) -> Option<LoopOutcome> {
+        self.worker.tools().notify_turn_start().await;
+        None
+    }
+
     async fn check_signals(&self) -> LoopSignal {
         // Drain the entire message channel, prioritizing Stop over user messages.
         // Scope the lock so it's dropped before any .await below.

@@ -8,7 +8,8 @@
 //! isolation and deterministic behavior.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -465,8 +466,16 @@ pub struct WasmToolWrapper {
     capabilities: Capabilities,
     /// Cached description (from PreparedModule or override).
     description: String,
-    /// Cached schema (from PreparedModule or override).
-    schema: serde_json::Value,
+    /// Compact schema advertised in the main tools array.
+    ///
+    /// This stays permissive by default to avoid serializing full exported
+    /// WASM schemas on every LLM call. Sidecars can override it explicitly.
+    advertised_schema: serde_json::Value,
+    /// Full schema used for discovery/coercion before any lazy runtime extraction.
+    ///
+    /// Seeded from the WASM `schema()` export at registration time, unless a
+    /// sidecar explicitly overrides it via `with_schema()`.
+    discovery_schema: serde_json::Value,
     /// Injected credentials for HTTP requests (e.g., OAuth tokens).
     /// Keys are placeholder names like "GOOGLE_ACCESS_TOKEN".
     credentials: HashMap<String, String>,
@@ -475,37 +484,89 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Real parameter schema extracted from WASM schema() export on first execution.
+    /// Used only for coerce_params_to_schema(), NOT for parameters_schema() (tools array).
+    /// Arc-wrapped so the state is shared when the wrapper is cloned into spawn_blocking.
+    coercion_schema: Arc<OnceLock<serde_json::Value>>,
+    /// Whether the error hint has been sent this turn (reset via on_turn_start).
+    /// Arc-wrapped so the state is shared when the wrapper is cloned into spawn_blocking.
+    hint_sent: Arc<AtomicBool>,
 }
 
 impl WasmToolWrapper {
+    fn permissive_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+        })
+    }
+
+    fn is_permissive_schema(schema: &serde_json::Value) -> bool {
+        schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .is_none_or(|p| p.is_empty())
+    }
+
     /// Create a new WASM tool wrapper.
     pub fn new(
         runtime: Arc<WasmToolRuntime>,
         prepared: Arc<PreparedModule>,
         capabilities: Capabilities,
     ) -> Self {
-        Self {
+        let mut wrapper = Self {
             description: prepared.description.clone(),
-            schema: prepared.schema.clone(),
+            advertised_schema: Self::permissive_schema(),
+            discovery_schema: prepared.schema.clone(),
             runtime,
             prepared,
             capabilities,
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
-        }
+            coercion_schema: Arc::new(OnceLock::new()),
+            hint_sent: Arc::new(AtomicBool::new(false)),
+        };
+        wrapper.append_schema_hint_if_permissive();
+        wrapper
     }
 
     /// Override the tool description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = description.into();
+        self.append_schema_hint_if_permissive();
         self
     }
 
     /// Override the parameter schema.
     pub fn with_schema(mut self, schema: serde_json::Value) -> Self {
-        self.schema = schema;
+        self.advertised_schema = schema.clone();
+        self.discovery_schema = schema;
+        self.strip_schema_hint();
+        self.append_schema_hint_if_permissive();
         self
+    }
+
+    /// Append a tool_info hint to the description when the schema is permissive
+    /// (no typed properties), so the LLM knows to call tool_info for the full schema.
+    fn append_schema_hint_if_permissive(&mut self) {
+        if Self::is_permissive_schema(&self.advertised_schema)
+            && !self.description.contains("tool_info")
+        {
+            self.description
+                .push_str(" (call tool_info for parameter schema)");
+        }
+    }
+
+    /// Remove the tool_info hint from the description (e.g. after with_schema adds real types).
+    fn strip_schema_hint(&mut self) {
+        if let Some(pos) = self
+            .description
+            .find(" (call tool_info for parameter schema)")
+        {
+            self.description.truncate(pos);
+        }
     }
 
     /// Set credentials for HTTP request placeholder injection.
@@ -615,9 +676,31 @@ impl WasmToolWrapper {
                 }
             })?;
 
+        // Get typed interface — used for execute and error hints.
+        let tool_iface = instance.near_agent_tool();
+
+        // Determine effective schema for type coercion.
+        // Priority:
+        // 1. cached coercion_schema
+        // 2. discovery_schema (WASM-exported or sidecar override) if typed
+        // 3. lazy WASM extraction when discovery_schema is still permissive
+        let effective_schema = if let Some(cached) = self.coercion_schema.get() {
+            cached
+        } else if Self::is_permissive_schema(&self.discovery_schema) {
+            // Discovery schema is still permissive — try extracting from the WASM export.
+            if let Ok(schema_str) = tool_iface.call_schema(&mut store)
+                && let Ok(schema_val) = serde_json::from_str::<serde_json::Value>(&schema_str)
+            {
+                let _ = self.coercion_schema.set(schema_val);
+            }
+            self.coercion_schema.get().unwrap_or(&self.discovery_schema)
+        } else {
+            &self.discovery_schema
+        };
+
         // Coerce string-encoded values to their schema-declared types.
         // LLMs frequently pass numeric values as strings (e.g. "5" instead of 5).
-        let params = coerce_params_to_schema(params, &self.schema);
+        let params = coerce_params_to_schema(params, effective_schema);
 
         // Prepare the request
         let params_json = serde_json::to_string(&params)
@@ -629,7 +712,6 @@ impl WasmToolWrapper {
         };
 
         // Call execute using the generated typed interface
-        let tool_iface = instance.near_agent_tool();
         let response = tool_iface.call_execute(&mut store, &request).map_err(|e| {
             let error_str = e.to_string();
             if error_str.contains("out of fuel") {
@@ -644,12 +726,18 @@ impl WasmToolWrapper {
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
 
-        // Check for tool-level error — on failure, call the WASM module's
-        // description() and schema() exports so the LLM can retry with the
-        // correct parameters without us having to include the (large) schema
-        // in every request's tools array.
+        // Check for tool-level error — point the LLM to tool_info for the
+        // full schema instead of dumping ~3.5KB inline. Only show the tip
+        // once per turn (reset via on_turn_start()).
         if let Some(err) = response.error {
-            let hint = build_tool_hint(tool_iface, &mut store);
+            let hint = if !self.hint_sent.swap(true, Ordering::Relaxed) {
+                format!(
+                    "Tip: call tool_info(name: \"{}\", include_schema: true) for the full parameter schema.",
+                    self.prepared.name
+                )
+            } else {
+                String::new()
+            };
             return Err(WasmError::ToolReturnedError { message: err, hint });
         }
 
@@ -658,47 +746,55 @@ impl WasmToolWrapper {
     }
 }
 
-/// Maximum characters for the description portion of a tool hint.
-const HINT_DESC_MAX: usize = 500;
-/// Maximum characters for the schema portion of a tool hint.
-const HINT_SCHEMA_MAX: usize = 3000;
+/// Extract metadata (description + schema) from a WASM tool by briefly
+/// instantiating it and calling its `description()` and `schema()` exports.
+/// Analogous to MCP's `list_tools()` — discovers tool capabilities at load time.
+///
+/// Falls back to generic description and permissive schema on failure.
+pub(super) fn extract_wasm_metadata(
+    engine: &wasmtime::Engine,
+    component: &wasmtime::component::Component,
+    limits: &ResourceLimits,
+) -> Result<(String, serde_json::Value), WasmError> {
+    let store_data = StoreData::new(
+        limits.memory_bytes,
+        Capabilities::default(),
+        HashMap::new(),
+        vec![],
+    );
+    let mut store = Store::new(engine, store_data);
 
-/// Call the WASM module's `description()` and `schema()` exports to build a
-/// hint string.  Returns an empty string if both calls fail or return empty.
-/// Description is capped at [`HINT_DESC_MAX`] chars, schema at
-/// [`HINT_SCHEMA_MAX`] chars.
-fn build_tool_hint(tool_iface: &wit_tool::Guest, store: &mut Store<StoreData>) -> String {
-    let desc = tool_iface
-        .call_description(&mut *store)
+    // Configure fuel + epoch deadline so extraction can't hang
+    if let Err(e) = store.set_fuel(limits.fuel) {
+        tracing::debug!("Fuel not enabled for metadata extraction: {e}");
+    }
+    store.epoch_deadline_trap();
+    let ticks = (limits.timeout.as_millis() / EPOCH_TICK_INTERVAL.as_millis()).max(1) as u64;
+    store.set_epoch_deadline(ticks);
+    store.limiter(|data| &mut data.limiter);
+
+    // Instantiate with minimal linker
+    let mut linker = Linker::new(engine);
+    WasmToolWrapper::add_host_functions(&mut linker)?;
+    let instance = SandboxedTool::instantiate(&mut store, component, &linker)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+    let tool_iface = instance.near_agent_tool();
+
+    // Extract description (fall back to generic)
+    let description = tool_iface
+        .call_description(&mut store)
+        .unwrap_or_else(|_| "WASM sandboxed tool".to_string());
+
+    // Extract and parse schema (fall back to permissive)
+    let schema = tool_iface
+        .call_schema(&mut store)
         .ok()
-        .unwrap_or_default();
-    let schema = tool_iface.call_schema(&mut *store).ok().unwrap_or_default();
-    if desc.is_empty() && schema.is_empty() {
-        return String::new();
-    }
-    let mut hint = String::new();
-    if !desc.is_empty() {
-        hint.push_str("Description: ");
-        if desc.len() > HINT_DESC_MAX {
-            let end = crate::util::floor_char_boundary(&desc, HINT_DESC_MAX);
-            hint.push_str(&desc[..end]);
-            hint.push('…');
-        } else {
-            hint.push_str(&desc);
-        }
-        hint.push('\n');
-    }
-    if !schema.is_empty() {
-        hint.push_str("Parameters schema: ");
-        if schema.len() > HINT_SCHEMA_MAX {
-            let end = crate::util::floor_char_boundary(&schema, HINT_SCHEMA_MAX);
-            hint.push_str(&schema[..end]);
-            hint.push('…');
-        } else {
-            hint.push_str(&schema);
-        }
-    }
-    hint
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| {
+            serde_json::json!({"type": "object", "properties": {}, "additionalProperties": true})
+        });
+
+    Ok((description, schema))
 }
 
 #[async_trait]
@@ -712,7 +808,20 @@ impl Tool for WasmToolWrapper {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        self.schema.clone()
+        self.advertised_schema.clone()
+    }
+
+    fn on_turn_start(&self) {
+        self.hint_sent.store(false, Ordering::Relaxed);
+    }
+
+    fn discovery_schema(&self) -> serde_json::Value {
+        // Return coercion_schema if available (lazily extracted from WASM export),
+        // otherwise fall back to the registration-time discovery schema.
+        self.coercion_schema
+            .get()
+            .cloned()
+            .unwrap_or_else(|| self.discovery_schema.clone())
     }
 
     async fn execute(
@@ -749,8 +858,11 @@ impl Tool for WasmToolWrapper {
         let prepared = Arc::clone(&self.prepared);
         let capabilities = self.capabilities.clone();
         let description = self.description.clone();
-        let schema = self.schema.clone();
+        let advertised_schema = self.advertised_schema.clone();
+        let discovery_schema = self.discovery_schema.clone();
         let credentials = self.credentials.clone();
+        let coercion_schema_shared = Arc::clone(&self.coercion_schema);
+        let hint_sent_shared = Arc::clone(&self.hint_sent);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -759,10 +871,13 @@ impl Tool for WasmToolWrapper {
                 prepared,
                 capabilities,
                 description,
-                schema,
+                advertised_schema,
+                discovery_schema,
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
+                coercion_schema: coercion_schema_shared,
+                hint_sent: hint_sent_shared,
             };
 
             tokio::task::spawn_blocking(move || {
@@ -1232,6 +1347,7 @@ mod tests {
         TEST_GOOGLE_OAUTH_TOKEN, TEST_OAUTH_CLIENT_ID, TEST_OAUTH_CLIENT_SECRET,
         test_secrets_store,
     };
+    use crate::tools::tool::Tool;
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
 
@@ -1244,6 +1360,61 @@ mod tests {
 
         // Runtime was created successfully
         assert!(runtime.config().fuel_config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_advertised_schema_stays_permissive_until_sidecar_override() {
+        let discovery_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "limit": { "type": "integer" }
+            },
+            "required": ["query"]
+        });
+
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap());
+        let prepared = runtime
+            .prepare("search", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap();
+        let mut wrapper =
+            super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default());
+        wrapper.discovery_schema = discovery_schema.clone();
+        wrapper.description = "Search documents".to_string();
+        wrapper.append_schema_hint_if_permissive();
+
+        assert_eq!(
+            wrapper.parameters_schema(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        );
+        assert_eq!(wrapper.discovery_schema(), discovery_schema);
+        assert!(wrapper.description().contains("tool_info"));
+
+        let wrapper = wrapper.with_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"]
+        }));
+
+        assert_eq!(
+            wrapper.parameters_schema(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"]
+            })
+        );
+        assert_eq!(wrapper.discovery_schema(), wrapper.parameters_schema());
+        assert!(!wrapper.description().contains("tool_info"));
     }
 
     #[test]
@@ -1786,6 +1957,23 @@ mod tests {
         let result = super::coerce_params_to_schema(params, &schema);
         // Should remain as string since it can't be parsed
         assert_eq!(result["count"], serde_json::json!("not-a-number"));
+    }
+
+    /// Regression: permissive fallback schema (empty properties) must NOT coerce.
+    /// This documents the bug where WASM tools with no sidecar `parameters` field
+    /// got the permissive fallback, causing coercion to be a no-op and LLM-provided
+    /// string integers to reach the WASM tool un-coerced.
+    #[test]
+    fn test_coerce_noop_with_permissive_schema() {
+        let permissive = serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+        });
+        let params = serde_json::json!({"query": "test", "count": "10"});
+        let result = super::coerce_params_to_schema(params, &permissive);
+        // With empty properties, no coercion happens — string stays string
+        assert_eq!(result["count"], serde_json::json!("10"));
     }
 
     /// Regression test: leak scan must run on raw headers (before credential

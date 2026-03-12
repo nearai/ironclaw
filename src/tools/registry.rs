@@ -75,6 +75,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_generate",
     "image_edit",
     "image_analyze",
+    "tool_info",
 ];
 
 /// Registry of available tools.
@@ -198,6 +199,14 @@ impl ToolRegistry {
         self.tools.read().await.values().cloned().collect()
     }
 
+    /// Notify all registered tools that a new agent turn has started.
+    /// Tools use this to reset per-turn state (e.g. error hint deduplication).
+    pub async fn notify_turn_start(&self) {
+        for tool in self.tools.read().await.values() {
+            tool.on_turn_start();
+        }
+    }
+
     /// Get tool definitions for LLM function calling.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
@@ -243,6 +252,17 @@ impl ToolRegistry {
         self.register_sync(Arc::new(http));
 
         tracing::debug!("Registered {} built-in tools", self.count());
+    }
+
+    /// Register the `tool_info` discovery tool.
+    ///
+    /// Requires `Arc<Self>` so the tool can query the registry for other tools'
+    /// schemas at runtime. Call after `register_builtin_tools()`.
+    pub fn register_tool_info(self: &Arc<Self>) {
+        use crate::tools::builtin::ToolInfoTool;
+        let tool = ToolInfoTool::new(Arc::clone(self));
+        self.register_sync(Arc::new(tool));
+        tracing::debug!("Registered tool_info discovery tool");
     }
 
     /// Register only orchestrator-domain tools (safe for the main process).
