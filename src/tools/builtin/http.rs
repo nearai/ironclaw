@@ -282,7 +282,7 @@ impl Tool for HttpTool {
                 "method": {
                     "type": "string",
                     "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"],
-                    "description": "HTTP method"
+                    "description": "HTTP method (default: GET)"
                 },
                 "url": {
                     "type": "string",
@@ -313,7 +313,7 @@ impl Tool for HttpTool {
                     "description": "Save response body as raw bytes to this file path instead of returning it. Use for binary downloads (images, PDFs, etc.). The path must be under /tmp/."
                 }
             },
-            "required": ["method", "url"]
+            "required": ["url"]
         })
     }
 
@@ -324,7 +324,7 @@ impl Tool for HttpTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let method = require_str(&params, "method")?;
+        let method = params["method"].as_str().unwrap_or("GET");
 
         let url = require_str(&params, "url")?;
         let mut parsed_url = validate_url(url)?;
@@ -596,10 +596,9 @@ impl Tool for HttpTool {
             return ApprovalRequirement::Always;
         }
 
-        // GET requests are low-risk reads; method is required by schema,
-        // but fall back to UnlessAutoApproved if somehow absent.
-        let method = params["method"].as_str();
-        if method.is_some_and(|m| m.eq_ignore_ascii_case("GET")) {
+        // GET requests (or missing method, since GET is the default) are low-risk
+        let method = params["method"].as_str().unwrap_or("GET");
+        if method.eq_ignore_ascii_case("GET") {
             return ApprovalRequirement::Never;
         }
 
