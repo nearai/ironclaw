@@ -8,6 +8,8 @@ activation state, and stale registry flags.
 Tests are ordered with dependencies tracked via module-level state.
 """
 
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -266,8 +268,7 @@ async def test_tools_registered_after_activate(ironclaw_server):
     r = await api_get(ironclaw_server, "/api/extensions/tools")
     assert r.status_code == 200
     tool_names = [t["name"] for t in r.json()["tools"]]
-    # WASM tool names use underscores (from binary stem)
-    assert any("web_search" in name or "web-search" in name for name in tool_names), (
+    assert "web-search" in tool_names, (
         f"web-search tool not found in tools list: {tool_names}"
     )
 
@@ -403,9 +404,12 @@ async def test_removed_extension_not_listed(ironclaw_server):
     if not _ws_installed:
         pytest.skip("web-search not installed")
 
-    # After removal, the extension itself should report no tools
-    ext = await _get_extension(ironclaw_server, "web-search")
-    assert ext is None, "web-search should not be in extensions after removal"
+    r = await api_get(ironclaw_server, "/api/extensions/tools")
+    assert r.status_code == 200
+    tool_names = [t["name"] for t in r.json()["tools"]]
+    assert "web-search" not in tool_names, (
+        f"Removed web-search tool should not remain registered: {tool_names}"
+    )
 
 
 async def test_removed_not_in_registry_installed(ironclaw_server):
@@ -421,10 +425,32 @@ async def test_removed_not_in_registry_installed(ironclaw_server):
     assert ws_entry["installed"] is False, "Registry should show installed=False"
 
 
-async def test_reinstall_after_remove(ironclaw_server):
-    """Extension can be reinstalled after removal."""
+async def test_activate_after_remove_uses_replacement_bytes_not_cached_module(
+    ironclaw_server, wasm_tools_dir
+):
+    """After removal, activation must use the replacement bytes rather than a stale cache."""
     if not _ws_installed:
         pytest.skip("web-search not installed")
+
+    wasm_path = Path(wasm_tools_dir) / "web-search.wasm"
+    wasm_path.write_bytes(b"not-a-valid-wasm-component")
+
+    r = await api_post(
+        ironclaw_server, "/api/extensions/web-search/activate", timeout=30
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("success") is False, (
+        f"Activation should fail against replacement bytes, got: {data}"
+    )
+
+
+async def test_reinstall_after_remove(ironclaw_server):
+    """Extension can be reinstalled after removal without stale activation errors."""
+    if not _ws_installed:
+        pytest.skip("web-search not installed")
+
+    await _ensure_removed(ironclaw_server, "web-search")
 
     r = await api_post(
         ironclaw_server,
@@ -440,6 +466,8 @@ async def test_reinstall_after_remove(ironclaw_server):
 
     ext = await _get_extension(ironclaw_server, "web-search")
     assert ext is not None, "web-search not found after reinstall"
+    assert ext["active"] is True, "Reinstalled tool should auto-activate via saved secrets"
+    assert ext["authenticated"] is True, "Saved secret should still authenticate on reinstall"
     # Verify no stale activation error from previous install
     assert ext.get("activation_error") is None or ext.get("activation_error") == "", (
         f"Reinstalled extension should have no stale activation error: {ext}"

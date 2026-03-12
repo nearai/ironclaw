@@ -3054,6 +3054,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_oauth_callback_expired_flow_broadcasts_auth_completed_failure() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+
+        let ext_mgr = Arc::new(ExtensionManager::new(
+            mcp_sm,
+            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
+            secrets.clone(),
+            tool_registry,
+            None,
+            None,
+            std::path::PathBuf::from("/tmp/wasm_tools"),
+            std::path::PathBuf::from("/tmp/wasm_channels"),
+            None,
+            "test".to_string(),
+            None,
+            vec![],
+        ));
+
+        let (sender, mut receiver) = tokio::sync::broadcast::channel(4);
+        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "test_tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "test_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "test".to_string(),
+            secrets,
+            sse_sender: Some(sender),
+            gateway_token: None,
+            created_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(600))
+                .expect("System uptime is too low to run expired flow test"),
+        };
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("expired_state".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/oauth/callback?code=test_code&state=expired_state")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("auth_completed event") {
+            crate::channels::web::types::SseEvent::AuthCompleted {
+                extension_name,
+                success,
+                message,
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(!success, "expired OAuth flow should broadcast failure");
+                assert_eq!(message, "OAuth flow expired. Please try again.");
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_oauth_callback_no_extension_manager() {
         use axum::body::Body;
         use tower::ServiceExt;

@@ -21,6 +21,16 @@ _auth_url = None
 _csrf_state = None
 
 
+def _extract_state(auth_url: str) -> str:
+    """Extract the CSRF state parameter from an OAuth authorization URL."""
+    parsed = urlparse(auth_url)
+    qs = parse_qs(parsed.query)
+    assert "state" in qs, f"auth_url should contain state param: {auth_url}"
+    state = qs["state"][0]
+    assert len(state) > 0
+    return state
+
+
 async def _get_extension(base_url, name):
     """Get a specific extension from the extensions list, or None."""
     r = await api_get(base_url, "/api/extensions")
@@ -79,12 +89,7 @@ async def test_oauth_configure_returns_auth_url(ironclaw_server):
         f"auth_url should point to Google: {_auth_url}"
     )
 
-    # Extract CSRF state from the auth URL
-    parsed = urlparse(_auth_url)
-    qs = parse_qs(parsed.query)
-    assert "state" in qs, f"auth_url should contain state param: {_auth_url}"
-    _csrf_state = qs["state"][0]
-    assert len(_csrf_state) > 0
+    _csrf_state = _extract_state(_auth_url)
 
 
 async def test_oauth_activate_returns_auth_url(ironclaw_server):
@@ -122,9 +127,7 @@ async def test_oauth_callback_exchanges_token(ironclaw_server):
     data = r.json()
     auth_url = data.get("auth_url")
     if auth_url:
-        parsed = urlparse(auth_url)
-        qs = parse_qs(parsed.query)
-        _csrf_state = qs["state"][0]
+        _csrf_state = _extract_state(auth_url)
 
     # Hit the OAuth callback endpoint directly (public route, no auth header).
     # The callback handler looks up the pending flow by state, calls
@@ -206,6 +209,49 @@ async def test_oauth_tools_registered(ironclaw_server):
     assert len(tools) > 0, (
         f"gmail should have tools registered after auth: {ext}"
     )
+
+
+async def test_remove_during_pending_oauth_invalidates_callback(ironclaw_server):
+    """Removing an extension while OAuth is pending invalidates the callback state."""
+    if not _gmail_installed:
+        pytest.skip("gmail not installed")
+
+    r = await api_post(
+        ironclaw_server,
+        "/api/extensions/gmail/setup",
+        json={"secrets": {}},
+        timeout=30,
+    )
+    assert r.status_code == 200
+    data = r.json()
+    auth_url = data.get("auth_url")
+    assert auth_url is not None, f"Expected auth_url in response: {data}"
+    callback_state = _extract_state(auth_url)
+
+    remove_r = await api_post(
+        ironclaw_server, "/api/extensions/gmail/remove", timeout=30
+    )
+    assert remove_r.status_code == 200
+    assert remove_r.json().get("success") is True, (
+        f"Removing gmail during pending OAuth should succeed: {remove_r.text[:300]}"
+    )
+
+    async with httpx.AsyncClient() as client:
+        callback_r = await client.get(
+            f"{ironclaw_server}/oauth/callback",
+            params={"code": "mock_auth_code", "state": callback_state},
+            timeout=30,
+            follow_redirects=True,
+        )
+
+    assert callback_r.status_code == 200
+    body = callback_r.text.lower()
+    assert "error" in body or "fail" in body or "expired" in body, (
+        f"Callback after removal should fail: {callback_r.text[:500]}"
+    )
+
+    ext = await _get_extension(ironclaw_server, "gmail")
+    assert ext is None, "gmail should remain removed after invalidated callback"
 
 
 # ── Section C: Cleanup ──────────────────────────────────────────────────
