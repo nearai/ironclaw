@@ -100,7 +100,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
 cron = "0.13"
 
 # Safety/sanitization
-ironclaw_safety = { path = "crates/ironclaw_safety" }
+ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.1.0" }
 regex = "1"
 aho-corasick = "1"
 
