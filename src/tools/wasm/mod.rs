@@ -96,7 +96,7 @@ pub(crate) mod storage;
 mod wrapper;
 
 // Core types
-pub use error::{TrapCode, TrapInfo, WasmError};
+pub use error::WasmError;
 pub use host::{HostState, LogEntry, LogLevel};
 pub use limits::{
     DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT, FuelConfig, ResourceLimits,

@@ -290,6 +290,7 @@ impl AppBuilder {
             Arc::new(ToolRegistry::new())
         };
         tools.register_builtin_tools();
+        tools.register_tool_info();
 
         if let Some(ref ss) = self.secrets_store {
             tools.register_secrets_tools(Arc::clone(ss));
