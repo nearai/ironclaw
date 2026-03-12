@@ -116,9 +116,23 @@ impl CapabilitiesFile {
     ///
     /// Channel-level JSON nests tool capabilities under `"capabilities"`.
     /// This promotes the inner fields so callers can access them uniformly.
-    fn resolve_nested(mut self) -> Self {
+    /// Maximum nesting depth for capabilities resolution.
+    const MAX_NESTED_DEPTH: usize = 8;
+
+    fn resolve_nested(self) -> Self {
+        self.resolve_nested_inner(0)
+    }
+
+    fn resolve_nested_inner(mut self, depth: usize) -> Self {
+        if depth > Self::MAX_NESTED_DEPTH {
+            tracing::warn!(
+                "Capabilities nesting exceeds maximum depth of {}, stopping resolution",
+                Self::MAX_NESTED_DEPTH
+            );
+            return self;
+        }
         if let Some(inner) = self.capabilities.take() {
-            let inner = inner.resolve_nested();
+            let inner = inner.resolve_nested_inner(depth + 1);
             self.description = self.description.or(inner.description);
             self.parameters = self.parameters.or(inner.parameters);
             self.http = self.http.or(inner.http);
@@ -1382,5 +1396,21 @@ mod tests {
             Some("Outer description wins"),
             "Outer description should take precedence over inner"
         );
+    }
+
+    /// Regression test for issue #974: deeply nested capabilities wrappers
+    /// must not cause stack overflow. resolve_nested should stop at
+    /// MAX_NESTED_DEPTH and return gracefully.
+    #[test]
+    fn test_resolve_nested_depth_limit() {
+        // Build a capabilities file nested beyond MAX_NESTED_DEPTH (8).
+        // The description is at the innermost level which is beyond the limit,
+        // so it won't be resolved — the key assertion is no stack overflow.
+        let mut json = r#"{ "description": "leaf" }"#.to_string();
+        for _ in 0..20 {
+            json = format!(r#"{{ "capabilities": {json} }}"#);
+        }
+        // Should not stack overflow — this is the primary assertion.
+        let _caps = CapabilitiesFile::from_json(&json).unwrap();
     }
 }
