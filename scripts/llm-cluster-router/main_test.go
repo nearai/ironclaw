@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -154,6 +156,27 @@ func TestParseComputeAppsCSV(t *testing.T) {
 	}
 }
 
+func TestParseComputeAppsCSVAllowsUnavailableMemory(t *testing.T) {
+	t.Parallel()
+
+	raw := "GPU-3090, 4321, python, [N/A]\n"
+
+	got, err := parseComputeAppsCSV(raw)
+	if err != nil {
+		t.Fatalf("parseComputeAppsCSV returned error: %v", err)
+	}
+
+	want := map[string][]gpuProcess{
+		"GPU-3090": {
+			{PID: 4321, ProcessName: "python", UsedMemoryMiB: 0},
+		},
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseComputeAppsCSV mismatch\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestAttachGPUProcesses(t *testing.T) {
 	t.Parallel()
 
@@ -174,5 +197,71 @@ func TestAttachGPUProcesses(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got[1].Processes, processes["GPU-4070"]) {
 		t.Fatalf("expected attached processes on second gpu, got %#v", got[1].Processes)
+	}
+}
+
+func TestRunBenchRequestSetsMaxTokens(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if got := int(payload["max_tokens"].(float64)); got != 64 {
+			t.Fatalf("max_tokens = %d, want 64", got)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+
+	result := runBenchRequest(server.Client(), server.URL, "qwen3.5-27b", "local", "hello", time.Second, 64)
+	if !result.OK {
+		t.Fatalf("runBenchRequest returned error: %#v", result)
+	}
+}
+
+func TestRunCancelProbeSetsMaxTokens(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if got := int(payload["max_tokens"].(float64)); got != 64 {
+			t.Fatalf("max_tokens = %d, want 64", got)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+
+	result := runCancelProbe(server.URL, "qwen3.5-27b", "local", "hello", 10*time.Millisecond, 64)
+	if result.Error != "" {
+		t.Fatalf("runCancelProbe returned error: %#v", result)
 	}
 }

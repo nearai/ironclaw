@@ -628,6 +628,7 @@ func runBench(args []string) error {
 	prompt := fs.String("prompt", "Bench the live local route and reply with a short acknowledgement.", "benchmark prompt")
 	requests := fs.Int("requests", 4, "number of requests")
 	concurrency := fs.Int("concurrency", 1, "number of concurrent requests")
+	maxTokens := fs.Int("max-tokens", 64, "maximum completion tokens per request")
 	timeout := fs.Duration("timeout", 3*time.Minute, "request timeout")
 	cancelAfter := fs.Duration("cancel-after", 1500*time.Millisecond, "cancel one probe request after this duration")
 	output := fs.String("output", filepath.Join(os.TempDir(), "ironclaw-mission-control-benchmark.json"), "benchmark report path")
@@ -651,7 +652,7 @@ func runBench(args []string) error {
 		go func() {
 			defer wg.Done()
 			for idx := range work {
-				results[idx] = runBenchRequest(client, *baseURL, *model, *apiKey, *prompt, *timeout)
+				results[idx] = runBenchRequest(client, *baseURL, *model, *apiKey, *prompt, *timeout, *maxTokens)
 			}
 		}()
 	}
@@ -662,7 +663,7 @@ func runBench(args []string) error {
 	close(work)
 	wg.Wait()
 
-	cancelResult := runCancelProbe(*baseURL, *model, *apiKey, *prompt, *cancelAfter)
+	cancelResult := runCancelProbe(*baseURL, *model, *apiKey, *prompt, *cancelAfter, *maxTokens)
 	healthBefore, _ := fetchJSON(client, strings.TrimRight(*baseURL, "/")+"/healthz")
 	modelsPayload, _ := fetchJSON(client, strings.TrimRight(*baseURL, "/")+"/v1/models")
 
@@ -808,7 +809,7 @@ func parseComputeAppsCSV(raw string) (map[string][]gpuProcess, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse pid: %w", err)
 		}
-		usedMemory, err := parseMetricInt(fields[3])
+		usedMemory, err := parseOptionalMetricInt(fields[3])
 		if err != nil {
 			return nil, fmt.Errorf("parse process memory: %w", err)
 		}
@@ -861,6 +862,14 @@ func parseMetricInt(raw string) (int, error) {
 	return strconv.Atoi(cleaned)
 }
 
+func parseOptionalMetricInt(raw string) (int, error) {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" || cleaned == "N/A" || cleaned == "[N/A]" {
+		return 0, nil
+	}
+	return parseMetricInt(cleaned)
+}
+
 type requestResult struct {
 	OK                  bool
 	Error               string
@@ -900,14 +909,15 @@ type benchmarkReport struct {
 	RawResults                []requestResult   `json:"raw_results"`
 }
 
-func runBenchRequest(client *http.Client, baseURL, model, apiKey, prompt string, timeout time.Duration) requestResult {
+func runBenchRequest(client *http.Client, baseURL, model, apiKey, prompt string, timeout time.Duration, maxTokens int) requestResult {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	payload := map[string]any{
-		"model":  model,
-		"stream": true,
+		"model":      model,
+		"max_tokens": maxTokens,
+		"stream":     true,
 		"stream_options": map[string]any{
 			"include_usage": true,
 		},
@@ -983,14 +993,19 @@ func runBenchRequest(client *http.Client, baseURL, model, apiKey, prompt string,
 	return result
 }
 
-func runCancelProbe(baseURL, model, apiKey, prompt string, cancelAfter time.Duration) cancelProbeResult {
+func runCancelProbe(baseURL, model, apiKey, prompt string, cancelAfter time.Duration, maxTokens int) cancelProbeResult {
 	start := time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	clientTimeout := cancelAfter + 5*time.Second
+	if clientTimeout < 5*time.Second {
+		clientTimeout = 5 * time.Second
+	}
 
 	payload := map[string]any{
-		"model":  model,
-		"stream": true,
+		"model":      model,
+		"max_tokens": maxTokens,
+		"stream":     true,
 		"messages": []map[string]string{
 			{"role": "user", "content": prompt + " Keep streaming so cancellation can be observed."},
 		},
@@ -1010,7 +1025,7 @@ func runCancelProbe(baseURL, model, apiKey, prompt string, cancelAfter time.Dura
 		cancel()
 	}()
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: clientTimeout}).Do(req)
 	if err != nil {
 		return cancelProbeResult{
 			CancelledCleanly: strings.Contains(strings.ToLower(err.Error()), "context canceled"),
