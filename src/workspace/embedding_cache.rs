@@ -72,12 +72,12 @@ impl CachedEmbeddingProvider {
     }
 
     /// Number of entries currently in the cache.
-    pub async fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Whether the cache is empty.
-    pub async fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -85,7 +85,7 @@ impl CachedEmbeddingProvider {
     }
 
     /// Clear all cached entries.
-    pub async fn clear(&self) {
+    pub fn clear(&self) {
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(inner.embed_calls(), 1); // still 1 -- cache hit
         assert_eq!(r1, r2);
 
-        assert_eq!(cached.len().await, 1);
+        assert_eq!(cached.len(), 1);
     }
 
     #[tokio::test]
@@ -344,7 +344,7 @@ mod tests {
         cached.embed("hello").await.unwrap();
         cached.embed("world").await.unwrap();
         assert_eq!(inner.embed_calls(), 2);
-        assert_eq!(cached.len().await, 2);
+        assert_eq!(cached.len(), 2);
     }
 
     #[tokio::test]
@@ -375,11 +375,11 @@ mod tests {
 
         cached.embed("first").await.unwrap();
         cached.embed("second").await.unwrap();
-        assert_eq!(cached.len().await, 2);
+        assert_eq!(cached.len(), 2);
 
         // Third entry should evict the oldest ("first")
         cached.embed("third").await.unwrap();
-        assert_eq!(cached.len().await, 2);
+        assert_eq!(cached.len(), 2);
         assert_eq!(inner.embed_calls(), 3);
 
         // "first" should be a cache miss now
@@ -408,7 +408,7 @@ mod tests {
         // Should have called embed_batch on inner for 2 misses
         assert_eq!(inner.batch_calls(), 1);
         assert_eq!(results.len(), 3);
-        assert_eq!(cached.len().await, 3); // all three now cached
+        assert_eq!(cached.len(), 3); // all three now cached
     }
 
     #[tokio::test]
@@ -498,12 +498,12 @@ mod tests {
         // First call fails
         let err = cached.embed("hello").await;
         assert!(err.is_err());
-        assert!(cached.is_empty().await, "cache should be empty after error");
+        assert!(cached.is_empty(), "cache should be empty after error");
 
         // Second call succeeds and should call the inner provider (not serve stale error)
         let result = cached.embed("hello").await;
         assert!(result.is_ok());
-        assert_eq!(cached.len().await, 1);
+        assert_eq!(cached.len(), 1);
     }
 
     #[tokio::test]
@@ -533,7 +533,7 @@ mod tests {
             1,
             "should call inner provider once for all misses"
         );
-        assert_eq!(cached.len().await, 3, "all results should be cached");
+        assert_eq!(cached.len(), 3, "all results should be cached");
 
         // Second call should be all hits — no new inner calls
         let results2 = cached.embed_batch(&texts).await.unwrap();
@@ -553,11 +553,11 @@ mod tests {
 
         // Should behave as max_entries=1 (clamped in constructor)
         cached.embed("hello").await.unwrap();
-        assert_eq!(cached.len().await, 1);
+        assert_eq!(cached.len(), 1);
 
         // Second entry evicts the first
         cached.embed("world").await.unwrap();
-        assert_eq!(cached.len().await, 1);
+        assert_eq!(cached.len(), 1);
         assert_eq!(inner.embed_calls(), 2);
     }
 }

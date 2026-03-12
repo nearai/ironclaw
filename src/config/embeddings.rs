@@ -33,7 +33,7 @@ pub struct EmbeddingsConfig {
     ///
     /// Approximate raw embedding payload: `cache_size × dimension × 4 bytes`.
     /// 10,000 × 1536 floats ≈ 58 MB (payload only; actual memory is higher
-    /// due to HashMap, String keys, and per-entry overhead).
+    /// due to HashMap buckets, per-entry Vec/timestamp overhead).
     pub cache_size: usize,
 }
 
