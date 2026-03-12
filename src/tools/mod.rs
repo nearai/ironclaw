@@ -12,6 +12,7 @@ pub mod builtin;
 pub mod execute;
 pub mod mcp;
 pub mod rate_limiter;
+pub mod redaction;
 pub mod schema_validator;
 pub mod wasm;
 
