@@ -114,6 +114,7 @@ fn install_linux() -> Result<()> {
          \n\
          [Service]\n\
          Type=simple\n\
+         Environment=\"CLI_ENABLED=false\"\n\
          ExecStart=\"{exe}\" run\n\
          Restart=always\n\
          RestartSec=3\n\
