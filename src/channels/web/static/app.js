@@ -1003,7 +1003,7 @@ function finalizeActivityGroup() {
 
 function showApproval(data) {
   // Avoid duplicate cards on reconnect/history refresh.
-  const existing = document.querySelector('.approval-card[data-request-id="' + data.request_id + '"]');
+  const existing = document.querySelector('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
   if (existing) return;
 
   const container = document.getElementById('chat-messages');
