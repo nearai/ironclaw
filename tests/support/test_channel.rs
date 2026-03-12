@@ -199,6 +199,82 @@ impl TestChannel {
 }
 
 // ---------------------------------------------------------------------------
+// TestChannelHandle -- wraps Arc<TestChannel> as Box<dyn Channel>
+// ---------------------------------------------------------------------------
+
+/// A thin wrapper around `Arc<TestChannel>` that implements `Channel`.
+///
+/// This lets us hand a `Box<dyn Channel>` to `ChannelManager::add()` while
+/// keeping an `Arc<TestChannel>` in the test rig for sending messages and
+/// reading captures. The `name_override` allows different test harnesses
+/// to present the channel under different names (e.g. "gateway" vs "test").
+pub struct TestChannelHandle {
+    inner: Arc<TestChannel>,
+    name: String,
+}
+
+impl TestChannelHandle {
+    /// Create a handle that delegates `name()` to the inner `TestChannel`.
+    pub fn new(inner: Arc<TestChannel>) -> Self {
+        Self {
+            name: inner.name().to_string(),
+            inner,
+        }
+    }
+
+    /// Create a handle with a custom channel name.
+    pub fn with_name(inner: Arc<TestChannel>, name: impl Into<String>) -> Self {
+        Self {
+            inner,
+            name: name.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl Channel for TestChannelHandle {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn start(&self) -> Result<MessageStream, ChannelError> {
+        self.inner.start().await
+    }
+
+    async fn respond(
+        &self,
+        msg: &IncomingMessage,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.inner.respond(msg, response).await
+    }
+
+    async fn send_status(
+        &self,
+        status: StatusUpdate,
+        metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        self.inner.send_status(status, metadata).await
+    }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.inner.broadcast(user_id, response).await
+    }
+
+    async fn health_check(&self) -> Result<(), ChannelError> {
+        self.inner.health_check().await
+    }
+
+    fn conversation_context(&self, metadata: &serde_json::Value) -> HashMap<String, String> {
+        self.inner.conversation_context(metadata)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Channel trait implementation
 // ---------------------------------------------------------------------------
 

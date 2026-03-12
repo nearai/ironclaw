@@ -197,7 +197,7 @@ All responses include:
 - `X-Content-Type-Options: nosniff`
 - `X-Frame-Options: DENY`
 
-**Request body limit:** 1 MB (`DefaultBodyLimit::max(1024 * 1024)`). Larger payloads return 413.
+**Request body limit:** 10 MB (`DefaultBodyLimit::max(10 * 1024 * 1024)`), sized for image uploads (#725). Larger payloads return 413.
 
 ## Pending Approvals
 

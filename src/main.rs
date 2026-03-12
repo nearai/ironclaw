@@ -77,6 +77,11 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return run_service_command(service_cmd);
         }
+        Some(Command::Skills(skills_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_skills_command(skills_cmd.clone(), cli.config.as_deref())
+                .await;
+        }
         Some(Command::Doctor) => {
             init_cli_tracing();
             return ironclaw::cli::run_doctor_command().await;
@@ -801,12 +806,12 @@ async fn async_main() -> anyhow::Result<()> {
                     };
 
                 // Restart listener if addr changed.
-                // Minimize lock scope: acquire, read old addr, release, then restart.
+                // Two-phase approach: bind outside the lock, then swap under lock.
                 let mut restart_failed = false;
                 if let Some(ref ws_arc) = sighup_webhook_server {
-                    let old_addr = {
+                    let (old_addr, router) = {
                         let ws = ws_arc.lock().await;
-                        ws.current_addr()
+                        (ws.current_addr(), ws.merged_router_clone())
                     }; // Lock released here
 
                     if old_addr != new_addr {
@@ -815,17 +820,45 @@ async fn async_main() -> anyhow::Result<()> {
                             old_addr,
                             new_addr
                         );
-                        // NOTE: Lock is held across restart_with_addr().await. This is
-                        // acceptable because SIGHUP is infrequent and restart is fast. A full
-                        // fix would require refactoring restart_with_addr to separate state
-                        // mutation from async I/O.
-                        let mut ws = ws_arc.lock().await;
-                        match ws.restart_with_addr(new_addr).await {
-                            Ok(()) => {
-                                tracing::info!("SIGHUP: webhook server restarted on {}", new_addr);
+
+                        match router {
+                            Some(app) => {
+                                // Phase 1: Bind new listener WITHOUT holding the lock.
+                                match tokio::net::TcpListener::bind(new_addr).await {
+                                    Ok(listener) => {
+                                        // Phase 2: Swap state under lock (no await inside).
+                                        let (old_tx, old_handle) = {
+                                            let mut ws = ws_arc.lock().await;
+                                            ws.install_listener(new_addr, listener, app)
+                                        }; // Lock released here
+
+                                        // Phase 3: Shut down old listener outside the lock.
+                                        if let Some(tx) = old_tx {
+                                            let _ = tx.send(());
+                                        }
+                                        if let Some(handle) = old_handle {
+                                            let _ = handle.await;
+                                        }
+
+                                        tracing::info!(
+                                            "SIGHUP: webhook server restarted on {}",
+                                            new_addr
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "SIGHUP: failed to bind to {}: {}",
+                                            new_addr,
+                                            e
+                                        );
+                                        restart_failed = true;
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                tracing::error!("SIGHUP: listener restart failed: {}", e);
+                            None => {
+                                tracing::error!(
+                                    "SIGHUP: cannot restart — server was never started"
+                                );
                                 restart_failed = true;
                             }
                         }

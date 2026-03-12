@@ -11,6 +11,16 @@ use uuid::Uuid;
 
 use crate::llm::recording::HttpInterceptor;
 
+/// Error returned when a job exceeds its token budget.
+#[derive(Debug, thiserror::Error)]
+#[error("Token budget exceeded: used {used} of {limit} allowed tokens")]
+pub struct TokenBudgetExceeded {
+    /// Total tokens consumed (including the call that exceeded the budget).
+    pub used: u64,
+    /// Configured token limit for this job.
+    pub limit: u64,
+}
+
 /// State of a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -265,15 +275,15 @@ impl JobContext {
         self.actual_cost += cost;
     }
 
-    /// Record token usage from an LLM call. Returns an error string if the
-    /// token budget has been exceeded after this addition.
-    pub fn add_tokens(&mut self, tokens: u64) -> Result<(), String> {
+    /// Record token usage from an LLM call. Returns an error if the token
+    /// budget has been exceeded after this addition.
+    pub fn add_tokens(&mut self, tokens: u64) -> Result<(), TokenBudgetExceeded> {
         self.total_tokens_used += tokens;
         if self.max_tokens > 0 && self.total_tokens_used > self.max_tokens {
-            Err(format!(
-                "Token budget exceeded: used {} of {} allowed tokens",
-                self.total_tokens_used, self.max_tokens
-            ))
+            Err(TokenBudgetExceeded {
+                used: self.total_tokens_used,
+                limit: self.max_tokens,
+            })
         } else {
             Ok(())
         }

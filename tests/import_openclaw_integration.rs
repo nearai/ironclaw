@@ -4,14 +4,14 @@
 //! verifying that data is correctly stored, idempotent, and that dry-run mode
 //! prevents modifications.
 
-#![cfg(all(feature = "import", feature = "libsql"))]
+#![cfg(feature = "import")]
 
-#[cfg(all(feature = "import", feature = "libsql"))]
+#[cfg(feature = "import")]
 mod import_integration_tests {
     use ironclaw::db::Database;
     use ironclaw::db::libsql::LibSqlBackend;
+    use ironclaw::import::ImportStats;
     use ironclaw::import::openclaw::reader::OpenClawReader;
-    use ironclaw::import::{ImportOptions, ImportStats};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -29,7 +29,7 @@ mod import_integration_tests {
     }
 
     /// Helper: Create a test OpenClaw directory with full structure
-    fn create_test_openclaw() -> Result<(TempDir, PathBuf), Box<dyn std::error::Error>> {
+    async fn create_test_openclaw() -> Result<(TempDir, PathBuf), Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let openclaw_path = temp_dir.path().to_path_buf();
 
@@ -63,17 +63,16 @@ mod import_integration_tests {
         let agents_dir = openclaw_path.join("agents");
         std::fs::create_dir_all(&agents_dir)?;
 
-        create_test_agent_db(&agents_dir.join("agent1.sqlite"))?;
-        create_test_agent_db(&agents_dir.join("agent2.sqlite"))?;
+        create_test_agent_db(&agents_dir.join("agent1.sqlite")).await?;
+        create_test_agent_db(&agents_dir.join("agent2.sqlite")).await?;
 
         Ok((temp_dir, openclaw_path))
     }
 
-    /// Helper: Create a test agent SQLite database
-    fn create_test_agent_db(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-        use rusqlite::Connection;
-
-        let conn = Connection::open(db_path)?;
+    /// Helper: Create a test agent SQLite database using libsql
+    async fn create_test_agent_db(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        let db = libsql::Builder::new_local(db_path).build().await?;
+        let conn = db.connect()?;
 
         // Chunks table
         conn.execute(
@@ -84,27 +83,30 @@ mod import_integration_tests {
                 embedding BLOB,
                 chunk_index INTEGER NOT NULL
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         for i in 0..3 {
             conn.execute(
-                "INSERT INTO chunks (id, path, content, embedding, chunk_index) VALUES (?, ?, ?, ?, ?)",
-                rusqlite::params![
+                "INSERT INTO chunks (id, path, content, embedding, chunk_index) VALUES (?1, ?2, ?3, ?4, ?5)",
+                libsql::params![
                     Uuid::new_v4().to_string(),
                     format!("doc/section_{}.md", i),
                     format!("Chunk {} content", i),
-                    None::<Vec<u8>>,
-                    i
+                    libsql::Value::Null,
+                    i as i64
                 ],
-            )?;
+            )
+            .await?;
         }
 
         // Conversations
         conn.execute(
             "CREATE TABLE conversations (id TEXT PRIMARY KEY, channel TEXT, created_at TEXT)",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         conn.execute(
             "CREATE TABLE messages (
@@ -114,26 +116,29 @@ mod import_integration_tests {
                 content TEXT NOT NULL,
                 created_at TEXT
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         let conv_id = Uuid::new_v4().to_string();
         conn.execute(
-            "INSERT INTO conversations VALUES (?, ?, ?)",
-            rusqlite::params![&conv_id, "slack", "2024-01-15T10:00:00Z"],
-        )?;
+            "INSERT INTO conversations VALUES (?1, ?2, ?3)",
+            libsql::params![conv_id.as_str(), "slack", "2024-01-15T10:00:00Z"],
+        )
+        .await?;
 
         for j in 0..2 {
             conn.execute(
-                "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                rusqlite::params![
+                "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                libsql::params![
                     Uuid::new_v4().to_string(),
-                    &conv_id,
+                    conv_id.as_str(),
                     if j % 2 == 0 { "user" } else { "assistant" },
                     format!("Message {}", j),
                     format!("2024-01-15T10:{:02}:00Z", j)
                 ],
-            )?;
+            )
+            .await?;
         }
 
         Ok(())
@@ -146,8 +151,9 @@ mod import_integration_tests {
     #[tokio::test]
     async fn test_full_import_with_database_writes() {
         let (db, _db_temp) = create_test_db().await.expect("DB creation failed");
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
 
         // Verify DB starts empty
         let before_docs = db
@@ -175,12 +181,14 @@ mod import_integration_tests {
         // Read chunks from first agent
         let chunks = reader
             .read_memory_chunks(&agent_dbs[0].1)
+            .await
             .expect("read chunks failed");
         assert_eq!(chunks.len(), 3); // 3 chunks created
 
         // Read conversations from first agent
         let conversations = reader
             .read_conversations(&agent_dbs[0].1)
+            .await
             .expect("read conversations failed");
         assert_eq!(conversations.len(), 1); // 1 conversation created
         assert_eq!(conversations[0].messages.len(), 2); // 2 messages
@@ -192,12 +200,13 @@ mod import_integration_tests {
 
     #[tokio::test]
     async fn test_import_command_execution() {
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
         let (_db, _db_temp) = create_test_db().await.expect("DB creation failed");
 
         // Create import options
-        let opts = ImportOptions {
+        let opts = ironclaw::import::ImportOptions {
             openclaw_path: openclaw_path.clone(),
             dry_run: false,
             re_embed: false,
@@ -222,8 +231,9 @@ mod import_integration_tests {
     #[tokio::test]
     async fn test_dry_run_prevents_database_writes() {
         let (db, _db_temp) = create_test_db().await.expect("DB creation failed");
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
 
         let user_id = "test_user";
 
@@ -235,7 +245,7 @@ mod import_integration_tests {
         let before_count = before_import.len();
 
         // Create import options in DRY-RUN mode
-        let opts = ImportOptions {
+        let opts = ironclaw::import::ImportOptions {
             openclaw_path: openclaw_path.clone(),
             dry_run: true, // ← KEY: dry_run is enabled
             re_embed: false,
@@ -266,8 +276,9 @@ mod import_integration_tests {
     #[tokio::test]
     async fn test_import_idempotency_no_duplicates_on_reimport() {
         let (_db, _db_temp) = create_test_db().await.expect("DB creation failed");
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
 
         // Simulate first import: count what would be imported
         let reader1 = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
@@ -282,11 +293,13 @@ mod import_integration_tests {
         for (_, db_path) in &agent_dbs1 {
             let chunks = reader1
                 .read_memory_chunks(db_path)
+                .await
                 .expect("read chunks failed");
             total_chunks_first += chunks.len();
 
             let conversations = reader1
                 .read_conversations(db_path)
+                .await
                 .expect("read conversations failed");
             total_conversations_first += conversations.len();
         }
@@ -330,8 +343,9 @@ mod import_integration_tests {
 
     #[tokio::test]
     async fn test_embedding_dimension_mismatch_queues_reembedding() {
-        let (_openclaw_temp, openclaw_path) =
-            create_test_openclaw().expect("OpenClaw creation failed");
+        let (_openclaw_temp, openclaw_path) = create_test_openclaw()
+            .await
+            .expect("OpenClaw creation failed");
 
         // Create an agent DB with embeddings (1536-dim)
         let agents_dir = openclaw_path.join("agents");
@@ -339,8 +353,11 @@ mod import_integration_tests {
         let db_path = agents_dir.join("with_embeddings.sqlite");
 
         {
-            use rusqlite::Connection;
-            let conn = Connection::open(&db_path).expect("db open failed");
+            let db = libsql::Builder::new_local(&db_path)
+                .build()
+                .await
+                .expect("db build failed");
+            let conn = db.connect().expect("db connect failed");
 
             conn.execute(
                 "CREATE TABLE chunks (
@@ -350,33 +367,36 @@ mod import_integration_tests {
                     embedding BLOB,
                     chunk_index INTEGER NOT NULL
                 )",
-                [],
+                (),
             )
+            .await
             .expect("create table failed");
 
             // Create a 1536-dimensional embedding (ada-002 size)
             // Each f32 is 4 bytes, so 1536 * 4 = 6144 bytes
-            let embedding_1536_bytes = vec![0.1f32; 1536]
+            let embedding_1536_bytes: Vec<u8> = vec![0.1f32; 1536]
                 .iter()
                 .flat_map(|f| f.to_le_bytes().to_vec())
-                .collect::<Vec<u8>>();
+                .collect();
 
             conn.execute(
-                "INSERT INTO chunks (id, path, content, embedding, chunk_index) VALUES (?, ?, ?, ?, ?)",
-                rusqlite::params![
+                "INSERT INTO chunks (id, path, content, embedding, chunk_index) VALUES (?1, ?2, ?3, ?4, ?5)",
+                libsql::params![
                     Uuid::new_v4().to_string(),
                     "test.md",
                     "Chunk with embedding",
-                    &embedding_1536_bytes,
-                    0
+                    embedding_1536_bytes,
+                    0i64
                 ],
             )
+            .await
             .expect("insert failed");
 
             conn.execute(
                 "CREATE TABLE conversations (id TEXT PRIMARY KEY, channel TEXT, created_at TEXT)",
-                [],
+                (),
             )
+            .await
             .expect("create conv table failed");
 
             conn.execute(
@@ -387,8 +407,9 @@ mod import_integration_tests {
                     content TEXT NOT NULL,
                     created_at TEXT
                 )",
-                [],
+                (),
             )
+            .await
             .expect("create messages table failed");
         }
 
@@ -396,6 +417,7 @@ mod import_integration_tests {
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let chunks = reader
             .read_memory_chunks(&db_path)
+            .await
             .expect("read chunks failed");
 
         assert_eq!(chunks.len(), 1);
@@ -417,16 +439,10 @@ mod import_integration_tests {
         }
 
         // Simulate dimension mismatch scenario:
-        // - Source: 1536-dim (ada-002)
-        // - Target: 3072-dim (text-embedding-3-large)
-        // This would trigger re-embedding logic
-
         let source_dim = embedding.len();
         let target_dim = 3072; // text-embedding-3-large
 
         if source_dim != target_dim {
-            // In real import, this would queue the chunk for re-embedding
-            // Verify the logic: dimensions don't match, so chunk needs re-embedding
             assert!(
                 source_dim != target_dim,
                 "Dimension mismatch detected: {} -> {}",
@@ -434,7 +450,6 @@ mod import_integration_tests {
                 target_dim
             );
 
-            // Track that this chunk would need re-embedding
             let mut re_embed_queued = 0;
             if source_dim != target_dim {
                 re_embed_queued += 1;
@@ -466,8 +481,11 @@ mod import_integration_tests {
         let db_path = agents_dir.join("same_dim.sqlite");
 
         {
-            use rusqlite::Connection;
-            let conn = Connection::open(&db_path).expect("db open failed");
+            let db = libsql::Builder::new_local(&db_path)
+                .build()
+                .await
+                .expect("db build failed");
+            let conn = db.connect().expect("db connect failed");
 
             conn.execute(
                 "CREATE TABLE chunks (
@@ -477,32 +495,35 @@ mod import_integration_tests {
                     embedding BLOB,
                     chunk_index INTEGER NOT NULL
                 )",
-                [],
+                (),
             )
+            .await
             .expect("create table failed");
 
             // 1536-dimensional embedding (text-embedding-3-small)
-            let embedding_bytes = vec![0.5f32; 1536]
+            let embedding_bytes: Vec<u8> = vec![0.5f32; 1536]
                 .iter()
                 .flat_map(|f| f.to_le_bytes().to_vec())
-                .collect::<Vec<u8>>();
+                .collect();
 
             conn.execute(
-                "INSERT INTO chunks (id, path, content, embedding, chunk_index) VALUES (?, ?, ?, ?, ?)",
-                rusqlite::params![
+                "INSERT INTO chunks (id, path, content, embedding, chunk_index) VALUES (?1, ?2, ?3, ?4, ?5)",
+                libsql::params![
                     Uuid::new_v4().to_string(),
                     "test.md",
                     "Chunk",
-                    &embedding_bytes,
-                    0
+                    embedding_bytes,
+                    0i64
                 ],
             )
+            .await
             .expect("insert failed");
 
             conn.execute(
                 "CREATE TABLE conversations (id TEXT PRIMARY KEY, channel TEXT, created_at TEXT)",
-                [],
+                (),
             )
+            .await
             .expect("create conv table failed");
 
             conn.execute(
@@ -513,14 +534,16 @@ mod import_integration_tests {
                     content TEXT NOT NULL,
                     created_at TEXT
                 )",
-                [],
+                (),
             )
+            .await
             .expect("create messages table failed");
         }
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let chunks = reader
             .read_memory_chunks(&db_path)
+            .await
             .expect("read chunks failed");
 
         let embedding = chunks[0].embedding.as_ref().unwrap();

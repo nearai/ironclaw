@@ -67,20 +67,23 @@ impl ConversationStore for LibSqlBackend {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
-        conn.execute(
+        let affected = conn
+            .execute(
             r#"
                 INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                ON CONFLICT (id) DO UPDATE SET last_activity = ?5
+                ON CONFLICT (id) DO UPDATE SET last_activity = excluded.last_activity
+                WHERE conversations.user_id = excluded.user_id
+                  AND conversations.channel = excluded.channel
                 "#,
             params![id.to_string(), channel, user_id, opt_text(thread_id), now],
         )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(affected > 0)
     }
 
     async fn list_conversations_with_preview(

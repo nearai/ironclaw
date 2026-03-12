@@ -176,9 +176,7 @@ readabilityrs = { version = "0.1.2", optional = true }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
 hex = "0.4.3"
 
-# OpenClaw import (feature gated). Reuse libsql's SQLite FFI so --all-features
-# test/link steps do not pull in a second bundled sqlite3 implementation.
-rusqlite = { package = "libsql-rusqlite", version = "0.33", optional = true }
+# OpenClaw import (feature gated)
 json5 = { version = "0.4", optional = true }
 
 # macOS keychain
@@ -216,7 +214,7 @@ libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
-import = ["dep:rusqlite", "dep:json5"]
+import = ["dep:json5", "libsql"]
 
 [[test]]
 name = "html_to_markdown"

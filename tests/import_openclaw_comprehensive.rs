@@ -47,15 +47,14 @@ mod comprehensive_import_tests {
     }
 
     /// Helper to create a synthetic SQLite database with memory chunks
-    fn create_synthetic_memory_db(
+    async fn create_synthetic_memory_db(
         agents_dir: &Path,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        use rusqlite::Connection;
-
         std::fs::create_dir_all(agents_dir)?;
         let db_path = agents_dir.join("test_agent.sqlite");
 
-        let conn = Connection::open(&db_path)?;
+        let db = libsql::Builder::new_local(&db_path).build().await?;
+        let conn = db.connect()?;
 
         // Create chunks table (simplified schema)
         conn.execute(
@@ -66,33 +65,36 @@ mod comprehensive_import_tests {
                 embedding BLOB,
                 chunk_index INTEGER NOT NULL
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         // Insert test chunks
         conn.execute(
             "INSERT INTO chunks (id, path, content, embedding, chunk_index)
              VALUES (?, ?, ?, ?, ?)",
-            rusqlite::params![
+            libsql::params![
                 Uuid::new_v4().to_string(),
                 "test/doc.md",
                 "This is test chunk 1 content.",
-                None::<Vec<u8>>,
-                0
+                libsql::Value::Null,
+                0i64
             ],
-        )?;
+        )
+        .await?;
 
         conn.execute(
             "INSERT INTO chunks (id, path, content, embedding, chunk_index)
              VALUES (?, ?, ?, ?, ?)",
-            rusqlite::params![
+            libsql::params![
                 Uuid::new_v4().to_string(),
                 "test/doc.md",
                 "This is test chunk 2 content.",
-                None::<Vec<u8>>,
-                1
+                libsql::Value::Null,
+                1i64
             ],
-        )?;
+        )
+        .await?;
 
         // Create conversation table
         conn.execute(
@@ -101,8 +103,9 @@ mod comprehensive_import_tests {
                 channel TEXT NOT NULL,
                 created_at TEXT
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         // Create messages table
         conn.execute(
@@ -114,40 +117,44 @@ mod comprehensive_import_tests {
                 created_at TEXT,
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id)
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         // Insert test conversation
         let conv_id = Uuid::new_v4().to_string();
         conn.execute(
             "INSERT INTO conversations (id, channel, created_at) VALUES (?, ?, ?)",
-            rusqlite::params![&conv_id, "telegram", "2024-01-15T10:30:00Z"],
-        )?;
+            libsql::params![conv_id.clone(), "telegram", "2024-01-15T10:30:00Z"],
+        )
+        .await?;
 
         // Insert test messages
         conn.execute(
             "INSERT INTO messages (id, conversation_id, role, content, created_at)
              VALUES (?, ?, ?, ?, ?)",
-            rusqlite::params![
+            libsql::params![
                 Uuid::new_v4().to_string(),
-                &conv_id,
+                conv_id.clone(),
                 "user",
                 "Hello, how are you?",
                 "2024-01-15T10:30:00Z"
             ],
-        )?;
+        )
+        .await?;
 
         conn.execute(
             "INSERT INTO messages (id, conversation_id, role, content, created_at)
              VALUES (?, ?, ?, ?, ?)",
-            rusqlite::params![
+            libsql::params![
                 Uuid::new_v4().to_string(),
-                &conv_id,
+                conv_id.clone(),
                 "assistant",
                 "I'm doing well, thank you for asking!",
                 "2024-01-15T10:31:00Z"
             ],
-        )?;
+        )
+        .await?;
 
         Ok(db_path)
     }
@@ -211,13 +218,15 @@ mod comprehensive_import_tests {
         let _ = temp_dir;
     }
 
-    #[test]
-    fn test_openclaw_reader_lists_agent_dbs() {
+    #[tokio::test]
+    async fn test_openclaw_reader_lists_agent_dbs() {
         let (temp_dir, openclaw_path) =
             create_synthetic_openclaw_dir().expect("failed to create test data");
 
         let agents_dir = openclaw_path.join("agents");
-        let _db_path = create_synthetic_memory_db(&agents_dir).expect("failed to create test DB");
+        let _db_path = create_synthetic_memory_db(&agents_dir)
+            .await
+            .expect("failed to create test DB");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("failed to create reader");
 
@@ -230,18 +239,21 @@ mod comprehensive_import_tests {
         let _ = temp_dir;
     }
 
-    #[test]
-    fn test_openclaw_reader_reads_memory_chunks() {
+    #[tokio::test]
+    async fn test_openclaw_reader_reads_memory_chunks() {
         let (temp_dir, openclaw_path) =
             create_synthetic_openclaw_dir().expect("failed to create test data");
 
         let agents_dir = openclaw_path.join("agents");
-        let db_path = create_synthetic_memory_db(&agents_dir).expect("failed to create test DB");
+        let db_path = create_synthetic_memory_db(&agents_dir)
+            .await
+            .expect("failed to create test DB");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("failed to create reader");
 
         let chunks = reader
             .read_memory_chunks(&db_path)
+            .await
             .expect("failed to read memory chunks");
 
         // Should find 2 chunks
@@ -260,18 +272,21 @@ mod comprehensive_import_tests {
         let _ = temp_dir;
     }
 
-    #[test]
-    fn test_openclaw_reader_reads_conversations() {
+    #[tokio::test]
+    async fn test_openclaw_reader_reads_conversations() {
         let (temp_dir, openclaw_path) =
             create_synthetic_openclaw_dir().expect("failed to create test data");
 
         let agents_dir = openclaw_path.join("agents");
-        let db_path = create_synthetic_memory_db(&agents_dir).expect("failed to create test DB");
+        let db_path = create_synthetic_memory_db(&agents_dir)
+            .await
+            .expect("failed to create test DB");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("failed to create reader");
 
         let conversations = reader
             .read_conversations(&db_path)
+            .await
             .expect("failed to read conversations");
 
         // Should find 1 conversation
