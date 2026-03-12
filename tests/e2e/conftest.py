@@ -6,7 +6,6 @@ Function-scoped: fresh browser context and page per test.
 
 import asyncio
 import os
-import shutil
 import signal
 import socket
 import subprocess
@@ -40,7 +39,9 @@ except Exception:
 # Temp directory for the libSQL database file (cleaned up automatically)
 _DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-")
 
-# Temp directory for WASM tools (pre-populated from dev builds)
+# Temp directories for WASM extensions. These start empty and are populated by
+# the install pipeline during tests; fixtures do not pre-populate dev build
+# artifacts into them.
 _WASM_TOOLS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-tools-")
 _WASM_CHANNELS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-channels-")
 

@@ -10,10 +10,9 @@ Tests are ordered with dependencies tracked via module-level state.
 
 from pathlib import Path
 
-import httpx
 import pytest
 
-from helpers import AUTH_TOKEN, SEL, api_get, api_post
+from helpers import SEL, api_get, api_post
 
 # Module-level state for dependent tests
 _ws_installed = False
