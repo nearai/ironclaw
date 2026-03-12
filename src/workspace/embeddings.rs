@@ -133,7 +133,7 @@ impl OpenAiEmbeddings {
         let url = base_url.trim();
 
         // Auto-prepend https:// if no scheme is present.
-        let url = if !url.starts_with("http://") && !url.starts_with("https://") {
+        let mut url = if !url.starts_with("http://") && !url.starts_with("https://") {
             tracing::debug!(
                 "No scheme in embedding base URL '{}', prepending https://",
                 url
@@ -143,7 +143,11 @@ impl OpenAiEmbeddings {
             url.to_string()
         };
 
-        self.base_url = url.trim_end_matches('/').to_string();
+        while url.ends_with('/') {
+            url.pop();
+        }
+
+        self.base_url = url;
         self
     }
 }

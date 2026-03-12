@@ -137,6 +137,11 @@ impl EmbeddingsConfig {
             }
             _ => {
                 if let Some(api_key) = self.openai_api_key() {
+                    let mut provider = crate::workspace::OpenAiEmbeddings::with_model(
+                        api_key,
+                        &self.model,
+                        self.dimension,
+                    );
                     if let Some(ref base_url) = self.openai_base_url {
                         tracing::debug!(
                             "Embeddings enabled via OpenAI (model: {}, base_url: {}, dim: {})",
@@ -144,20 +149,13 @@ impl EmbeddingsConfig {
                             base_url,
                             self.dimension,
                         );
+                        provider = provider.with_base_url(base_url);
                     } else {
                         tracing::debug!(
                             "Embeddings enabled via OpenAI (model: {}, dim: {})",
                             self.model,
                             self.dimension,
                         );
-                    }
-                    let mut provider = crate::workspace::OpenAiEmbeddings::with_model(
-                        api_key,
-                        &self.model,
-                        self.dimension,
-                    );
-                    if let Some(ref base_url) = self.openai_base_url {
-                        provider = provider.with_base_url(base_url);
                     }
                     Some(Arc::new(provider))
                 } else {
