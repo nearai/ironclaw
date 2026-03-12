@@ -46,7 +46,7 @@ struct CacheEntry {
 /// so a synchronous mutex is cheaper than `tokio::sync::Mutex`.
 pub struct CachedEmbeddingProvider {
     inner: Arc<dyn EmbeddingProvider>,
-    cache: Mutex<HashMap<String, CacheEntry>>,
+    cache: Mutex<HashMap<[u8; 32], CacheEntry>>,
     config: EmbeddingCacheConfig,
 }
 
@@ -66,7 +66,7 @@ impl CachedEmbeddingProvider {
         }
         Self {
             inner,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(HashMap::with_capacity(config.max_entries)),
             config,
         }
     }
@@ -90,19 +90,21 @@ impl CachedEmbeddingProvider {
     }
 
     /// Build a deterministic cache key: `SHA-256(model_name + "\0" + text)`.
-    fn cache_key(&self, text: &str) -> String {
+    ///
+    /// Returns raw 32-byte hash to avoid a 64-char hex String allocation per lookup.
+    fn cache_key(&self, text: &str) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(self.inner.model_name().as_bytes());
         hasher.update(b"\0");
         hasher.update(text.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hasher.finalize().into()
     }
 
     /// Evict the least-recently-used entry if at capacity.
     // TODO: O(n) scan per eviction. If max_entries grows large, switch to
     // an ordered data structure (e.g. `IndexMap` with swap_remove, or a
     // linked-list LRU like the `lru` crate).
-    fn evict_lru(cache: &mut HashMap<String, CacheEntry>, max_entries: usize) {
+    fn evict_lru(cache: &mut HashMap<[u8; 32], CacheEntry>, max_entries: usize) {
         while cache.len() >= max_entries {
             let oldest_key = cache
                 .iter()
@@ -174,7 +176,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         }
 
         // Partition into hits and misses
-        let keys: Vec<String> = texts.iter().map(|t| self.cache_key(t)).collect();
+        let keys: Vec<[u8; 32]> = texts.iter().map(|t| self.cache_key(t)).collect();
         let mut results: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
         let mut miss_indices: Vec<usize> = Vec::new();
 
