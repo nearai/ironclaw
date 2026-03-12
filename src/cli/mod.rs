@@ -8,9 +8,11 @@
 //! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
 //! - Querying workspace memory (`memory search`, `memory read`, `memory write`)
 //! - Managing OS service (`service install`, `service start`, `service stop`)
+//! - Listing configured channels (`channels list`)
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
+mod channels;
 mod completion;
 mod config;
 mod doctor;
@@ -22,9 +24,11 @@ pub mod oauth_defaults;
 mod pairing;
 mod registry;
 mod service;
+mod skills;
 pub mod status;
 mod tool;
 
+pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
@@ -36,6 +40,7 @@ pub use memory::run_memory_command_with_db;
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use service::{ServiceCommand, run_service_command};
+pub use skills::{SkillsCommand, run_skills_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
 
@@ -134,6 +139,14 @@ pub enum Command {
     )]
     Registry(RegistryCommand),
 
+    /// List and inspect messaging channels
+    #[command(
+        subcommand,
+        about = "Manage channels",
+        long_about = "List configured messaging channels.\nExamples:\n  ironclaw channels list\n  ironclaw channels list --verbose\n  ironclaw channels list --json"
+    )]
+    Channels(ChannelsCommand),
+
     /// Manage MCP servers (hosted tool providers)
     #[command(
         subcommand,
@@ -165,6 +178,14 @@ pub enum Command {
         long_about = "Install, start, or stop service.\nExample: ironclaw service install"
     )]
     Service(ServiceCommand),
+
+    /// Manage SKILL.md-based skills
+    #[command(
+        subcommand,
+        about = "Manage skills",
+        long_about = "List, search, and inspect SKILL.md-based skills.\nExamples:\n  ironclaw skills list\n  ironclaw skills search 'writing'\n  ironclaw skills info my-skill"
+    )]
+    Skills(SkillsCommand),
 
     /// Probe external dependencies and validate configuration
     #[command(

@@ -197,13 +197,20 @@ impl Validator {
     pub fn validate_tool_params(&self, params: &serde_json::Value) -> ValidationResult {
         let mut result = ValidationResult::ok();
 
-        // Recursively check all string values in the JSON
+        // Recursively check all string values in the JSON.
+        // Depth is capped to prevent stack overflow on pathological input.
+        const MAX_DEPTH: usize = 32;
+
         fn check_strings(
             value: &serde_json::Value,
             path: &str,
             validator: &Validator,
             result: &mut ValidationResult,
+            depth: usize,
         ) {
+            if depth > MAX_DEPTH {
+                return;
+            }
             match value {
                 serde_json::Value::String(s) => {
                     let string_result = if s.is_empty() {
@@ -216,7 +223,7 @@ impl Validator {
                 serde_json::Value::Array(arr) => {
                     for (i, item) in arr.iter().enumerate() {
                         let child_path = format!("{path}[{i}]");
-                        check_strings(item, &child_path, validator, result);
+                        check_strings(item, &child_path, validator, result, depth + 1);
                     }
                 }
                 serde_json::Value::Object(obj) => {
@@ -226,14 +233,14 @@ impl Validator {
                         } else {
                             format!("{path}.{k}")
                         };
-                        check_strings(v, &child_path, validator, result);
+                        check_strings(v, &child_path, validator, result, depth + 1);
                     }
                 }
                 _ => {}
             }
         }
 
-        check_strings(params, "", self, &mut result);
+        check_strings(params, "", self, &mut result, 0);
         result
     }
 }
@@ -422,5 +429,43 @@ mod tests {
             .find(|e| e.code == ValidationErrorCode::ForbiddenContent)
             .expect("expected forbidden content error");
         assert_eq!(error.field, "metadata.tags[1]");
+    }
+
+    #[test]
+    fn test_tool_params_depth_limit_prevents_stack_overflow() {
+        let validator = Validator::new().forbid_pattern("evil");
+
+        // Build a deeply nested JSON object (depth > MAX_DEPTH of 32)
+        let mut value = serde_json::json!("evil payload");
+        for _ in 0..50 {
+            value = serde_json::json!({ "nested": value });
+        }
+
+        let result = validator.validate_tool_params(&value);
+
+        // The "evil payload" is beyond the depth limit so it should NOT be
+        // detected — the traversal stops before reaching it.
+        assert!(
+            result.is_valid,
+            "Strings beyond depth limit should be silently skipped, got errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_tool_params_within_depth_limit_still_validated() {
+        let validator = Validator::new().forbid_pattern("evil");
+
+        // Build a nested object within the depth limit
+        let mut value = serde_json::json!("evil payload");
+        for _ in 0..5 {
+            value = serde_json::json!({ "nested": value });
+        }
+
+        let result = validator.validate_tool_params(&value);
+        assert!(
+            !result.is_valid,
+            "Strings within depth limit should still be validated"
+        );
     }
 }

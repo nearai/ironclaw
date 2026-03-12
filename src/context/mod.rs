@@ -12,4 +12,4 @@ mod state;
 
 pub use manager::ContextManager;
 pub use memory::{ActionRecord, ConversationMemory, Memory};
-pub use state::{JobContext, JobState, StateTransition};
+pub use state::{JobContext, JobState, StateTransition, TokenBudgetExceeded};

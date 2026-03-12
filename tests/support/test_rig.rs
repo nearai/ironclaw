@@ -6,94 +6,24 @@
 
 #![allow(dead_code)] // Public API consumed by later test modules (Task 4+).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use async_trait::async_trait;
 
 use ironclaw::agent::{Agent, AgentDeps};
 use ironclaw::app::{AppBuilder, AppBuilderFlags};
 use ironclaw::channels::web::log_layer::LogBroadcaster;
-use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use ironclaw::channels::{OutgoingResponse, StatusUpdate};
 use ironclaw::config::Config;
 use ironclaw::db::Database;
-use ironclaw::error::ChannelError;
 use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
 use ironclaw::tools::Tool;
 
 use crate::support::instrumented_llm::InstrumentedLlm;
 use crate::support::metrics::{ToolInvocation, TraceMetrics};
-use crate::support::test_channel::TestChannel;
+use crate::support::test_channel::{TestChannel, TestChannelHandle};
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
 use ironclaw::llm::recording::{HttpExchange, ReplayingHttpInterceptor};
-
-// ---------------------------------------------------------------------------
-// TestChannelHandle -- wraps Arc<TestChannel> as Box<dyn Channel>
-// ---------------------------------------------------------------------------
-
-/// A thin wrapper around `Arc<TestChannel>` that implements `Channel`.
-///
-/// This lets us hand a `Box<dyn Channel>` to `ChannelManager::add()` while
-/// keeping an `Arc<TestChannel>` in the `TestRig` for sending messages and
-/// reading captures.
-struct TestChannelHandle {
-    inner: Arc<TestChannel>,
-}
-
-impl TestChannelHandle {
-    fn new(inner: Arc<TestChannel>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl Channel for TestChannelHandle {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    async fn start(&self) -> Result<MessageStream, ChannelError> {
-        self.inner.start().await
-    }
-
-    async fn respond(
-        &self,
-        msg: &IncomingMessage,
-        response: OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        self.inner.respond(msg, response).await
-    }
-
-    async fn send_status(
-        &self,
-        status: StatusUpdate,
-        metadata: &serde_json::Value,
-    ) -> Result<(), ChannelError> {
-        self.inner.send_status(status, metadata).await
-    }
-
-    async fn broadcast(
-        &self,
-        user_id: &str,
-        response: OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        self.inner.broadcast(user_id, response).await
-    }
-
-    async fn health_check(&self) -> Result<(), ChannelError> {
-        self.inner.health_check().await
-    }
-
-    fn conversation_context(&self, metadata: &serde_json::Value) -> HashMap<String, String> {
-        self.inner.conversation_context(metadata)
-    }
-
-    async fn shutdown(&self) -> Result<(), ChannelError> {
-        self.inner.shutdown().await
-    }
-}
 
 // ---------------------------------------------------------------------------
 // TestRig
@@ -312,7 +242,23 @@ impl TestRig {
                 .collect();
             let started = self.tool_calls_started();
             let completed = self.tool_calls_completed();
-            let results = self.tool_results();
+            let mut results = self.tool_results();
+            for status in self.channel.captured_status_events() {
+                if let ironclaw::channels::StatusUpdate::ToolCompleted {
+                    name,
+                    success: false,
+                    error,
+                    parameters,
+                } = status
+                {
+                    let detail = format!(
+                        "error={}; params={}",
+                        error.unwrap_or_else(|| "unknown".to_string()),
+                        parameters.unwrap_or_else(|| "{}".to_string())
+                    );
+                    results.push((name, detail));
+                }
+            }
             verify_expects(
                 &trace.expects,
                 &all_response_strings,
@@ -339,7 +285,23 @@ impl TestRig {
         let response_strings: Vec<String> = responses.iter().map(|r| r.content.clone()).collect();
         let started = self.tool_calls_started();
         let completed = self.tool_calls_completed();
-        let results = self.tool_results();
+        let mut results = self.tool_results();
+        for status in self.channel.captured_status_events() {
+            if let ironclaw::channels::StatusUpdate::ToolCompleted {
+                name,
+                success: false,
+                error,
+                parameters,
+            } = status
+            {
+                let detail = format!(
+                    "error={}; params={}",
+                    error.unwrap_or_else(|| "unknown".to_string()),
+                    parameters.unwrap_or_else(|| "{}".to_string())
+                );
+                results.push((name, detail));
+            }
+        }
         verify_expects(
             &trace.expects,
             &response_strings,
@@ -394,7 +356,7 @@ impl TestRigBuilder {
             llm: None,
             max_tool_iterations: 10,
             injection_check: false,
-            auto_approve_tools: None,
+            auto_approve_tools: Some(true),
             enable_skills: false,
             enable_routines: false,
             http_exchanges: Vec::new(),
@@ -567,11 +529,20 @@ impl TestRigBuilder {
             .await
             .expect("AppBuilder::build_all() failed in test rig");
 
+        // AppBuilder may re-resolve config from env/TOML and override test defaults.
+        // Force test-rig agent flags to the requested deterministic values.
+        components.config.agent.auto_approve_tools = auto_approve_tools.unwrap_or(true);
+        components.config.agent.allow_local_tools = true;
+
         let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
             Arc::new(tokio::sync::RwLock::new(None));
 
         // 6. Register job tools, routine tools, and extra tools.
         {
+            // Ensure filesystem/shell dev tools are always available in the
+            // test rig, even if upstream builder flags/config disable local tools.
+            components.tools.register_dev_tools();
+
             components.tools.register_job_tools(
                 Arc::clone(&components.context_manager),
                 Some(scheduler_slot.clone()),

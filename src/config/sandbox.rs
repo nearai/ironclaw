@@ -8,6 +8,13 @@ pub struct SandboxModeConfig {
     pub enabled: bool,
     /// Sandbox policy: "readonly", "workspace_write", or "full_access".
     pub policy: String,
+    /// Explicit opt-in for `FullAccess` policy.
+    ///
+    /// When `policy` is `full_access` but this is `false`, the policy is
+    /// downgraded to `workspace_write` with a loud error log. This prevents
+    /// accidental host-level command execution from a single misconfigured
+    /// env var.
+    pub allow_full_access: bool,
     /// Command timeout in seconds.
     pub timeout_secs: u64,
     /// Memory limit in megabytes.
@@ -31,6 +38,7 @@ impl Default for SandboxModeConfig {
         Self {
             enabled: true,
             policy: "readonly".to_string(),
+            allow_full_access: false,
             timeout_secs: 120,
             memory_limit_mb: 2048,
             cpu_shares: 1024,
@@ -70,6 +78,7 @@ impl SandboxModeConfig {
         Ok(Self {
             enabled: parse_bool_env("SANDBOX_ENABLED", true)?,
             policy: parse_string_env("SANDBOX_POLICY", "readonly")?,
+            allow_full_access: parse_bool_env("SANDBOX_ALLOW_FULL_ACCESS", false)?,
             timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", 120)?,
             memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", 2048)?,
             cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", 1024)?,
@@ -82,11 +91,25 @@ impl SandboxModeConfig {
     }
 
     /// Convert to SandboxConfig for the sandbox module.
+    ///
+    /// If `policy` is `FullAccess` but `allow_full_access` is `false`,
+    /// the policy is downgraded to `WorkspaceWrite` and an error is logged.
     pub fn to_sandbox_config(&self) -> crate::sandbox::SandboxConfig {
         use crate::sandbox::SandboxPolicy;
         use std::time::Duration;
 
-        let policy = self.policy.parse().unwrap_or(SandboxPolicy::ReadOnly);
+        let mut policy = self.policy.parse().unwrap_or(SandboxPolicy::ReadOnly);
+
+        // Double opt-in guard: FullAccess requires SANDBOX_ALLOW_FULL_ACCESS=true
+        if policy == SandboxPolicy::FullAccess && !self.allow_full_access {
+            tracing::error!(
+                "SANDBOX_POLICY=full_access is set but SANDBOX_ALLOW_FULL_ACCESS is not \
+                 set to 'true'. FullAccess bypasses Docker and runs commands directly on \
+                 the host. Downgrading to WorkspaceWrite for safety. Set \
+                 SANDBOX_ALLOW_FULL_ACCESS=true to explicitly enable FullAccess."
+            );
+            policy = SandboxPolicy::WorkspaceWrite;
+        }
 
         let mut allowlist = crate::sandbox::default_allowlist();
         allowlist.extend(self.extra_allowed_domains.clone());
@@ -94,6 +117,7 @@ impl SandboxModeConfig {
         crate::sandbox::SandboxConfig {
             enabled: self.enabled,
             policy,
+            allow_full_access: self.allow_full_access,
             timeout: Duration::from_secs(self.timeout_secs),
             memory_limit_mb: self.memory_limit_mb,
             cpu_shares: self.cpu_shares,
@@ -302,6 +326,7 @@ mod tests {
             extra_allowed_domains: vec!["example.com".to_string()],
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
+            allow_full_access: false,
         };
         assert!(!cfg.enabled);
         assert_eq!(cfg.policy, "full_access");
@@ -326,6 +351,7 @@ mod tests {
             extra_allowed_domains: vec!["custom.example.com".to_string()],
             reaper_interval_secs: 300,
             orphan_threshold_secs: 600,
+            allow_full_access: false,
         };
         let sc = mode.to_sandbox_config();
         assert!(sc.enabled);
@@ -484,5 +510,58 @@ mod tests {
                 "tool '{tool}' should end with '(*)' glob pattern"
             );
         }
+    }
+
+    #[test]
+    fn test_full_access_downgraded_without_allow() {
+        let config = SandboxModeConfig {
+            policy: "full_access".to_string(),
+            allow_full_access: false,
+            ..Default::default()
+        };
+        let sandbox = config.to_sandbox_config();
+        // Should have been downgraded to WorkspaceWrite
+        assert_eq!(
+            sandbox.policy,
+            crate::sandbox::SandboxPolicy::WorkspaceWrite
+        );
+        assert!(!sandbox.allow_full_access);
+    }
+
+    #[test]
+    fn test_full_access_allowed_with_explicit_opt_in() {
+        let config = SandboxModeConfig {
+            policy: "full_access".to_string(),
+            allow_full_access: true,
+            ..Default::default()
+        };
+        let sandbox = config.to_sandbox_config();
+        assert_eq!(sandbox.policy, crate::sandbox::SandboxPolicy::FullAccess);
+        assert!(sandbox.allow_full_access);
+    }
+
+    #[test]
+    fn test_non_full_access_policy_unaffected() {
+        let config = SandboxModeConfig {
+            policy: "workspace_write".to_string(),
+            allow_full_access: false,
+            ..Default::default()
+        };
+        let sandbox = config.to_sandbox_config();
+        assert_eq!(
+            sandbox.policy,
+            crate::sandbox::SandboxPolicy::WorkspaceWrite
+        );
+    }
+
+    #[test]
+    fn test_readonly_policy_unaffected() {
+        let config = SandboxModeConfig {
+            policy: "readonly".to_string(),
+            allow_full_access: false,
+            ..Default::default()
+        };
+        let sandbox = config.to_sandbox_config();
+        assert_eq!(sandbox.policy, crate::sandbox::SandboxPolicy::ReadOnly);
     }
 }

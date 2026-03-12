@@ -16,7 +16,8 @@ mod e2e_import_tests {
     use ironclaw::import::{ImportOptions, ImportStats};
 
     /// Helper: Create a synthetic OpenClaw with full structure
-    fn setup_full_openclaw_test_env() -> Result<(TempDir, PathBuf), Box<dyn std::error::Error>> {
+    async fn setup_full_openclaw_test_env() -> Result<(TempDir, PathBuf), Box<dyn std::error::Error>>
+    {
         let temp_dir = TempDir::new()?;
         let openclaw_path = temp_dir.path().to_path_buf();
 
@@ -60,17 +61,16 @@ mod e2e_import_tests {
         let agents_dir = openclaw_path.join("agents");
         std::fs::create_dir_all(&agents_dir)?;
 
-        create_full_agent_db(&agents_dir.join("primary_agent.sqlite"))?;
-        create_full_agent_db(&agents_dir.join("secondary_agent.sqlite"))?;
+        create_full_agent_db(&agents_dir.join("primary_agent.sqlite")).await?;
+        create_full_agent_db(&agents_dir.join("secondary_agent.sqlite")).await?;
 
         Ok((temp_dir, openclaw_path))
     }
 
     /// Helper: Create a full agent SQLite database with chunks and conversations
-    fn create_full_agent_db(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-        use rusqlite::Connection;
-
-        let conn = Connection::open(db_path)?;
+    async fn create_full_agent_db(db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        let db = libsql::Builder::new_local(db_path).build().await?;
+        let conn = db.connect()?;
 
         // Chunks table
         conn.execute(
@@ -81,22 +81,24 @@ mod e2e_import_tests {
                 embedding BLOB,
                 chunk_index INTEGER NOT NULL
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         // Insert 5 chunks
         for i in 0..5 {
             conn.execute(
                 "INSERT INTO chunks (id, path, content, embedding, chunk_index)
                  VALUES (?, ?, ?, ?, ?)",
-                rusqlite::params![
+                libsql::params![
                     Uuid::new_v4().to_string(),
                     format!("notes/section_{}.md", i),
                     format!("Content for section {}. This is important information.", i),
-                    None::<Vec<u8>>,
-                    i
+                    libsql::Value::Null,
+                    i as i64
                 ],
-            )?;
+            )
+            .await?;
         }
 
         // Conversations table
@@ -106,8 +108,9 @@ mod e2e_import_tests {
                 channel TEXT NOT NULL,
                 created_at TEXT
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         // Messages table
         conn.execute(
@@ -119,8 +122,9 @@ mod e2e_import_tests {
                 created_at TEXT,
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id)
             )",
-            [],
-        )?;
+            (),
+        )
+        .await?;
 
         // Insert 3 conversations with messages
         for conv_num in 0..3 {
@@ -133,12 +137,13 @@ mod e2e_import_tests {
 
             conn.execute(
                 "INSERT INTO conversations (id, channel, created_at) VALUES (?, ?, ?)",
-                rusqlite::params![
-                    &conv_id,
+                libsql::params![
+                    conv_id.clone(),
                     channel,
                     format!("2024-01-{:02}T10:00:00Z", 10 + conv_num)
                 ],
-            )?;
+            )
+            .await?;
 
             // Add 3 messages per conversation
             for msg_num in 0..3 {
@@ -150,9 +155,9 @@ mod e2e_import_tests {
                 conn.execute(
                     "INSERT INTO messages (id, conversation_id, role, content, created_at)
                      VALUES (?, ?, ?, ?, ?)",
-                    rusqlite::params![
+                    libsql::params![
                         Uuid::new_v4().to_string(),
-                        &conv_id,
+                        conv_id.clone(),
                         role,
                         format!(
                             "{} message {} from conversation {}",
@@ -160,7 +165,8 @@ mod e2e_import_tests {
                         ),
                         format!("2024-01-{:02}T10:{:02}:00Z", 10 + conv_num, msg_num * 10)
                     ],
-                )?;
+                )
+                .await?;
             }
         }
 
@@ -171,9 +177,9 @@ mod e2e_import_tests {
     // Configuration & Settings Tests
     // ────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_full_config_extraction() {
-        let (_temp, openclaw_path) = setup_full_openclaw_test_env().expect("setup failed");
+    #[tokio::test]
+    async fn test_full_config_extraction() {
+        let (_temp, openclaw_path) = setup_full_openclaw_test_env().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let config = reader.read_config().expect("config read failed");
@@ -198,9 +204,9 @@ mod e2e_import_tests {
         assert!(config.other_settings.contains_key("custom_setting"));
     }
 
-    #[test]
-    fn test_settings_mapping_to_ironclaw_format() {
-        let (_temp, openclaw_path) = setup_full_openclaw_test_env().expect("setup failed");
+    #[tokio::test]
+    async fn test_settings_mapping_to_ironclaw_format() {
+        let (_temp, openclaw_path) = setup_full_openclaw_test_env().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let config = reader.read_config().expect("config read failed");
@@ -224,9 +230,9 @@ mod e2e_import_tests {
     // Credential Extraction Tests
     // ────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_credentials_extraction() {
-        let (_temp, openclaw_path) = setup_full_openclaw_test_env().expect("setup failed");
+    #[tokio::test]
+    async fn test_credentials_extraction() {
+        let (_temp, openclaw_path) = setup_full_openclaw_test_env().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let config = reader.read_config().expect("config read failed");
@@ -249,9 +255,9 @@ mod e2e_import_tests {
         }
     }
 
-    #[test]
-    fn test_credentials_never_logged() {
-        let (_temp, openclaw_path) = setup_full_openclaw_test_env().expect("setup failed");
+    #[tokio::test]
+    async fn test_credentials_never_logged() {
+        let (_temp, openclaw_path) = setup_full_openclaw_test_env().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let config = reader.read_config().expect("config read failed");
@@ -271,9 +277,9 @@ mod e2e_import_tests {
     // Data Volume Tests
     // ────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_full_workspace_import_counts() {
-        let (_temp, openclaw_path) = setup_full_openclaw_test_env().expect("setup failed");
+    #[tokio::test]
+    async fn test_full_workspace_import_counts() {
+        let (_temp, openclaw_path) = setup_full_openclaw_test_env().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
 
@@ -288,9 +294,9 @@ mod e2e_import_tests {
         assert_eq!(agent_dbs.len(), 2); // primary + secondary
     }
 
-    #[test]
-    fn test_full_memory_chunks_import() {
-        let (_temp, openclaw_path) = setup_full_openclaw_test_env().expect("setup failed");
+    #[tokio::test]
+    async fn test_full_memory_chunks_import() {
+        let (_temp, openclaw_path) = setup_full_openclaw_test_env().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let agent_dbs = reader.list_agent_dbs().expect("list agent dbs failed");
@@ -299,6 +305,7 @@ mod e2e_import_tests {
         for (_name, db_path) in agent_dbs {
             let chunks = reader
                 .read_memory_chunks(&db_path)
+                .await
                 .expect("read memory chunks failed");
             assert_eq!(chunks.len(), 5);
 
@@ -314,9 +321,9 @@ mod e2e_import_tests {
         }
     }
 
-    #[test]
-    fn test_full_conversations_import() {
-        let (_temp, openclaw_path) = setup_full_openclaw_test_env().expect("setup failed");
+    #[tokio::test]
+    async fn test_full_conversations_import() {
+        let (_temp, openclaw_path) = setup_full_openclaw_test_env().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let agent_dbs = reader.list_agent_dbs().expect("list agent dbs failed");
@@ -325,6 +332,7 @@ mod e2e_import_tests {
         for (_name, db_path) in agent_dbs {
             let conversations = reader
                 .read_conversations(&db_path)
+                .await
                 .expect("read conversations failed");
             assert_eq!(conversations.len(), 3);
 
@@ -387,8 +395,8 @@ mod e2e_import_tests {
     // Error Handling Tests
     // ────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_error_on_corrupt_sqlite() {
+    #[tokio::test]
+    async fn test_error_on_corrupt_sqlite() {
         let temp_dir = TempDir::new().expect("temp dir creation failed");
         let openclaw_path = temp_dir.path().to_path_buf();
 
@@ -410,7 +418,7 @@ mod e2e_import_tests {
         assert_eq!(dbs.len(), 1);
 
         // But reading should fail
-        let result = reader.read_memory_chunks(&dbs[0].1);
+        let result = reader.read_memory_chunks(&dbs[0].1).await;
         assert!(result.is_err());
     }
 
@@ -437,9 +445,9 @@ mod e2e_import_tests {
     // Extensibility Tests
     // ────────────────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_multiple_agents_independent_data() {
-        let (_temp, openclaw_path) = setup_full_openclaw_test_env().expect("setup failed");
+    #[tokio::test]
+    async fn test_multiple_agents_independent_data() {
+        let (_temp, openclaw_path) = setup_full_openclaw_test_env().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let agent_dbs = reader.list_agent_dbs().expect("list agent dbs failed");
@@ -453,14 +461,15 @@ mod e2e_import_tests {
         for (_name, db_path) in &agent_dbs {
             let chunks = reader
                 .read_memory_chunks(db_path)
+                .await
                 .expect("read chunks failed");
             assert_eq!(chunks.len(), 5);
         }
     }
 
-    #[test]
-    fn test_channel_diversity_in_conversations() {
-        let (_temp, openclaw_path) = setup_full_openclaw_test_env().expect("setup failed");
+    #[tokio::test]
+    async fn test_channel_diversity_in_conversations() {
+        let (_temp, openclaw_path) = setup_full_openclaw_test_env().await.expect("setup failed");
 
         let reader = OpenClawReader::new(&openclaw_path).expect("reader creation failed");
         let agent_dbs = reader.list_agent_dbs().expect("list agent dbs failed");
@@ -468,6 +477,7 @@ mod e2e_import_tests {
         // Get conversations from first agent
         let conversations = reader
             .read_conversations(&agent_dbs[0].1)
+            .await
             .expect("read conversations failed");
 
         // Should have different channels

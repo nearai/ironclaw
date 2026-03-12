@@ -808,6 +808,10 @@ impl Tool for WasmToolWrapper {
         // Use the timeout as a conservative estimate
         Some(self.prepared.limits.timeout)
     }
+
+    fn webhook_capability(&self) -> Option<crate::tools::wasm::WebhookCapability> {
+        self.capabilities.webhook.clone()
+    }
 }
 
 impl std::fmt::Debug for WasmToolWrapper {
