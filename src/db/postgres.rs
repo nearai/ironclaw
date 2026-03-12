@@ -99,7 +99,7 @@ impl ConversationStore for PgBackend {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         self.store
             .ensure_conversation(id, channel, user_id, thread_id)
             .await

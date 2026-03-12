@@ -28,7 +28,9 @@ Collect these values before creating routines:
 Before installing routines, verify:
 - Routines system enabled.
 - GitHub tool authenticated (for issue/PR/comment/status operations).
-- Events are emitted via `event_emit` tool calls (a future HTTP webhook ingestion endpoint is planned but not yet available).
+- GitHub webhook delivery configured to `POST /webhook/tools/github`.
+- Webhook HMAC secret configured in the secrets store as `github_webhook_secret` (required for GitHub webhook delivery).
+- Events can also be emitted via `event_emit` tool calls for testing or when webhook ingestion is not yet configured.
 
 ## Install Procedure
 1. Open [`workflow-routines.md`](references/workflow-routines.md).
@@ -51,8 +53,8 @@ Install these routines:
 
 ## Event Filters
 Prefer top-level filters for stability:
-- `repository` (string)
-- `sender` (string)
+- `repository_name` (string, e.g. `owner/repo`)
+- `sender_login` (string)
 - `issue_number` / `pr_number`
 - `ci_status`, `ci_conclusion`
 - `review_state`, `comment_author`

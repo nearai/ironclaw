@@ -24,6 +24,7 @@ use ironclaw::{
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
+    webhooks::{self, ToolWebhookState},
 };
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -85,6 +86,12 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Completion(completion)) => {
             init_cli_tracing();
             return completion.run();
+        }
+        #[cfg(feature = "import")]
+        Some(Command::Import(import_cmd)) => {
+            init_cli_tracing();
+            let config = ironclaw::config::Config::from_env().await?;
+            return ironclaw::cli::run_import_command(import_cmd, &config).await;
         }
         Some(Command::Worker {
             job_id,
@@ -271,8 +278,24 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Shared routine engine slot for gateway + generic webhook ingress.
+    let shared_routine_engine_slot: ironclaw::channels::web::server::RoutineEngineSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
+
     // Collect webhook route fragments; a single WebhookServer hosts them all.
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
+
+    webhook_routes.push(webhooks::routes(ToolWebhookState {
+        tools: Arc::clone(&components.tools),
+        routine_engine: Arc::clone(&shared_routine_engine_slot),
+        user_id: config
+            .channels
+            .gateway
+            .as_ref()
+            .map(|g| g.user_id.clone())
+            .unwrap_or_else(|| "default".to_string()),
+        secrets_store: components.secrets_store.clone(),
+    }));
 
     // Load WASM channels and register their webhook routes.
     if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
@@ -425,7 +448,6 @@ async fn async_main() -> anyhow::Result<()> {
     let mut sse_sender: Option<
         tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
     > = None;
-    let mut routine_engine_slot: Option<ironclaw::channels::web::server::RoutineEngineSlot> = None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw =
             GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
@@ -449,6 +471,7 @@ async fn async_main() -> anyhow::Result<()> {
             gw = gw.with_job_manager(Arc::clone(jm));
         }
         gw = gw.with_scheduler(scheduler_slot.clone());
+        gw = gw.with_routine_engine_slot(Arc::clone(&shared_routine_engine_slot));
         if let Some(ref sr) = components.skill_registry {
             gw = gw.with_skill_registry(Arc::clone(sr));
         }
@@ -483,8 +506,6 @@ async fn async_main() -> anyhow::Result<()> {
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
         sse_sender = Some(gw.state().sse.sender());
-        routine_engine_slot = Some(Arc::clone(&gw.state().routine_engine));
-
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
     }
@@ -564,28 +585,39 @@ async fn async_main() -> anyhow::Result<()> {
             .await;
         tracing::debug!("Channel runtime wired into extension manager for hot-activation");
 
-        // Auto-activate channels that were active in a previous session.
+        // Auto-activate WASM channels that were active in a previous session.
+        // Relay channels are handled separately below via restore_relay_channels().
         let persisted = ext_mgr.load_persisted_active_channels().await;
         for name in &persisted {
-            if !active_at_startup.contains(name) {
-                match ext_mgr.activate(name).await {
-                    Ok(result) => {
-                        tracing::debug!(
-                            channel = %name,
-                            message = %result.message,
-                            "Auto-activated persisted channel"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            channel = %name,
-                            error = %e,
-                            "Failed to auto-activate persisted channel"
-                        );
-                    }
+            if active_at_startup.contains(name) || ext_mgr.is_relay_channel(name).await {
+                continue;
+            }
+            match ext_mgr.activate(name).await {
+                Ok(result) => {
+                    tracing::debug!(
+                        channel = %name,
+                        message = %result.message,
+                        "Auto-activated persisted WASM channel"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %name,
+                        error = %e,
+                        "Failed to auto-activate persisted WASM channel"
+                    );
                 }
             }
         }
+    }
+
+    // Ensure the relay channel manager is always set (even without WASM runtime),
+    // then restore any persisted relay channels.
+    if let Some(ref ext_mgr) = components.extension_manager {
+        ext_mgr
+            .set_relay_channel_manager(Arc::clone(&channels))
+            .await;
+        ext_mgr.restore_relay_channels().await;
     }
 
     // Wire SSE sender into extension manager for broadcasting status events.
@@ -672,9 +704,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Give the agent the routine engine slot so it can expose the engine to the gateway.
-    if let Some(slot) = routine_engine_slot {
-        agent.set_routine_engine_slot(slot);
-    }
+    agent.set_routine_engine_slot(shared_routine_engine_slot);
 
     // Prepare SIGHUP handler for hot-reloading HTTP webhook config
     // Broadcast channel for clean shutdown of background tasks
@@ -768,13 +798,13 @@ async fn async_main() -> anyhow::Result<()> {
                         }
                     };
 
-                // Restart listener if addr changed
+                // Restart listener if addr changed.
+                // Two-phase approach: bind outside the lock, then swap under lock.
                 let mut restart_failed = false;
                 if let Some(ref ws_arc) = sighup_webhook_server {
-                    // Read old address while holding lock, then drop immediately
-                    let old_addr = {
+                    let (old_addr, router) = {
                         let ws = ws_arc.lock().await;
-                        ws.current_addr()
+                        (ws.current_addr(), ws.merged_router_clone())
                     }; // Lock released here
 
                     if old_addr != new_addr {
@@ -783,15 +813,45 @@ async fn async_main() -> anyhow::Result<()> {
                             old_addr,
                             new_addr
                         );
-                        // Wait for restart to complete before proceeding with secret update.
-                        // This ensures atomicity: if restart fails, secret is not updated (partial state corruption).
-                        let mut ws = ws_arc.lock().await;
-                        match ws.restart_with_addr(new_addr).await {
-                            Ok(()) => {
-                                tracing::info!("SIGHUP: webhook server restarted on {}", new_addr);
+
+                        match router {
+                            Some(app) => {
+                                // Phase 1: Bind new listener WITHOUT holding the lock.
+                                match tokio::net::TcpListener::bind(new_addr).await {
+                                    Ok(listener) => {
+                                        // Phase 2: Swap state under lock (no await inside).
+                                        let (old_tx, old_handle) = {
+                                            let mut ws = ws_arc.lock().await;
+                                            ws.install_listener(new_addr, listener, app)
+                                        }; // Lock released here
+
+                                        // Phase 3: Shut down old listener outside the lock.
+                                        if let Some(tx) = old_tx {
+                                            let _ = tx.send(());
+                                        }
+                                        if let Some(handle) = old_handle {
+                                            let _ = handle.await;
+                                        }
+
+                                        tracing::info!(
+                                            "SIGHUP: webhook server restarted on {}",
+                                            new_addr
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "SIGHUP: failed to bind to {}: {}",
+                                            new_addr,
+                                            e
+                                        );
+                                        restart_failed = true;
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                tracing::error!("SIGHUP: listener restart failed: {}", e);
+                            None => {
+                                tracing::error!(
+                                    "SIGHUP: cannot restart — server was never started"
+                                );
                                 restart_failed = true;
                             }
                         }

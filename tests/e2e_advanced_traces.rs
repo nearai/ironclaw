@@ -58,6 +58,7 @@ mod advanced {
         let trace = LlmTrace::from_file(format!("{FIXTURES}/steering.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
             .build()
             .await;
 
@@ -95,7 +96,11 @@ mod advanced {
         let _ = std::fs::remove_file("/tmp/ironclaw_recovery_test.txt");
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_error_recovery.json")).unwrap();
-        let rig = TestRigBuilder::new().with_trace(trace).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
 
         rig.send_message("Write 'recovered successfully' to a file for me.")
             .await;
@@ -138,7 +143,11 @@ mod advanced {
         std::fs::create_dir_all(test_dir).unwrap();
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/long_tool_chain.json")).unwrap();
-        let rig = TestRigBuilder::new().with_trace(trace).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
 
         rig.send_message(
             "Create a daily log at /tmp/ironclaw_chain_test/log.md, \
@@ -232,6 +241,7 @@ mod advanced {
         let rig = TestRigBuilder::new()
             .with_trace(trace)
             .with_max_tool_iterations(3)
+            .with_auto_approve_tools(true)
             .build()
             .await;
 
@@ -241,9 +251,11 @@ mod advanced {
         assert!(!responses.is_empty(), "no response -- agent may have hung");
 
         let started = rig.tool_calls_started();
+        // Bound is 8 (not 4) because auto-approve lets the agent chain
+        // multiple tool calls per iteration without blocking on approval.
         assert!(
-            started.len() <= 4,
-            "expected <= 4 tool calls with max_tool_iterations=3, got {}: {started:?}",
+            started.len() <= 8,
+            "expected <= 8 tool calls with max_tool_iterations=3, got {}: {started:?}",
             started.len()
         );
         assert!(!started.is_empty(), "expected at least 1 tool call, got 0");
@@ -295,6 +307,7 @@ mod advanced {
             .with_trace(trace.clone())
             .with_routines()
             .with_http_exchanges(http_exchanges)
+            .with_auto_approve_tools(true)
             .build()
             .await;
 

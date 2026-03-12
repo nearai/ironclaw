@@ -32,7 +32,11 @@ mod tests {
         ))
         .expect("failed to load simple_text.json");
 
-        let rig = TestRigBuilder::new().with_trace(trace).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
 
         rig.send_message("hello").await;
         let _responses = rig.wait_for_responses(1, Duration::from_secs(10)).await;
@@ -95,7 +99,11 @@ mod tests {
         ))
         .expect("failed to load file_write_read.json");
 
-        let rig = TestRigBuilder::new().with_trace(trace).build().await;
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
 
         rig.send_message("Please write a greeting to a file and read it back.")
             .await;

@@ -35,12 +35,24 @@ use serde::{Deserialize, Serialize};
 use crate::secrets::{CredentialLocation, CredentialMapping};
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WorkspaceCapability,
+    ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
 };
 
 /// Root schema for a capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilitiesFile {
+    /// Human-readable description of what the tool does.
+    /// Used as the `Tool::description()` return value.
+    /// If omitted, a generic fallback is used (with a warning).
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// JSON Schema for the tool's input parameters.
+    /// Used as the `Tool::parameters_schema()` return value.
+    /// If omitted, a permissive fallback is used (with a warning).
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+
     /// Extension version (semver).
     #[serde(default)]
     pub version: Option<String>,
@@ -64,6 +76,10 @@ pub struct CapabilitiesFile {
     /// Workspace file read access.
     #[serde(default)]
     pub workspace: Option<WorkspaceCapabilitySchema>,
+
+    /// Tool webhook authentication/signature configuration.
+    #[serde(default)]
+    pub webhook: Option<WebhookCapabilitySchema>,
 
     /// Authentication setup instructions.
     /// Used by `ironclaw config` to guide users through auth setup.
@@ -103,10 +119,13 @@ impl CapabilitiesFile {
     fn resolve_nested(mut self) -> Self {
         if let Some(inner) = self.capabilities.take() {
             let inner = inner.resolve_nested();
+            self.description = self.description.or(inner.description);
+            self.parameters = self.parameters.or(inner.parameters);
             self.http = self.http.or(inner.http);
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
             self.workspace = self.workspace.or(inner.workspace);
+            self.webhook = self.webhook.or(inner.webhook);
             self.auth = self.auth.or(inner.auth);
             self.setup = self.setup.or(inner.setup);
         }
@@ -196,6 +215,10 @@ impl CapabilitiesFile {
                 allowed_prefixes: workspace.allowed_prefixes.clone(),
                 reader: None, // Injected at runtime
             });
+        }
+
+        if let Some(webhook) = &self.webhook {
+            caps.webhook = Some(webhook.to_webhook_capability());
         }
 
         caps
@@ -417,6 +440,46 @@ pub struct WorkspaceCapabilitySchema {
     /// Allowed path prefixes (e.g., ["context/", "daily/"]).
     #[serde(default)]
     pub allowed_prefixes: Vec<String>,
+}
+
+/// Webhook capability schema for tools.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WebhookCapabilitySchema {
+    /// HTTP header name for secret validation.
+    #[serde(default)]
+    pub secret_header: Option<String>,
+    /// Secret name in secrets store for shared-secret validation.
+    #[serde(default)]
+    pub secret_name: Option<String>,
+    /// Secret name in secrets store containing Ed25519 public key.
+    #[serde(default)]
+    pub signature_key_secret_name: Option<String>,
+    /// Secret name in secrets store for HMAC-SHA256 signing.
+    #[serde(default)]
+    pub hmac_secret_name: Option<String>,
+    /// Signature header for HMAC verification.
+    #[serde(default)]
+    pub hmac_signature_header: Option<String>,
+    /// Optional timestamp header for Slack-style v0 verification.
+    #[serde(default)]
+    pub hmac_timestamp_header: Option<String>,
+    /// Optional signature prefix for body-only HMAC mode (default sha256=).
+    #[serde(default)]
+    pub hmac_prefix: Option<String>,
+}
+
+impl WebhookCapabilitySchema {
+    fn to_webhook_capability(&self) -> WebhookCapability {
+        WebhookCapability {
+            secret_header: self.secret_header.clone(),
+            secret_name: self.secret_name.clone(),
+            signature_key_secret_name: self.signature_key_secret_name.clone(),
+            hmac_secret_name: self.hmac_secret_name.clone(),
+            hmac_signature_header: self.hmac_signature_header.clone(),
+            hmac_timestamp_header: self.hmac_timestamp_header.clone(),
+            hmac_prefix: self.hmac_prefix.clone(),
+        }
+    }
 }
 
 /// Authentication setup schema.
@@ -767,6 +830,28 @@ mod tests {
         let caps = CapabilitiesFile::from_json(json).unwrap();
         let workspace = caps.workspace.unwrap();
         assert_eq!(workspace.allowed_prefixes, vec!["context/", "daily/"]);
+    }
+
+    #[test]
+    fn test_parse_webhook_capability() {
+        let json = r#"{
+            "webhook": {
+                "hmac_secret_name": "github_webhook_secret",
+                "hmac_signature_header": "x-hub-signature-256",
+                "hmac_prefix": "sha256="
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let webhook = caps.webhook.unwrap();
+        assert_eq!(
+            webhook.hmac_secret_name.as_deref(),
+            Some("github_webhook_secret")
+        );
+        assert_eq!(
+            webhook.hmac_signature_header.as_deref(),
+            Some("x-hub-signature-256")
+        );
     }
 
     #[test]
@@ -1186,6 +1271,116 @@ mod tests {
         assert_eq!(
             http.allowlist[0].host, "preserved.example.com",
             "Empty inner capabilities should not clobber outer http"
+        );
+    }
+
+    // ── Tool description and parameters schema ──────────────────────────
+
+    #[test]
+    fn test_parse_description_and_parameters() {
+        let json = r#"{
+            "description": "Search the web using Brave Search API",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of results"
+                    }
+                },
+                "required": ["query"]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("Search the web using Brave Search API")
+        );
+        let params = caps.parameters.unwrap();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["query"].is_object());
+        assert_eq!(params["required"][0], "query");
+    }
+
+    #[test]
+    fn test_parse_description_only() {
+        let json = r#"{
+            "description": "A tool without explicit parameters schema"
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("A tool without explicit parameters schema")
+        );
+        assert!(caps.parameters.is_none());
+    }
+
+    #[test]
+    fn test_parse_without_description_or_parameters() {
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "api.example.com" }]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert!(
+            caps.description.is_none(),
+            "description should be None when not provided"
+        );
+        assert!(
+            caps.parameters.is_none(),
+            "parameters should be None when not provided"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_description_promoted() {
+        let json = r#"{
+            "capabilities": {
+                "description": "Inner tool description",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": { "type": "string" }
+                    },
+                    "required": ["input"]
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("Inner tool description"),
+            "description should be promoted from inner capabilities"
+        );
+        assert!(
+            caps.parameters.is_some(),
+            "parameters should be promoted from inner capabilities"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_outer_description_takes_precedence() {
+        let json = r#"{
+            "description": "Outer description wins",
+            "capabilities": {
+                "description": "Inner description loses"
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("Outer description wins"),
+            "Outer description should take precedence over inner"
         );
     }
 }
