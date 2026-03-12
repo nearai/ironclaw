@@ -16,7 +16,6 @@
 mod channels;
 mod completion;
 mod config;
-mod routines;
 mod doctor;
 #[cfg(feature = "import")]
 pub mod import;
@@ -25,6 +24,7 @@ pub mod memory;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
+mod routines;
 mod service;
 mod skills;
 pub mod status;
@@ -33,7 +33,6 @@ mod tool;
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
-pub use routines::{RoutinesCommand, run_routines_command};
 pub use doctor::run_doctor_command;
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
@@ -42,6 +41,7 @@ pub use memory::MemoryCommand;
 pub use memory::run_memory_command_with_db;
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
+pub use routines::{RoutinesCommand, run_routines_command};
 pub use service::{ServiceCommand, run_service_command};
 pub use skills::{SkillsCommand, run_skills_command};
 pub use status::run_status_command;
