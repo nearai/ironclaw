@@ -63,6 +63,7 @@ impl FallbackDeliverable {
 
         let last_action = memory.last_action().map(|a| {
             // Use sanitized output to avoid leaking secrets through the fallback API surface.
+            // For failed actions (no sanitized output), fall back to the error message.
             let preview_source = a
                 .output_sanitized
                 .as_ref()
@@ -70,6 +71,7 @@ impl FallbackDeliverable {
                     serde_json::Value::String(s) => s.clone(),
                     other => serde_json::to_string(other).unwrap_or_default(),
                 })
+                .or_else(|| a.error.clone())
                 .unwrap_or_default();
             let preview = truncate_str(&preview_source, 200);
             LastAction {
@@ -179,6 +181,24 @@ mod tests {
         let la = fb.last_action.unwrap();
         assert_eq!(la.tool_name, "tool_b");
         assert!(!la.success);
+        // Failed actions should surface the error message as the output preview
+        assert_eq!(la.output_preview, "broke");
+    }
+
+    #[test]
+    fn test_fallback_failed_action_shows_error() {
+        let ctx = JobContext::new("Test", "Error preview");
+        let mut memory = Memory::new(ctx.job_id);
+
+        let action = memory
+            .create_action("broken_tool", serde_json::json!({}))
+            .fail("connection timed out after 30s", StdDuration::from_secs(30));
+        memory.record_action(action);
+
+        let fb = FallbackDeliverable::build(&ctx, &memory, "tool failure");
+        let la = fb.last_action.unwrap();
+        assert!(!la.success);
+        assert_eq!(la.output_preview, "connection timed out after 30s");
     }
 
     #[test]
