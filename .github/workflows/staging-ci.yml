@@ -406,6 +406,10 @@ jobs:
             echo "passed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Only merge PRs targeting main. Chained PRs (targeting another
+      # promotion branch) stay open — when the base PR merges into main,
+      # GitHub auto-retargets the chained PR. Merging chained PRs would
+      # trigger delete_branch_on_merge, auto-closing downstream PRs.
       - name: Merge promotion PR
         id: merge
         if: steps.evaluate.outputs.passed == 'true'
@@ -414,12 +418,15 @@ jobs:
           PR_NUMBER: ${{ needs.create-promotion-pr.outputs.pr_number }}
         run: |
           if [ -n "$PR_NUMBER" ]; then
-            echo "Merging promotion PR #${PR_NUMBER}"
-            # Do NOT use --delete-branch: deleting a promotion branch closes
-            # any chained PRs that use it as their base (verified in ironclaw-ci-test).
-            # Stale promotion branches are cleaned up separately.
-            gh pr merge "$PR_NUMBER" --merge
-            echo "merged=true" >> "$GITHUB_OUTPUT"
+            BASE=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName')
+            if [ "$BASE" = "main" ]; then
+              echo "Merging promotion PR #${PR_NUMBER} (targets main)"
+              gh pr merge "$PR_NUMBER" --merge
+              echo "merged=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "PR #${PR_NUMBER} targets '${BASE}' (not main) — leaving open for chain resolution"
+              echo "merged=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
   # ── Update tested tag (always, so next batch covers only new commits) ──
@@ -437,7 +444,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: staging
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Update staging-tested tag
         run: |

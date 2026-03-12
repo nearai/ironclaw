@@ -449,6 +449,20 @@ pub struct ActivateResult {
     pub message: String,
 }
 
+/// Result of configuring secrets for an extension.
+///
+/// Returned by `ExtensionManager::configure()`, the single entrypoint
+/// for providing secrets to any extension (chat auth, gateway setup, etc.).
+#[derive(Debug, Clone)]
+pub struct ConfigureResult {
+    /// Human-readable status message.
+    pub message: String,
+    /// Whether the extension was successfully activated after configuration.
+    pub activated: bool,
+    /// OAuth authorization URL (if OAuth flow was started).
+    pub auth_url: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -529,6 +543,9 @@ pub enum ExtensionError {
         primary: Box<ExtensionError>,
         fallback: Box<ExtensionError>,
     },
+
+    #[error("Token validation failed: {0}")]
+    ValidationFailed(String),
 
     #[error("{0}")]
     Other(String),
