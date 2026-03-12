@@ -23,7 +23,7 @@ use crate::tools::builtin::{
     ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{Tool, ToolDomain};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -276,6 +276,38 @@ impl ToolRegistry {
                 parameters: tool.parameters_schema(),
             })
             .collect()
+    }
+
+    /// Get tool definitions excluding specific tools by name.
+    ///
+    /// Used by lightweight routines to filter out denylisted and approval-gated tools
+    /// so the LLM only sees tools it is actually allowed to call.
+    pub async fn tool_definitions_excluding(&self, deny: &[&str]) -> Vec<ToolDefinition> {
+        let empty_params = serde_json::Value::Object(serde_json::Map::new());
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| {
+                // Exclude denylisted tools
+                if deny.contains(&tool.name()) {
+                    return false;
+                }
+                // Exclude tools that require approval
+                matches!(
+                    tool.requires_approval(&empty_params),
+                    ApprovalRequirement::Never
+                )
+            })
+            .map(|tool| ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters: tool.parameters_schema(),
+            })
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// Register development tools for building software.
