@@ -381,5 +381,47 @@
       "display_name": "Cloudflare Workers AI",
       "can_list_models": false
     }
+  },
+  {
+    "id": "zai",
+    "aliases": [
+      "z.ai",
+      "zai-global",
+      "z.ai-global"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://api.z.ai/api/coding/paas/v4",
+    "api_key_env": "ZAI_API_KEY",
+    "api_key_required": true,
+    "model_env": "ZAI_MODEL",
+    "default_model": "GLM-5",
+    "description": "Z.AI Coding API (global endpoint)",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_zai_api_key",
+      "key_url": "https://z.ai",
+      "display_name": "Z.AI (Global)",
+      "can_list_models": false
+    }
+  },
+  {
+    "id": "zai-cn",
+    "aliases": [
+      "z.ai-cn"
+    ],
+    "protocol": "open_ai_completions",
+    "default_base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+    "api_key_env": "ZAI_CN_API_KEY",
+    "api_key_required": true,
+    "model_env": "ZAI_CN_MODEL",
+    "default_model": "GLM-5",
+    "description": "Z.AI Coding API (China endpoint)",
+    "setup": {
+      "kind": "api_key",
+      "secret_name": "llm_zai_cn_api_key",
+      "key_url": "https://open.bigmodel.cn",
+      "display_name": "Z.AI (China)",
+      "can_list_models": true
+    }
   }
 ]
