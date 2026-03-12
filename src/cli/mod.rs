@@ -8,9 +8,11 @@
 //! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
 //! - Querying workspace memory (`memory search`, `memory read`, `memory write`)
 //! - Managing OS service (`service install`, `service start`, `service stop`)
+//! - Listing configured channels (`channels list`)
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
+mod channels;
 mod completion;
 mod config;
 mod doctor;
@@ -26,6 +28,7 @@ mod skills;
 pub mod status;
 mod tool;
 
+pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
@@ -135,6 +138,14 @@ pub enum Command {
         long_about = "Interact with extension registry.\nExample: ironclaw registry list"
     )]
     Registry(RegistryCommand),
+
+    /// List and inspect messaging channels
+    #[command(
+        subcommand,
+        about = "Manage channels",
+        long_about = "List configured messaging channels.\nExamples:\n  ironclaw channels list\n  ironclaw channels list --verbose\n  ironclaw channels list --json"
+    )]
+    Channels(ChannelsCommand),
 
     /// Manage MCP servers (hosted tool providers)
     #[command(
