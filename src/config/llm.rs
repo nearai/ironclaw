@@ -39,6 +39,8 @@ impl LlmConfig {
             provider: None,
             bedrock: None,
             request_timeout_secs: 120,
+            cheap_model: None,
+            smart_routing_cascade: false,
         }
     }
 
@@ -169,6 +171,14 @@ impl LlmConfig {
 
         let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
 
+        // Generic cheap model (works with any backend).
+        // Falls back to NearAI-specific cheap_model in provider chain logic.
+        let cheap_model = optional_env("LLM_CHEAP_MODEL")?;
+
+        // Generic smart routing cascade flag.
+        // Defaults to true. Overrides NearAI-specific smart_routing_cascade.
+        let smart_routing_cascade = parse_optional_env("SMART_ROUTING_CASCADE", true)?;
+
         Ok(Self {
             backend: if is_nearai {
                 "nearai".to_string()
@@ -184,6 +194,8 @@ impl LlmConfig {
             provider,
             bedrock,
             request_timeout_secs,
+            cheap_model,
+            smart_routing_cascade,
         })
     }
 

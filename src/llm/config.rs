@@ -129,6 +129,13 @@ pub struct LlmConfig {
     /// Default: 120. Increase for local LLMs (Ollama, vLLM, LM Studio) that
     /// need more time for prompt evaluation on consumer hardware.
     pub request_timeout_secs: u64,
+    /// Generic cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
+    /// Works with any backend. Set via `LLM_CHEAP_MODEL` env var.
+    /// When set, takes priority over the NearAI-specific `NEARAI_CHEAP_MODEL`.
+    pub cheap_model: Option<String>,
+    /// Enable cascade mode for smart routing (retry with primary if cheap model
+    /// response seems uncertain). Default: true. Set via `SMART_ROUTING_CASCADE`.
+    pub smart_routing_cascade: bool,
 }
 
 /// NEAR AI configuration.

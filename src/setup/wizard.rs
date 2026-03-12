@@ -3436,6 +3436,8 @@ fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
         provider: None,
         bedrock: None,
         request_timeout_secs: 120,
+        cheap_model: None,
+        smart_routing_cascade: true,
     }
 }
 
