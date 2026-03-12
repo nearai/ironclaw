@@ -201,26 +201,21 @@ jobs:
             COMMIT_MD="- (no non-merge commits in range)"
           fi
 
-          PR_BODY=$(cat <<EOF
-## Auto-promotion from staging CI
-
-**Batch range:** \`${RANGE}\`
-**Promotion branch:** \`${BRANCH}\`
-**Base:** \`${BASE}\`
-**Triggered by:** Staging CI batch at ${TIMESTAMP}
-
-### Commits in this batch (${COMMIT_COUNT}):
-${COMMIT_MD}
-
-Waiting for gates:
-- Tests: pending
-- E2E: pending
-- Claude Code review: pending (will post comments on this PR)
-
----
-*Auto-created by staging-ci workflow*
-EOF
-)
+          # Build PR body via concatenation to avoid heredoc shell expansion
+          # (commit messages in COMMIT_MD may contain $, backticks, or backslashes)
+          PR_BODY="## Auto-promotion from staging CI"
+          PR_BODY+=$'\n\n'"**Batch range:** \`${RANGE}\`"
+          PR_BODY+=$'\n'"**Promotion branch:** \`${BRANCH}\`"
+          PR_BODY+=$'\n'"**Base:** \`${BASE}\`"
+          PR_BODY+=$'\n'"**Triggered by:** Staging CI batch at ${TIMESTAMP}"
+          PR_BODY+=$'\n\n'"### Commits in this batch (${COMMIT_COUNT}):"
+          PR_BODY+=$'\n'"${COMMIT_MD}"
+          PR_BODY+=$'\n\n'"Waiting for gates:"
+          PR_BODY+=$'\n'"- Tests: pending"
+          PR_BODY+=$'\n'"- E2E: pending"
+          PR_BODY+=$'\n'"- Claude Code review: pending (will post comments on this PR)"
+          PR_BODY+=$'\n\n'"---"
+          PR_BODY+=$'\n'"*Auto-created by staging-ci workflow*"
 
           PR_URL=$(gh pr create \
             --base "$BASE" \
@@ -234,7 +229,7 @@ EOF
           echo "Created promotion PR #${PR_NUM}"
 
           # Output commit summary for use in merge commit message
-          DELIM="COMMIT_SUMMARY_$(uuidgen)"
+          DELIM="COMMIT_SUMMARY_EOF_$(date +%s)"
           {
             echo "commit_summary<<${DELIM}"
             echo "Commits in this batch (${COMMIT_COUNT}):"
@@ -459,7 +454,7 @@ EOF
               echo "Merging promotion PR #${PR_NUMBER} (targets main)"
               TITLE=$(gh pr view "$PR_NUMBER" --json title --jq '.title')
               if [ -n "$COMMIT_SUMMARY" ]; then
-                gh pr merge "$PR_NUMBER" --merge --subject "#${PR_NUMBER} $TITLE" --body "$COMMIT_SUMMARY"
+                gh pr merge "$PR_NUMBER" --merge --subject "#${PR_NUMBER} $TITLE" --body-file <(printf '%s' "$COMMIT_SUMMARY")
               else
                 gh pr merge "$PR_NUMBER" --merge
               fi
