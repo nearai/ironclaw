@@ -15,26 +15,6 @@ serde_json = "1"
 path = ".."
 
 [[bin]]
-name = "fuzz_safety_sanitizer"
-path = "fuzz_targets/fuzz_safety_sanitizer.rs"
-doc = false
-
-[[bin]]
-name = "fuzz_safety_validator"
-path = "fuzz_targets/fuzz_safety_validator.rs"
-doc = false
-
-[[bin]]
-name = "fuzz_leak_detector"
-path = "fuzz_targets/fuzz_leak_detector.rs"
-doc = false
-
-[[bin]]
 name = "fuzz_tool_params"
 path = "fuzz_targets/fuzz_tool_params.rs"
-doc = false
-
-[[bin]]
-name = "fuzz_config_env"
-path = "fuzz_targets/fuzz_config_env.rs"
 doc = false
