@@ -563,7 +563,19 @@ impl AppBuilder {
                         }
                     }
                     Err(e) => {
-                        tracing::debug!("No MCP servers configured ({})", e);
+                        if matches!(
+                            e,
+                            crate::tools::mcp::config::ConfigError::InvalidConfig { .. }
+                                | crate::tools::mcp::config::ConfigError::Json(_)
+                        ) {
+                            tracing::warn!(
+                                "MCP server configuration is invalid: {}. \
+                                 Fix or remove the corrupted config.",
+                                e
+                            );
+                        } else {
+                            tracing::debug!("No MCP servers configured ({})", e);
+                        }
                     }
                 }
             }

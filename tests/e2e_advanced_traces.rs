@@ -251,6 +251,8 @@ mod advanced {
         assert!(!responses.is_empty(), "no response -- agent may have hung");
 
         let started = rig.tool_calls_started();
+        // Bound is 8 (not 4) because auto-approve lets the agent chain
+        // multiple tool calls per iteration without blocking on approval.
         assert!(
             started.len() <= 8,
             "expected <= 8 tool calls with max_tool_iterations=3, got {}: {started:?}",

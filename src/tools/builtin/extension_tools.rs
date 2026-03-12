@@ -213,7 +213,7 @@ impl Tool for ToolAuthTool {
 
         let result = self
             .manager
-            .auth(name, None)
+            .auth(name)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
@@ -329,7 +329,7 @@ impl Tool for ToolActivateTool {
 
                 // Activation failed due to missing auth; initiate auth flow
                 // so the agent loop can show the auth card.
-                match self.manager.auth(name, None).await {
+                match self.manager.auth(name).await {
                     Ok(auth_result) if auth_result.is_authenticated() => {
                         // Auth succeeded (e.g. env var was set); retry activation.
                         let result = self
