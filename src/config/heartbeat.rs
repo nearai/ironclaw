@@ -40,7 +40,9 @@ impl Default for HeartbeatConfig {
 
 impl HeartbeatConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        let fire_at = optional_env("HEARTBEAT_FIRE_AT")?
+        let fire_at_str =
+            optional_env("HEARTBEAT_FIRE_AT")?.or_else(|| settings.heartbeat.fire_at.clone());
+        let fire_at = fire_at_str
             .map(|s| {
                 chrono::NaiveTime::parse_from_str(&s, "%H:%M").map_err(|e| {
                     ConfigError::InvalidValue {

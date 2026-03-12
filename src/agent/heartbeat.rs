@@ -222,6 +222,18 @@ impl HeartbeatRunner {
             return;
         }
 
+        // Two scheduling modes:
+        //   fire_at → sleep until the next occurrence (recalculated each iteration)
+        //   interval → tokio::time::interval (drift-free, accounts for loop body time)
+        let mut tick_interval = if self.config.fire_at.is_none() {
+            let mut iv = tokio::time::interval(self.config.interval);
+            // Don't fire immediately on startup.
+            iv.tick().await;
+            Some(iv)
+        } else {
+            None
+        };
+
         if let Some(fire_at) = self.config.fire_at {
             tracing::info!(
                 "Starting heartbeat loop: fire daily at {:?} {:?}",
@@ -236,14 +248,13 @@ impl HeartbeatRunner {
         }
 
         loop {
-            // Sleep until the next fire time
-            let sleep_dur = if let Some(fire_at) = self.config.fire_at {
-                duration_until_next_fire(fire_at, self.config.resolved_tz())
-            } else {
-                self.config.interval
-            };
-            tracing::info!("Next heartbeat in {:.1}h", sleep_dur.as_secs_f64() / 3600.0);
-            tokio::time::sleep(sleep_dur).await;
+            if let Some(fire_at) = self.config.fire_at {
+                let sleep_dur = duration_until_next_fire(fire_at, self.config.resolved_tz());
+                tracing::info!("Next heartbeat in {:.1}h", sleep_dur.as_secs_f64() / 3600.0);
+                tokio::time::sleep(sleep_dur).await;
+            } else if let Some(ref mut iv) = tick_interval {
+                iv.tick().await;
+            }
 
             // Skip during quiet hours
             if self.config.is_quiet_hours() {
