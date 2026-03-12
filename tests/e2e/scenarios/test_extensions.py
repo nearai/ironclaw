@@ -920,9 +920,9 @@ async def test_auth_completed_failure_sse_shows_error_toast_and_reloads_extensio
     async def handle_registry(route):
         await route.fulfill(status=200, content_type="application/json", body='{"entries":[]}')
 
+    await page.route("**/api/extensions*", counting_handler)
     await page.route("**/api/extensions/tools", handle_tools)
     await page.route("**/api/extensions/registry", handle_registry)
-    await page.route("**/api/extensions*", counting_handler)
 
     await go_to_extensions(page)
     count_before = len(reload_count)
@@ -1068,9 +1068,9 @@ async def test_extensions_tab_reloads_on_revisit(page):
     async def handle_registry(route):
         await route.fulfill(status=200, content_type="application/json", body='{"entries":[]}')
 
+    await page.route("**/api/extensions*", counting_handler)
     await page.route("**/api/extensions/tools", handle_tools)
     await page.route("**/api/extensions/registry", handle_registry)
-    await page.route("**/api/extensions*", counting_handler)
 
     # First visit
     await go_to_extensions(page)
@@ -1111,9 +1111,9 @@ async def test_auth_completed_sse_triggers_extensions_reload(page):
     async def handle_registry(route):
         await route.fulfill(status=200, content_type="application/json", body='{"entries":[]}')
 
+    await page.route("**/api/extensions*", counting_handler)
     await page.route("**/api/extensions/tools", handle_tools)
     await page.route("**/api/extensions/registry", handle_registry)
-    await page.route("**/api/extensions*", counting_handler)
 
     await go_to_extensions(page)
     count_before = len(reload_count)
