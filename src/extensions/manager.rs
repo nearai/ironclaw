@@ -200,7 +200,7 @@ impl ExtensionManager {
     /// used to build OAuth redirect URIs when `IRONCLAW_OAUTH_CALLBACK_URL` is not set.
     pub async fn enable_gateway_mode(&self, base_url: String) {
         self.gateway_mode
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .store(true, std::sync::atomic::Ordering::Release);
         *self.gateway_base_url.write().await = Some(base_url);
     }
 
@@ -212,7 +212,7 @@ impl ExtensionManager {
     /// - `IRONCLAW_OAUTH_CALLBACK_URL` is set to a non-loopback URL, OR
     /// - `self.tunnel_url` is set to a non-loopback URL
     pub fn should_use_gateway_mode(&self) -> bool {
-        if self.gateway_mode.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.gateway_mode.load(std::sync::atomic::Ordering::Acquire) {
             return true;
         }
         if crate::cli::oauth_defaults::use_gateway_callback() {
@@ -4975,7 +4975,7 @@ mod tests {
             Arc::new(InMemorySecretsStore::new(crypto));
         let tools = Arc::new(crate::tools::ToolRegistry::new());
         let mcp = Arc::new(McpSessionManager::new());
-        let dir = std::path::PathBuf::from("/tmp/ironclaw-test-nonexistent");
+        let dir = std::env::temp_dir().join("ironclaw-test-gateway-mode");
 
         ExtensionManager::new(
             mcp,
@@ -5085,6 +5085,8 @@ mod tests {
             unsafe {
                 if let Some(ref val) = self.original {
                     std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+                } else {
+                    std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
                 }
             }
         }
