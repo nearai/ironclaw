@@ -111,6 +111,10 @@ serde_yml = "0.0.12"
 dirs = "6"
 fs4 = "0.6"
 
+# Unix process signals (gateway stop)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Semantic versioning
 semver = "1"
 

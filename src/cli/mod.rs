@@ -17,6 +17,7 @@ mod channels;
 mod completion;
 mod config;
 mod doctor;
+mod gateway;
 #[cfg(feature = "import")]
 pub mod import;
 mod mcp;
@@ -34,6 +35,7 @@ pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
+pub use gateway::{GatewayCommand, run_gateway_command};
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
 pub use mcp::{McpCommand, run_mcp_command};
@@ -182,6 +184,14 @@ pub enum Command {
         long_about = "Approve or manage pairing requests.\nExamples:\n  ironclaw pairing list telegram\n  ironclaw pairing approve telegram ABC12345"
     )]
     Pairing(PairingCommand),
+
+    /// Manage the web gateway (standalone mode)
+    #[command(
+        subcommand,
+        about = "Manage web gateway",
+        long_about = "Manage the web gateway in standalone mode (no agent loop).\nExamples:\n  ironclaw gateway serve   # Foreground (Ctrl-C to stop)\n  ironclaw gateway start   # Background daemon\n  ironclaw gateway stop    # Stop background daemon\n  ironclaw gateway status  # Check if running"
+    )]
+    Gateway(GatewayCommand),
 
     /// Manage OS service (launchd / systemd)
     #[command(
