@@ -213,7 +213,7 @@ impl Tool for ToolAuthTool {
 
         let result = self
             .manager
-            .auth(name, None)
+            .auth(name)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
@@ -253,6 +253,16 @@ impl Tool for ToolAuthTool {
             .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
 
         Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        // In gateway mode, tool_auth only returns an auth URL for the frontend
+        // to open — no browser is launched server-side, so no approval needed.
+        if self.manager.should_use_gateway_mode() {
+            ApprovalRequirement::Never
+        } else {
+            ApprovalRequirement::UnlessAutoApproved
+        }
     }
 }
 
@@ -319,7 +329,7 @@ impl Tool for ToolActivateTool {
 
                 // Activation failed due to missing auth; initiate auth flow
                 // so the agent loop can show the auth card.
-                match self.manager.auth(name, None).await {
+                match self.manager.auth(name).await {
                     Ok(auth_result) if auth_result.is_authenticated() => {
                         // Auth succeeded (e.g. env var was set); retry activation.
                         let result = self
@@ -649,7 +659,7 @@ mod tests {
         assert_eq!(tool.name(), "tool_auth");
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::Never
+            ApprovalRequirement::UnlessAutoApproved
         );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
@@ -727,6 +737,22 @@ mod tests {
                 case_name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn tool_auth_no_approval_in_gateway_mode() {
+        let manager = test_manager_stub();
+        manager
+            .enable_gateway_mode("http://localhost:3000".to_string())
+            .await;
+        let tool = ToolAuthTool {
+            manager: manager.clone(),
+        };
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never,
+            "tool_auth should not require approval in gateway mode"
+        );
     }
 
     #[test]

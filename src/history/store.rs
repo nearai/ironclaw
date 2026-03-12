@@ -1407,25 +1407,31 @@ pub struct ConversationMessage {
 impl Store {
     /// Ensure a conversation row exists for a given UUID.
     ///
-    /// Idempotent: inserts on first call, bumps `last_activity` on subsequent calls.
+    /// Returns `true` when the row is inserted or refreshed for the same
+    /// `(channel, user_id)`. Returns `false` when the UUID already exists but
+    /// belongs to a different owner/channel.
     pub async fn ensure_conversation(
         &self,
         id: Uuid,
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         let conn = self.conn().await?;
-        conn.execute(
-            r#"
+        let affected = conn
+            .execute(
+                r#"
             INSERT INTO conversations (id, channel, user_id, thread_id)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id) DO UPDATE SET last_activity = NOW()
+            ON CONFLICT (id) DO UPDATE
+            SET last_activity = NOW()
+            WHERE conversations.user_id = EXCLUDED.user_id
+              AND conversations.channel = EXCLUDED.channel
             "#,
-            &[&id, &channel, &user_id, &thread_id],
-        )
-        .await?;
-        Ok(())
+                &[&id, &channel, &user_id, &thread_id],
+            )
+            .await?;
+        Ok(affected > 0)
     }
 
     /// List conversations with a title derived from the first user message.

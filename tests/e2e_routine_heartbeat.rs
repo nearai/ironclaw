@@ -61,6 +61,8 @@ mod tests {
                 prompt: prompt.to_string(),
                 context_paths: vec![],
                 max_tokens: 1000,
+                use_tools: false,
+                max_tool_rounds: 3,
             },
             guardrails: RoutineGuardrails {
                 cooldown: Duration::from_secs(0),
@@ -397,10 +399,6 @@ mod tests {
             "Expected case-insensitive match on filter values"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // Test 4: routine_cooldown
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn routine_cooldown() {

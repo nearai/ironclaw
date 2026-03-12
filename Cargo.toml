@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "crates/ironclaw_safety"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
@@ -15,11 +15,12 @@ exclude = [
     "tools-src/slack",
     "tools-src/telegram",
     "fuzz",
+    "crates/ironclaw_safety/fuzz",
 ]
 
 [package]
 name = "ironclaw"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -99,6 +100,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
 cron = "0.13"
 
 # Safety/sanitization
+ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.1.0" }
 regex = "1"
 aho-corasick = "1"
 
@@ -176,7 +178,6 @@ ed25519-dalek = { version = "2.2.0", features = ["std"] }
 hex = "0.4.3"
 
 # OpenClaw import (feature gated)
-rusqlite = { version = "0.32", optional = true, features = ["bundled"] }
 json5 = { version = "0.4", optional = true }
 
 # macOS keychain
@@ -214,7 +215,7 @@ libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
-import = ["dep:rusqlite", "dep:json5"]
+import = ["dep:json5", "libsql"]
 
 [[test]]
 name = "html_to_markdown"

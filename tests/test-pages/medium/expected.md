@@ -308,4 +308,4 @@ We’re trying out some new shoes. And while they’re not self-lacing, and
 
 [**pippin@pippinlee.com**](mailto:pippinblee@gmail.com)
 
-*This isn’t supposed to be a****manifesto™©*** *we just think it’s pretty cool to share what we’ve learned so far, and hope you’ll do the same. We’re all in this together.*
+*This isn’t supposed to be a* ***manifesto™©*** *we just think it’s pretty cool to share what we’ve learned so far, and hope you’ll do the same. We’re all in this together.*

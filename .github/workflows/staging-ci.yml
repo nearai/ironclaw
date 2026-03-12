@@ -44,6 +44,7 @@ jobs:
         id: check
         env:
           FORCE_RUN: ${{ inputs.force }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           CURRENT_HEAD=$(git rev-parse HEAD)
           echo "current_head=${CURRENT_HEAD}" >> "$GITHUB_OUTPUT"
@@ -65,8 +66,8 @@ jobs:
               echo "Found ${COMMIT_COUNT} new commit(s) since last tested"
               DIFF_RANGE="${LAST_TESTED}..${CURRENT_HEAD}"
             else
-              git fetch origin main
-              MERGE_BASE=$(git merge-base origin/main HEAD)
+              git fetch origin "${DEFAULT_BRANCH}"
+              MERGE_BASE=$(git merge-base "origin/${DEFAULT_BRANCH}" HEAD)
               echo "First run -- reviewing from merge-base ${MERGE_BASE}"
               DIFF_RANGE="${MERGE_BASE}..${CURRENT_HEAD}"
             fi
@@ -129,18 +130,19 @@ jobs:
             echo "token=${{ github.token }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check if staging is ahead of main
+      - name: Check if staging is ahead of target branch
         id: ahead-check
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          git fetch origin main
-          AHEAD=$(git rev-list --count origin/main..origin/staging)
+          git fetch origin "${DEFAULT_BRANCH}"
+          AHEAD=$(git rev-list --count "origin/${DEFAULT_BRANCH}..origin/staging")
           echo "commits_ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
           if [ "$AHEAD" -eq 0 ]; then
-            echo "Staging is not ahead of main. Nothing to promote."
+            echo "Staging is not ahead of ${DEFAULT_BRANCH}. Nothing to promote."
           else
-            echo "Staging is ${AHEAD} commits ahead of main."
+            echo "Staging is ${AHEAD} commits ahead of ${DEFAULT_BRANCH}."
           fi
 
       - name: Create promotion branch
@@ -159,6 +161,7 @@ jobs:
         if: steps.ahead-check.outputs.commits_ahead != '0'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           # Find the newest open promotion PR with a staging-promote/* head branch
           LATEST=$(gh pr list --label staging-promotion --state open \
@@ -168,8 +171,8 @@ jobs:
             echo "base=${LATEST}" >> "$GITHUB_OUTPUT"
             echo "Chaining onto existing promotion branch: ${LATEST}"
           else
-            echo "base=main" >> "$GITHUB_OUTPUT"
-            echo "No existing promotion PR — targeting main"
+            echo "base=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "No existing promotion PR — targeting ${DEFAULT_BRANCH}"
           fi
 
       - name: Create promotion PR
@@ -186,7 +189,7 @@ jobs:
           PR_URL=$(gh pr create \
             --base "$BASE" \
             --head "$BRANCH" \
-            --title "chore: promote staging to main (${TIMESTAMP})" \
+            --title "chore: promote staging to ${BASE} (${TIMESTAMP})" \
             --body "## Auto-promotion from staging CI
 
           **Batch range:** \`${RANGE}\`
@@ -406,6 +409,10 @@ jobs:
             echo "passed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Only merge PRs targeting main. Chained PRs (targeting another
+      # promotion branch) stay open — when the base PR merges into main,
+      # GitHub auto-retargets the chained PR. Merging chained PRs would
+      # trigger delete_branch_on_merge, auto-closing downstream PRs.
       - name: Merge promotion PR
         id: merge
         if: steps.evaluate.outputs.passed == 'true'
@@ -414,12 +421,15 @@ jobs:
           PR_NUMBER: ${{ needs.create-promotion-pr.outputs.pr_number }}
         run: |
           if [ -n "$PR_NUMBER" ]; then
-            echo "Merging promotion PR #${PR_NUMBER}"
-            # Do NOT use --delete-branch: deleting a promotion branch closes
-            # any chained PRs that use it as their base (verified in ironclaw-ci-test).
-            # Stale promotion branches are cleaned up separately.
-            gh pr merge "$PR_NUMBER" --merge
-            echo "merged=true" >> "$GITHUB_OUTPUT"
+            BASE=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName')
+            if [ "$BASE" = "main" ]; then
+              echo "Merging promotion PR #${PR_NUMBER} (targets main)"
+              gh pr merge "$PR_NUMBER" --merge
+              echo "merged=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "PR #${PR_NUMBER} targets '${BASE}' (not main) — leaving open for chain resolution"
+              echo "merged=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
   # ── Update tested tag (always, so next batch covers only new commits) ──
@@ -437,7 +447,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: staging
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Update staging-tested tag
         run: |

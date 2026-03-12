@@ -116,9 +116,18 @@ pub fn load_ironclaw_env() {
             .join(".ironclaw")
             .join("ironclaw.db");
         if default_db.exists() {
-            // SAFETY: `load_ironclaw_env` is called from a synchronous `fn main()`
-            // before the Tokio runtime is started, so no other threads exist yet.
-            unsafe { std::env::set_var("DATABASE_BACKEND", "libsql") };
+            if tokio::runtime::Handle::try_current().is_ok() {
+                // Tokio runtime is active (multi-threaded); std::env::set_var is UB here.
+                // Fall back to the thread-safe runtime overlay so the value is always set.
+                tracing::warn!(
+                    "load_ironclaw_env called with active Tokio runtime; \
+                     using runtime env overlay for DATABASE_BACKEND"
+                );
+                crate::config::set_runtime_env("DATABASE_BACKEND", "libsql");
+            } else {
+                // SAFETY: No Tokio runtime = no other threads = safe to call set_var.
+                unsafe { std::env::set_var("DATABASE_BACKEND", "libsql") };
+            }
         }
     }
 }

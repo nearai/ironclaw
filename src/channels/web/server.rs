@@ -318,7 +318,11 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
-        .route("/favicon.ico", get(favicon_handler));
+        .route("/favicon.ico", get(favicon_handler))
+        .route("/i18n/index.js", get(i18n_index_handler))
+        .route("/i18n/en.js", get(i18n_en_handler))
+        .route("/i18n/zh-CN.js", get(i18n_zh_handler))
+        .route("/i18n-app.js", get(i18n_app_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
@@ -367,6 +371,21 @@ pub async fn start_server(
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_FRAME_OPTIONS,
             header::HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("content-security-policy"),
+            header::HeaderValue::from_static(
+                "default-src 'self'; \
+                 script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
+                 style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+                 font-src https://fonts.gstatic.com; \
+                 connect-src 'self'; \
+                 img-src 'self' data:; \
+                 object-src 'none'; \
+                 frame-ancestors 'none'; \
+                 base-uri 'self'; \
+                 form-action 'self'",
+            ),
         ))
         .with_state(state.clone());
 
@@ -427,6 +446,46 @@ async fn favicon_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         include_bytes!("static/favicon.ico").as_slice(),
+    )
+}
+
+async fn i18n_index_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n/index.js"),
+    )
+}
+
+async fn i18n_en_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n/en.js"),
+    )
+}
+
+async fn i18n_zh_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n/zh-CN.js"),
+    )
+}
+
+async fn i18n_app_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/i18n-app.js"),
     )
 }
 
@@ -522,7 +581,12 @@ async fn oauth_callback_handler(
     let exchange_proxy_url = std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL").ok();
 
     let result: Result<(), String> = async {
-        let token_response = if let Some(ref proxy_url) = exchange_proxy_url {
+        let token_response = if let (Some(proxy_url), None) = (&exchange_proxy_url, &flow.resource)
+        {
+            // Use the platform exchange proxy when configured and no resource
+            // parameter is needed. The proxy holds client_secret server-side so
+            // the container never sees it. MCP flows (resource.is_some()) bypass
+            // the proxy because it doesn't forward the RFC 8707 resource param.
             let gateway_token = flow.gateway_token.as_deref().unwrap_or_default();
             oauth_defaults::exchange_via_proxy(
                 proxy_url,
@@ -535,7 +599,10 @@ async fn oauth_callback_handler(
             .await
             .map_err(|e| e.to_string())?
         } else {
-            oauth_defaults::exchange_oauth_code(
+            // Direct token exchange: uses exchange_oauth_code_with_resource so MCP
+            // flows can include the RFC 8707 `resource` parameter to scope the
+            // issued token to the specific MCP server.
+            oauth_defaults::exchange_oauth_code_with_resource(
                 &flow.token_url,
                 &flow.client_id,
                 flow.client_secret.as_deref(),
@@ -543,6 +610,7 @@ async fn oauth_callback_handler(
                 &flow.redirect_uri,
                 flow.code_verifier.as_deref(),
                 &flow.access_token_field,
+                flow.resource.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?
@@ -568,6 +636,19 @@ async fn oauth_callback_handler(
         )
         .await
         .map_err(|e| e.to_string())?;
+
+        // For MCP OAuth flows (identified by resource field), persist the
+        // client_id so token refresh works without re-authentication.
+        // The CLI flow stores this in authorize_mcp_server(); the gateway
+        // callback must do the same.
+        if let Some(ref client_id_secret) = flow.client_id_secret_name {
+            let params = crate::secrets::CreateSecretParams::new(client_id_secret, &flow.client_id)
+                .with_provider(flow.provider.as_ref().cloned().unwrap_or_default());
+            flow.secrets
+                .create(&flow.user_id, params)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
 
         Ok(())
     }
@@ -600,12 +681,35 @@ async fn oauth_callback_handler(
         }
     }
 
+    // After successful OAuth, auto-activate the extension so it moves
+    // from "Installed (Authenticate)" → "Active" without a second click.
+    // OAuth success is independent of activation — tokens are already stored.
+    // Report auth as successful and attempt activation as a bonus step.
+    let final_message = if success {
+        match ext_mgr.activate(&flow.extension_name).await {
+            Ok(result) => result.message,
+            Err(e) => {
+                tracing::warn!(
+                    extension = %flow.extension_name,
+                    error = %e,
+                    "Auto-activation after OAuth failed"
+                );
+                format!(
+                    "{} authenticated successfully. Activation failed: {}. Try activating manually.",
+                    flow.display_name, e
+                )
+            }
+        }
+    } else {
+        message
+    };
+
     // Broadcast SSE event to notify the web UI
     if let Some(ref sender) = flow.sse_sender {
         let _ = sender.send(SseEvent::AuthCompleted {
             extension_name: flow.extension_name,
             success,
-            message,
+            message: final_message.clone(),
         });
     }
 
@@ -914,11 +1018,17 @@ async fn chat_send_handler(
         req.images.len()
     );
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tracing::debug!("[chat_send_handler] Sending message through channel");
     tx.send(msg).await.map_err(|_| {
@@ -984,11 +1094,17 @@ async fn chat_approval_handler(
 
     let msg_id = msg.id;
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tx.send(msg).await.map_err(|_| {
         (
@@ -1018,49 +1134,35 @@ async fn chat_auth_token_handler(
         "Extension manager not available".to_string(),
     ))?;
 
-    let result = ext_mgr
-        .auth(&req.extension_name, Some(&req.token))
+    match ext_mgr
+        .configure_token(&req.extension_name, &req.token)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    {
+        Ok(result) => {
+            // Clear auth mode on the active thread
+            clear_auth_mode(&state).await;
 
-    if result.is_authenticated() {
-        // Auto-activate so tools are available immediately
-        let msg = match ext_mgr.activate(&req.extension_name).await {
-            Ok(r) => format!(
-                "{} authenticated ({} tools loaded)",
-                req.extension_name,
-                r.tools_loaded.len()
-            ),
-            Err(e) => format!(
-                "{} authenticated but activation failed: {}",
-                req.extension_name, e
-            ),
-        };
+            state.sse.broadcast(SseEvent::AuthCompleted {
+                extension_name: req.extension_name.clone(),
+                success: true,
+                message: result.message.clone(),
+            });
 
-        // Clear auth mode on the active thread
-        clear_auth_mode(&state).await;
-
-        state.sse.broadcast(SseEvent::AuthCompleted {
-            extension_name: req.extension_name,
-            success: true,
-            message: msg.clone(),
-        });
-
-        Ok(Json(ActionResponse::ok(msg)))
-    } else {
-        // Re-emit auth_required for retry
-        state.sse.broadcast(SseEvent::AuthRequired {
-            extension_name: req.extension_name.clone(),
-            instructions: result.instructions().map(String::from),
-            auth_url: result.auth_url().map(String::from),
-            setup_url: result.setup_url().map(String::from),
-        });
-        Ok(Json(ActionResponse::fail(
-            result
-                .instructions()
-                .map(String::from)
-                .unwrap_or_else(|| "Invalid token".to_string()),
-        )))
+            Ok(Json(ActionResponse::ok(result.message)))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            // Re-emit auth_required for retry on validation errors
+            if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: req.extension_name.clone(),
+                    instructions: Some(msg.clone()),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            }
+            Ok(Json(ActionResponse::fail(msg)))
+        }
     }
 }
 
@@ -1418,11 +1520,17 @@ async fn chat_new_thread_handler(
     // Persist the empty conversation row with thread_type metadata synchronously
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
-        if let Err(e) = store
+        match store
             .ensure_conversation(thread_id, "gateway", &state.user_id, None)
             .await
         {
-            tracing::warn!("Failed to persist new thread: {}", e);
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                user = %state.user_id,
+                thread_id = %thread_id,
+                "Skipped persisting new thread due to ownership/channel conflict"
+            ),
+            Err(e) => tracing::warn!("Failed to persist new thread: {}", e),
         }
         let metadata_val = serde_json::json!("thread");
         if let Err(e) = store
@@ -1809,7 +1917,7 @@ async fn extensions_install_handler(
                 // expansion and for first-time auth when credentials are already
                 // configured (e.g., built-in providers). We only surface an auth_url
                 // when the extension reports it is awaiting authorization.
-                match ext_mgr.auth(&req.name, None).await {
+                match ext_mgr.auth(&req.name).await {
                     Ok(auth_result) if auth_result.auth_url().is_some() => {
                         // Scope expansion or initial OAuth: user needs to authorize
                         resp.auth_url = auth_result.auth_url().map(String::from);
@@ -1838,9 +1946,9 @@ async fn extensions_activate_handler(
             // Activation loaded the WASM module. Check if the tool needs
             // OAuth scope expansion (e.g., adding google-docs when gmail
             // already has a token but missing the documents scope).
-            // Initial OAuth setup is triggered via save_setup_secrets.
+            // Initial OAuth setup is triggered via configure.
             let mut resp = ActionResponse::ok(result.message);
-            if let Ok(auth_result) = ext_mgr.auth(&name, None).await
+            if let Ok(auth_result) = ext_mgr.auth(&name).await
                 && auth_result.auth_url().is_some()
             {
                 resp.auth_url = auth_result.auth_url().map(String::from);
@@ -1858,7 +1966,7 @@ async fn extensions_activate_handler(
             }
 
             // Activation failed due to auth; try authenticating first.
-            match ext_mgr.auth(&name, None).await {
+            match ext_mgr.auth(&name).await {
                 Ok(auth_result) if auth_result.is_authenticated() => {
                     // Auth succeeded, retry activation.
                     match ext_mgr.activate(&name).await {
@@ -2065,7 +2173,7 @@ async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.save_setup_secrets(&name, &req.secrets).await {
+    match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
             // Broadcast auth_completed so the chat UI can dismiss any in-progress
             // auth card or setup modal that was triggered by tool_auth/tool_activate.
@@ -2706,6 +2814,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_csp_header_present_on_responses() {
+        use std::net::SocketAddr;
+
+        let state = test_gateway_state(None);
+
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let bound = start_server(addr, state.clone(), "test-token".to_string())
+            .await
+            .expect("server should start");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/api/health", bound))
+            .send()
+            .await
+            .expect("health request should succeed");
+
+        assert_eq!(resp.status(), 200);
+
+        let csp = resp
+            .headers()
+            .get("content-security-policy")
+            .expect("CSP header must be present");
+
+        let csp_str = csp.to_str().expect("CSP header should be valid UTF-8");
+        assert!(
+            csp_str.contains("default-src 'self'"),
+            "CSP must contain default-src"
+        );
+        assert!(
+            csp_str.contains(
+                "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com"
+            ),
+            "CSP must allow both marked and DOMPurify script CDNs"
+        );
+        assert!(
+            csp_str.contains("object-src 'none'"),
+            "CSP must contain object-src 'none'"
+        );
+        assert!(
+            csp_str.contains("frame-ancestors 'none'"),
+            "CSP must contain frame-ancestors 'none'"
+        );
+
+        if let Some(tx) = state.shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    #[tokio::test]
     async fn test_oauth_callback_missing_params() {
         use axum::body::Body;
         use tower::ServiceExt;
@@ -2853,6 +3011,8 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
+            resource: None,
+            client_id_secret_name: None,
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
                 .expect("System uptime is too low to run expired flow test"),
@@ -2962,6 +3122,8 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
+            resource: None,
+            client_id_secret_name: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))

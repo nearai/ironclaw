@@ -1,7 +1,7 @@
 //! HTTP request tool.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,9 +31,30 @@ const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 /// in memory for LLM context. Matches the WASM attachment size cap.
 const MAX_SAVE_TO_SIZE: usize = 50 * 1024 * 1024;
 
+/// Default request timeout when the caller does not provide one.
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum allowed request timeout to bound resource usage from LLM-controlled inputs.
+const MAX_TIMEOUT_SECS: u64 = 300;
+
+/// Maximum number of redirects to follow for simple GET requests.
+const MAX_REDIRECTS: usize = 3;
+
+/// Descriptive User-Agent so public APIs don't reject bare requests.
+const USER_AGENT: &str = concat!(
+    "IronClaw-Agent/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/nearai/ironclaw)"
+);
+
 /// Tool for making HTTP requests.
+///
+/// Each request builds a per-request [`Client`] with DNS pinning to prevent
+/// TOCTOU DNS rebinding attacks.  The hostname is resolved once, validated
+/// against the SSRF blocklist, and then pinned via
+/// [`reqwest::ClientBuilder::resolve_to_addrs`] so that reqwest connects
+/// directly to the pre-validated IPs without a second DNS lookup.
 pub struct HttpTool {
-    client: Client,
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
@@ -41,52 +62,7 @@ pub struct HttpTool {
 impl HttpTool {
     /// Create a new HTTP tool.
     pub fn new() -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 10 {
-                    return attempt.error("too many redirects");
-                }
-                // Reject scheme downgrades (https → http)
-                if attempt.url().scheme() != "https" {
-                    return attempt.error("redirect to non-HTTPS URL is not allowed");
-                }
-                // Extract host info before consuming attempt
-                let host_owned = attempt.url().host_str().map(|h| h.to_owned());
-                let port = attempt.url().port_or_known_default().unwrap_or(443);
-
-                if let Some(host) = host_owned {
-                    let host_lower = host.to_lowercase();
-                    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
-                        return attempt.error("redirect to localhost is not allowed");
-                    }
-                    if let Ok(ip) = host.parse::<IpAddr>()
-                        && is_disallowed_ip(&ip)
-                    {
-                        return attempt.error("redirect to private/local IP is not allowed");
-                    }
-                    // Resolve hostname and check all IPs
-                    let socket_addr = format!("{}:{}", host, port);
-                    if let Ok(addrs) = socket_addr.to_socket_addrs() {
-                        for addr in addrs {
-                            if is_disallowed_ip(&addr.ip()) {
-                                let msg = format!(
-                                    "redirect target '{}' resolves to disallowed IP {}",
-                                    host,
-                                    addr.ip()
-                                );
-                                return attempt.error(msg);
-                            }
-                        }
-                    }
-                }
-                attempt.follow()
-            }))
-            .build()
-            .expect("Failed to create HTTP client");
-
         Self {
-            client,
             credential_registry: None,
             secrets_store: None,
         }
@@ -129,6 +105,11 @@ fn validate_save_to_path(save_to: &str) -> Result<std::path::PathBuf, ToolError>
     Ok(validated)
 }
 
+/// Parse and validate a URL without DNS resolution.
+///
+/// Checks scheme (HTTPS only), rejects localhost and private/link-local IP
+/// literals.  Does **not** resolve hostnames -- use [`validate_and_resolve_url`]
+/// for the full DNS-pinning flow that eliminates the TOCTOU rebinding window.
 pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
@@ -159,36 +140,94 @@ pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
         ));
     }
 
-    // Resolve hostname and check all resolved IPs against the blocklist.
-    // This prevents DNS rebinding where a hostname resolves to a private IP.
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let socket_addr = format!("{}:{}", host, port);
-    if let Ok(addrs) = socket_addr.to_socket_addrs() {
-        for addr in addrs {
-            if is_disallowed_ip(&addr.ip()) {
-                return Err(ToolError::NotAuthorized(format!(
-                    "hostname '{}' resolves to disallowed IP {}",
-                    host,
-                    addr.ip()
-                )));
-            }
+    Ok(parsed)
+}
+
+/// Resolve DNS for a validated URL and check every resolved address against
+/// the SSRF blocklist.
+///
+/// Returns the resolved [`SocketAddr`]s so that callers can pin the hostname
+/// via [`reqwest::ClientBuilder::resolve_to_addrs`], preventing a DNS rebinding
+/// attack where a second, independent resolution (inside reqwest) returns a
+/// different -- potentially private -- IP after our validation pass.
+pub(crate) async fn validate_and_resolve_url(
+    url: &reqwest::Url,
+) -> Result<Vec<SocketAddr>, ToolError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| ToolError::InvalidParameters("URL missing host".to_string()))?;
+
+    let port = url.port_or_known_default().unwrap_or(443);
+
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
+        .await
+        .map_err(|e| {
+            ToolError::ExternalService(format!("DNS resolution failed for '{}': {}", host, e))
+        })?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(ToolError::ExternalService(format!(
+            "DNS resolution for '{}' returned no addresses",
+            host
+        )));
+    }
+
+    for addr in &addrs {
+        if is_disallowed_ip(&addr.ip()) {
+            return Err(ToolError::NotAuthorized(format!(
+                "hostname '{}' resolves to disallowed IP {}",
+                host,
+                addr.ip()
+            )));
         }
     }
 
-    Ok(parsed)
+    Ok(addrs)
+}
+
+/// Build a reqwest [`Client`] that pins the given hostname to the
+/// pre-validated resolved addresses, preventing any second DNS lookup.
+pub(crate) fn build_pinned_client(
+    host: &str,
+    resolved_addrs: &[SocketAddr],
+    timeout: Duration,
+    redirect_policy: reqwest::redirect::Policy,
+) -> Result<Client, ToolError> {
+    let builder = Client::builder()
+        .timeout(timeout)
+        .redirect(redirect_policy)
+        .user_agent(USER_AGENT)
+        .resolve_to_addrs(host, resolved_addrs);
+
+    builder
+        .build()
+        .map_err(|e| ToolError::ExternalService(format!("failed to build HTTP client: {}", e)))
+}
+
+/// Check whether an IPv4 address falls in a disallowed range (private,
+/// loopback, link-local, multicast, unspecified, or cloud metadata).
+fn is_disallowed_ipv4(v4: &Ipv4Addr) -> bool {
+    v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_multicast()
+        || v4.is_unspecified()
+        || *v4 == Ipv4Addr::new(169, 254, 169, 254)
 }
 
 fn is_disallowed_ip(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_multicast()
-                || v4.is_unspecified()
-                || *v4 == std::net::Ipv4Addr::new(169, 254, 169, 254)
-        }
+        IpAddr::V4(v4) => is_disallowed_ipv4(v4),
         IpAddr::V6(v6) => {
+            // Catch IPv4-mapped IPv6 addresses (e.g. ::ffff:169.254.169.254)
+            // that would bypass IPv4-only checks.
+            if let Some(v4) = v6.to_ipv4_mapped()
+                && is_disallowed_ipv4(&v4)
+            {
+                return true;
+            }
+
             v6.is_loopback()
                 || v6.is_unique_local()
                 || v6.is_unicast_link_local()
@@ -211,39 +250,116 @@ fn is_html_response(headers: &HashMap<String, String>) -> bool {
 fn parse_headers_param(
     headers: Option<&serde_json::Value>,
 ) -> Result<Vec<(String, String)>, ToolError> {
+    fn parse_header_object(
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Vec<(String, String)>, ToolError> {
+        let mut out = Vec::with_capacity(map.len());
+        for (k, v) in map {
+            let value = v.as_str().ok_or_else(|| {
+                ToolError::InvalidParameters(format!("header '{}' must have a string value", k))
+            })?;
+            out.push((k.clone(), value.to_string()));
+        }
+        Ok(out)
+    }
+
+    fn parse_header_array(items: &[serde_json::Value]) -> Result<Vec<(String, String)>, ToolError> {
+        let mut out = Vec::with_capacity(items.len());
+        for (idx, item) in items.iter().enumerate() {
+            let obj = item.as_object().ok_or_else(|| {
+                ToolError::InvalidParameters(format!(
+                    "headers[{}] must be an object with 'name' and 'value'",
+                    idx
+                ))
+            })?;
+            let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                ToolError::InvalidParameters(format!("headers[{}].name must be a string", idx))
+            })?;
+            let value = obj.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
+                ToolError::InvalidParameters(format!("headers[{}].value must be a string", idx))
+            })?;
+            out.push((name.to_string(), value.to_string()));
+        }
+        Ok(out)
+    }
+
     match headers {
         None => Ok(Vec::new()),
-        Some(serde_json::Value::Object(map)) => {
-            let mut out = Vec::with_capacity(map.len());
-            for (k, v) in map {
-                let value = v.as_str().ok_or_else(|| {
-                    ToolError::InvalidParameters(format!("header '{}' must have a string value", k))
-                })?;
-                out.push((k.clone(), value.to_string()));
+        Some(serde_json::Value::String(raw)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(Vec::new());
             }
-            Ok(out)
-        }
-        Some(serde_json::Value::Array(items)) => {
-            let mut out = Vec::with_capacity(items.len());
-            for (idx, item) in items.iter().enumerate() {
-                let obj = item.as_object().ok_or_else(|| {
-                    ToolError::InvalidParameters(format!(
-                        "headers[{}] must be an object with 'name' and 'value'",
-                        idx
-                    ))
-                })?;
-                let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
-                    ToolError::InvalidParameters(format!("headers[{}].name must be a string", idx))
-                })?;
-                let value = obj.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
-                    ToolError::InvalidParameters(format!("headers[{}].value must be a string", idx))
-                })?;
-                out.push((name.to_string(), value.to_string()));
+            let parsed = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|e| {
+                ToolError::InvalidParameters(format!(
+                    "headers string must contain valid JSON object/array: {}",
+                    e
+                ))
+            })?;
+            match parsed {
+                serde_json::Value::Object(map) => parse_header_object(&map),
+                serde_json::Value::Array(items) => parse_header_array(&items),
+                _ => Err(ToolError::InvalidParameters(
+                    "headers string must decode to a JSON object or array".to_string(),
+                )),
             }
-            Ok(out)
         }
+        Some(serde_json::Value::Object(map)) => parse_header_object(map),
+        Some(serde_json::Value::Array(items)) => parse_header_array(items),
         Some(_) => Err(ToolError::InvalidParameters(
             "'headers' must be an object or an array of {name, value}".to_string(),
+        )),
+    }
+}
+
+fn parse_timeout_secs_param(timeout: Option<&serde_json::Value>) -> Result<Option<u64>, ToolError> {
+    let parsed = match timeout {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => n.as_u64().map(Some).ok_or_else(|| {
+            ToolError::InvalidParameters("timeout_secs must be a non-negative integer".to_string())
+        }),
+        Some(serde_json::Value::String(raw)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let secs = trimmed.parse::<u64>().map_err(|_| {
+                ToolError::InvalidParameters(
+                    "timeout_secs string must contain a non-negative integer".to_string(),
+                )
+            })?;
+            Ok(Some(secs))
+        }
+        Some(_) => Err(ToolError::InvalidParameters(
+            "timeout_secs must be an integer".to_string(),
+        )),
+    }?;
+
+    if let Some(secs) = parsed
+        && secs > MAX_TIMEOUT_SECS
+    {
+        return Err(ToolError::InvalidParameters(format!(
+            "timeout_secs must be <= {}",
+            MAX_TIMEOUT_SECS
+        )));
+    }
+
+    Ok(parsed)
+}
+
+fn parse_save_to_param(save_to: Option<&serde_json::Value>) -> Result<Option<String>, ToolError> {
+    match save_to {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(path)) => {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Some(_) => Err(ToolError::InvalidParameters(
+            "save_to must be a string".to_string(),
         )),
     }
 }
@@ -325,20 +441,39 @@ impl Tool for HttpTool {
         let start = std::time::Instant::now();
 
         let method = params["method"].as_str().unwrap_or("GET");
+        let method_upper = method.to_uppercase();
 
         let url = require_str(&params, "url")?;
         let mut parsed_url = validate_url(url)?;
 
+        // Resolve DNS once, validate against SSRF blocklist, then pin the
+        // resolved addresses into the reqwest client so it cannot re-resolve
+        // to a different (potentially private) IP.
+        let resolved_addrs = validate_and_resolve_url(&parsed_url).await?;
+        let host = parsed_url
+            .host_str()
+            .ok_or_else(|| ToolError::InvalidParameters("URL missing host".into()))?
+            .to_string();
+        let client = build_pinned_client(
+            &host,
+            &resolved_addrs,
+            Duration::from_secs(30),
+            reqwest::redirect::Policy::none(),
+        )?;
+
         // Parse headers
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
+        let timeout_secs = parse_timeout_secs_param(params.get("timeout_secs"))?;
+        let save_to = parse_save_to_param(params.get("save_to"))?;
+        let effective_timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
 
         // Build request
         let mut request = match method.to_uppercase().as_str() {
-            "GET" => self.client.get(parsed_url.clone()),
-            "POST" => self.client.post(parsed_url.clone()),
-            "PUT" => self.client.put(parsed_url.clone()),
-            "DELETE" => self.client.delete(parsed_url.clone()),
-            "PATCH" => self.client.patch(parsed_url.clone()),
+            "GET" => client.get(parsed_url.clone()),
+            "POST" => client.post(parsed_url.clone()),
+            "PUT" => client.put(parsed_url.clone()),
+            "DELETE" => client.delete(parsed_url.clone()),
+            "PATCH" => client.patch(parsed_url.clone()),
             _ => {
                 return Err(ToolError::InvalidParameters(format!(
                     "unsupported method: {}",
@@ -346,6 +481,8 @@ impl Tool for HttpTool {
                 )));
             }
         };
+
+        request = request.timeout(effective_timeout);
 
         // Add headers
         for (key, value) in &headers_vec {
@@ -355,7 +492,9 @@ impl Tool for HttpTool {
         // Add body if present
         let body_bytes = if let Some(body) = params.get("body") {
             if let Some(body_str) = body.as_str() {
-                if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
+                if body_str.is_empty() {
+                    None
+                } else if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
                     let bytes = serde_json::to_vec(&json_body).map_err(|e| {
                         ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
                     })?;
@@ -382,8 +521,8 @@ impl Tool for HttpTool {
             self.credential_registry.as_ref(),
             self.secrets_store.as_ref(),
         ) {
-            let host = parsed_url.host_str().unwrap_or("");
-            let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(host);
+            let cred_host = parsed_url.host_str().unwrap_or("");
+            let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(cred_host);
             for mapping in &matched {
                 match store
                     .get_decrypted(&ctx.user_id, &mapping.secret_name)
@@ -420,7 +559,7 @@ impl Tool for HttpTool {
 
         // Build the interceptor request descriptor for recording/replay
         let intercept_req = crate::llm::recording::HttpExchangeRequest {
-            method: method.to_uppercase(),
+            method: method_upper,
             url: parsed_url.to_string(),
             headers: headers_vec.clone(),
             body: body_bytes
@@ -443,19 +582,123 @@ impl Tool for HttpTool {
             return Ok(ToolOutput::success(result, start.elapsed()).with_raw(recorded.body));
         }
 
-        // Execute request
-        let response = request.send().await.map_err(|e| {
-            if e.is_timeout() {
-                ToolError::Timeout(Duration::from_secs(30))
-            } else {
-                ToolError::ExternalService(e.to_string())
+        // Determine if this is a simple GET (eligible for redirect following).
+        let is_simple_get =
+            method.eq_ignore_ascii_case("GET") && headers_vec.is_empty() && body_bytes.is_none();
+
+        // Execute request, optionally following redirects for simple GETs.
+        // Each redirect hop gets its own DNS resolution + SSRF validation +
+        // pinned client to prevent rebinding attacks across hops.
+        let response = if is_simple_get {
+            let mut redirects_remaining = MAX_REDIRECTS;
+            loop {
+                // Build a per-hop pinned client for the current URL.
+                let hop_addrs = validate_and_resolve_url(&parsed_url).await?;
+                let hop_host = parsed_url
+                    .host_str()
+                    .ok_or_else(|| ToolError::InvalidParameters("URL missing host".into()))?
+                    .to_string();
+                let hop_client = build_pinned_client(
+                    &hop_host,
+                    &hop_addrs,
+                    effective_timeout,
+                    reqwest::redirect::Policy::none(),
+                )?;
+
+                let resp = hop_client
+                    .get(parsed_url.clone())
+                    .header(
+                        reqwest::header::ACCEPT,
+                        "text/markdown, text/html;q=0.9, application/json;q=0.9, */*;q=0.8",
+                    )
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        if e.is_timeout() {
+                            ToolError::Timeout(effective_timeout)
+                        } else {
+                            ToolError::ExternalService(e.to_string())
+                        }
+                    })?;
+
+                let status = resp.status().as_u16();
+                if (300..400).contains(&status) {
+                    if redirects_remaining == 0 {
+                        return Err(ToolError::ExecutionFailed(format!(
+                            "too many redirects (max {})",
+                            MAX_REDIRECTS
+                        )));
+                    }
+
+                    let location = resp
+                        .headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|v| v.to_str().ok())
+                        .ok_or_else(|| {
+                            ToolError::ExecutionFailed(format!(
+                                "redirect (HTTP {}) has no Location header",
+                                status
+                            ))
+                        })?;
+
+                    let next_url_str =
+                        if location.starts_with("http://") || location.starts_with("https://") {
+                            location.to_string()
+                        } else {
+                            parsed_url
+                                .join(location)
+                                .map(|u| u.to_string())
+                                .map_err(|e| {
+                                    ToolError::ExecutionFailed(format!(
+                                        "could not resolve relative redirect '{}': {}",
+                                        location, e
+                                    ))
+                                })?
+                        };
+
+                    // SSRF re-validation on every hop (URL structure checks).
+                    // DNS resolution + IP validation happens at the top of the
+                    // next loop iteration via validate_and_resolve_url.
+                    parsed_url = validate_url(&next_url_str)?;
+                    let hop_detector = LeakDetector::new();
+                    hop_detector
+                        .scan_http_request(parsed_url.as_str(), &[], None)
+                        .map_err(|e| ToolError::NotAuthorized(e.to_string()))?;
+
+                    redirects_remaining -= 1;
+                    tracing::debug!(
+                        to = %parsed_url,
+                        hops_left = redirects_remaining,
+                        "http tool following redirect"
+                    );
+                    continue;
+                }
+
+                break resp;
             }
-        })?;
+        } else {
+            let resp = request.send().await.map_err(|e| {
+                if e.is_timeout() {
+                    ToolError::Timeout(effective_timeout)
+                } else {
+                    ToolError::ExternalService(e.to_string())
+                }
+            })?;
+
+            let status = resp.status().as_u16();
+
+            // Block redirects for non-simple requests (potential SSRF)
+            if (300..400).contains(&status) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "request returned redirect (HTTP {}), which is blocked to prevent SSRF",
+                    status
+                )));
+            }
+
+            resp
+        };
 
         let status = response.status().as_u16();
-
-        // Redirects are followed automatically (up to 10 hops).
-        // If we still see a 3xx here, the chain was too long.
 
         let headers: HashMap<String, String> = response
             .headers()
@@ -464,7 +707,7 @@ impl Tool for HttpTool {
             .collect();
 
         // Use a larger size limit when saving to disk (file downloads)
-        let saving_to_disk = params.get("save_to").is_some();
+        let saving_to_disk = save_to.is_some();
         let max_size = if saving_to_disk {
             MAX_SAVE_TO_SIZE
         } else {
@@ -509,11 +752,11 @@ impl Tool for HttpTool {
         let body_bytes = bytes::Bytes::from(body);
 
         // If save_to is specified, write raw bytes to file and return metadata.
-        if let Some(save_to) = params.get("save_to").and_then(|v| v.as_str()) {
-            let save_to_owned = save_to.to_string();
+        if let Some(save_to) = save_to {
+            let saved_to = save_to.clone();
             let bytes_clone = body_bytes.clone();
             tokio::task::spawn_blocking(move || {
-                let canonical = validate_save_to_path(&save_to_owned)?;
+                let canonical = validate_save_to_path(&save_to)?;
                 std::fs::write(&canonical, &bytes_clone).map_err(|e| {
                     ToolError::ExecutionFailed(format!("failed to write file: {}", e))
                 })?;
@@ -524,7 +767,7 @@ impl Tool for HttpTool {
             .map_err(|e: ToolError| e)?;
             let result = serde_json::json!({
                 "status": status,
-                "saved_to": save_to,
+                "saved_to": saved_to,
                 "size_bytes": body_bytes.len(),
                 "headers": headers,
             });
@@ -660,8 +903,6 @@ mod tests {
 
     #[test]
     fn test_is_disallowed_ip_covers_ranges() {
-        use std::net::Ipv4Addr;
-
         // Private ranges
         assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
         assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
@@ -674,6 +915,39 @@ mod tests {
         ))));
         // Public
         assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn test_is_disallowed_ip_catches_ipv4_mapped_ipv6() {
+        use std::net::Ipv6Addr;
+
+        // ::ffff:127.0.0.1 (IPv4-mapped loopback)
+        let mapped_loopback = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001));
+        assert!(
+            is_disallowed_ip(&mapped_loopback),
+            "IPv4-mapped ::ffff:127.0.0.1 should be disallowed"
+        );
+
+        // ::ffff:169.254.169.254 (IPv4-mapped cloud metadata)
+        let mapped_metadata = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xa9fe, 0xa9fe));
+        assert!(
+            is_disallowed_ip(&mapped_metadata),
+            "IPv4-mapped ::ffff:169.254.169.254 should be disallowed"
+        );
+
+        // ::ffff:10.0.0.1 (IPv4-mapped private)
+        let mapped_private = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x0a00, 0x0001));
+        assert!(
+            is_disallowed_ip(&mapped_private),
+            "IPv4-mapped ::ffff:10.0.0.1 should be disallowed"
+        );
+
+        // ::ffff:8.8.8.8 (IPv4-mapped public -- should be allowed)
+        let mapped_public = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x0808, 0x0808));
+        assert!(
+            !is_disallowed_ip(&mapped_public),
+            "IPv4-mapped ::ffff:8.8.8.8 should be allowed"
+        );
     }
 
     #[test]
@@ -706,6 +980,71 @@ mod tests {
                 ("X-Test".to_string(), "1".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_headers_param_accepts_stringified_array() {
+        let headers =
+            serde_json::json!("[{\"name\":\"Authorization\",\"value\":\"Bearer token\"}]");
+        let parsed = parse_headers_param(Some(&headers)).unwrap();
+        assert_eq!(
+            parsed,
+            vec![("Authorization".to_string(), "Bearer token".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_headers_param_rejects_double_string_encoding() {
+        let headers = serde_json::json!("\"hello\"");
+        let err = parse_headers_param(Some(&headers)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("headers string must decode to a JSON object or array"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_timeout_secs_param_accepts_string_integer() {
+        let timeout = serde_json::json!("30");
+        assert_eq!(parse_timeout_secs_param(Some(&timeout)).unwrap(), Some(30));
+    }
+
+    #[test]
+    fn test_parse_timeout_secs_param_treats_empty_string_as_none() {
+        let timeout = serde_json::json!("");
+        assert_eq!(parse_timeout_secs_param(Some(&timeout)).unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_timeout_secs_param_rejects_value_above_cap() {
+        let timeout = serde_json::json!(MAX_TIMEOUT_SECS + 1);
+        let err = parse_timeout_secs_param(Some(&timeout)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("timeout_secs must be <= {}", MAX_TIMEOUT_SECS)),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_timeout_secs_param_rejects_string_value_above_cap() {
+        let timeout = serde_json::json!((MAX_TIMEOUT_SECS + 1).to_string());
+        let err = parse_timeout_secs_param(Some(&timeout)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("timeout_secs must be <= {}", MAX_TIMEOUT_SECS)),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_save_to_param_treats_empty_string_as_none() {
+        let save_to = serde_json::json!("");
+        assert_eq!(parse_save_to_param(Some(&save_to)).unwrap(), None);
     }
 
     #[test]
@@ -936,6 +1275,76 @@ mod tests {
     fn test_extract_host_from_params_missing_url() {
         let params = serde_json::json!({"method": "GET"});
         assert_eq!(extract_host_from_params(&params), None);
+    }
+
+    #[test]
+    fn test_requires_approval_with_stringified_http_params() {
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        let tool = HttpTool::new().with_credentials(
+            Arc::new(SharedCredentialRegistry::new()),
+            Arc::new(test_secrets_store()),
+        );
+        let req = serde_json::json!({
+            "body": "",
+            "headers": "[]",
+            "method": "GET",
+            "save_to": "",
+            "timeout_secs": "30",
+            "url": "https://r.jina.ai/http://news.baidu.com/"
+        });
+        let _ = tool.requires_approval(&req);
+    }
+
+    // ── DNS pinning tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_validate_and_resolve_rejects_loopback_hostname() {
+        // "localhost" is blocked at the URL validation level, but verify
+        // that validate_and_resolve_url also catches loopback IPs returned
+        // by DNS for any hostname that resolves to 127.0.0.1.
+        let url = reqwest::Url::parse("https://127.0.0.1/test").unwrap();
+        // 127.0.0.1 is an IP literal -- validate_url blocks it before
+        // we ever reach validate_and_resolve_url, but the function should
+        // still reject if called directly.
+        let err = validate_and_resolve_url(&url).await.unwrap_err();
+        assert!(
+            err.to_string().contains("disallowed"),
+            "expected disallowed IP error, got: {}",
+            err
+        );
+    }
+
+    // Requires network access -- run with: cargo test -- --ignored
+    #[ignore]
+    #[tokio::test]
+    async fn test_validate_and_resolve_accepts_public_host() {
+        // example.com resolves to public IPs.
+        let url = reqwest::Url::parse("https://example.com").unwrap();
+        let addrs = validate_and_resolve_url(&url).await.unwrap();
+        assert!(!addrs.is_empty(), "should resolve to at least one address");
+        for addr in &addrs {
+            assert!(
+                !is_disallowed_ip(&addr.ip()),
+                "example.com resolved to disallowed IP: {}",
+                addr.ip()
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_pinned_client_succeeds() {
+        let addrs = vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            443,
+        )];
+        let client = build_pinned_client(
+            "example.com",
+            &addrs,
+            Duration::from_secs(10),
+            reqwest::redirect::Policy::none(),
+        );
+        assert!(client.is_ok(), "should build client successfully");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

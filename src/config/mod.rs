@@ -42,6 +42,7 @@ pub use self::llm::default_session_path;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
+use self::safety::resolve_safety_config;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
@@ -53,6 +54,10 @@ pub use crate::llm::config::{
     RegistryProviderConfig,
 };
 pub use crate::llm::session::SessionConfig;
+
+// Thread-safe env var override helpers (replaces unsafe `std::env::set_var`
+// for mid-process env mutations in multi-threaded contexts).
+pub use self::helpers::{env_or_override, set_runtime_env};
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///
@@ -302,7 +307,7 @@ impl Config {
             tunnel: TunnelConfig::resolve(settings)?,
             channels: ChannelsConfig::resolve(settings)?,
             agent: AgentConfig::resolve(settings)?,
-            safety: SafetyConfig::resolve()?,
+            safety: resolve_safety_config()?,
             wasm: WasmConfig::resolve()?,
             secrets: SecretsConfig::resolve().await?,
             builder: BuilderModeConfig::resolve()?,

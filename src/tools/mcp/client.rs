@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
@@ -57,6 +57,10 @@ pub struct McpClient {
 
     /// Custom headers to include in every request.
     custom_headers: HashMap<String, String>,
+
+    /// Whether the MCP initialize handshake has completed.
+    /// Used as a local idempotency guard when no session_manager is present.
+    initialized: AtomicBool,
 }
 
 impl McpClient {
@@ -79,6 +83,7 @@ impl McpClient {
             user_id: "default".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
+            initialized: AtomicBool::new(false),
         }
     }
 
@@ -101,6 +106,7 @@ impl McpClient {
             user_id: "default".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
+            initialized: AtomicBool::new(false),
         }
     }
 
@@ -131,6 +137,7 @@ impl McpClient {
             secrets: None,
             user_id: "default".to_string(),
             custom_headers: config.headers.clone(),
+            initialized: AtomicBool::new(false),
             server_config: Some(config),
         }
     }
@@ -162,6 +169,7 @@ impl McpClient {
             user_id: user_id.into(),
             server_config: Some(config),
             custom_headers,
+            initialized: AtomicBool::new(false),
         }
     }
 
@@ -197,7 +205,14 @@ impl McpClient {
             user_id: user_id.into(),
             server_config,
             custom_headers,
+            initialized: AtomicBool::new(false),
         }
+    }
+
+    /// Attach a session manager for Streamable HTTP session tracking.
+    pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
+        self.session_manager = Some(session_manager);
+        self
     }
 
     /// Get the server name.
@@ -208,6 +223,11 @@ impl McpClient {
     /// Get the server URL.
     pub fn server_url(&self) -> &str {
         &self.server_url
+    }
+
+    /// Whether this client has a session manager attached.
+    pub fn has_session_manager(&self) -> bool {
+        self.session_manager.is_some()
     }
 
     /// Get the next request ID.
@@ -237,9 +257,19 @@ impl McpClient {
     }
 
     /// Build the headers map for a request (auth, session-id, custom headers).
+    ///
+    /// Custom headers are applied first. OAuth token injection is skipped if the
+    /// user has explicitly configured an Authorization header, so user-provided
+    /// credentials are never silently overwritten.
     async fn build_request_headers(&self) -> Result<HashMap<String, String>, ToolError> {
         let mut headers = self.custom_headers.clone();
-        if let Some(token) = self.get_access_token().await? {
+
+        // Only inject OAuth token if the user hasn't set a custom Authorization header.
+        let has_custom_auth = self
+            .custom_headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"));
+        if !has_custom_auth && let Some(token) = self.get_access_token().await? {
             headers.insert("Authorization".to_string(), format!("Bearer {}", token));
         }
         if let Some(ref session_manager) = self.session_manager
@@ -307,9 +337,14 @@ impl McpClient {
 
     /// Initialize the connection to the MCP server.
     pub async fn initialize(&self) -> Result<InitializeResult, ToolError> {
+        // Fast path: already initialized (local flag or session manager)
+        if self.initialized.load(Ordering::Relaxed) {
+            return Ok(InitializeResult::default());
+        }
         if let Some(ref session_manager) = self.session_manager
             && session_manager.is_initialized(&self.server_name).await
         {
+            self.initialized.store(true, Ordering::Relaxed);
             return Ok(InitializeResult::default());
         }
         if let Some(ref session_manager) = self.session_manager {
@@ -342,6 +377,7 @@ impl McpClient {
         if let Some(ref session_manager) = self.session_manager {
             session_manager.mark_initialized(&self.server_name).await;
         }
+        self.initialized.store(true, Ordering::Relaxed);
 
         let notification = McpRequest::initialized_notification();
         let _ = self.send_request(notification).await;
@@ -354,9 +390,7 @@ impl McpClient {
         if let Some(tools) = self.tools_cache.read().await.as_ref() {
             return Ok(tools.clone());
         }
-        if self.session_manager.is_some() {
-            self.initialize().await?;
-        }
+        self.initialize().await?;
 
         let request = McpRequest::list_tools(self.next_request_id());
         let response = self.send_request(request).await?;
@@ -386,9 +420,7 @@ impl McpClient {
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<CallToolResult, ToolError> {
-        if self.session_manager.is_some() {
-            self.initialize().await?;
-        }
+        self.initialize().await?;
 
         let request = McpRequest::call_tool(self.next_request_id(), name, arguments);
         let response = self.send_request(request).await?;
@@ -452,6 +484,7 @@ impl Clone for McpClient {
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
+            initialized: AtomicBool::new(self.initialized.load(Ordering::Relaxed)),
         }
     }
 }
@@ -695,6 +728,17 @@ mod tests {
     }
 
     #[test]
+    fn test_with_session_manager() {
+        let client = McpClient::new("http://localhost:8080");
+        assert!(!client.has_session_manager());
+
+        let session_manager = Arc::new(McpSessionManager::new());
+        let client = client.with_session_manager(session_manager);
+
+        assert!(client.has_session_manager());
+    }
+
+    #[test]
     fn test_next_request_id_monotonically_increasing() {
         let client = McpClient::new("http://localhost:1234");
         assert_eq!(client.next_request_id(), 1);
@@ -794,13 +838,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_http_transport_skips_401_retry() {
-        let response = McpResponse {
+        // initialize response, then notification ack (consumed but ignored),
+        // then list_tools response
+        let init_response = McpResponse {
             jsonrpc: "2.0".to_string(),
             id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
             result: Some(serde_json::json!({"tools": []})),
             error: None,
         };
-        let transport = Arc::new(MockTransport::new(false, vec![response]));
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![init_response, notification_ack, list_response],
+        ));
         let client = McpClient::new_with_transport(
             "test-stdio",
             transport.clone(),
@@ -813,7 +878,8 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
         let headers = transport.recorded_headers();
-        assert_eq!(headers.len(), 1);
+        // 3 sends: initialize + notifications/initialized + list_tools
+        assert_eq!(headers.len(), 3);
         assert!(!headers[0].contains_key("Authorization"));
         assert!(!headers[0].contains_key("Mcp-Session-Id"));
     }
@@ -824,6 +890,50 @@ mod tests {
         assert!(http_transport.supports_http_features());
         let mock_non_http = MockTransport::new(false, vec![]);
         assert!(!mock_non_http.supports_http_features());
+    }
+
+    /// Regression test for issue #890: stdio clients must auto-initialize
+    /// even without a session manager, and the second call should be idempotent.
+    #[tokio::test]
+    async fn test_stdio_client_auto_initializes_without_session_manager() {
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![init_response, notification_ack],
+        ));
+        let client = McpClient::new_with_transport(
+            "test-stdio",
+            transport.clone(),
+            None, // no session manager
+            None,
+            "default",
+            None,
+        );
+
+        // First call should send initialize + notification
+        let result = client.initialize().await;
+        assert!(result.is_ok());
+        assert_eq!(transport.recorded_headers().len(), 2);
+
+        // Second call should be a no-op (idempotent via local flag)
+        let result2 = client.initialize().await;
+        assert!(result2.is_ok());
+        assert_eq!(transport.recorded_headers().len(), 2); // no additional sends
     }
 
     #[test]

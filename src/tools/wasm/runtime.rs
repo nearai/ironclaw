@@ -323,27 +323,32 @@ impl WasmToolRuntime {
 
 /// Extract tool description from a compiled component.
 ///
-/// In a full implementation, this would use WIT bindgen to call the description() export.
-/// For now, we return a placeholder since we can't easily introspect without more setup.
+/// Returns a generic fallback. Callers should prefer loading the description
+/// from the sidecar `*.capabilities.json` file and overriding via
+/// `WasmToolWrapper::with_description()` or the `WasmToolRegistration::description` field.
 fn extract_tool_description(
     _engine: &Engine,
     _component: &wasmtime::component::Component,
 ) -> Result<String, WasmError> {
-    // TODO: Use WIT bindgen to properly extract description
-    // This requires instantiating with a linker, which needs host functions.
-    // For now, tools should have their description set externally.
+    // WIT bindgen extraction is not yet implemented (see TODO #4 in CLAUDE.md).
+    // Real descriptions come from the capabilities.json sidecar file, which is
+    // loaded by the WasmToolLoader and passed as an override at registration time.
     Ok("WASM sandboxed tool".to_string())
 }
 
-/// Extract tool schema from a compiled component.
+/// Extract tool parameter schema from a compiled component.
 ///
-/// In a full implementation, this would use WIT bindgen to call the schema() export.
+/// Returns a permissive fallback that accepts any JSON object. Callers should
+/// prefer loading the schema from the sidecar `*.capabilities.json` file and
+/// overriding via `WasmToolWrapper::with_schema()` or the
+/// `WasmToolRegistration::schema` field.
 fn extract_tool_schema(
     _engine: &Engine,
     _component: &wasmtime::component::Component,
 ) -> Result<serde_json::Value, WasmError> {
-    // TODO: Use WIT bindgen to properly extract schema
-    // For now, return a minimal schema that accepts any object.
+    // WIT bindgen extraction is not yet implemented (see TODO #4 in CLAUDE.md).
+    // Real schemas come from the capabilities.json sidecar file, which is
+    // loaded by the WasmToolLoader and passed as an override at registration time.
     Ok(serde_json::json!({
         "type": "object",
         "properties": {},

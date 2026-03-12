@@ -1,7 +1,12 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wit_version": "0.3.0",
   "capabilities": {
+    "webhook": {
+      "hmac_secret_name": "github_webhook_secret",
+      "hmac_signature_header": "x-hub-signature-256",
+      "hmac_prefix": "sha256="
+    },
     "http": {
       "allowlist": [
         {
@@ -9,7 +14,8 @@
           "path_prefix": "/",
           "methods": [
             "GET",
-            "POST"
+            "POST",
+            "PUT"
           ]
         }
       ],
