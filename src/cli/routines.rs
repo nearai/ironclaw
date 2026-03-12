@@ -330,6 +330,8 @@ async fn create(
             prompt: prompt.to_string(),
             context_paths: Vec::new(),
             max_tokens: 4096,
+            use_tools: false,
+            max_tool_rounds: 0,
         },
         guardrails: RoutineGuardrails {
             cooldown: std::time::Duration::from_secs(cooldown_secs),
