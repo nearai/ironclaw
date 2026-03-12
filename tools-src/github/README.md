@@ -5,8 +5,8 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ## Features
 
 - **Repository Info** - Get repo details, list user repos
-- **Issues** - List, create, and get issue details
-- **Pull Requests** - List PRs, get PR details, review files, create reviews
+- **Issues** - List/create/get issues, list/add issue comments
+- **Pull Requests** - List/create/get PRs, review files, create reviews, list/reply review comments, merge PRs
 - **File Content** - Read files from repos
 - **Workflows** - Trigger GitHub Actions, check run status
 
@@ -79,6 +79,102 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
   "pr_number": 42,
   "body": "LGTM! Great work.",
   "event": "APPROVE"
+}
+```
+
+### Create Pull Request
+
+```json
+{
+  "action": "create_pull_request",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "title": "feat: add event-driven routines",
+  "head": "feat/event-routines",
+  "base": "main",
+  "body": "Implements system_event trigger + event_emit tool."
+}
+```
+
+### Merge Pull Request
+
+```json
+{
+  "action": "merge_pull_request",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "pr_number": 42,
+  "merge_method": "squash"
+}
+```
+
+### List Issue Comments
+
+```json
+{
+  "action": "list_issue_comments",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "issue_number": 42,
+  "limit": 10
+}
+```
+
+### Add Issue Comment
+
+```json
+{
+  "action": "create_issue_comment",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "issue_number": 42,
+  "body": "Thanks for reporting this!"
+}
+```
+
+### List PR Review Comments
+
+```json
+{
+  "action": "list_pull_request_comments",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "pr_number": 42,
+  "limit": 30
+}
+```
+
+### Reply to PR Review Comment
+
+```json
+{
+  "action": "reply_pull_request_comment",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "comment_id": 123456789,
+  "body": "Fixed in the latest commit."
+}
+```
+
+### Get PR Reviews
+
+```json
+{
+  "action": "get_pull_request_reviews",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "pr_number": 42
+}
+```
+
+### Get Combined Status
+
+```json
+{
+  "action": "get_combined_status",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "ref": "main"
 }
 ```
 

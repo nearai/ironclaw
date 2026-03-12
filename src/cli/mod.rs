@@ -22,6 +22,7 @@ pub mod oauth_defaults;
 mod pairing;
 mod registry;
 mod service;
+mod skills;
 pub mod status;
 mod tool;
 
@@ -36,6 +37,7 @@ pub use memory::run_memory_command_with_db;
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use service::{ServiceCommand, run_service_command};
+pub use skills::{SkillsCommand, run_skills_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
 
@@ -165,6 +167,14 @@ pub enum Command {
         long_about = "Install, start, or stop service.\nExample: ironclaw service install"
     )]
     Service(ServiceCommand),
+
+    /// Manage SKILL.md-based skills
+    #[command(
+        subcommand,
+        about = "Manage skills",
+        long_about = "List, search, and inspect SKILL.md-based skills.\nExamples:\n  ironclaw skills list\n  ironclaw skills search 'writing'\n  ironclaw skills info my-skill"
+    )]
+    Skills(SkillsCommand),
 
     /// Probe external dependencies and validate configuration
     #[command(

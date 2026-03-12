@@ -165,7 +165,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing (shows subagent models) |
 | `memory` | ✅ | ✅ | - | Memory search CLI |
-| `skills` | ✅ | ✅ | - | Skills tools + web API endpoints (install, list, activate) |
+| `skills` | ✅ | ✅ | - | CLI subcommands (list, search, info) + agent tools + web API endpoints |
 | `pairing` | ✅ | ✅ | - | list/approve, account selector |
 | `nodes` | ✅ | ❌ | P3 | Device management, remove/clear flows |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
@@ -440,6 +440,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `before_agent_start` hook | ✅ | ❌ | P2 | Model/provider override |
 | `before_message_write` hook | ✅ | ❌ | P2 | Pre-write interception |
 | `onMessage` hook | ✅ | ✅ | - | Routines with event trigger |
+| Structured system-event routines | ✅ | ✅ | P2 | `system_event` trigger + `event_emit` tool for event-driven automation |
 | `onSessionStart` hook | ✅ | ✅ | P2 | |
 | `onSessionEnd` hook | ✅ | ✅ | P2 | |
 | `transcribeAudio` hook | ✅ | ❌ | P3 | |
@@ -558,7 +559,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Media handling (images, PDFs)
 - ✅ Ollama/local model support (via rig::providers::ollama)
 - ❌ Configuration hot-reload
-- ❌ Webhook trigger endpoint in web gateway
+- ✅ Tool-driven webhook ingress (`/webhook/tools/{tool}` -> host-verified + tool-normalized `system_event` routines)
 - ❌ Channel health monitor with auto-restart
 - ❌ Partial output preservation on abort
 
