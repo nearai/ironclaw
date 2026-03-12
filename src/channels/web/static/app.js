@@ -702,16 +702,25 @@ function copyCodeBlock(btn) {
   });
 }
 
+function copyMessage(btn) {
+  const message = btn.closest('.message');
+  if (!message) return;
+  const text = message.getAttribute('data-copy-text')
+    || message.getAttribute('data-raw')
+    || message.textContent
+    || '';
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+  }).catch(() => {
+    btn.textContent = 'Failed';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+  });
+}
+
 function addMessage(role, content) {
   const container = document.getElementById('chat-messages');
-  const div = document.createElement('div');
-  div.className = 'message ' + role;
-  if (role === 'user') {
-    div.textContent = content;
-  } else {
-    div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
-  }
+  const div = createMessageElement(role, content);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
@@ -723,7 +732,11 @@ function appendToLastAssistant(chunk) {
     const last = messages[messages.length - 1];
     const raw = (last.getAttribute('data-raw') || '') + chunk;
     last.setAttribute('data-raw', raw);
-    last.innerHTML = renderMarkdown(raw);
+    last.setAttribute('data-copy-text', raw);
+    const content = last.querySelector('.message-content');
+    if (content) {
+      content.innerHTML = renderMarkdown(raw);
+    }
     container.scrollTop = container.scrollHeight;
   } else {
     addMessage('assistant', chunk);
@@ -1310,12 +1323,31 @@ function loadHistory(before) {
 function createMessageElement(role, content) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
-  if (role === 'user') {
-    div.textContent = content;
+
+  if (role === 'assistant' || role === 'user') {
+    div.classList.add('has-copy');
+    div.setAttribute('data-copy-text', content);
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'message-copy-btn';
+    copyBtn.type = 'button';
+    copyBtn.setAttribute('aria-label', 'Copy message');
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      copyMessage(copyBtn);
+    });
+    div.appendChild(copyBtn);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'message-content';
+  if (role === 'user' || role === 'system') {
+    body.textContent = content;
   } else {
     div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
+    body.innerHTML = renderMarkdown(content);
   }
+  div.appendChild(body);
   return div;
 }
 
