@@ -12,7 +12,14 @@ jobs:
   scope:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/labeler@v5
+      - name: Checkout base branch
+        uses: actions/checkout@v4
         with:
-          configuration-path: .github/labeler.yml
-          sync-labels: false          # additive only — never remove scope labels
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: Apply scope labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: bash .github/scripts/pr-scope-labeler.sh
