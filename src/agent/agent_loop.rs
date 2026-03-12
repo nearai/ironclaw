@@ -581,7 +581,10 @@ impl Agent {
                     // Persist into the assistant thread and register it so
                     // gateway clients see the greeting via history.
                     if let Some(id) = assistant_thread_id {
-                        self.persist_assistant_response(id, "default", &response)
+                        // Use the same (user_id, channel) that
+                        // get_or_create_assistant_conversation used, so
+                        // ensure_writable_conversation finds the right owner.
+                        self.persist_assistant_response(id, "gateway", "default", &response)
                             .await;
                         let (session, _) = self
                             .session_manager
