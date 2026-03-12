@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure we are running from the repository root
+cd "$(git rev-parse --show-toplevel)"
+
 echo "==> fmt check"
 cargo fmt --all -- --check
 

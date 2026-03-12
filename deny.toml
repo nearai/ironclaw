@@ -41,7 +41,7 @@ unused-allowed-license = "allow"
 
 [bans]
 multiple-versions = "warn"
-wildcards = "allow"
+wildcards = "deny"
 
 [sources]
 unknown-registry = "deny"
