@@ -38,17 +38,17 @@ pub struct ComposioTool {
 }
 
 impl ComposioTool {
-    pub fn new(api_key: String, entity_id: String) -> Self {
+    pub fn new(api_key: String, entity_id: String) -> Result<Self, String> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .expect("failed to create composio HTTP client");
-        Self {
+            .map_err(|e| format!("failed to create composio HTTP client: {e}"))?;
+        Ok(Self {
             client,
             api_key: SecretString::from(api_key),
             entity_id,
             account_cache: Mutex::new(HashMap::new()),
-        }
+        })
     }
 
     /// Build a properly percent-encoded URL with query parameters.
@@ -119,8 +119,10 @@ impl ComposioTool {
             .map_err(|e| ToolError::ExternalService(format!("non-UTF8 response: {e}")))?;
 
         if !status.is_success() {
+            // Truncate error body to avoid leaking sensitive data in logs/events
+            let truncated = if body.len() > 512 { &body[..512] } else { &body };
             return Err(ToolError::ExternalService(format!(
-                "Composio API {status}: {body}"
+                "Composio API {status}: {truncated}"
             )));
         }
         serde_json::from_str(&body)
@@ -361,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_schema_valid() {
-        let tool = ComposioTool::new("test-key".into(), "default".into());
+        let tool = ComposioTool::new("test-key".into(), "default".into()).unwrap();
         let schema = tool.parameters_schema();
         let errors = crate::tools::tool::validate_tool_schema(&schema, "composio");
         assert!(errors.is_empty(), "schema errors: {errors:?}");
@@ -369,14 +371,14 @@ mod tests {
 
     #[test]
     fn test_name_and_description() {
-        let tool = ComposioTool::new("test-key".into(), "default".into());
+        let tool = ComposioTool::new("test-key".into(), "default".into()).unwrap();
         assert_eq!(tool.name(), "composio");
         assert!(!tool.description().is_empty());
     }
 
     #[tokio::test]
     async fn test_missing_action_param() {
-        let tool = ComposioTool::new("test-key".into(), "default".into());
+        let tool = ComposioTool::new("test-key".into(), "default".into()).unwrap();
         let ctx = JobContext::default();
         let err = tool.execute(json!({}), &ctx).await.unwrap_err();
         assert!(err.to_string().contains("missing 'action'"));
@@ -384,7 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unknown_action() {
-        let tool = ComposioTool::new("test-key".into(), "default".into());
+        let tool = ComposioTool::new("test-key".into(), "default".into()).unwrap();
         let ctx = JobContext::default();
         let err = tool
             .execute(json!({"action": "invalid"}), &ctx)
@@ -395,7 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_missing_tool_slug() {
-        let tool = ComposioTool::new("test-key".into(), "default".into());
+        let tool = ComposioTool::new("test-key".into(), "default".into()).unwrap();
         let ctx = JobContext::default();
         let err = tool
             .execute(json!({"action": "execute"}), &ctx)
@@ -406,7 +408,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_missing_app() {
-        let tool = ComposioTool::new("test-key".into(), "default".into());
+        let tool = ComposioTool::new("test-key".into(), "default".into()).unwrap();
         let ctx = JobContext::default();
         let err = tool
             .execute(json!({"action": "connect"}), &ctx)
@@ -417,19 +419,19 @@ mod tests {
 
     #[test]
     fn test_default_entity_id() {
-        let tool = ComposioTool::new("key".into(), "my-tenant".into());
+        let tool = ComposioTool::new("key".into(), "my-tenant".into()).unwrap();
         assert_eq!(tool.entity_id, "my-tenant");
     }
 
     #[test]
     fn test_execution_timeout() {
-        let tool = ComposioTool::new("key".into(), "default".into());
+        let tool = ComposioTool::new("key".into(), "default".into()).unwrap();
         assert_eq!(tool.execution_timeout(), Duration::from_secs(30));
     }
 
     #[test]
     fn test_rate_limit_configured() {
-        let tool = ComposioTool::new("key".into(), "default".into());
+        let tool = ComposioTool::new("key".into(), "default".into()).unwrap();
         let rl = tool.rate_limit_config().expect("should have rate limit");
         assert_eq!(rl.requests_per_minute, 30);
         assert_eq!(rl.requests_per_hour, 500);
@@ -437,14 +439,14 @@ mod tests {
 
     #[test]
     fn test_requires_sanitization() {
-        let tool = ComposioTool::new("key".into(), "default".into());
+        let tool = ComposioTool::new("key".into(), "default".into()).unwrap();
         // External service — should sanitize output
         assert!(tool.requires_sanitization());
     }
 
     #[test]
     fn test_tool_schema_complete() {
-        let tool = ComposioTool::new("key".into(), "default".into());
+        let tool = ComposioTool::new("key".into(), "default".into()).unwrap();
         let schema = tool.schema();
         assert_eq!(schema.name, "composio");
         assert!(!schema.description.is_empty());
@@ -465,7 +467,7 @@ mod tests {
     #[test]
     fn test_entity_id_not_in_schema() {
         // entity_id is server-configured only, not exposed to callers
-        let tool = ComposioTool::new("fake-key".into(), "default".into());
+        let tool = ComposioTool::new("fake-key".into(), "default".into()).unwrap();
         let schema = tool.parameters_schema();
         let props = schema["properties"].as_object().unwrap();
         assert!(!props.contains_key("entity_id"));
@@ -474,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_requires_approval_read_actions() {
-        let tool = ComposioTool::new("key".into(), "default".into());
+        let tool = ComposioTool::new("key".into(), "default".into()).unwrap();
         assert_eq!(
             tool.requires_approval(&json!({"action": "list"})),
             ApprovalRequirement::Never
@@ -488,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_requires_approval_write_actions() {
-        let tool = ComposioTool::new("key".into(), "default".into());
+        let tool = ComposioTool::new("key".into(), "default".into()).unwrap();
         assert_eq!(
             tool.requires_approval(&json!({"action": "execute"})),
             ApprovalRequirement::UnlessAutoApproved

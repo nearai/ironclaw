@@ -298,7 +298,9 @@ impl AppBuilder {
         {
             let entity_id =
                 std::env::var("COMPOSIO_ENTITY_ID").unwrap_or_else(|_| "default".to_string());
-            tools.register_composio_tools(composio_key, entity_id);
+            if let Err(e) = tools.register_composio_tools(composio_key, entity_id) {
+                tracing::warn!("Failed to register composio tool: {e}");
+            }
         }
 
         // Create embeddings provider using the unified method

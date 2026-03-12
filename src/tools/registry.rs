@@ -531,9 +531,11 @@ impl ToolRegistry {
     ///
     /// Enabled when `COMPOSIO_API_KEY` env var is set. Provides OAuth connection
     /// and action execution for 250+ apps via Composio's REST API.
-    pub fn register_composio_tools(&self, api_key: String, entity_id: String) {
-        self.register_sync(Arc::new(ComposioTool::new(api_key, entity_id)));
+    pub fn register_composio_tools(&self, api_key: String, entity_id: String) -> Result<(), String> {
+        let tool = ComposioTool::new(api_key, entity_id)?;
+        self.register_sync(Arc::new(tool));
         tracing::debug!("Registered composio tool");
+        Ok(())
     }
 
     /// Register the software builder tool.
