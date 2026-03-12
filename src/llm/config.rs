@@ -138,6 +138,23 @@ pub struct LlmConfig {
     pub smart_routing_cascade: bool,
 }
 
+impl LlmConfig {
+    /// Resolve the effective cheap model name.
+    ///
+    /// Resolution order:
+    /// 1. `LLM_CHEAP_MODEL` (generic, works with any backend)
+    /// 2. `NEARAI_CHEAP_MODEL` (NearAI-only, backward compatibility)
+    pub fn cheap_model_name(&self) -> Option<&str> {
+        self.cheap_model.as_deref().or_else(|| {
+            if self.backend == "nearai" {
+                self.nearai.cheap_model.as_deref()
+            } else {
+                None
+            }
+        })
+    }
+}
+
 /// NEAR AI configuration.
 #[derive(Debug, Clone)]
 pub struct NearAiConfig {
