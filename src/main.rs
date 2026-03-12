@@ -124,6 +124,13 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
+        Some(Command::Gateway(gw_cmd)) => {
+            // Serve initializes its own full tracing; other subcommands use lightweight CLI tracing.
+            if !matches!(gw_cmd, ironclaw::cli::GatewayCommand::Serve) {
+                init_cli_tracing();
+            }
+            return ironclaw::cli::run_gateway_command(gw_cmd.clone(), cli.config.as_deref()).await;
+        }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
             return run_service_command(service_cmd);

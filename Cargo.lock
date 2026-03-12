@@ -3441,6 +3441,7 @@ dependencies = [
  "ironclaw_safety",
  "json5",
  "jsonwebtoken",
+ "libc",
  "libsql",
  "lru",
  "mime_guess",

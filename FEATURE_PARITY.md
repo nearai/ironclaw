@@ -155,7 +155,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|----------|-------|
 | `run` (agent) | ✅ | ✅ | - | Default command |
 | `tool install/list/remove` | ✅ | ✅ | - | WASM tools |
-| `gateway start/stop` | ✅ | ❌ | P2 | |
+| `gateway serve/start/stop` | ✅ | 🚧 | P2 | **serve**: foreground mode for dev/debug. **start**: background daemon (detached child via setsid, health-check poll, logs to `~/.ironclaw/gateway.log`). **stop**: SIGTERM via PID file, Unix-only. **status**: PID liveness + health probe. Standalone serves read-only APIs (health, threads, history, memory, extensions, settings, skills, logs, OpenAI proxy). Unavailable: chat send/ws, routine trigger, job restart/cancel/prompt. Graceful shutdown via `shutdown_tx` → await server handle; no integration test for WS close/drain. |
 | `onboard` (wizard) | ✅ | ✅ | - | Interactive setup |
 | `tui` | ✅ | ✅ | - | Ratatui TUI |
 | `config` | ✅ | ✅ | - | Read/write config plus validate/path helpers |
