@@ -8,8 +8,7 @@
 //! isolation and deterministic behavior.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -466,16 +465,8 @@ pub struct WasmToolWrapper {
     capabilities: Capabilities,
     /// Cached description (from PreparedModule or override).
     description: String,
-    /// Compact schema advertised in the main tools array.
-    ///
-    /// This stays permissive by default to avoid serializing full exported
-    /// WASM schemas on every LLM call. Sidecars can override it explicitly.
-    advertised_schema: serde_json::Value,
-    /// Full schema used for discovery/coercion before any lazy runtime extraction.
-    ///
-    /// Seeded from the WASM `schema()` export at registration time, unless a
-    /// sidecar explicitly overrides it via `with_schema()`.
-    discovery_schema: serde_json::Value,
+    /// Compact and discovery schemas for this tool.
+    schemas: WasmToolSchemas,
     /// Injected credentials for HTTP requests (e.g., OAuth tokens).
     /// Keys are placeholder names like "GOOGLE_ACCESS_TOKEN".
     credentials: HashMap<String, String>,
@@ -484,16 +475,23 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
-    /// Real parameter schema extracted from WASM schema() export on first execution.
-    /// Used only for coerce_params_to_schema(), NOT for parameters_schema() (tools array).
-    /// Arc-wrapped so the state is shared when the wrapper is cloned into spawn_blocking.
-    coercion_schema: Arc<OnceLock<serde_json::Value>>,
-    /// Whether the error hint has been sent this turn (reset via on_turn_start).
-    /// Arc-wrapped so the state is shared when the wrapper is cloned into spawn_blocking.
-    hint_sent: Arc<AtomicBool>,
 }
 
-impl WasmToolWrapper {
+#[derive(Debug, Clone)]
+struct WasmToolSchemas {
+    /// Compact schema advertised in the main tools array.
+    ///
+    /// This stays permissive by default to avoid serializing full exported
+    /// WASM schemas on every LLM call. Sidecars can override it explicitly.
+    advertised: serde_json::Value,
+    /// Full schema available for discovery and coercion.
+    ///
+    /// Seeded from the WASM `schema()` export at registration time, unless a
+    /// sidecar explicitly overrides it.
+    discovery: serde_json::Value,
+}
+
+impl WasmToolSchemas {
     fn permissive_schema() -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -509,6 +507,50 @@ impl WasmToolWrapper {
             .is_none_or(|p| p.is_empty())
     }
 
+    fn new(discovery: serde_json::Value) -> Self {
+        Self {
+            advertised: Self::permissive_schema(),
+            discovery,
+        }
+    }
+
+    fn with_override(&self, schema: serde_json::Value) -> Self {
+        Self {
+            advertised: schema.clone(),
+            discovery: schema,
+        }
+    }
+
+    fn is_advertised_permissive(&self) -> bool {
+        Self::is_permissive_schema(&self.advertised)
+    }
+
+    fn advertised(&self) -> serde_json::Value {
+        self.advertised.clone()
+    }
+
+    fn discovery(&self) -> serde_json::Value {
+        self.discovery.clone()
+    }
+
+    fn effective_for_coercion(
+        &self,
+        tool_iface: &wit_tool::Guest,
+        store: &mut Store<StoreData>,
+    ) -> serde_json::Value {
+        if !Self::is_permissive_schema(&self.discovery) {
+            return self.discovery.clone();
+        }
+
+        tool_iface
+            .call_schema(store)
+            .ok()
+            .and_then(|schema_str| serde_json::from_str::<serde_json::Value>(&schema_str).ok())
+            .unwrap_or_else(|| self.discovery.clone())
+    }
+}
+
+impl WasmToolWrapper {
     /// Create a new WASM tool wrapper.
     pub fn new(
         runtime: Arc<WasmToolRuntime>,
@@ -517,16 +559,13 @@ impl WasmToolWrapper {
     ) -> Self {
         let mut wrapper = Self {
             description: prepared.description.clone(),
-            advertised_schema: Self::permissive_schema(),
-            discovery_schema: prepared.schema.clone(),
+            schemas: WasmToolSchemas::new(prepared.schema.clone()),
             runtime,
             prepared,
             capabilities,
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
-            coercion_schema: Arc::new(OnceLock::new()),
-            hint_sent: Arc::new(AtomicBool::new(false)),
         };
         wrapper.append_schema_hint_if_permissive();
         wrapper
@@ -541,8 +580,7 @@ impl WasmToolWrapper {
 
     /// Override the parameter schema.
     pub fn with_schema(mut self, schema: serde_json::Value) -> Self {
-        self.advertised_schema = schema.clone();
-        self.discovery_schema = schema;
+        self.schemas = self.schemas.with_override(schema);
         self.strip_schema_hint();
         self.append_schema_hint_if_permissive();
         self
@@ -551,9 +589,7 @@ impl WasmToolWrapper {
     /// Append a tool_info hint to the description when the schema is permissive
     /// (no typed properties), so the LLM knows to call tool_info for the full schema.
     fn append_schema_hint_if_permissive(&mut self) {
-        if Self::is_permissive_schema(&self.advertised_schema)
-            && !self.description.contains("tool_info")
-        {
+        if self.schemas.is_advertised_permissive() && !self.description.contains("tool_info") {
             self.description
                 .push_str(" (call tool_info for parameter schema)");
         }
@@ -680,27 +716,13 @@ impl WasmToolWrapper {
         let tool_iface = instance.near_agent_tool();
 
         // Determine effective schema for type coercion.
-        // Priority:
-        // 1. cached coercion_schema
-        // 2. discovery_schema (WASM-exported or sidecar override) if typed
-        // 3. lazy WASM extraction when discovery_schema is still permissive
-        let effective_schema = if let Some(cached) = self.coercion_schema.get() {
-            cached
-        } else if Self::is_permissive_schema(&self.discovery_schema) {
-            // Discovery schema is still permissive — try extracting from the WASM export.
-            if let Ok(schema_str) = tool_iface.call_schema(&mut store)
-                && let Ok(schema_val) = serde_json::from_str::<serde_json::Value>(&schema_str)
-            {
-                let _ = self.coercion_schema.set(schema_val);
-            }
-            self.coercion_schema.get().unwrap_or(&self.discovery_schema)
-        } else {
-            &self.discovery_schema
-        };
+        // Prefer the registration-time discovery schema when typed; otherwise
+        // try the WASM export transiently for this invocation only.
+        let effective_schema = self.schemas.effective_for_coercion(tool_iface, &mut store);
 
         // Coerce string-encoded values to their schema-declared types.
         // LLMs frequently pass numeric values as strings (e.g. "5" instead of 5).
-        let params = coerce_params_to_schema(params, effective_schema);
+        let params = coerce_params_to_schema(params, &effective_schema);
 
         // Prepare the request
         let params_json = serde_json::to_string(&params)
@@ -727,17 +749,12 @@ impl WasmToolWrapper {
         let logs = store.data_mut().host_state.take_logs();
 
         // Check for tool-level error — point the LLM to tool_info for the
-        // full schema instead of dumping ~3.5KB inline. Only show the tip
-        // once per turn (reset via on_turn_start()).
+        // full schema instead of dumping ~3.5KB inline.
         if let Some(err) = response.error {
-            let hint = if !self.hint_sent.swap(true, Ordering::Relaxed) {
-                format!(
-                    "Tip: call tool_info(name: \"{}\", include_schema: true) for the full parameter schema.",
-                    self.prepared.name
-                )
-            } else {
-                String::new()
-            };
+            let hint = format!(
+                "Tip: call tool_info(name: \"{}\", include_schema: true) for the full parameter schema.",
+                self.prepared.name
+            );
             return Err(WasmError::ToolReturnedError { message: err, hint });
         }
 
@@ -808,20 +825,11 @@ impl Tool for WasmToolWrapper {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        self.advertised_schema.clone()
-    }
-
-    fn on_turn_start(&self) {
-        self.hint_sent.store(false, Ordering::Relaxed);
+        self.schemas.advertised()
     }
 
     fn discovery_schema(&self) -> serde_json::Value {
-        // Return coercion_schema if available (lazily extracted from WASM export),
-        // otherwise fall back to the registration-time discovery schema.
-        self.coercion_schema
-            .get()
-            .cloned()
-            .unwrap_or_else(|| self.discovery_schema.clone())
+        self.schemas.discovery()
     }
 
     async fn execute(
@@ -858,11 +866,8 @@ impl Tool for WasmToolWrapper {
         let prepared = Arc::clone(&self.prepared);
         let capabilities = self.capabilities.clone();
         let description = self.description.clone();
-        let advertised_schema = self.advertised_schema.clone();
-        let discovery_schema = self.discovery_schema.clone();
+        let schemas = self.schemas.clone();
         let credentials = self.credentials.clone();
-        let coercion_schema_shared = Arc::clone(&self.coercion_schema);
-        let hint_sent_shared = Arc::clone(&self.hint_sent);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -871,13 +876,10 @@ impl Tool for WasmToolWrapper {
                 prepared,
                 capabilities,
                 description,
-                advertised_schema,
-                discovery_schema,
+                schemas,
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
-                coercion_schema: coercion_schema_shared,
-                hint_sent: hint_sent_shared,
             };
 
             tokio::task::spawn_blocking(move || {
@@ -1380,7 +1382,7 @@ mod tests {
             .unwrap();
         let mut wrapper =
             super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default());
-        wrapper.discovery_schema = discovery_schema.clone();
+        wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
         wrapper.description = "Search documents".to_string();
         wrapper.append_schema_hint_if_permissive();
 

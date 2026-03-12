@@ -336,11 +336,6 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    /// Called at the start of each agent turn. Override to reset per-turn state
-    /// (e.g. error hint deduplication flags).
-    /// Default: no-op.
-    fn on_turn_start(&self) {}
-
     /// Full parameter schema for discovery and coercion purposes.
     ///
     /// Unlike `parameters_schema()` (which may be permissive to keep the tools

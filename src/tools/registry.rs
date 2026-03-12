@@ -199,14 +199,6 @@ impl ToolRegistry {
         self.tools.read().await.values().cloned().collect()
     }
 
-    /// Notify all registered tools that a new agent turn has started.
-    /// Tools use this to reset per-turn state (e.g. error hint deduplication).
-    pub async fn notify_turn_start(&self) {
-        for tool in self.tools.read().await.values() {
-            tool.on_turn_start();
-        }
-    }
-
     /// Get tool definitions for LLM function calling.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self

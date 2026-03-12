@@ -249,11 +249,6 @@ struct ChatDelegate<'a> {
 
 #[async_trait]
 impl<'a> LoopDelegate for ChatDelegate<'a> {
-    async fn on_turn_start(&self, _reason_ctx: &mut ReasoningContext) -> Option<LoopOutcome> {
-        self.agent.tools().notify_turn_start().await;
-        None
-    }
-
     async fn check_signals(&self) -> LoopSignal {
         let sess = self.session.lock().await;
         if let Some(thread) = sess.threads.get(&self.thread_id)

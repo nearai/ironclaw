@@ -345,11 +345,6 @@ impl ContainerDelegate {
 
 #[async_trait]
 impl LoopDelegate for ContainerDelegate {
-    async fn on_turn_start(&self, _reason_ctx: &mut ReasoningContext) -> Option<LoopOutcome> {
-        self.tools.notify_turn_start().await;
-        None
-    }
-
     async fn check_signals(&self) -> LoopSignal {
         // Container runtime has no stop signals — the orchestrator manages lifecycle.
         LoopSignal::Continue

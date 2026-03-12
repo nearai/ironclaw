@@ -66,13 +66,13 @@ pub enum WasmError {
     Timeout(std::time::Duration),
 
     /// Component returned an error response.
-    /// When `hint` is non-empty it carries the tool's description and parameter
-    /// schema so the LLM can retry with correct arguments.
+    /// When `hint` is non-empty it points the LLM to `tool_info` so it can
+    /// fetch the tool's full parameter schema on demand.
     #[error("Tool error: {message}{}", if hint.is_empty() { String::new() } else { format!("\n\nTool usage hint:\n{hint}") })]
     ToolReturnedError {
         /// The error message from the WASM tool.
         message: String,
-        /// Optional description + schema hint (empty when unavailable).
+        /// Optional retry hint (empty when unavailable).
         hint: String,
     },
 

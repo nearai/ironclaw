@@ -74,14 +74,6 @@ impl Default for AgenticLoopConfig {
 /// ownership instead of borrows (as `JobDelegate` and `ContainerDelegate` do).
 #[async_trait]
 pub trait LoopDelegate: Send + Sync {
-    /// Called once at the start of each turn before the first iteration.
-    ///
-    /// Consumers can use this to reset per-turn tool state that must apply
-    /// consistently across chat, job, and container loops.
-    async fn on_turn_start(&self, _reason_ctx: &mut ReasoningContext) -> Option<LoopOutcome> {
-        None
-    }
-
     /// Called at the start of each iteration. Check for external signals
     /// (cancellation, user messages, stop requests).
     async fn check_signals(&self) -> LoopSignal;
@@ -141,10 +133,6 @@ pub async fn run_agentic_loop(
     config: &AgenticLoopConfig,
 ) -> Result<LoopOutcome, Error> {
     let mut consecutive_tool_intent_nudges: u32 = 0;
-
-    if let Some(outcome) = delegate.on_turn_start(reason_ctx).await {
-        return Ok(outcome);
-    }
 
     for iteration in 1..=config.max_iterations {
         // Check for external signals (stop, cancellation, user messages)
@@ -280,7 +268,6 @@ mod tests {
         iterations_seen: Mutex<Vec<usize>>,
         early_exit: Mutex<Option<(usize, LoopOutcome)>>,
         nudge_count: AtomicUsize,
-        turn_start_count: AtomicUsize,
     }
 
     impl MockDelegate {
@@ -293,7 +280,6 @@ mod tests {
                 iterations_seen: Mutex::new(Vec::new()),
                 early_exit: Mutex::new(None),
                 nudge_count: AtomicUsize::new(0),
-                turn_start_count: AtomicUsize::new(0),
             }
         }
 
@@ -310,11 +296,6 @@ mod tests {
 
     #[async_trait]
     impl LoopDelegate for MockDelegate {
-        async fn on_turn_start(&self, _reason_ctx: &mut ReasoningContext) -> Option<LoopOutcome> {
-            self.turn_start_count.fetch_add(1, Ordering::SeqCst);
-            None
-        }
-
         async fn check_signals(&self) -> LoopSignal {
             let mut sig = self.signal.lock().await;
             std::mem::replace(&mut *sig, LoopSignal::Continue)
@@ -400,7 +381,6 @@ mod tests {
         // after_iteration is NOT called when handle_text_response returns Return
         // (the loop exits before reaching after_iteration).
         assert!(delegate.iterations_seen.lock().await.is_empty());
-        assert_eq!(delegate.turn_start_count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -427,7 +407,6 @@ mod tests {
             _ => panic!("Expected LoopOutcome::Response"),
         }
         assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 1);
-        assert_eq!(delegate.turn_start_count.load(Ordering::SeqCst), 1);
         // after_iteration called for iteration 1 (tool call), but not 2
         // (text response exits before after_iteration).
         assert_eq!(*delegate.iterations_seen.lock().await, vec![1]);
@@ -476,9 +455,6 @@ mod tests {
 
         #[async_trait]
         impl LoopDelegate for ContinueDelegate {
-            async fn on_turn_start(&self, _: &mut ReasoningContext) -> Option<LoopOutcome> {
-                None
-            }
             async fn check_signals(&self) -> LoopSignal {
                 LoopSignal::Continue
             }
@@ -534,38 +510,6 @@ mod tests {
             .filter(|m| m.role == crate::llm::Role::Assistant)
             .count();
         assert_eq!(assistant_count, 3);
-    }
-
-    #[tokio::test]
-    async fn test_turn_start_hook_runs_once_per_loop() {
-        let delegate = MockDelegate::new(vec![
-            tool_calls_output(vec![ToolCall {
-                id: "call_1".to_string(),
-                name: "echo".to_string(),
-                arguments: serde_json::json!({}),
-            }]),
-            tool_calls_output(vec![ToolCall {
-                id: "call_2".to_string(),
-                name: "echo".to_string(),
-                arguments: serde_json::json!({}),
-            }]),
-            text_output("done"),
-        ]);
-        let reasoning = stub_reasoning();
-        let mut ctx = ReasoningContext::new();
-
-        let outcome = run_agentic_loop(
-            &delegate,
-            &reasoning,
-            &mut ctx,
-            &AgenticLoopConfig::default(),
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(outcome, LoopOutcome::Response(_)));
-        assert_eq!(delegate.turn_start_count.load(Ordering::SeqCst), 1);
-        assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
