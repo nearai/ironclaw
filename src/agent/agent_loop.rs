@@ -18,7 +18,7 @@ use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
-use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
+use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
@@ -934,29 +934,10 @@ impl Agent {
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
-            SubmissionResult::NeedApproval {
-                request_id,
-                tool_name,
-                description,
-                parameters,
-            } => {
-                // Each channel renders the approval prompt via send_status.
-                // Web gateway shows an inline card, REPL prints a formatted prompt, etc.
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ApprovalNeeded {
-                            request_id: request_id.to_string(),
-                            tool_name,
-                            description,
-                            parameters,
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-
-                // Empty string signals the caller to skip respond() (no duplicate text)
+            SubmissionResult::NeedApproval { .. } => {
+                // ApprovalNeeded status was already sent by thread_ops.rs before
+                // returning this result. Empty string signals the caller to skip
+                // respond() (no duplicate text).
                 Ok(Some(String::new()))
             }
         }

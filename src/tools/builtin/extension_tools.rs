@@ -256,7 +256,13 @@ impl Tool for ToolAuthTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
+        // In gateway mode, tool_auth only returns an auth URL for the frontend
+        // to open — no browser is launched server-side, so no approval needed.
+        if self.manager.should_use_gateway_mode() {
+            ApprovalRequirement::Never
+        } else {
+            ApprovalRequirement::UnlessAutoApproved
+        }
     }
 }
 
@@ -731,6 +737,22 @@ mod tests {
                 case_name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn tool_auth_no_approval_in_gateway_mode() {
+        let manager = test_manager_stub();
+        manager
+            .enable_gateway_mode("http://localhost:3000".to_string())
+            .await;
+        let tool = ToolAuthTool {
+            manager: manager.clone(),
+        };
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never,
+            "tool_auth should not require approval in gateway mode"
+        );
     }
 
     #[test]

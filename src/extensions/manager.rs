@@ -118,6 +118,13 @@ pub struct ExtensionManager {
     /// Relay config captured at startup. Used by `auth_channel_relay` and
     /// `activate_channel_relay` instead of re-reading env vars.
     relay_config: Option<crate::config::RelayConfig>,
+    /// When `true`, OAuth flows always return an auth URL to the caller
+    /// instead of opening a browser on the server via `open::that()`.
+    /// Set by the web gateway at startup via `enable_gateway_mode()`.
+    gateway_mode: std::sync::atomic::AtomicBool,
+    /// The gateway's own base URL for building OAuth redirect URIs.
+    /// Set by the web gateway at startup via `enable_gateway_mode()`.
+    gateway_base_url: RwLock<Option<String>>,
 }
 
 /// Sanitize a URL for logging by removing query parameters and credentials.
@@ -191,7 +198,73 @@ impl ExtensionManager {
             pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
             gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
             relay_config: crate::config::RelayConfig::from_env(),
+            gateway_mode: std::sync::atomic::AtomicBool::new(false),
+            gateway_base_url: RwLock::new(None),
         }
+    }
+
+    /// Enable gateway mode so OAuth flows return auth URLs to the frontend
+    /// instead of calling `open::that()` on the server.
+    ///
+    /// `base_url` is the gateway's own public URL (e.g. `https://my-gateway.example.com`),
+    /// used to build OAuth redirect URIs when `IRONCLAW_OAUTH_CALLBACK_URL` is not set.
+    pub async fn enable_gateway_mode(&self, base_url: String) {
+        self.gateway_mode
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *self.gateway_base_url.write().await = Some(base_url);
+    }
+
+    /// Returns `true` if OAuth should use gateway mode (return auth URL to
+    /// frontend) rather than CLI mode (open browser on server via `open::that`).
+    ///
+    /// Gateway mode is active when any of:
+    /// - `enable_gateway_mode()` was called (web gateway is running), OR
+    /// - `IRONCLAW_OAUTH_CALLBACK_URL` is set to a non-loopback URL, OR
+    /// - `self.tunnel_url` is set to a non-loopback URL
+    pub fn should_use_gateway_mode(&self) -> bool {
+        if self.gateway_mode.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        if crate::cli::oauth_defaults::use_gateway_callback() {
+            return true;
+        }
+        self.tunnel_url
+            .as_ref()
+            .filter(|u| !u.is_empty())
+            .and_then(|raw| url::Url::parse(raw).ok())
+            .and_then(|u| u.host_str().map(String::from))
+            .map(|host| !crate::cli::oauth_defaults::is_loopback_host(&host))
+            .unwrap_or(false)
+    }
+
+    /// Returns the OAuth redirect URI for gateway mode, or `None` for local mode.
+    ///
+    /// Priority:
+    /// 1. `IRONCLAW_OAUTH_CALLBACK_URL` env var (via `callback_url()`)
+    /// 2. `gateway_base_url` (set by `enable_gateway_mode()`)
+    /// 3. `tunnel_url` (from config)
+    /// 4. `None` (local/CLI mode)
+    async fn gateway_callback_redirect_uri(&self) -> Option<String> {
+        use crate::cli::oauth_defaults;
+        if oauth_defaults::use_gateway_callback() {
+            return Some(format!("{}/callback", oauth_defaults::callback_url()));
+        }
+        // Use gateway_base_url from enable_gateway_mode()
+        if let Some(ref base) = *self.gateway_base_url.read().await {
+            let base = base.trim_end_matches('/');
+            return Some(format!("{}/oauth/callback", base));
+        }
+        // Fall back to tunnel_url
+        self.tunnel_url
+            .as_ref()
+            .filter(|u| !u.is_empty())
+            .and_then(|raw| url::Url::parse(raw).ok())
+            .and_then(|u| u.host_str().map(String::from))
+            .filter(|host| !oauth_defaults::is_loopback_host(host))
+            .map(|_| {
+                let base = self.tunnel_url.as_ref().unwrap().trim_end_matches('/');
+                format!("{}/oauth/callback", base)
+            })
     }
 
     /// Get the relay config stored at startup.
@@ -1716,7 +1789,7 @@ impl ExtensionManager {
         // In gateway mode, build an auth URL and return it for the frontend to
         // open in the same browser. The gateway's /oauth/callback handler will
         // complete the token exchange.
-        if crate::cli::oauth_defaults::use_gateway_callback() {
+        if self.should_use_gateway_mode() {
             return match self.auth_mcp_build_url(name, &server).await {
                 Ok(result) => Ok(result),
                 Err(_) => Ok(AuthResult::awaiting_token(
@@ -1788,12 +1861,12 @@ impl ExtensionManager {
 
         use crate::cli::oauth_defaults;
 
-        let is_gateway = oauth_defaults::use_gateway_callback();
+        let is_gateway = self.should_use_gateway_mode();
 
         // Build redirect URI: gateway uses the public callback URL,
         // local mode binds a random port.
-        let redirect_uri = if is_gateway {
-            format!("{}/callback", oauth_defaults::callback_url())
+        let redirect_uri = if let Some(uri) = self.gateway_callback_redirect_uri().await {
+            uri
         } else {
             let port = find_available_port()
                 .await
@@ -2352,7 +2425,10 @@ impl ExtensionManager {
             flows.retain(|_, flow| flow.extension_name != name);
         }
 
-        let redirect_uri = format!("{}/callback", oauth_defaults::callback_url());
+        let redirect_uri = self
+            .gateway_callback_redirect_uri()
+            .await
+            .unwrap_or_else(|| format!("{}/callback", oauth_defaults::callback_url()));
 
         // Merge scopes from all tools sharing this provider
         let merged_scopes = self
@@ -2377,7 +2453,7 @@ impl ExtensionManager {
             .clone()
             .unwrap_or_else(|| name.to_string());
 
-        if oauth_defaults::use_gateway_callback() {
+        if self.should_use_gateway_mode() {
             // Gateway mode: store pending flow state for the web gateway's
             // `/oauth/callback` handler to complete the exchange. No TCP listener
             // needed — the OAuth provider redirects to the gateway URL.
@@ -4797,5 +4873,187 @@ mod tests {
         let result = super::sanitize_url_for_logging(url);
         assert_eq!(result, url);
         assert!(result.contains("/v1/users/123/profile"));
+    }
+
+    // ---- gateway mode detection tests ----
+    // Regression tests for a bug where MCP OAuth called `open::that()` on the
+    // server machine instead of returning an auth URL to the gateway frontend.
+    // The root cause was that `should_use_gateway_mode()` only checked the
+    // `IRONCLAW_OAUTH_CALLBACK_URL` env var, ignoring `self.tunnel_url`.
+
+    /// Serializes env-mutating tests to prevent parallel races.
+    static GATEWAY_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Build a minimal ExtensionManager with a custom tunnel_url.
+    fn make_manager_with_tunnel(tunnel_url: Option<String>) -> ExtensionManager {
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mcp = Arc::new(McpSessionManager::new());
+        let dir = std::path::PathBuf::from("/tmp/ironclaw-test-nonexistent");
+
+        ExtensionManager::new(
+            mcp,
+            Arc::new(McpProcessManager::new()),
+            secrets,
+            tools,
+            None,
+            None,
+            dir.clone(),
+            dir,
+            tunnel_url,
+            "test".to_string(),
+            None,
+            vec![],
+        )
+    }
+
+    #[test]
+    fn should_use_gateway_mode_true_for_tunnel_url() {
+        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+
+        let mgr = make_manager_with_tunnel(Some("https://my-gateway.example.com".into()));
+        assert!(
+            mgr.should_use_gateway_mode(),
+            "should detect gateway mode from tunnel_url"
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
+    }
+
+    #[test]
+    fn should_use_gateway_mode_false_without_tunnel() {
+        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+
+        let mgr = make_manager_with_tunnel(None);
+        assert!(
+            !mgr.should_use_gateway_mode(),
+            "should not detect gateway mode without tunnel_url or env var"
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
+    }
+
+    #[test]
+    fn should_use_gateway_mode_false_for_loopback_tunnel() {
+        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+
+        let mgr = make_manager_with_tunnel(Some("http://127.0.0.1:3001".into()));
+        assert!(
+            !mgr.should_use_gateway_mode(),
+            "should not detect gateway mode for loopback tunnel_url"
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
+    }
+
+    /// Helper to run an async test body while holding the env mutex.
+    /// Clears `IRONCLAW_OAUTH_CALLBACK_URL` for the duration, restoring on drop.
+    struct EnvGuard {
+        original: Option<String>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            let guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+            let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+            // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+            Self {
+                original,
+                _mutex: guard,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: Under GATEWAY_ENV_MUTEX (still held by _mutex), no concurrent env access.
+            unsafe {
+                if let Some(ref val) = self.original {
+                    std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_callback_redirect_uri_from_tunnel_url() {
+        let _env = EnvGuard::new();
+
+        let mgr = make_manager_with_tunnel(Some("https://my-gateway.example.com".into()));
+        assert_eq!(
+            mgr.gateway_callback_redirect_uri().await,
+            Some("https://my-gateway.example.com/oauth/callback".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_callback_redirect_uri_none_without_tunnel() {
+        let _env = EnvGuard::new();
+
+        let mgr = make_manager_with_tunnel(None);
+        assert_eq!(mgr.gateway_callback_redirect_uri().await, None);
+    }
+
+    #[tokio::test]
+    async fn gateway_callback_redirect_uri_trims_trailing_slash() {
+        let _env = EnvGuard::new();
+
+        let mgr = make_manager_with_tunnel(Some("https://my-gateway.example.com/".into()));
+        assert_eq!(
+            mgr.gateway_callback_redirect_uri().await,
+            Some("https://my-gateway.example.com/oauth/callback".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_mode_enabled_explicitly() {
+        let _env = EnvGuard::new();
+
+        let mgr = make_manager_with_tunnel(None);
+        assert!(!mgr.should_use_gateway_mode());
+
+        mgr.enable_gateway_mode("https://my-gateway.example.com".into())
+            .await;
+        assert!(mgr.should_use_gateway_mode());
+        assert_eq!(
+            mgr.gateway_callback_redirect_uri().await,
+            Some("https://my-gateway.example.com/oauth/callback".to_string()),
+        );
     }
 }
