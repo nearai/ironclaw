@@ -397,10 +397,6 @@ impl Tool for ListDirTool {
         false // Directory listings are safe
     }
 
-    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
-    }
-
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
     }

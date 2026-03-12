@@ -26,6 +26,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
+use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
@@ -2424,11 +2425,20 @@ async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    let was_enabled = routine.enabled;
     // If a specific value was provided, use it; otherwise toggle.
     routine.enabled = match body {
         Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
         None => !routine.enabled,
     };
+
+    if routine.enabled
+        && !was_enabled
+        && let Trigger::Cron { schedule, timezone } = &routine.trigger
+    {
+        routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref())
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     store
         .update_routine(&routine)
