@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pre-push hook: run clippy and tests before pushing.
+# Install: git config core.hooksPath .githooks
+
+echo "pre-push: running clippy..."
+if ! cargo clippy --all --benches --tests --examples --all-features -- -D warnings; then
+    echo ""
+    echo "Push blocked: clippy warnings found."
+    echo "To bypass: git push --no-verify"
+    exit 1
+fi
+
+echo "pre-push: running tests..."
+if ! cargo test; then
+    echo ""
+    echo "Push blocked: tests failed."
+    echo "To bypass: git push --no-verify"
+    exit 1
+fi
+
+echo "pre-push: all checks passed."

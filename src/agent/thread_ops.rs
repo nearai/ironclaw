@@ -486,7 +486,12 @@ impl Agent {
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::Status("Awaiting approval".into()),
+                        StatusUpdate::ApprovalNeeded {
+                            request_id: request_id.to_string(),
+                            tool_name: tool_name.clone(),
+                            description: description.clone(),
+                            parameters: parameters.clone(),
+                        },
                         &message.metadata,
                     )
                     .await;
@@ -1297,7 +1302,12 @@ impl Agent {
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::Status("Awaiting approval".into()),
+                        StatusUpdate::ApprovalNeeded {
+                            request_id: request_id.to_string(),
+                            tool_name: tool_name.clone(),
+                            description: description.clone(),
+                            parameters: parameters.clone(),
+                        },
                         &message.metadata,
                     )
                     .await;
@@ -1368,7 +1378,12 @@ impl Agent {
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::Status("Awaiting approval".into()),
+                            StatusUpdate::ApprovalNeeded {
+                                request_id: request_id.to_string(),
+                                tool_name: tool_name.clone(),
+                                description: description.clone(),
+                                parameters: parameters.clone(),
+                            },
                             &message.metadata,
                         )
                         .await;

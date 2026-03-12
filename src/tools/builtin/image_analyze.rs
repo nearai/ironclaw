@@ -8,7 +8,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::context::JobContext;
 use crate::tools::builtin::path_utils::validate_path;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 /// Tool for analyzing images using a vision-capable model.
 pub struct ImageAnalyzeTool {
@@ -84,10 +84,6 @@ impl Tool for ImageAnalyzeTool {
             },
             "required": ["image_path"]
         })
-    }
-
-    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -185,6 +181,7 @@ impl Tool for ImageAnalyzeTool {
 mod tests {
     use super::super::media_type_from_path;
     use super::*;
+    use crate::tools::tool::ApprovalRequirement;
     use tempfile::TempDir;
 
     #[test]
@@ -199,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_requires_approval_returns_unless_auto_approved() {
+    fn test_requires_approval_returns_never() {
         let tool = ImageAnalyzeTool::new(
             "https://api.example.com".to_string(),
             "test-key".to_string(),
@@ -208,7 +205,7 @@ mod tests {
         );
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Never
         );
     }
 

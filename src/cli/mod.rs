@@ -7,10 +7,13 @@
 //! - Managing WASM tools (`tool install`, `tool list`, `tool remove`)
 //! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
 //! - Querying workspace memory (`memory search`, `memory read`, `memory write`)
+//! - Managing routines (`routines list`, `routines create`, `routines edit`, ...)
 //! - Managing OS service (`service install`, `service start`, `service stop`)
+//! - Listing configured channels (`channels list`)
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
+mod channels;
 mod completion;
 mod config;
 mod doctor;
@@ -21,11 +24,13 @@ pub mod memory;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
+mod routines;
 mod service;
 mod skills;
 pub mod status;
 mod tool;
 
+pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
@@ -36,6 +41,7 @@ pub use memory::MemoryCommand;
 pub use memory::run_memory_command_with_db;
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
+pub use routines::{RoutinesCommand, run_routines_command};
 pub use service::{ServiceCommand, run_service_command};
 pub use skills::{SkillsCommand, run_skills_command};
 pub use status::run_status_command;
@@ -135,6 +141,23 @@ pub enum Command {
         long_about = "Interact with extension registry.\nExample: ironclaw registry list"
     )]
     Registry(RegistryCommand),
+
+    /// List and inspect messaging channels
+    #[command(
+        subcommand,
+        about = "Manage channels",
+        long_about = "List configured messaging channels.\nExamples:\n  ironclaw channels list\n  ironclaw channels list --verbose\n  ironclaw channels list --json"
+    )]
+    Channels(ChannelsCommand),
+
+    /// Manage routines (scheduled, event-driven, webhook, manual)
+    #[command(
+        subcommand,
+        alias = "cron",
+        about = "Manage routines",
+        long_about = "List, create, edit, enable/disable, delete, and view history of routines.\nExamples:\n  ironclaw routines list\n  ironclaw routines create --name daily-digest --schedule '0 0 9 * * *' --prompt 'Summarize today'"
+    )]
+    Routines(RoutinesCommand),
 
     /// Manage MCP servers (hosted tool providers)
     #[command(
@@ -268,6 +291,23 @@ pub async fn init_secrets_store()
     let crypto = Arc::new(crate::secrets::SecretsCrypto::new(master_key.clone())?);
 
     Ok(crate::db::create_secrets_store(&config.database, crypto).await?)
+}
+
+/// Run the Routines CLI subcommand.
+pub async fn run_routines_cli(
+    routines_cmd: &RoutinesCommand,
+    config_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let config = crate::config::Config::from_env_with_toml(config_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+
+    let db: Arc<dyn crate::db::Database> = crate::db::connect_from_config(&config.database)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+
+    let user_id = std::env::var("GATEWAY_USER_ID").unwrap_or_else(|_| "default".to_string());
+    run_routines_command(routines_cmd.clone(), db, &user_id).await
 }
 
 /// Run the Memory CLI subcommand.

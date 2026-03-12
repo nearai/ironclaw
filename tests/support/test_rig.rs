@@ -50,6 +50,9 @@ pub struct TestRig {
     /// The underlying TraceLlm for inspecting captured requests.
     #[cfg(feature = "libsql")]
     trace_llm: Option<Arc<TraceLlm>>,
+    /// Extension manager for direct extension operations in tests.
+    #[cfg(feature = "libsql")]
+    extension_manager: Option<Arc<ironclaw::extensions::ExtensionManager>>,
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
@@ -74,6 +77,11 @@ impl TestRig {
             .as_ref()
             .map(|t| t.captured_requests())
             .unwrap_or_default()
+    }
+
+    /// Return the extension manager for direct extension operations in tests.
+    pub fn extension_manager(&self) -> Option<&Arc<ironclaw::extensions::ExtensionManager>> {
+        self.extension_manager.as_ref()
     }
 
     /// Wait until at least `n` responses have been captured, or `timeout` elapses.
@@ -600,6 +608,7 @@ impl TestRigBuilder {
         // Save references for test accessors.
         let db_ref = components.db.clone().expect("test rig requires a database");
         let workspace_ref = components.workspace.clone();
+        let ext_mgr_ref = components.extension_manager.clone();
 
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
@@ -695,6 +704,7 @@ impl TestRigBuilder {
             db: db_ref,
             workspace: workspace_ref,
             trace_llm: trace_llm_ref,
+            extension_manager: ext_mgr_ref,
             _temp_dir: temp_dir,
         }
     }

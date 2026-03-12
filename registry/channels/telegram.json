@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/latest/download/telegram-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/telegram-0.2.2-wasm32-wasip2.tar.gz",
+      "sha256": "b9a83d5a2d1285ce0ec116b354336a1f245f893291ccb01dffbcaccf89d72aed"
     }
   },
   "auth_summary": {

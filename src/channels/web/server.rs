@@ -26,6 +26,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
+use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
@@ -581,7 +582,12 @@ async fn oauth_callback_handler(
     let exchange_proxy_url = std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL").ok();
 
     let result: Result<(), String> = async {
-        let token_response = if let Some(ref proxy_url) = exchange_proxy_url {
+        let token_response = if let (Some(proxy_url), None) = (&exchange_proxy_url, &flow.resource)
+        {
+            // Use the platform exchange proxy when configured and no resource
+            // parameter is needed. The proxy holds client_secret server-side so
+            // the container never sees it. MCP flows (resource.is_some()) bypass
+            // the proxy because it doesn't forward the RFC 8707 resource param.
             let gateway_token = flow.gateway_token.as_deref().unwrap_or_default();
             oauth_defaults::exchange_via_proxy(
                 proxy_url,
@@ -594,7 +600,10 @@ async fn oauth_callback_handler(
             .await
             .map_err(|e| e.to_string())?
         } else {
-            oauth_defaults::exchange_oauth_code(
+            // Direct token exchange: uses exchange_oauth_code_with_resource so MCP
+            // flows can include the RFC 8707 `resource` parameter to scope the
+            // issued token to the specific MCP server.
+            oauth_defaults::exchange_oauth_code_with_resource(
                 &flow.token_url,
                 &flow.client_id,
                 flow.client_secret.as_deref(),
@@ -602,6 +611,7 @@ async fn oauth_callback_handler(
                 &flow.redirect_uri,
                 flow.code_verifier.as_deref(),
                 &flow.access_token_field,
+                flow.resource.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?
@@ -627,6 +637,19 @@ async fn oauth_callback_handler(
         )
         .await
         .map_err(|e| e.to_string())?;
+
+        // For MCP OAuth flows (identified by resource field), persist the
+        // client_id so token refresh works without re-authentication.
+        // The CLI flow stores this in authorize_mcp_server(); the gateway
+        // callback must do the same.
+        if let Some(ref client_id_secret) = flow.client_id_secret_name {
+            let params = crate::secrets::CreateSecretParams::new(client_id_secret, &flow.client_id)
+                .with_provider(flow.provider.as_ref().cloned().unwrap_or_default());
+            flow.secrets
+                .create(&flow.user_id, params)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
 
         Ok(())
     }
@@ -659,12 +682,35 @@ async fn oauth_callback_handler(
         }
     }
 
+    // After successful OAuth, auto-activate the extension so it moves
+    // from "Installed (Authenticate)" → "Active" without a second click.
+    // OAuth success is independent of activation — tokens are already stored.
+    // Report auth as successful and attempt activation as a bonus step.
+    let final_message = if success {
+        match ext_mgr.activate(&flow.extension_name).await {
+            Ok(result) => result.message,
+            Err(e) => {
+                tracing::warn!(
+                    extension = %flow.extension_name,
+                    error = %e,
+                    "Auto-activation after OAuth failed"
+                );
+                format!(
+                    "{} authenticated successfully. Activation failed: {}. Try activating manually.",
+                    flow.display_name, e
+                )
+            }
+        }
+    } else {
+        message
+    };
+
     // Broadcast SSE event to notify the web UI
     if let Some(ref sender) = flow.sse_sender {
         let _ = sender.send(SseEvent::AuthCompleted {
             extension_name: flow.extension_name,
             success,
-            message,
+            message: final_message.clone(),
         });
     }
 
@@ -973,11 +1019,17 @@ async fn chat_send_handler(
         req.images.len()
     );
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tracing::debug!("[chat_send_handler] Sending message through channel");
     tx.send(msg).await.map_err(|_| {
@@ -1043,11 +1095,17 @@ async fn chat_approval_handler(
 
     let msg_id = msg.id;
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tx.send(msg).await.map_err(|_| {
         (
@@ -2359,11 +2417,20 @@ async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    let was_enabled = routine.enabled;
     // If a specific value was provided, use it; otherwise toggle.
     routine.enabled = match body {
         Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
         None => !routine.enabled,
     };
+
+    if routine.enabled
+        && !was_enabled
+        && let Trigger::Cron { schedule, timezone } = &routine.trigger
+    {
+        routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref())
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     store
         .update_routine(&routine)
@@ -2954,6 +3021,8 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
+            resource: None,
+            client_id_secret_name: None,
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
                 .expect("System uptime is too low to run expired flow test"),
@@ -3063,6 +3132,8 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
+            resource: None,
+            client_id_secret_name: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))

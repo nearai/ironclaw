@@ -44,6 +44,7 @@ jobs:
         id: check
         env:
           FORCE_RUN: ${{ inputs.force }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           CURRENT_HEAD=$(git rev-parse HEAD)
           echo "current_head=${CURRENT_HEAD}" >> "$GITHUB_OUTPUT"
@@ -65,8 +66,8 @@ jobs:
               echo "Found ${COMMIT_COUNT} new commit(s) since last tested"
               DIFF_RANGE="${LAST_TESTED}..${CURRENT_HEAD}"
             else
-              git fetch origin main
-              MERGE_BASE=$(git merge-base origin/main HEAD)
+              git fetch origin "${DEFAULT_BRANCH}"
+              MERGE_BASE=$(git merge-base "origin/${DEFAULT_BRANCH}" HEAD)
               echo "First run -- reviewing from merge-base ${MERGE_BASE}"
               DIFF_RANGE="${MERGE_BASE}..${CURRENT_HEAD}"
             fi
@@ -107,6 +108,7 @@ jobs:
     outputs:
       pr_number: ${{ steps.create-pr.outputs.pr_number }}
       promotion_branch: ${{ steps.branch.outputs.branch }}
+      commit_summary: ${{ steps.create-pr.outputs.commit_summary }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -129,18 +131,19 @@ jobs:
             echo "token=${{ github.token }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check if staging is ahead of main
+      - name: Check if staging is ahead of target branch
         id: ahead-check
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          git fetch origin main
-          AHEAD=$(git rev-list --count origin/main..origin/staging)
+          git fetch origin "${DEFAULT_BRANCH}"
+          AHEAD=$(git rev-list --count "origin/${DEFAULT_BRANCH}..origin/staging")
           echo "commits_ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
           if [ "$AHEAD" -eq 0 ]; then
-            echo "Staging is not ahead of main. Nothing to promote."
+            echo "Staging is not ahead of ${DEFAULT_BRANCH}. Nothing to promote."
           else
-            echo "Staging is ${AHEAD} commits ahead of main."
+            echo "Staging is ${AHEAD} commits ahead of ${DEFAULT_BRANCH}."
           fi
 
       - name: Create promotion branch
@@ -159,6 +162,7 @@ jobs:
         if: steps.ahead-check.outputs.commits_ahead != '0'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           # Find the newest open promotion PR with a staging-promote/* head branch
           LATEST=$(gh pr list --label staging-promotion --state open \
@@ -168,8 +172,8 @@ jobs:
             echo "base=${LATEST}" >> "$GITHUB_OUTPUT"
             echo "Chaining onto existing promotion branch: ${LATEST}"
           else
-            echo "base=main" >> "$GITHUB_OUTPUT"
-            echo "No existing promotion PR — targeting main"
+            echo "base=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "No existing promotion PR — targeting ${DEFAULT_BRANCH}"
           fi
 
       - name: Create promotion PR
@@ -183,29 +187,58 @@ jobs:
           BRANCH="${{ steps.branch.outputs.branch }}"
           BASE="${{ steps.find-base.outputs.base }}"
 
+          # Enumerate commits in this batch (exclude merge commits, cap at 50)
+          MAX_COMMITS=50
+          COMMIT_LIST=$(git log --oneline --no-merges --reverse "${RANGE}" 2>/dev/null || echo "")
+          if [ -n "$COMMIT_LIST" ]; then
+            COMMIT_COUNT=$(echo "$COMMIT_LIST" | wc -l | tr -d ' ')
+            if [ "$COMMIT_COUNT" -gt "$MAX_COMMITS" ]; then
+              COMMIT_MD=$(echo "$COMMIT_LIST" | head -n "$MAX_COMMITS" | sed 's/^/- /')
+              COMMIT_MD="${COMMIT_MD}
+- ... and $((COMMIT_COUNT - MAX_COMMITS)) more (see compare view)"
+            else
+              COMMIT_MD=$(echo "$COMMIT_LIST" | sed 's/^/- /')
+            fi
+          else
+            COMMIT_COUNT=0
+            COMMIT_MD="- (no non-merge commits in range)"
+          fi
+
+          # Build PR body via concatenation to avoid heredoc shell expansion
+          # (commit messages in COMMIT_MD may contain $, backticks, or backslashes)
+          PR_BODY="## Auto-promotion from staging CI"
+          PR_BODY+=$'\n\n'"**Batch range:** \`${RANGE}\`"
+          PR_BODY+=$'\n'"**Promotion branch:** \`${BRANCH}\`"
+          PR_BODY+=$'\n'"**Base:** \`${BASE}\`"
+          PR_BODY+=$'\n'"**Triggered by:** Staging CI batch at ${TIMESTAMP}"
+          PR_BODY+=$'\n\n'"### Commits in this batch (${COMMIT_COUNT}):"
+          PR_BODY+=$'\n'"${COMMIT_MD}"
+          PR_BODY+=$'\n\n'"Waiting for gates:"
+          PR_BODY+=$'\n'"- Tests: pending"
+          PR_BODY+=$'\n'"- E2E: pending"
+          PR_BODY+=$'\n'"- Claude Code review: pending (will post comments on this PR)"
+          PR_BODY+=$'\n\n'"---"
+          PR_BODY+=$'\n'"*Auto-created by staging-ci workflow*"
+
           PR_URL=$(gh pr create \
             --base "$BASE" \
             --head "$BRANCH" \
-            --title "chore: promote staging to main (${TIMESTAMP})" \
-            --body "## Auto-promotion from staging CI
-
-          **Batch range:** \`${RANGE}\`
-          **Promotion branch:** \`${BRANCH}\`
-          **Base:** \`${BASE}\`
-          **Triggered by:** Staging CI batch at ${TIMESTAMP}
-
-          Waiting for gates:
-          - Tests: pending
-          - E2E: pending
-          - Claude Code review: pending (will post comments on this PR)
-
-          ---
-          *Auto-created by staging-ci workflow*" \
+            --title "chore: promote staging to ${BASE} (${TIMESTAMP})" \
+            --body "$PR_BODY" \
             --label "staging-promotion")
 
           PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
           echo "pr_number=${PR_NUM}" >> "$GITHUB_OUTPUT"
           echo "Created promotion PR #${PR_NUM}"
+
+          # Output commit summary for use in merge commit message
+          DELIM="COMMIT_SUMMARY_EOF_$(date +%s)"
+          {
+            echo "commit_summary<<${DELIM}"
+            echo "Commits in this batch (${COMMIT_COUNT}):"
+            echo "${COMMIT_MD}"
+            echo "${DELIM}"
+          } >> "$GITHUB_OUTPUT"
 
   # ── Gate: wait for review, process findings, merge or block ─────
   gate:
@@ -416,12 +449,18 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           PR_NUMBER: ${{ needs.create-promotion-pr.outputs.pr_number }}
+          COMMIT_SUMMARY: ${{ needs.create-promotion-pr.outputs.commit_summary }}
         run: |
           if [ -n "$PR_NUMBER" ]; then
             BASE=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName')
             if [ "$BASE" = "main" ]; then
               echo "Merging promotion PR #${PR_NUMBER} (targets main)"
-              gh pr merge "$PR_NUMBER" --merge
+              TITLE=$(gh pr view "$PR_NUMBER" --json title --jq '.title')
+              if [ -n "$COMMIT_SUMMARY" ]; then
+                gh pr merge "$PR_NUMBER" --merge --subject "#${PR_NUMBER} $TITLE" --body-file <(printf '%s' "$COMMIT_SUMMARY")
+              else
+                gh pr merge "$PR_NUMBER" --merge
+              fi
               echo "merged=true" >> "$GITHUB_OUTPUT"
             else
               echo "PR #${PR_NUMBER} targets '${BASE}' (not main) — leaving open for chain resolution"

@@ -27,7 +27,7 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpClient;
 use crate::tools::mcp::auth::{
-    PkceChallenge, authorize_mcp_server, build_authorization_url, discover_full_oauth_metadata,
+    authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
 use crate::tools::mcp::config::McpServerConfig;
@@ -108,6 +108,13 @@ pub struct ExtensionManager {
     /// Relay config captured at startup. Used by `auth_channel_relay` and
     /// `activate_channel_relay` instead of re-reading env vars.
     relay_config: Option<crate::config::RelayConfig>,
+    /// When `true`, OAuth flows always return an auth URL to the caller
+    /// instead of opening a browser on the server via `open::that()`.
+    /// Set by the web gateway at startup via `enable_gateway_mode()`.
+    gateway_mode: std::sync::atomic::AtomicBool,
+    /// The gateway's own base URL for building OAuth redirect URIs.
+    /// Set by the web gateway at startup via `enable_gateway_mode()`.
+    gateway_base_url: RwLock<Option<String>>,
 }
 
 /// Sanitize a URL for logging by removing query parameters and credentials.
@@ -181,7 +188,73 @@ impl ExtensionManager {
             pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
             gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
             relay_config: crate::config::RelayConfig::from_env(),
+            gateway_mode: std::sync::atomic::AtomicBool::new(false),
+            gateway_base_url: RwLock::new(None),
         }
+    }
+
+    /// Enable gateway mode so OAuth flows return auth URLs to the frontend
+    /// instead of calling `open::that()` on the server.
+    ///
+    /// `base_url` is the gateway's own public URL (e.g. `https://my-gateway.example.com`),
+    /// used to build OAuth redirect URIs when `IRONCLAW_OAUTH_CALLBACK_URL` is not set.
+    pub async fn enable_gateway_mode(&self, base_url: String) {
+        self.gateway_mode
+            .store(true, std::sync::atomic::Ordering::Release);
+        *self.gateway_base_url.write().await = Some(base_url);
+    }
+
+    /// Returns `true` if OAuth should use gateway mode (return auth URL to
+    /// frontend) rather than CLI mode (open browser on server via `open::that`).
+    ///
+    /// Gateway mode is active when any of:
+    /// - `enable_gateway_mode()` was called (web gateway is running), OR
+    /// - `IRONCLAW_OAUTH_CALLBACK_URL` is set to a non-loopback URL, OR
+    /// - `self.tunnel_url` is set to a non-loopback URL
+    pub fn should_use_gateway_mode(&self) -> bool {
+        if self.gateway_mode.load(std::sync::atomic::Ordering::Acquire) {
+            return true;
+        }
+        if crate::cli::oauth_defaults::use_gateway_callback() {
+            return true;
+        }
+        self.tunnel_url
+            .as_ref()
+            .filter(|u| !u.is_empty())
+            .and_then(|raw| url::Url::parse(raw).ok())
+            .and_then(|u| u.host_str().map(String::from))
+            .map(|host| !crate::cli::oauth_defaults::is_loopback_host(&host))
+            .unwrap_or(false)
+    }
+
+    /// Returns the OAuth redirect URI for gateway mode, or `None` for local mode.
+    ///
+    /// Priority:
+    /// 1. `IRONCLAW_OAUTH_CALLBACK_URL` env var (via `callback_url()`)
+    /// 2. `gateway_base_url` (set by `enable_gateway_mode()`)
+    /// 3. `tunnel_url` (from config)
+    /// 4. `None` (local/CLI mode)
+    async fn gateway_callback_redirect_uri(&self) -> Option<String> {
+        use crate::cli::oauth_defaults;
+        if oauth_defaults::use_gateway_callback() {
+            return Some(format!("{}/oauth/callback", oauth_defaults::callback_url()));
+        }
+        // Use gateway_base_url from enable_gateway_mode()
+        if let Some(ref base) = *self.gateway_base_url.read().await {
+            let base = base.trim_end_matches('/');
+            return Some(format!("{}/oauth/callback", base));
+        }
+        // Fall back to tunnel_url
+        self.tunnel_url
+            .as_ref()
+            .filter(|u| !u.is_empty())
+            .and_then(|raw| url::Url::parse(raw).ok())
+            .and_then(|u| u.host_str().map(String::from))
+            .filter(|host| !oauth_defaults::is_loopback_host(host))
+            .map(|_| {
+                let base = self.tunnel_url.as_ref().unwrap().trim_end_matches('/');
+                format!("{}/oauth/callback", base)
+            })
     }
 
     /// Get the relay config stored at startup.
@@ -191,6 +264,12 @@ impl ExtensionManager {
                 "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
             )
         })
+    }
+
+    /// Inject a registry entry for testing. The entry is added to the discovery
+    /// cache so it appears in search results alongside built-in entries.
+    pub async fn inject_registry_entry(&self, entry: crate::extensions::RegistryEntry) {
+        self.registry.cache_discovered(vec![entry]).await;
     }
 
     /// Configure the channel runtime infrastructure for hot-activating WASM channels.
@@ -1684,29 +1763,46 @@ impl ExtensionManager {
             return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
         }
 
-        // Run the full OAuth flow (opens browser, waits for callback)
+        // In gateway mode, build an auth URL and return it for the frontend to
+        // open in the same browser. The gateway's /oauth/callback handler will
+        // complete the token exchange.
+        if self.should_use_gateway_mode() {
+            return match self.auth_mcp_build_url(name, &server).await {
+                Ok(result) => Ok(result),
+                Err(ExtensionError::AuthNotSupported(_)) => Ok(AuthResult::awaiting_token(
+                    name,
+                    ExtensionKind::McpServer,
+                    format!(
+                        "Server '{}' does not support OAuth. \
+                         Please provide an API token/key for this server.",
+                        name
+                    ),
+                    None,
+                )),
+                Err(e) => Err(e),
+            };
+        }
+
+        // CLI/local mode: run the full blocking OAuth flow (opens browser, waits for callback)
         match authorize_mcp_server(&server, &self.secrets, &self.user_id).await {
             Ok(_token) => {
                 tracing::info!("MCP server '{}' authenticated via OAuth", name);
                 Ok(AuthResult::authenticated(name, ExtensionKind::McpServer))
             }
             Err(crate::tools::mcp::auth::AuthError::NotSupported) => {
-                // Server doesn't support OAuth, try building a URL first
+                // Server doesn't support OAuth, try building a URL
                 match self.auth_mcp_build_url(name, &server).await {
                     Ok(result) => Ok(result),
-                    Err(_) => {
-                        // No OAuth, no DCR: fall back to manual token entry
-                        Ok(AuthResult::awaiting_token(
-                            name,
-                            ExtensionKind::McpServer,
-                            format!(
-                                "Server '{}' does not support OAuth. \
-                                 Please provide an API token/key for this server.",
-                                name
-                            ),
-                            None,
-                        ))
-                    }
+                    Err(_) => Ok(AuthResult::awaiting_token(
+                        name,
+                        ExtensionKind::McpServer,
+                        format!(
+                            "Server '{}' does not support OAuth. \
+                             Please provide an API token/key for this server.",
+                            name
+                        ),
+                        None,
+                    )),
                 }
             }
             Err(e) => {
@@ -1725,8 +1821,12 @@ impl ExtensionManager {
         }
     }
 
-    /// Build an auth URL for cases where non-interactive auth is needed
-    /// (e.g., running via Telegram where we can't open a browser).
+    /// Build an auth URL for MCP OAuth.
+    ///
+    /// In gateway mode, stores a `PendingOAuthFlow` so the web gateway's
+    /// `/oauth/callback` handler can complete the token exchange — the auth
+    /// URL is sent to the frontend which opens it in the same browser.
+    /// In local/CLI mode, builds the URL for the user to open manually.
     async fn auth_mcp_build_url(
         &self,
         name: &str,
@@ -1735,60 +1835,153 @@ impl ExtensionManager {
         // Try to discover OAuth metadata and build a URL the user can open manually
         let metadata = discover_full_oauth_metadata(&server.url)
             .await
-            .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+            .map_err(|e| match e {
+                crate::tools::mcp::auth::AuthError::NotSupported => {
+                    ExtensionError::AuthNotSupported(e.to_string())
+                }
+                _ => ExtensionError::AuthFailed(e.to_string()),
+            })?;
+
+        use crate::cli::oauth_defaults;
+
+        let is_gateway = self.should_use_gateway_mode();
+
+        // Build redirect URI: gateway uses the public callback URL,
+        // local mode binds a random port.
+        let redirect_uri = if let Some(uri) = self.gateway_callback_redirect_uri().await {
+            uri
+        } else {
+            let port = find_available_port()
+                .await
+                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+            format!("http://localhost:{}/callback", port.1)
+        };
 
         // Try DCR if no client_id configured
-        let (client_id, redirect_uri) = if let Some(ref oauth) = server.oauth {
-            let port = find_available_port()
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-            let redirect = format!("http://localhost:{}/callback", port.1);
-            (oauth.client_id.clone(), redirect)
+        let (client_id, client_secret) = if let Some(ref oauth) = server.oauth {
+            (oauth.client_id.clone(), None)
         } else if let Some(ref reg_endpoint) = metadata.registration_endpoint {
-            let port = find_available_port()
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-            let redirect = format!("http://localhost:{}/callback", port.1);
-
-            let registration = register_client(reg_endpoint, &redirect)
+            let registration = register_client(reg_endpoint, &redirect_uri)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
-            (registration.client_id, redirect)
+            (registration.client_id, None)
         } else {
-            return Err(ExtensionError::AuthFailed(
+            return Err(ExtensionError::AuthNotSupported(
                 "Server doesn't support OAuth or Dynamic Client Registration".to_string(),
             ));
         };
 
-        let pkce = PkceChallenge::generate();
-        let auth_url = build_authorization_url(
+        // RFC 8707: resource parameter to scope the token to this MCP server
+        let resource = canonical_resource_uri(&server.url);
+
+        // Build authorization URL with CSRF state using the shared oauth_defaults
+        // builder, which generates PKCE + state for us.
+        let mut extra_params = server
+            .oauth
+            .as_ref()
+            .map(|o| o.extra_params.clone())
+            .unwrap_or_default();
+        extra_params.insert("resource".to_string(), resource.clone());
+
+        let scopes = server
+            .oauth
+            .as_ref()
+            .map(|o| o.scopes.clone())
+            .unwrap_or_else(|| metadata.scopes_supported.clone());
+
+        let oauth_result = oauth_defaults::build_oauth_url(
             &metadata.authorization_endpoint,
             &client_id,
             &redirect_uri,
-            &metadata.scopes_supported,
-            Some(&pkce),
-            &std::collections::HashMap::new(),
-            None,
+            &scopes,
+            true, // Always use PKCE for MCP
+            &extra_params,
         );
+        let expected_state = oauth_result.state;
+        let code_verifier = oauth_result.code_verifier;
 
-        // Store pending auth for later callback handling
-        self.pending_auth.write().await.insert(
-            name.to_string(),
-            PendingAuth {
-                _name: name.to_string(),
-                _kind: ExtensionKind::McpServer,
+        if is_gateway {
+            // Gateway mode: store pending flow for the /oauth/callback handler.
+            oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
+
+            // Platform routing: prepend instance name to state
+            let platform_state = oauth_defaults::build_platform_state(&expected_state);
+            let auth_url = if platform_state != expected_state {
+                oauth_result.url.replace(
+                    &format!("state={}", urlencoding::encode(&expected_state)),
+                    &format!("state={}", urlencoding::encode(&platform_state)),
+                )
+            } else {
+                oauth_result.url
+            };
+
+            let flow = oauth_defaults::PendingOAuthFlow {
+                extension_name: name.to_string(),
+                display_name: server.name.clone(),
+                token_url: metadata.token_endpoint,
+                client_id,
+                client_secret,
+                redirect_uri,
+                code_verifier,
+                access_token_field: "access_token".to_string(),
+                secret_name: server.token_secret_name(),
+                provider: Some(format!("mcp:{}", name)),
+                validation_endpoint: None,
+                scopes,
+                user_id: self.user_id.clone(),
+                secrets: Arc::clone(&self.secrets),
+                sse_sender: self.sse_sender.read().await.clone(),
+                gateway_token: self.gateway_token.clone(),
+                resource: Some(resource),
+                client_id_secret_name: if server.oauth.is_none() {
+                    Some(server.client_id_secret_name())
+                } else {
+                    None
+                },
                 created_at: std::time::Instant::now(),
-                task_handle: None,
-            },
-        );
+            };
 
-        Ok(AuthResult::awaiting_authorization(
-            name,
-            ExtensionKind::McpServer,
-            auth_url,
-            "local".to_string(),
-        ))
+            self.pending_oauth_flows
+                .write()
+                .await
+                .insert(expected_state, flow);
+
+            self.pending_auth.write().await.insert(
+                name.to_string(),
+                PendingAuth {
+                    _name: name.to_string(),
+                    _kind: ExtensionKind::McpServer,
+                    created_at: std::time::Instant::now(),
+                    task_handle: None,
+                },
+            );
+
+            Ok(AuthResult::awaiting_authorization(
+                name,
+                ExtensionKind::McpServer,
+                auth_url,
+                "gateway".to_string(),
+            ))
+        } else {
+            // Local mode: return URL for manual opening
+            self.pending_auth.write().await.insert(
+                name.to_string(),
+                PendingAuth {
+                    _name: name.to_string(),
+                    _kind: ExtensionKind::McpServer,
+                    created_at: std::time::Instant::now(),
+                    task_handle: None,
+                },
+            );
+
+            Ok(AuthResult::awaiting_authorization(
+                name,
+                ExtensionKind::McpServer,
+                oauth_result.url,
+                "local".to_string(),
+            ))
+        }
     }
 
     async fn auth_wasm_tool(&self, name: &str) -> Result<AuthResult, ExtensionError> {
@@ -2203,7 +2396,10 @@ impl ExtensionManager {
             flows.retain(|_, flow| flow.extension_name != name);
         }
 
-        let redirect_uri = format!("{}/callback", oauth_defaults::callback_url());
+        let redirect_uri = self
+            .gateway_callback_redirect_uri()
+            .await
+            .unwrap_or_else(|| format!("{}/callback", oauth_defaults::callback_url()));
 
         // Merge scopes from all tools sharing this provider
         let merged_scopes = self
@@ -2228,7 +2424,7 @@ impl ExtensionManager {
             .clone()
             .unwrap_or_else(|| name.to_string());
 
-        if oauth_defaults::use_gateway_callback() {
+        if self.should_use_gateway_mode() {
             // Gateway mode: store pending flow state for the web gateway's
             // `/oauth/callback` handler to complete the exchange. No TCP listener
             // needed — the OAuth provider redirects to the gateway URL.
@@ -2264,6 +2460,8 @@ impl ExtensionManager {
                 secrets: Arc::clone(&self.secrets),
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
+                resource: None,
+                client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             };
 
@@ -2605,11 +2803,17 @@ impl ExtensionManager {
         .await
         .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
-        // Try to list and create tools
-        let mcp_tools = client
-            .list_tools()
-            .await
-            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        // Try to list and create tools.
+        // A 401/auth error means the server requires OAuth — surface as
+        // AuthRequired so the activate handler triggers the OAuth flow.
+        let mcp_tools = client.list_tools().await.map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("requires authentication") || msg.contains("401") {
+                ExtensionError::AuthRequired
+            } else {
+                ExtensionError::ActivationFailed(msg)
+            }
+        })?;
 
         let tool_impls = client
             .create_tools()
@@ -4764,6 +4968,190 @@ mod tests {
         let result = super::sanitize_url_for_logging(url);
         assert_eq!(result, url);
         assert!(result.contains("/v1/users/123/profile"));
+    }
+
+    // ---- gateway mode detection tests ----
+    // Regression tests for a bug where MCP OAuth called `open::that()` on the
+    // server machine instead of returning an auth URL to the gateway frontend.
+    // The root cause was that `should_use_gateway_mode()` only checked the
+    // `IRONCLAW_OAUTH_CALLBACK_URL` env var, ignoring `self.tunnel_url`.
+
+    /// Serializes env-mutating tests to prevent parallel races.
+    static GATEWAY_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Build a minimal ExtensionManager with a custom tunnel_url.
+    fn make_manager_with_tunnel(tunnel_url: Option<String>) -> ExtensionManager {
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mcp = Arc::new(McpSessionManager::new());
+        let dir = std::env::temp_dir().join("ironclaw-test-gateway-mode");
+
+        ExtensionManager::new(
+            mcp,
+            Arc::new(McpProcessManager::new()),
+            secrets,
+            tools,
+            None,
+            None,
+            dir.clone(),
+            dir,
+            tunnel_url,
+            "test".to_string(),
+            None,
+            vec![],
+        )
+    }
+
+    #[test]
+    fn should_use_gateway_mode_true_for_tunnel_url() {
+        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+
+        let mgr = make_manager_with_tunnel(Some("https://my-gateway.example.com".into()));
+        assert!(
+            mgr.should_use_gateway_mode(),
+            "should detect gateway mode from tunnel_url"
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
+    }
+
+    #[test]
+    fn should_use_gateway_mode_false_without_tunnel() {
+        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+
+        let mgr = make_manager_with_tunnel(None);
+        assert!(
+            !mgr.should_use_gateway_mode(),
+            "should not detect gateway mode without tunnel_url or env var"
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
+    }
+
+    #[test]
+    fn should_use_gateway_mode_false_for_loopback_tunnel() {
+        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+
+        let mgr = make_manager_with_tunnel(Some("http://127.0.0.1:3001".into()));
+        assert!(
+            !mgr.should_use_gateway_mode(),
+            "should not detect gateway mode for loopback tunnel_url"
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
+    }
+
+    /// Helper to run an async test body while holding the env mutex.
+    /// Clears `IRONCLAW_OAUTH_CALLBACK_URL` for the duration, restoring on drop.
+    struct EnvGuard {
+        original: Option<String>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            let guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+            let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+            // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+            Self {
+                original,
+                _mutex: guard,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: Under GATEWAY_ENV_MUTEX (still held by _mutex), no concurrent env access.
+            unsafe {
+                if let Some(ref val) = self.original {
+                    std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+                } else {
+                    std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_callback_redirect_uri_from_tunnel_url() {
+        let _env = EnvGuard::new();
+
+        let mgr = make_manager_with_tunnel(Some("https://my-gateway.example.com".into()));
+        assert_eq!(
+            mgr.gateway_callback_redirect_uri().await,
+            Some("https://my-gateway.example.com/oauth/callback".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_callback_redirect_uri_none_without_tunnel() {
+        let _env = EnvGuard::new();
+
+        let mgr = make_manager_with_tunnel(None);
+        assert_eq!(mgr.gateway_callback_redirect_uri().await, None);
+    }
+
+    #[tokio::test]
+    async fn gateway_callback_redirect_uri_trims_trailing_slash() {
+        let _env = EnvGuard::new();
+
+        let mgr = make_manager_with_tunnel(Some("https://my-gateway.example.com/".into()));
+        assert_eq!(
+            mgr.gateway_callback_redirect_uri().await,
+            Some("https://my-gateway.example.com/oauth/callback".to_string()),
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_mode_enabled_explicitly() {
+        let _env = EnvGuard::new();
+
+        let mgr = make_manager_with_tunnel(None);
+        assert!(!mgr.should_use_gateway_mode());
+
+        mgr.enable_gateway_mode("https://my-gateway.example.com".into())
+            .await;
+        assert!(mgr.should_use_gateway_mode());
+        assert_eq!(
+            mgr.gateway_callback_redirect_uri().await,
+            Some("https://my-gateway.example.com/oauth/callback".to_string()),
+        );
     }
 
     // ── Regression tests for PR #677 (unify-extension-lifecycle) ─────────

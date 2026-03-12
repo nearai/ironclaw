@@ -7,7 +7,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::context::JobContext;
 use crate::tools::builtin::path_utils::validate_path;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 /// Tool for editing images using an AI image editing API.
 pub struct ImageEditTool {
@@ -83,10 +83,6 @@ impl Tool for ImageEditTool {
             },
             "required": ["prompt", "image_path"]
         })
-    }
-
-    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -266,6 +262,7 @@ impl ImageEditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::tool::ApprovalRequirement;
     use tempfile::TempDir;
 
     #[test]
@@ -280,7 +277,7 @@ mod tests {
         assert!(!tool.requires_sanitization());
         assert_eq!(
             tool.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Never
         );
     }
 

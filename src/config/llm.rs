@@ -668,6 +668,31 @@ mod tests {
     }
 
     #[test]
+    fn registry_provider_alias_resolves_zai() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("ZAI_API_KEY");
+            std::env::remove_var("ZAI_MODEL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("bigmodel".to_string()),
+            selected_model: Some("glm-5".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.backend, "zai");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(provider.provider_id, "zai");
+        assert_eq!(provider.model, "glm-5");
+        assert_eq!(provider.base_url, "https://api.z.ai/api/paas/v4");
+        assert_eq!(provider.protocol, ProviderProtocol::OpenAiCompletions);
+    }
+
+    #[test]
     fn nearai_backend_has_no_registry_provider() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         // SAFETY: Under ENV_MUTEX.
