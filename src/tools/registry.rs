@@ -23,6 +23,7 @@ use crate::tools::builtin::{
     ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::executor::ToolExecutor;
+use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
