@@ -286,95 +286,94 @@ async fn webhook_handler(
             )
                 .into_response();
         }
-        if let Some(expected_secret) = webhook_secret.as_ref() {
-            let expected_secret = expected_secret.expose_secret();
+        let expected_secret = webhook_secret
+            .as_ref()
+            .expect("checked is_none above")
+            .expose_secret();
 
-            match headers.get("x-ironclaw-signature") {
-                Some(raw_signature) => match raw_signature.to_str() {
-                    Ok(signature) => {
-                        if !verify_hmac_signature(expected_secret, &body, signature) {
-                            return (
-                                StatusCode::UNAUTHORIZED,
-                                Json(WebhookResponse {
-                                    message_id: Uuid::nil(),
-                                    status: "error".to_string(),
-                                    response: Some("Invalid webhook signature".to_string()),
-                                }),
-                            )
-                                .into_response();
-                        }
+        match headers.get("x-ironclaw-signature") {
+            Some(raw_signature) => match raw_signature.to_str() {
+                Ok(signature) => {
+                    if !verify_hmac_signature(expected_secret, &body, signature) {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(WebhookResponse {
+                                message_id: Uuid::nil(),
+                                status: "error".to_string(),
+                                response: Some("Invalid webhook signature".to_string()),
+                            }),
+                        )
+                            .into_response();
                     }
+                }
+                Err(_) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(WebhookResponse {
+                            message_id: Uuid::nil(),
+                            status: "error".to_string(),
+                            response: Some("Invalid signature header encoding".to_string()),
+                        }),
+                    )
+                        .into_response();
+                }
+            },
+            None => {
+                let req: WebhookRequest = match serde_json::from_slice(&body) {
+                    Ok(req) => req,
                     Err(_) => {
                         return (
                             StatusCode::UNAUTHORIZED,
                             Json(WebhookResponse {
                                 message_id: Uuid::nil(),
                                 status: "error".to_string(),
-                                response: Some("Invalid signature header encoding".to_string()),
+                                response: Some(
+                                    "Webhook authentication required. Provide X-IronClaw-Signature header \
+                                     (preferred) or 'secret' field in body (deprecated)."
+                                        .to_string(),
+                                ),
                             }),
                         )
                             .into_response();
                     }
-                },
-                None => {
-                    let req: WebhookRequest = match serde_json::from_slice(&body) {
-                        Ok(req) => req,
-                        Err(_) => {
-                            return (
-                                StatusCode::UNAUTHORIZED,
-                                Json(WebhookResponse {
-                                    message_id: Uuid::nil(),
-                                    status: "error".to_string(),
-                                    response: Some(
-                                        "Webhook authentication required. Provide X-IronClaw-Signature header \
-                                         (preferred) or 'secret' field in body (deprecated)."
-                                            .to_string(),
-                                    ),
-                                }),
-                            )
-                                .into_response();
-                        }
-                    };
+                };
 
-                    match &req.secret {
-                        Some(provided)
-                            if bool::from(
-                                provided.as_bytes().ct_eq(expected_secret.as_bytes()),
-                            ) =>
-                        {
-                            tracing::warn!(
-                                "Webhook authenticated via deprecated 'secret' field in request body. \
-                                 Migrate to X-IronClaw-Signature header (HMAC-SHA256). \
-                                 Body secret support will be removed in a future release."
-                            );
-                            fallback_req = Some(req);
-                        }
-                        Some(_) => {
-                            return (
-                                StatusCode::UNAUTHORIZED,
-                                Json(WebhookResponse {
-                                    message_id: Uuid::nil(),
-                                    status: "error".to_string(),
-                                    response: Some("Invalid webhook secret".to_string()),
-                                }),
-                            )
-                                .into_response();
-                        }
-                        None => {
-                            return (
-                                StatusCode::UNAUTHORIZED,
-                                Json(WebhookResponse {
-                                    message_id: Uuid::nil(),
-                                    status: "error".to_string(),
-                                    response: Some(
-                                        "Webhook authentication required. Provide X-IronClaw-Signature header \
-                                         (preferred) or 'secret' field in body (deprecated)."
-                                            .to_string(),
-                                    ),
-                                }),
-                            )
-                                .into_response();
-                        }
+                match &req.secret {
+                    Some(provided)
+                        if bool::from(provided.as_bytes().ct_eq(expected_secret.as_bytes())) =>
+                    {
+                        tracing::warn!(
+                            "Webhook authenticated via deprecated 'secret' field in request body. \
+                             Migrate to X-IronClaw-Signature header (HMAC-SHA256). \
+                             Body secret support will be removed in a future release."
+                        );
+                        fallback_req = Some(req);
+                    }
+                    Some(_) => {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(WebhookResponse {
+                                message_id: Uuid::nil(),
+                                status: "error".to_string(),
+                                response: Some("Invalid webhook secret".to_string()),
+                            }),
+                        )
+                            .into_response();
+                    }
+                    None => {
+                        return (
+                            StatusCode::UNAUTHORIZED,
+                            Json(WebhookResponse {
+                                message_id: Uuid::nil(),
+                                status: "error".to_string(),
+                                response: Some(
+                                    "Webhook authentication required. Provide X-IronClaw-Signature header \
+                                     (preferred) or 'secret' field in body (deprecated)."
+                                        .to_string(),
+                                ),
+                            }),
+                        )
+                            .into_response();
                     }
                 }
             }
@@ -1067,6 +1066,32 @@ mod tests {
             StatusCode::OK,
             "new secret should work after update"
         );
+    }
+
+    #[tokio::test]
+    async fn webhook_rejects_requests_after_secret_is_cleared() {
+        let secret = "test-secret-123";
+        let channel = test_channel(Some(secret));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        channel.update_secret(None).await;
+
+        let body = serde_json::json!({
+            "content": "hello"
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let signature = compute_signature(secret, &body_bytes);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-ironclaw-signature", signature)
+            .body(Body::from(body_bytes))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

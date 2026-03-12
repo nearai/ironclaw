@@ -1169,9 +1169,11 @@ pub fn spawn_cron_ticker(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Run one check immediately so routines due at startup don't wait
+        // an extra full polling interval.
+        engine.check_cron_triggers().await;
+
         let mut ticker = tokio::time::interval(interval);
-        // Skip immediate first tick
-        ticker.tick().await;
 
         loop {
             ticker.tick().await;
@@ -1376,5 +1378,12 @@ mod tests {
         );
         assert_eq!(finish_reason_length, crate::llm::FinishReason::Length);
         assert_eq!(finish_reason_stop, crate::llm::FinishReason::Stop);
+    }
+
+    #[test]
+    fn test_truncate_adds_ellipsis_when_over_limit() {
+        let input = "abcdefghijk";
+        let out = super::truncate(input, 5);
+        assert_eq!(out, "abcde...");
     }
 }

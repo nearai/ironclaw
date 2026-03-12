@@ -342,8 +342,19 @@ function connectSSE() {
 
   eventSource.addEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
-    showApproval(data);
+    const hasThread = !!data.thread_id;
+    const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
+
+    if (forCurrentThread) {
+      showApproval(data);
+    } else {
+      // Keep thread list fresh when approval is requested in a background thread.
+      unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+      debouncedLoadThreads();
+    }
+
+    // Extension setup flows can surface approvals while user is on Extensions tab.
+    if (currentTab === 'extensions') loadExtensions();
   });
 
   eventSource.addEventListener('auth_required', (e) => {
@@ -364,6 +375,9 @@ function connectSSE() {
     removeAuthCard(data.extension_name);
     closeConfigureModal();
     showToast(data.message, data.success ? 'success' : 'error');
+    if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
+      addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
+    }
     // Refresh extensions list so status indicators update
     if (currentTab === 'extensions') loadExtensions();
     enableChatInput();
@@ -990,7 +1004,26 @@ function finalizeActivityGroup() {
   _activeToolCards = {};
 }
 
+function humanizeToolName(rawName) {
+  if (!rawName) return '';
+  return String(rawName)
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/^tool([a-zA-Z])/, 'tool $1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shouldShowChannelConnectedMessage(extensionName, success) {
+  if (!success || !extensionName) return false;
+  return String(extensionName).toLowerCase().includes('telegram');
+}
+
 function showApproval(data) {
+  // Avoid duplicate cards on reconnect/history refresh.
+  const existing = document.querySelector('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
+  if (existing) return;
+
   const container = document.getElementById('chat-messages');
   const card = document.createElement('div');
   card.className = 'approval-card';
@@ -1003,7 +1036,7 @@ function showApproval(data) {
 
   const toolName = document.createElement('div');
   toolName.className = 'approval-tool-name';
-  toolName.textContent = data.tool_name;
+  toolName.textContent = humanizeToolName(data.tool_name);
   card.appendChild(toolName);
 
   if (data.description) {

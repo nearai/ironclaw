@@ -540,8 +540,8 @@ impl Tool for MemoryTreeTool {
 }
 
 #[cfg(test)]
-mod path_routing_tests {
-    use super::looks_like_filesystem_path;
+mod tests {
+    use super::*;
 
     #[test]
     fn detects_filesystem_paths() {
@@ -557,82 +557,82 @@ mod path_routing_tests {
         assert!(!looks_like_filesystem_path("daily/2026-03-11.md"));
         assert!(!looks_like_filesystem_path("projects/alpha/notes.md"));
     }
-}
 
-#[cfg(all(test, feature = "postgres"))]
-mod tests {
-    use super::*;
+    #[cfg(feature = "postgres")]
+    mod postgres_schema_tests {
+        use super::*;
 
-    fn make_test_workspace() -> Arc<Workspace> {
-        Arc::new(Workspace::new(
-            "test_user",
-            deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
-                tokio_postgres::Config::new(),
-                tokio_postgres::NoTls,
+        fn make_test_workspace() -> Arc<Workspace> {
+            Arc::new(Workspace::new(
+                "test_user",
+                deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
+                    tokio_postgres::Config::new(),
+                    tokio_postgres::NoTls,
+                ))
+                .build()
+                .unwrap(),
             ))
-            .build()
-            .unwrap(),
-        ))
-    }
+        }
 
-    #[test]
-    fn test_memory_search_schema() {
-        let workspace = make_test_workspace();
-        let tool = MemorySearchTool::new(workspace);
+        #[test]
+        fn test_memory_search_schema() {
+            let workspace = make_test_workspace();
+            let tool = MemorySearchTool::new(workspace);
 
-        assert_eq!(tool.name(), "memory_search");
-        assert!(!tool.requires_sanitization());
+            assert_eq!(tool.name(), "memory_search");
+            assert!(!tool.requires_sanitization());
 
-        let schema = tool.parameters_schema();
-        assert!(schema["properties"]["query"].is_object());
-        assert!(
-            schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&"query".into())
-        );
-    }
+            let schema = tool.parameters_schema();
+            assert!(schema["properties"]["query"].is_object());
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&"query".into())
+            );
+        }
 
-    #[test]
-    fn test_memory_write_schema() {
-        let workspace = make_test_workspace();
-        let tool = MemoryWriteTool::new(workspace);
+        #[test]
+        fn test_memory_write_schema() {
+            let workspace = make_test_workspace();
+            let tool = MemoryWriteTool::new(workspace);
 
-        assert_eq!(tool.name(), "memory_write");
+            assert_eq!(tool.name(), "memory_write");
 
-        let schema = tool.parameters_schema();
-        assert!(schema["properties"]["content"].is_object());
-        assert!(schema["properties"]["target"].is_object());
-        assert!(schema["properties"]["append"].is_object());
-    }
+            let schema = tool.parameters_schema();
+            assert!(schema["properties"]["content"].is_object());
+            assert!(schema["properties"]["target"].is_object());
+            assert!(schema["properties"]["append"].is_object());
+        }
 
-    #[test]
-    fn test_memory_read_schema() {
-        let workspace = make_test_workspace();
-        let tool = MemoryReadTool::new(workspace);
+        #[test]
+        fn test_memory_read_schema() {
+            let workspace = make_test_workspace();
+            let tool = MemoryReadTool::new(workspace);
 
-        assert_eq!(tool.name(), "memory_read");
+            assert_eq!(tool.name(), "memory_read");
 
-        let schema = tool.parameters_schema();
-        assert!(schema["properties"]["path"].is_object());
-        assert!(
-            schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&"path".into())
-        );
-    }
+            let schema = tool.parameters_schema();
+            assert!(schema["properties"]["path"].is_object());
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&"path".into())
+            );
+        }
 
-    #[test]
-    fn test_memory_tree_schema() {
-        let workspace = make_test_workspace();
-        let tool = MemoryTreeTool::new(workspace);
+        #[test]
+        fn test_memory_tree_schema() {
+            let workspace = make_test_workspace();
+            let tool = MemoryTreeTool::new(workspace);
 
-        assert_eq!(tool.name(), "memory_tree");
+            assert_eq!(tool.name(), "memory_tree");
 
-        let schema = tool.parameters_schema();
-        assert!(schema["properties"]["path"].is_object());
-        assert!(schema["properties"]["depth"].is_object());
-        assert_eq!(schema["properties"]["depth"]["default"], 1);
+            let schema = tool.parameters_schema();
+            assert!(schema["properties"]["path"].is_object());
+            assert!(schema["properties"]["depth"].is_object());
+            assert_eq!(schema["properties"]["depth"]["default"], 1);
+        }
     }
 }

@@ -183,6 +183,7 @@ pub async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    let was_enabled = routine.enabled;
     // If a specific value was provided, use it; otherwise toggle.
     routine.enabled = match body {
         Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
@@ -192,6 +193,7 @@ pub async fn routines_toggle_handler(
     // When re-enabling a cron routine, recompute next_fire_at so the cron
     // ticker can pick it up. Mirrors the CLI behavior (issue #1077).
     if routine.enabled
+        && !was_enabled
         && let Trigger::Cron {
             ref schedule,
             ref timezone,
