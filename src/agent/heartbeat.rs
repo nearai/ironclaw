@@ -154,9 +154,7 @@ fn duration_until_next_fire(fire_at: chrono::NaiveTime, tz: Tz) -> Duration {
 
     // Try to build today's target datetime in the given timezone.
     // `.earliest()` picks the first occurrence if DST creates ambiguity.
-    let candidate = tz
-        .from_local_datetime(&today.and_time(fire_at))
-        .earliest();
+    let candidate = tz.from_local_datetime(&today.and_time(fire_at)).earliest();
 
     let target = match candidate {
         Some(t) if t > now => t,
