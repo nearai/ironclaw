@@ -1150,9 +1150,11 @@ pub fn spawn_cron_ticker(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Run one check immediately so routines due at startup don't wait
+        // an extra full polling interval.
+        engine.check_cron_triggers().await;
+
         let mut ticker = tokio::time::interval(interval);
-        // Skip immediate first tick
-        ticker.tick().await;
 
         loop {
             ticker.tick().await;
