@@ -786,6 +786,19 @@ impl ExtensionManager {
         Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
 
+        // Clean up any in-progress OAuth flows for this extension.
+        // TCP mode: abort the listener task so port 9876 is freed immediately.
+        // Gateway mode: remove stale pending flow entries.
+        if let Some(pending) = self.pending_auth.write().await.remove(name)
+            && let Some(handle) = pending.task_handle
+        {
+            handle.abort();
+        }
+        self.pending_oauth_flows
+            .write()
+            .await
+            .retain(|_, flow| flow.extension_name != name);
+
         match kind {
             ExtensionKind::McpServer => {
                 // Unregister tools with this server's prefix
@@ -818,6 +831,14 @@ impl ExtensionManager {
             ExtensionKind::WasmTool => {
                 // Unregister from tool registry
                 self.tool_registry.unregister(name).await;
+
+                // Evict compiled module from runtime cache so reinstall uses fresh binary
+                if let Some(ref rt) = self.wasm_tool_runtime {
+                    rt.remove(name).await;
+                }
+
+                // Clear stale activation errors so reinstall starts clean
+                self.activation_errors.write().await.remove(name);
 
                 // Revoke credential mappings from the shared registry
                 let cap_path = self
@@ -858,6 +879,9 @@ impl ExtensionManager {
                 // Remove from active set and persist
                 self.active_channel_names.write().await.remove(name);
                 self.persist_active_channels().await;
+
+                // Clear stale activation errors so reinstall starts clean
+                self.activation_errors.write().await.remove(name);
 
                 // Delete channel files
                 let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
@@ -2858,6 +2882,17 @@ impl ExtensionManager {
                 tools_loaded: vec![name.to_string()],
                 message: format!("WASM tool '{}' already active", name),
             });
+        }
+
+        // Check auth status — block activation if required secrets are missing.
+        // NeedsAuth (OAuth not yet completed) is allowed because configure() loads
+        // the tool first, then starts the OAuth flow to obtain the token.
+        let auth_state = self.check_tool_auth_status(name).await;
+        if auth_state == ToolAuthState::NeedsSetup {
+            return Err(ExtensionError::ActivationFailed(format!(
+                "Tool '{}' requires configuration. Use the setup form to provide credentials.",
+                name
+            )));
         }
 
         let runtime = self.wasm_tool_runtime.as_ref().ok_or_else(|| {

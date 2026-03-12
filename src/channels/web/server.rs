@@ -572,6 +572,14 @@ async fn oauth_callback_handler(
             extension = %flow.extension_name,
             "OAuth flow expired"
         );
+        // Notify UI so auth card can show error instead of staying stuck
+        if let Some(ref sender) = flow.sse_sender {
+            let _ = sender.send(SseEvent::AuthCompleted {
+                extension_name: flow.extension_name.clone(),
+                success: false,
+                message: "OAuth flow expired. Please try again.".to_string(),
+            });
+        }
         return oauth_error_page(&flow.display_name);
     }
 
