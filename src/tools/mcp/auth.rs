@@ -1751,7 +1751,11 @@ mod tests {
             "https://app.attio.com/oidc/authorize",
             "test-client",
             "http://127.0.0.1:9876/callback",
-            &["mcp".to_string(), "offline_access".to_string(), "openid".to_string()],
+            &[
+                "mcp".to_string(),
+                "offline_access".to_string(),
+                "openid".to_string(),
+            ],
             Some(&pkce),
             &extra_params,
             Some("https://mcp.attio.com/mcp"),
