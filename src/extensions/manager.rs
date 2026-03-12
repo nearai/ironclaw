@@ -4970,6 +4970,8 @@ mod tests {
                 secrets: Arc::clone(&secrets),
                 sse_sender: None,
                 gateway_token: None,
+                resource: None,
+                client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             },
         );
@@ -4992,6 +4994,8 @@ mod tests {
                 secrets,
                 sse_sender: None,
                 gateway_token: None,
+                resource: None,
+                client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             },
         );

@@ -3101,6 +3101,8 @@ mod tests {
             secrets,
             sse_sender: Some(sender),
             gateway_token: None,
+            resource: None,
+            client_id_secret_name: None,
             created_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(600))
                 .expect("System uptime is too low to run expired flow test"),
