@@ -300,6 +300,7 @@ mod tests {
             None,
             tools,
             safety,
+            false, // sandbox_available
         ));
 
         let mut filters = std::collections::HashMap::new();
