@@ -37,8 +37,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FALLBACK_BRANCH: main
+          REPO: ${{ github.repository }}
         run: |
-          LATEST=$(gh pr list --label staging-promotion --state open \
+          LATEST=$(gh pr list --repo "${REPO}" --label staging-promotion --state open \
             --json headRefName,createdAt \
             --jq '[.[] | select(.headRefName | startswith("staging-promote/"))] | sort_by(.createdAt) | last | .headRefName // empty')
           if [ -n "$LATEST" ]; then
