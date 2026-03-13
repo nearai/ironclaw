@@ -32,7 +32,7 @@ fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
                 .timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .map_err(|e| AuthError::Http(e.to_string()))
+.map_err(|e| AuthError::ClientSetupFailed(e.to_string()))
         })
         .as_ref()
         .map_err(Clone::clone)
