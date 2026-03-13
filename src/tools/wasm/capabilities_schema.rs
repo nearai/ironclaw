@@ -560,7 +560,11 @@ pub struct ToolFieldSetupSchema {
     pub input_type: ToolSetupFieldInputType,
     /// Optional dotted setting path to persist this value to.
     ///
-    /// Example: `llm_backend` or `selected_model`.
+    /// Restricted by the host to extension-owned namespaces and a small
+    /// allowlist of approved global settings.
+    ///
+    /// Example: `extensions.switch-llm.provider`, `llm_backend`, or
+    /// `selected_model`.
     #[serde(default)]
     pub setting_path: Option<String>,
     /// Whether changing this field requires a restart to fully apply.

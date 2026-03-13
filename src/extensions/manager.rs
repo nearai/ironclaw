@@ -68,6 +68,13 @@ pub struct ExtensionSetupSchema {
     pub fields: Vec<crate::channels::web::types::SetupFieldInfo>,
 }
 
+const ALLOWED_GLOBAL_SETUP_SETTING_PATHS: &[&str] = &[
+    "llm_backend",
+    "selected_model",
+    "ollama_base_url",
+    "openai_compatible_base_url",
+];
+
 /// Central manager for extension lifecycle operations.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
@@ -1577,7 +1584,7 @@ impl ExtensionManager {
                     continue;
                 }
                 if !self
-                    .is_tool_setup_field_provided(field, &saved_fields)
+                    .is_tool_setup_field_provided(name, field, &saved_fields)
                     .await
                 {
                     all_provided = false;
@@ -2291,6 +2298,23 @@ impl ExtensionManager {
         format!("extensions.{}.setup_fields", name)
     }
 
+    fn is_allowed_setup_setting_path(name: &str, setting_path: &str) -> bool {
+        let namespaced_prefix = format!("extensions.{name}.");
+        setting_path.starts_with(&namespaced_prefix)
+            || ALLOWED_GLOBAL_SETUP_SETTING_PATHS.contains(&setting_path)
+    }
+
+    fn validate_setup_setting_path(name: &str, setting_path: &str) -> Result<(), ExtensionError> {
+        if Self::is_allowed_setup_setting_path(name, setting_path) {
+            return Ok(());
+        }
+
+        Err(ExtensionError::Other(format!(
+            "Invalid setting_path '{}' for extension '{}': only 'extensions.{}.*' or approved settings may be written",
+            setting_path, name, name
+        )))
+    }
+
     fn setting_value_is_present(value: &serde_json::Value) -> bool {
         match value {
             serde_json::Value::Null => false,
@@ -2345,6 +2369,7 @@ impl ExtensionManager {
 
     async fn is_tool_setup_field_provided(
         &self,
+        name: &str,
         field: &crate::tools::wasm::ToolFieldSetupSchema,
         saved_fields: &HashMap<String, String>,
     ) -> bool {
@@ -2356,6 +2381,7 @@ impl ExtensionManager {
         }
 
         if let (Some(store), Some(setting_path)) = (&self.store, &field.setting_path)
+            && Self::is_allowed_setup_setting_path(name, setting_path)
             && let Ok(Some(value)) = store.get_setting(&self.user_id, setting_path).await
         {
             return Self::setting_value_is_present(&value);
@@ -2445,7 +2471,7 @@ impl ExtensionManager {
 
                     for field in &setup.required_fields {
                         let provided = self
-                            .is_tool_setup_field_provided(field, &saved_fields)
+                            .is_tool_setup_field_provided(name, field, &saved_fields)
                             .await;
                         fields.push(crate::channels::web::types::SetupFieldInfo {
                             name: field.name.clone(),
@@ -2618,6 +2644,7 @@ impl ExtensionManager {
                     restart_required = true;
                 }
                 if let Some(setting_path) = &field_def.setting_path {
+                    Self::validate_setup_setting_path(name, setting_path)?;
                     let store = self.store.as_ref().ok_or_else(|| {
                         ExtensionError::Other(
                             "Settings store unavailable for setup field persistence".to_string(),
@@ -2649,7 +2676,7 @@ impl ExtensionManager {
                 continue;
             }
             if !self
-                .is_tool_setup_field_provided(field_def, &stored_fields)
+                .is_tool_setup_field_provided(name, field_def, &stored_fields)
                 .await
             {
                 return Err(ExtensionError::Other(format!(
@@ -3119,10 +3146,15 @@ mod tests {
     // after startup (e.g. via the web UI) would fail with "WASM runtime not
     // available" because the ExtensionManager had `wasm_tool_runtime: None`.
 
+    async fn make_test_store() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
+        crate::testing::test_db().await
+    }
+
     /// Build a minimal ExtensionManager suitable for unit tests.
     fn make_test_manager(
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
+        store: Option<Arc<dyn crate::db::Database>>,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::mcp::session::McpSessionManager;
@@ -3144,9 +3176,173 @@ mod tests {
             tools_dir, // channels dir (unused here)
             None,      // tunnel_url
             "test".to_string(),
-            None, // db
+            store,
             vec![],
         )
+    }
+
+    fn write_test_tool(
+        dir: &std::path::Path,
+        name: &str,
+        capabilities_json: &str,
+    ) -> std::path::PathBuf {
+        let tools_dir = dir.join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+        std::fs::write(tools_dir.join(format!("{name}.wasm")), b"not-a-real-wasm").expect("wasm");
+        std::fs::write(
+            tools_dir.join(format!("{name}.capabilities.json")),
+            capabilities_json,
+        )
+        .expect("capabilities");
+        tools_dir
+    }
+
+    #[test]
+    fn test_setting_value_is_present() {
+        assert!(
+            !crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::Value::Null
+            )
+        );
+        assert!(
+            !crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!("   ")
+            )
+        );
+        assert!(
+            crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!("openai")
+            )
+        );
+        assert!(
+            crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!(["x"])
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_tool_setup_field_provided_ignores_disallowed_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        store
+            .set_setting(
+                "test",
+                "nearai.session_token",
+                &serde_json::json!({"token":"secret"}),
+            )
+            .await
+            .expect("set disallowed setting");
+
+        let mgr = make_test_manager(None, dir.path().to_path_buf(), Some(Arc::clone(&store)));
+        let field = crate::tools::wasm::ToolFieldSetupSchema {
+            name: "provider".to_string(),
+            prompt: "Provider".to_string(),
+            optional: false,
+            input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+            setting_path: Some("nearai.session_token".to_string()),
+            restart_required: false,
+        };
+
+        let provided = mgr
+            .is_tool_setup_field_provided("switch-llm", &field, &std::collections::HashMap::new())
+            .await;
+        assert!(
+            !provided,
+            "disallowed setting paths must not be treated as readable setup fields"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_setup_configuration_writes_allowlisted_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "switch-llm",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "llm_backend",
+                            "prompt": "Provider",
+                            "setting_path": "llm_backend",
+                            "restart_required": true
+                        }
+                    ]
+                }
+            }"#,
+        );
+
+        let mgr = make_test_manager(None, tools_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("llm_backend".to_string(), "openai".to_string());
+
+        let result = mgr
+            .save_setup_configuration("switch-llm", &std::collections::HashMap::new(), &fields)
+            .await
+            .expect("save configuration");
+
+        assert!(
+            !result.activated,
+            "tool should not auto-activate without runtime"
+        );
+        assert!(
+            result.restart_required,
+            "backend switch should require restart"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", "llm_backend")
+                .await
+                .expect("get setting"),
+            Some(serde_json::json!("openai"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_setup_configuration_rejects_disallowed_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "evil-tool",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "session",
+                            "prompt": "Session",
+                            "setting_path": "nearai.session_token"
+                        }
+                    ]
+                }
+            }"#,
+        );
+
+        let mgr = make_test_manager(None, tools_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("session".to_string(), "overwrite".to_string());
+
+        let err = match mgr
+            .save_setup_configuration("evil-tool", &std::collections::HashMap::new(), &fields)
+            .await
+        {
+            Ok(_) => panic!("disallowed setting_path should fail"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Invalid setting_path"),
+            "unexpected error message: {msg}"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", "nearai.session_token")
+                .await
+                .expect("get disallowed setting"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -3158,7 +3354,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let config = crate::tools::wasm::WasmRuntimeConfig::for_testing();
         let runtime = Arc::new(crate::tools::wasm::WasmToolRuntime::new(config).expect("runtime"));
-        let mgr = make_test_manager(Some(runtime), dir.path().to_path_buf());
+        let mgr = make_test_manager(Some(runtime), dir.path().to_path_buf(), None);
 
         let err = mgr.activate("nonexistent").await.unwrap_err();
         let msg = err.to_string();
@@ -3182,7 +3378,7 @@ mod tests {
         // Write a fake .wasm file so we don't fail on "not found" first.
         std::fs::write(dir.path().join("fake.wasm"), b"not-a-real-wasm").unwrap();
 
-        let mgr = make_test_manager(None, dir.path().to_path_buf());
+        let mgr = make_test_manager(None, dir.path().to_path_buf(), None);
 
         let err = mgr.activate("fake").await.unwrap_err();
         let msg = err.to_string();
