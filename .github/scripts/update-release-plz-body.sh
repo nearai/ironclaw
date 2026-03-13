@@ -17,7 +17,7 @@ jq -r '.body // ""' < "${TMP_DIR}/pr.json" > "${TMP_DIR}/body.md"
 git fetch origin "${MAIN_BRANCH}"
 git fetch origin "+refs/tags/v*:refs/tags/v*"
 
-LAST_TAG="$(git describe --tags --abbrev=0 "origin/${MAIN_BRANCH}" 2>/dev/null || true)"
+LAST_TAG="$(git describe --tags --match 'v*' --abbrev=0 "origin/${MAIN_BRANCH}" 2>/dev/null || true)"
 if [ -n "${LAST_TAG}" ]; then
   RANGE="${LAST_TAG}..origin/${MAIN_BRANCH}"
   HEADER="## Staging promotion batches since ${LAST_TAG}"
