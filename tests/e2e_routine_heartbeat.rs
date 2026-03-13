@@ -17,7 +17,7 @@ mod tests {
     use ironclaw::agent::routine::{
         NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger,
     };
-    use ironclaw::agent::routine_engine::RoutineEngine;
+    use ironclaw::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
     use ironclaw::agent::{HeartbeatConfig, HeartbeatRunner};
     use ironclaw::channels::IncomingMessage;
     use ironclaw::config::{RoutineConfig, SafetyConfig};
@@ -498,6 +498,102 @@ mod tests {
             fired_filter_case, 1,
             "Expected case-insensitive match on filter values"
         );
+    }
+
+    #[tokio::test]
+    async fn out_of_band_event_enable_converges_via_ticker_refresh() {
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        let trace = LlmTrace::single_turn(
+            "test-system-event-out-of-band-enable",
+            "event",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "System event handled".to_string(),
+                    input_tokens: 40,
+                    output_tokens: 8,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let safety_config = SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        };
+        let safety = Arc::new(SafetyLayer::new(&safety_config));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        let routine = make_routine(
+            "out-of-band-system-event",
+            Trigger::SystemEvent {
+                source: "github".to_string(),
+                event_type: "issue.opened".to_string(),
+                filters: std::collections::HashMap::new(),
+            },
+            "Summarize event",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+
+        // Start with routine disabled and refresh cache (so it is absent).
+        let mut disabled = routine.clone();
+        disabled.enabled = false;
+        db.update_routine(&disabled).await.expect("disable routine");
+        engine.refresh_event_cache().await;
+
+        let fired_disabled = engine
+            .emit_system_event(
+                "github",
+                "issue.opened",
+                &serde_json::json!({"repository": "nearai/ironclaw"}),
+                Some("default"),
+            )
+            .await;
+        assert_eq!(fired_disabled, 0, "disabled routine should not fire");
+
+        // Start ticker with short interval and enable routine out-of-band via DB.
+        let ticker = spawn_cron_ticker(Arc::clone(&engine), Duration::from_millis(100));
+        let mut enabled = disabled;
+        enabled.enabled = true;
+        db.update_routine(&enabled).await.expect("enable routine");
+
+        // Wait for periodic refresh to converge cache state.
+        let mut fired_enabled = 0usize;
+        for _ in 0..20 {
+            fired_enabled = engine
+                .emit_system_event(
+                    "github",
+                    "issue.opened",
+                    &serde_json::json!({"repository": "nearai/ironclaw"}),
+                    Some("default"),
+                )
+                .await;
+            if fired_enabled >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            fired_enabled >= 1,
+            "enabled out-of-band routine should fire after periodic refresh"
+        );
+
+        ticker.abort();
     }
 
     #[tokio::test]
