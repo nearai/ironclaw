@@ -99,7 +99,7 @@ impl ConversationStore for PgBackend {
         channel: &str,
         user_id: &str,
         thread_id: Option<&str>,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<bool, DatabaseError> {
         self.store
             .ensure_conversation(id, channel, user_id, thread_id)
             .await
@@ -113,6 +113,36 @@ impl ConversationStore for PgBackend {
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         self.store
             .list_conversations_with_preview(user_id, channel, limit)
+            .await
+    }
+
+    async fn list_conversations_all_channels(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ConversationSummary>, DatabaseError> {
+        self.store
+            .list_conversations_all_channels(user_id, limit)
+            .await
+    }
+
+    async fn get_or_create_routine_conversation(
+        &self,
+        routine_id: Uuid,
+        routine_name: &str,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store
+            .get_or_create_routine_conversation(routine_id, routine_name, user_id)
+            .await
+    }
+
+    async fn get_or_create_heartbeat_conversation(
+        &self,
+        user_id: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store
+            .get_or_create_heartbeat_conversation(user_id)
             .await
     }
 
@@ -221,6 +251,13 @@ impl JobStore for PgBackend {
 
     async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
         self.store.agent_job_summary().await
+    }
+
+    async fn get_agent_job_failure_reason(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        self.store.get_agent_job_failure_reason(id).await
     }
 
     async fn save_action(&self, job_id: Uuid, action: &ActionRecord) -> Result<(), DatabaseError> {

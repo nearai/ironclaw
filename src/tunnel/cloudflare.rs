@@ -49,6 +49,8 @@ impl Tunnel for CloudflareTunnel {
             .kill_on_drop(true)
             .spawn()?;
 
+        let stdout = child.stdout.take();
+
         // cloudflared prints the public URL on stderr
         let stderr = child
             .stderr
@@ -82,8 +84,42 @@ impl Tunnel for CloudflareTunnel {
         }
 
         if public_url.is_empty() {
+            let error_detail = if let Some(stdout) = stdout {
+                let mut out_reader = tokio::io::BufReader::new(stdout).lines();
+                let mut lines = Vec::new();
+                while lines.len() < 10 {
+                    match tokio::time::timeout(
+                        tokio::time::Duration::from_secs(1),
+                        out_reader.next_line(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(line))) => lines.push(line),
+                        _ => break,
+                    }
+                }
+                lines.join("\n")
+            } else {
+                String::new()
+            };
+
             child.kill().await.ok();
-            bail!("cloudflared did not produce a public URL within 30s. Is the token valid?");
+            if error_detail.is_empty() {
+                bail!("cloudflared did not produce a public URL within 30s");
+            } else {
+                bail!("cloudflared failed to start: {error_detail}");
+            }
+        }
+
+        // Drain stderr in the background to prevent SIGPIPE/buffer stalls.
+        tokio::spawn(async move { while let Ok(Some(_)) = reader.next_line().await {} });
+
+        // Drain stdout silently.
+        if let Some(stdout) = stdout {
+            tokio::spawn(async move {
+                let mut out_reader = tokio::io::BufReader::new(stdout).lines();
+                while let Ok(Some(_)) = out_reader.next_line().await {}
+            });
         }
 
         if let Ok(mut guard) = self.url.write() {

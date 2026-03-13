@@ -42,8 +42,12 @@ pub struct Settings {
     #[serde(default)]
     pub secrets_master_key_source: KeySource,
 
+    /// Generated master key hex (env var mode only, written to .env by wizard).
+    #[serde(default, skip_serializing)]
+    pub secrets_master_key_hex: Option<String>,
+
     // === Step 3: Inference Provider ===
-    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible".
+    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible", "tinfoil", "bedrock".
     #[serde(default)]
     pub llm_backend: Option<String>,
 
@@ -54,6 +58,18 @@ pub struct Settings {
     /// OpenAI-compatible endpoint base URL (when llm_backend = "openai_compatible").
     #[serde(default)]
     pub openai_compatible_base_url: Option<String>,
+
+    /// Bedrock region (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_region: Option<String>,
+
+    /// Bedrock cross-region inference prefix (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_cross_region: Option<String>,
+
+    /// AWS profile name for Bedrock (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_profile: Option<String>,
 
     // === Step 4: Model Selection ===
     /// Currently selected model.
@@ -99,6 +115,10 @@ pub struct Settings {
     /// Builder configuration.
     #[serde(default)]
     pub builder: BuilderSettings,
+
+    /// Transcription configuration.
+    #[serde(default)]
+    pub transcription: Option<TranscriptionSettings>,
 }
 
 /// Source for the secrets master key.
@@ -249,10 +269,10 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub signal_group_allow_from: Option<String>,
 
-    /// Telegram owner user ID. When set, the bot only responds to this user.
-    /// Captured during setup by having the user message the bot.
+    /// Per-channel owner user IDs. When set, the channel only responds to this user.
+    /// Key: channel name (e.g., "telegram"), Value: owner user ID.
     #[serde(default)]
-    pub telegram_owner_id: Option<i64>,
+    pub wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 
     /// Enabled WASM channels by name.
     /// Channels not in this list but present in the channels directory will still load.
@@ -287,6 +307,18 @@ pub struct HeartbeatSettings {
     /// User ID to notify on heartbeat findings.
     #[serde(default)]
     pub notify_user: Option<String>,
+
+    /// Hour (0-23) when quiet hours start (heartbeat skipped).
+    #[serde(default)]
+    pub quiet_hours_start: Option<u32>,
+
+    /// Hour (0-23) when quiet hours end (heartbeat resumes).
+    #[serde(default)]
+    pub quiet_hours_end: Option<u32>,
+
+    /// Timezone for quiet hours evaluation (IANA name, e.g. "America/New_York").
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 fn default_heartbeat_interval() -> u64 {
@@ -300,6 +332,9 @@ impl Default for HeartbeatSettings {
             interval_secs: default_heartbeat_interval(),
             notify_channel: None,
             notify_user: None,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            timezone: None,
         }
     }
 }
@@ -347,6 +382,14 @@ pub struct AgentSettings {
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     #[serde(default)]
     pub auto_approve_tools: bool,
+
+    /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
+    #[serde(default = "default_timezone")]
+    pub default_timezone: String,
+
+    /// Maximum tokens per job (0 = unlimited).
+    #[serde(default)]
+    pub max_tokens_per_job: u64,
 }
 
 fn default_agent_name() -> String {
@@ -381,6 +424,10 @@ fn default_max_tool_iterations() -> usize {
     50
 }
 
+fn default_timezone() -> String {
+    "UTC".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -398,6 +445,8 @@ impl Default for AgentSettings {
             session_idle_timeout_secs: default_session_idle_timeout(),
             max_tool_iterations: default_max_tool_iterations(),
             auto_approve_tools: false,
+            default_timezone: default_timezone(),
+            max_tokens_per_job: 0,
         }
     }
 }
@@ -494,6 +543,10 @@ pub struct SandboxSettings {
     /// Additional domains to allow through the network proxy.
     #[serde(default)]
     pub extra_allowed_domains: Vec<String>,
+
+    /// Whether Claude Code sandbox mode is enabled.
+    #[serde(default)]
+    pub claude_code_enabled: bool,
 }
 
 fn default_sandbox_policy() -> String {
@@ -527,6 +580,7 @@ impl Default for SandboxSettings {
             image: default_sandbox_image(),
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
+            claude_code_enabled: false,
         }
     }
 }
@@ -598,6 +652,14 @@ impl Default for BuilderSettings {
             auto_register: true,
         }
     }
+}
+
+/// Transcription pipeline settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionSettings {
+    /// Whether audio transcription is enabled.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 impl Settings {
@@ -1049,28 +1111,37 @@ mod tests {
     }
 
     #[test]
-    fn test_telegram_owner_id_db_round_trip() {
+    fn test_wasm_channel_owner_ids_db_round_trip() {
         let mut settings = Settings::default();
-        settings.channels.telegram_owner_id = Some(123456789);
+        settings
+            .channels
+            .wasm_channel_owner_ids
+            .insert("telegram".to_string(), 123456789);
 
         let map = settings.to_db_map();
         let restored = Settings::from_db_map(&map);
-        assert_eq!(restored.channels.telegram_owner_id, Some(123456789));
+        assert_eq!(
+            restored.channels.wasm_channel_owner_ids.get("telegram"),
+            Some(&123456789)
+        );
     }
 
     #[test]
-    fn test_telegram_owner_id_default_none() {
+    fn test_wasm_channel_owner_ids_default_empty() {
         let settings = Settings::default();
-        assert_eq!(settings.channels.telegram_owner_id, None);
+        assert!(settings.channels.wasm_channel_owner_ids.is_empty());
     }
 
     #[test]
-    fn test_telegram_owner_id_via_set() {
+    fn test_wasm_channel_owner_ids_via_set() {
         let mut settings = Settings::default();
         settings
-            .set("channels.telegram_owner_id", "987654321")
+            .set("channels.wasm_channel_owner_ids.telegram", "987654321")
             .unwrap();
-        assert_eq!(settings.channels.telegram_owner_id, Some(987654321));
+        assert_eq!(
+            settings.channels.wasm_channel_owner_ids.get("telegram"),
+            Some(&987654321)
+        );
     }
 
     #[test]
@@ -1146,6 +1217,31 @@ mod tests {
         assert_eq!(loaded.agent.name, "toml-bot");
         assert!(loaded.heartbeat.enabled);
         assert_eq!(loaded.heartbeat.interval_secs, 900);
+    }
+
+    /// Regression test: /model command must persist selected_model to TOML config.
+    /// Prior to the fix, `set_model()` only changed the in-memory provider and the
+    /// choice was lost on restart.
+    #[test]
+    fn toml_selected_model_update_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Start with a config that has a different model.
+        let settings = Settings {
+            selected_model: Some("old-model".to_string()),
+            ..Default::default()
+        };
+        settings.save_toml(&path).unwrap();
+
+        // Simulate what persist_selected_model does: load, update, save.
+        let mut loaded = Settings::load_toml(&path).unwrap().unwrap();
+        loaded.selected_model = Some("new-model".to_string());
+        loaded.save_toml(&path).unwrap();
+
+        // Verify the change survived a reload.
+        let reloaded = Settings::load_toml(&path).unwrap().unwrap();
+        assert_eq!(reloaded.selected_model, Some("new-model".to_string()));
     }
 
     #[test]
@@ -1406,7 +1502,11 @@ mod tests {
             channels: ChannelSettings {
                 http_enabled: true,
                 http_port: Some(9090),
-                telegram_owner_id: Some(12345),
+                wasm_channel_owner_ids: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("telegram".to_string(), 12345);
+                    m
+                },
                 ..Default::default()
             },
             heartbeat: HeartbeatSettings {
@@ -1473,9 +1573,9 @@ mod tests {
         assert!(restored.channels.http_enabled, "http_enabled lost");
         assert_eq!(restored.channels.http_port, Some(9090), "http_port lost");
         assert_eq!(
-            restored.channels.telegram_owner_id,
-            Some(12345),
-            "telegram_owner_id lost"
+            restored.channels.wasm_channel_owner_ids.get("telegram"),
+            Some(&12345),
+            "wasm_channel_owner_ids lost"
         );
         assert!(restored.heartbeat.enabled, "heartbeat.enabled lost");
         assert_eq!(

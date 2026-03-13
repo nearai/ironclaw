@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 use tokio::sync::Mutex;
 
-use crate::error::LlmError;
+use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
     ToolCompletionResponse,
@@ -243,6 +243,14 @@ impl LlmProvider for CircuitBreakerProvider {
 
     fn cost_per_token(&self) -> (Decimal, Decimal) {
         self.inner.cost_per_token()
+    }
+
+    fn cache_write_multiplier(&self) -> Decimal {
+        self.inner.cache_write_multiplier()
+    }
+
+    fn cache_read_discount(&self) -> Decimal {
+        self.inner.cache_read_discount()
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {

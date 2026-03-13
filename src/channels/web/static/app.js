@@ -5,6 +5,7 @@ let eventSource = null;
 let logEventSource = null;
 let currentTab = 'chat';
 let currentThreadId = null;
+let currentThreadIsReadOnly = false;
 let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
@@ -13,8 +14,11 @@ let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
+let unreadThreads = new Map(); // thread_id -> unread count
+let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
+let stagedImages = [];
 
 // --- Slash Commands ---
 
@@ -51,7 +55,7 @@ let _activityThinking = null;
 function authenticate() {
   token = document.getElementById('token-input').value.trim();
   if (!token) {
-    document.getElementById('auth-error').textContent = 'Token required';
+    document.getElementById('auth-error').textContent = I18n.t('auth.errorRequired');
     return;
   }
 
@@ -85,7 +89,7 @@ function authenticate() {
       sessionStorage.removeItem('ironclaw_token');
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('app').style.display = 'none';
-      document.getElementById('auth-error').textContent = 'Invalid token';
+      document.getElementById('auth-error').textContent = I18n.t('auth.errorInvalid');
     });
 }
 
@@ -133,6 +137,94 @@ function apiFetch(path, options) {
   });
 }
 
+// --- Restart Feature ---
+
+let isRestarting = false; // Track if we're currently restarting
+let restartEnabled = false; // Track if restart is available in this deployment
+
+function triggerRestart() {
+  if (!currentThreadId) {
+    alert(I18n.t('error.startConversation'));
+    return;
+  }
+
+  // Show the confirmation modal
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'flex';
+}
+
+function confirmRestart() {
+  if (!currentThreadId) {
+    alert(I18n.t('error.startConversation'));
+    return;
+  }
+
+  // Hide confirmation modal
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'none';
+
+  const restartBtn = document.getElementById('restart-btn');
+  const restartIcon = document.getElementById('restart-icon');
+
+  // Mark as restarting
+  isRestarting = true;
+  restartBtn.disabled = true;
+  if (restartIcon) restartIcon.classList.add('spinning');
+
+  // Show progress modal
+  const loaderEl = document.getElementById('restart-loader');
+  loaderEl.style.display = 'flex';
+
+  // Send restart command via chat
+  console.log('[confirmRestart] Sending /restart command to server');
+  apiFetch('/api/chat/send', {
+    method: 'POST',
+    body: {
+      content: '/restart',
+      thread_id: currentThreadId,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    },
+  })
+    .then((response) => {
+      console.log('[confirmRestart] API call succeeded, response:', response);
+    })
+    .catch((err) => {
+      console.error('[confirmRestart] Restart request failed:', err);
+      addMessage('system', I18n.t('error.restartFailed', { message: err.message }));
+      isRestarting = false;
+      restartBtn.disabled = false;
+      if (restartIcon) restartIcon.classList.remove('spinning');
+      loaderEl.style.display = 'none';
+    });
+}
+
+function cancelRestart() {
+  const confirmModal = document.getElementById('restart-confirm-modal');
+  confirmModal.style.display = 'none';
+}
+
+function tryShowRestartModal() {
+  // Defensive callback for when restart is detected in messages.
+  if (!isRestarting) {
+    isRestarting = true;
+    const restartBtn = document.getElementById('restart-btn');
+    const restartIcon = document.getElementById('restart-icon');
+    restartBtn.disabled = true;
+    if (restartIcon) restartIcon.classList.add('spinning');
+
+    // Show progress modal
+    const loaderEl = document.getElementById('restart-loader');
+    loaderEl.style.display = 'flex';
+  }
+}
+
+function updateRestartButtonVisibility() {
+  const restartBtn = document.getElementById('restart-btn');
+  if (restartBtn) {
+    restartBtn.style.display = restartEnabled ? 'block' : 'none';
+  }
+}
+
 // --- SSE ---
 
 function connectSSE() {
@@ -142,7 +234,19 @@ function connectSSE() {
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
-    document.getElementById('sse-status').textContent = 'Connected';
+    document.getElementById('sse-status').textContent = I18n.t('status.connected');
+
+    // If we were restarting, close the modal and reset button now that server is back
+    if (isRestarting) {
+      const loaderEl = document.getElementById('restart-loader');
+      if (loaderEl) loaderEl.style.display = 'none';
+      const restartBtn = document.getElementById('restart-btn');
+      const restartIcon = document.getElementById('restart-icon');
+      if (restartBtn) restartBtn.disabled = false;
+      if (restartIcon) restartIcon.classList.remove('spinning');
+      isRestarting = false;
+    }
+
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
       loadHistory();
@@ -152,22 +256,36 @@ function connectSSE() {
 
   eventSource.onerror = () => {
     document.getElementById('sse-dot').classList.add('disconnected');
-    document.getElementById('sse-status').textContent = 'Reconnecting...';
+    document.getElementById('sse-status').textContent = I18n.t('status.reconnecting');
   };
 
   eventSource.addEventListener('response', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+        debouncedLoadThreads();
+      }
+      return;
+    }
     finalizeActivityGroup();
     addMessage('assistant', data.content);
     enableChatInput();
     // Refresh thread list so new titles appear after first message
     loadThreads();
+
+    // Show restart modal if the response indicates restart was initiated
+    if (data.content && data.content.toLowerCase().includes('restart initiated')) {
+      setTimeout(() => tryShowRestartModal(), 500);
+    }
   });
 
   eventSource.addEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) debouncedLoadThreads();
+      return;
+    }
     showActivityThinking(data.message);
   });
 
@@ -180,7 +298,12 @@ function connectSSE() {
   eventSource.addEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    completeToolCard(data.name, data.success);
+    completeToolCard(data.name, data.success, data.error, data.parameters);
+
+    // Show restart modal only when the restart tool succeeds
+    if (data.name.toLowerCase() === 'restart' && data.success) {
+      setTimeout(() => tryShowRestartModal(), 500);
+    }
   });
 
   eventSource.addEventListener('tool_result', (e) => {
@@ -198,7 +321,10 @@ function connectSSE() {
 
   eventSource.addEventListener('status', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) debouncedLoadThreads();
+      return;
+    }
     // "Done" and "Awaiting approval" are terminal signals from the agent:
     // the agentic loop finished, so re-enable input as a safety net in case
     // the response SSE event is empty or lost.
@@ -216,24 +342,37 @@ function connectSSE() {
 
   eventSource.addEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
-    showApproval(data);
+    const hasThread = !!data.thread_id;
+    const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
+
+    if (forCurrentThread) {
+      showApproval(data);
+    } else {
+      // Keep thread list fresh when approval is requested in a background thread.
+      unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+      debouncedLoadThreads();
+    }
+
+    // Extension setup flows can surface approvals while user is on Extensions tab.
+    if (currentTab === 'extensions') loadExtensions();
   });
 
   eventSource.addEventListener('auth_required', (e) => {
-    const data = JSON.parse(e.data);
-    showAuthCard(data);
+    handleAuthRequired(JSON.parse(e.data));
   });
 
   eventSource.addEventListener('auth_completed', (e) => {
-    const data = JSON.parse(e.data);
-    removeAuthCard(data.extension_name);
-    showToast(data.message, 'success');
-    enableChatInput();
+    handleAuthCompleted(JSON.parse(e.data));
   });
 
   eventSource.addEventListener('extension_status', (e) => {
     if (currentTab === 'extensions') loadExtensions();
+  });
+
+  eventSource.addEventListener('image_generated', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    addGeneratedImage(data.data_url, data.path);
   });
 
   eventSource.addEventListener('error', (e) => {
@@ -277,9 +416,9 @@ function connectSSE() {
 }
 
 // Check if an SSE event belongs to the currently viewed thread.
-// Events without a thread_id (legacy) are always shown.
+// Events without a thread_id are dropped (prevents notification leaking).
 function isCurrentThread(threadId) {
-  if (!threadId) return true;
+  if (!threadId) return false;
   if (!currentThreadId) return true;
   return threadId === currentThreadId;
 }
@@ -293,23 +432,135 @@ function sendMessage() {
     return;
   }
   const content = input.value.trim();
-  if (!content) return;
+  if (!content && stagedImages.length === 0) return;
 
-  addMessage('user', content);
+  addMessage('user', content || '(images attached)');
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
 
+  const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+  if (stagedImages.length > 0) {
+    body.images = stagedImages.map(img => ({ media_type: img.media_type, data: img.data }));
+    stagedImages = [];
+    renderImagePreviews();
+  }
+
   apiFetch('/api/chat/send', {
     method: 'POST',
-    body: { content, thread_id: currentThreadId || undefined },
+    body: body,
   }).catch((err) => {
     addMessage('system', 'Failed to send: ' + err.message);
   });
 }
 
 function enableChatInput() {
-  // no-op: input and send button are always enabled
+  if (currentThreadIsReadOnly) return;
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('send-btn');
+  if (input) {
+    input.disabled = false;
+    input.placeholder = I18n.t('chat.inputPlaceholder');
+  }
+  if (btn) btn.disabled = false;
+}
+
+// --- Image Upload ---
+
+function renderImagePreviews() {
+  const strip = document.getElementById('image-preview-strip');
+  strip.innerHTML = '';
+  stagedImages.forEach((img, idx) => {
+    const container = document.createElement('div');
+    container.className = 'image-preview-container';
+
+    const preview = document.createElement('img');
+    preview.className = 'image-preview';
+    preview.src = img.dataUrl;
+    preview.alt = 'Attached image';
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'image-preview-remove';
+    removeBtn.textContent = '\u00d7';
+    removeBtn.addEventListener('click', () => {
+      stagedImages.splice(idx, 1);
+      renderImagePreviews();
+    });
+
+    container.appendChild(preview);
+    container.appendChild(removeBtn);
+    strip.appendChild(container);
+  });
+}
+
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per image
+const MAX_STAGED_IMAGES = 5;
+
+function handleImageFiles(files) {
+  Array.from(files).forEach(file => {
+    if (!file.type.startsWith('image/')) return;
+    if (file.size > MAX_IMAGE_SIZE_BYTES) {
+      alert(`Image "${file.name}" exceeds 5 MB limit (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+      return;
+    }
+    if (stagedImages.length >= MAX_STAGED_IMAGES) {
+      alert(`Maximum ${MAX_STAGED_IMAGES} images allowed per message`);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const dataUrl = e.target.result;
+      const commaIdx = dataUrl.indexOf(',');
+      const meta = dataUrl.substring(0, commaIdx); // e.g. "data:image/png;base64"
+      const base64 = dataUrl.substring(commaIdx + 1);
+      const mediaType = meta.replace('data:', '').replace(';base64', '');
+      stagedImages.push({ media_type: mediaType, data: base64, dataUrl: dataUrl });
+      renderImagePreviews();
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+document.getElementById('attach-btn').addEventListener('click', () => {
+  document.getElementById('image-file-input').click();
+});
+
+document.getElementById('image-file-input').addEventListener('change', (e) => {
+  handleImageFiles(e.target.files);
+  e.target.value = '';
+});
+
+document.getElementById('chat-input').addEventListener('paste', (e) => {
+  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
+      const file = items[i].getAsFile();
+      if (file) handleImageFiles([file]);
+    }
+  }
+});
+
+function addGeneratedImage(dataUrl, path) {
+  const container = document.getElementById('chat-messages');
+  const card = document.createElement('div');
+  card.className = 'generated-image-card';
+
+  const img = document.createElement('img');
+  img.className = 'generated-image';
+  img.src = dataUrl;
+  img.alt = 'Generated image';
+
+  card.appendChild(img);
+
+  if (path) {
+    const pathLabel = document.createElement('div');
+    pathLabel.className = 'generated-image-path';
+    pathLabel.textContent = path;
+    card.appendChild(pathLabel);
+  }
+
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
 }
 
 // --- Slash Autocomplete ---
@@ -404,36 +655,37 @@ function sendApprovalAction(requestId, action) {
 
 function renderMarkdown(text) {
   if (typeof marked !== 'undefined') {
+    // Escape raw HTML error pages instead of rendering them as markup.
+    // Only triggers when the text *starts with* a doctype or <html> tag
+    // (after optional whitespace), so normal messages that mention HTML
+    // tags in prose or code fences are not affected.  See #263.
+    if (/^\s*<!doctype\s/i.test(text) || /^\s*<html[\s>]/i.test(text)) {
+      return escapeHtml(text);
+    }
     let html = marked.parse(text);
     // Sanitize HTML output to prevent XSS from tool output or LLM responses.
     html = sanitizeRenderedHtml(html);
     // Inject copy buttons into <pre> blocks
-    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" onclick="copyCodeBlock(this)">Copy</button>');
+    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" data-action="copy-code">Copy</button>');
     return html;
   }
   return escapeHtml(text);
 }
 
-// Strip dangerous HTML elements and attributes from rendered markdown.
-// This prevents XSS from tool output or prompt injection in LLM responses.
+// Sanitize rendered HTML using DOMPurify to prevent XSS from tool output
+// or prompt injection in LLM responses. DOMPurify is a DOM-based sanitizer
+// that handles all known bypass vectors (SVG onload, newline-split event
+// handlers, mutation XSS, etc.) unlike the regex approach it replaces.
 function sanitizeRenderedHtml(html) {
-  html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-  html = html.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '');
-  html = html.replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '');
-  html = html.replace(/<embed\b[^>]*\/?>/gi, '');
-  html = html.replace(/<form\b[^>]*>[\s\S]*?<\/form>/gi, '');
-  html = html.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
-  html = html.replace(/<link\b[^>]*\/?>/gi, '');
-  html = html.replace(/<base\b[^>]*\/?>/gi, '');
-  html = html.replace(/<meta\b[^>]*\/?>/gi, '');
-  // Remove event handler attributes (onclick, onerror, onload, etc.)
-  html = html.replace(/\s+on\w+\s*=\s*"[^"]*"/gi, '');
-  html = html.replace(/\s+on\w+\s*=\s*'[^']*'/gi, '');
-  html = html.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
-  // Remove javascript: and data: URLs in href/src attributes
-  html = html.replace(/(href|src|action)\s*=\s*["']?\s*javascript\s*:/gi, '$1="');
-  html = html.replace(/(href|src|action)\s*=\s*["']?\s*data\s*:/gi, '$1="');
-  return html;
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(html, {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ['style', 'script'],
+      FORBID_ATTR: ['style', 'onerror', 'onload']
+    });
+  }
+  // DOMPurify not available (CDN unreachable) — return empty string rather than unsanitized HTML
+  return '';
 }
 
 function copyCodeBlock(btn) {
@@ -441,21 +693,30 @@ function copyCodeBlock(btn) {
   const code = pre.querySelector('code');
   const text = code ? code.textContent : pre.textContent;
   navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = 'Copied!';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    btn.textContent = I18n.t('btn.copied');
+    setTimeout(() => { btn.textContent = I18n.t('btn.copy'); }, 1500);
+  });
+}
+
+function copyMessage(btn) {
+  const message = btn.closest('.message');
+  if (!message) return;
+  const text = message.getAttribute('data-copy-text')
+    || message.getAttribute('data-raw')
+    || message.textContent
+    || '';
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+  }).catch(() => {
+    btn.textContent = 'Failed';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
   });
 }
 
 function addMessage(role, content) {
   const container = document.getElementById('chat-messages');
-  const div = document.createElement('div');
-  div.className = 'message ' + role;
-  if (role === 'user') {
-    div.textContent = content;
-  } else {
-    div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
-  }
+  const div = createMessageElement(role, content);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
@@ -467,7 +728,11 @@ function appendToLastAssistant(chunk) {
     const last = messages[messages.length - 1];
     const raw = (last.getAttribute('data-raw') || '') + chunk;
     last.setAttribute('data-raw', raw);
-    last.innerHTML = renderMarkdown(raw);
+    last.setAttribute('data-copy-text', raw);
+    const content = last.querySelector('.message-content');
+    if (content) {
+      content.innerHTML = renderMarkdown(raw);
+    }
     container.scrollTop = container.scrollHeight;
   } else {
     addMessage('assistant', chunk);
@@ -584,7 +849,7 @@ function addToolCard(name) {
   container.scrollTop = container.scrollHeight;
 }
 
-function completeToolCard(name, success) {
+function completeToolCard(name, success, error, parameters) {
   const entries = _activeToolCards[name];
   if (!entries || entries.length === 0) return;
   // Find first running card
@@ -605,6 +870,27 @@ function completeToolCard(name, success) {
     ? '<span class="activity-icon-success">&#10003;</span>'
     : '<span class="activity-icon-fail">&#10007;</span>';
   entry.card.setAttribute('data-status', success ? 'success' : 'fail');
+
+  // For failed tools, populate the body with error details and auto-expand
+  if (!success && (error || parameters)) {
+    const output = entry.card.querySelector('.activity-tool-output');
+    if (output) {
+      let detail = '';
+      if (parameters) {
+        detail += 'Input:\n' + parameters + '\n\n';
+      }
+      if (error) {
+        detail += 'Error:\n' + error;
+      }
+      output.textContent = detail;
+
+      // Auto-expand so the error is immediately visible
+      const body = entry.card.querySelector('.activity-tool-body');
+      const chevron = entry.card.querySelector('.activity-tool-chevron');
+      if (body) body.style.display = 'block';
+      if (chevron) chevron.classList.add('expanded');
+    }
+  }
 }
 
 function setToolCardOutput(name, preview) {
@@ -700,7 +986,26 @@ function finalizeActivityGroup() {
   _activeToolCards = {};
 }
 
+function humanizeToolName(rawName) {
+  if (!rawName) return '';
+  return String(rawName)
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/^tool([a-zA-Z])/, 'tool $1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shouldShowChannelConnectedMessage(extensionName, success) {
+  if (!success || !extensionName) return false;
+  return String(extensionName).toLowerCase().includes('telegram');
+}
+
 function showApproval(data) {
+  // Avoid duplicate cards on reconnect/history refresh.
+  const existing = document.querySelector('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
+  if (existing) return;
+
   const container = document.getElementById('chat-messages');
   const card = document.createElement('div');
   card.className = 'approval-card';
@@ -708,12 +1013,12 @@ function showApproval(data) {
 
   const header = document.createElement('div');
   header.className = 'approval-header';
-  header.textContent = 'Tool requires approval';
+  header.textContent = I18n.t('approval.title');
   card.appendChild(header);
 
   const toolName = document.createElement('div');
   toolName.className = 'approval-tool-name';
-  toolName.textContent = data.tool_name;
+  toolName.textContent = humanizeToolName(data.tool_name);
   card.appendChild(toolName);
 
   if (data.description) {
@@ -726,7 +1031,7 @@ function showApproval(data) {
   if (data.parameters) {
     const paramsToggle = document.createElement('button');
     paramsToggle.className = 'approval-params-toggle';
-    paramsToggle.textContent = 'Show parameters';
+    paramsToggle.textContent = I18n.t('approval.showParams');
     const paramsBlock = document.createElement('pre');
     paramsBlock.className = 'approval-params';
     paramsBlock.textContent = data.parameters;
@@ -734,7 +1039,7 @@ function showApproval(data) {
     paramsToggle.addEventListener('click', () => {
       const visible = paramsBlock.style.display !== 'none';
       paramsBlock.style.display = visible ? 'none' : 'block';
-      paramsToggle.textContent = visible ? 'Show parameters' : 'Hide parameters';
+      paramsToggle.textContent = visible ? I18n.t('approval.showParams') : I18n.t('approval.hideParams');
     });
     card.appendChild(paramsToggle);
     card.appendChild(paramsBlock);
@@ -745,17 +1050,17 @@ function showApproval(data) {
 
   const approveBtn = document.createElement('button');
   approveBtn.className = 'approve';
-  approveBtn.textContent = 'Approve';
+  approveBtn.textContent = I18n.t('approval.approve');
   approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
 
   const alwaysBtn = document.createElement('button');
   alwaysBtn.className = 'always';
-  alwaysBtn.textContent = 'Always';
+  alwaysBtn.textContent = I18n.t('approval.always');
   alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
 
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
-  denyBtn.textContent = 'Deny';
+  denyBtn.textContent = I18n.t('approval.deny');
   denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
 
   actions.appendChild(approveBtn);
@@ -782,7 +1087,7 @@ function showJobCard(data) {
 
   const title = document.createElement('div');
   title.className = 'job-card-title';
-  title.textContent = data.title || 'Sandbox Job';
+  title.textContent = data.title || I18n.t('sandbox.job');
   info.appendChild(title);
 
   const id = document.createElement('div');
@@ -794,7 +1099,7 @@ function showJobCard(data) {
 
   const viewBtn = document.createElement('button');
   viewBtn.className = 'job-card-view';
-  viewBtn.textContent = 'View Job';
+  viewBtn.textContent = I18n.t('jobs.viewJob');
   viewBtn.addEventListener('click', () => {
     switchTab('jobs');
     openJobDetail(data.job_id);
@@ -806,7 +1111,7 @@ function showJobCard(data) {
     browseBtn.className = 'job-card-browse';
     browseBtn.href = data.browse_url;
     browseBtn.target = '_blank';
-    browseBtn.textContent = 'Browse';
+    browseBtn.textContent = I18n.t('jobs.browse');
     card.appendChild(browseBtn);
   }
 
@@ -816,18 +1121,76 @@ function showJobCard(data) {
 
 // --- Auth card ---
 
-function showAuthCard(data) {
-  // Remove any existing card for this extension first
-  removeAuthCard(data.extension_name);
+function handleAuthRequired(data) {
+  if (data.auth_url) {
+    // OAuth flow: show the global auth prompt with an OAuth button + optional token paste field.
+    showAuthCard(data);
+  } else {
+    // Setup flow: fetch the extension's credential schema and show the multi-field
+    // configure modal (the same UI used by the Extensions tab "Setup" button).
+    showConfigureModal(data.extension_name);
+  }
+}
 
-  const container = document.getElementById('chat-messages');
+function handleAuthCompleted(data) {
+  // Dismiss only the matching extension's UI so unrelated setup work is not interrupted.
+  removeAuthCard(data.extension_name);
+  closeConfigureModal(data.extension_name);
+  showToast(data.message, data.success ? 'success' : 'error');
+  if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
+    addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
+  }
+  if (currentTab === 'extensions') loadExtensions();
+  enableChatInput();
+}
+
+function queryByDataAttribute(selector, attributeName, attributeValue) {
+  if (typeof attributeValue !== 'string') return document.querySelector(selector);
+
+  if (window.CSS && typeof window.CSS.escape === 'function') {
+    return document.querySelector(
+      selector + '[' + attributeName + '="' + window.CSS.escape(attributeValue) + '"]'
+    );
+  }
+
+  const candidates = document.querySelectorAll(selector);
+  for (const candidate of candidates) {
+    if (candidate.getAttribute(attributeName) === attributeValue) return candidate;
+  }
+  return null;
+}
+
+function getAuthOverlay(extensionName) {
+  return queryByDataAttribute('.auth-overlay', 'data-extension-name', extensionName);
+}
+
+function getAuthCard(extensionName) {
+  return queryByDataAttribute('.auth-card', 'data-extension-name', extensionName);
+}
+
+function getConfigureOverlay(extensionName) {
+  return queryByDataAttribute('.configure-overlay', 'data-extension-name', extensionName);
+}
+
+function showAuthCard(data) {
+  // Keep a single global auth prompt so the experience is consistent across tabs.
+  const existing = getAuthOverlay();
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'auth-overlay';
+  overlay.setAttribute('data-extension-name', data.extension_name);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) cancelAuth(data.extension_name);
+  });
+
   const card = document.createElement('div');
-  card.className = 'auth-card';
+  card.className = 'auth-card auth-modal';
   card.setAttribute('data-extension-name', data.extension_name);
 
   const header = document.createElement('div');
   header.className = 'auth-header';
-  header.textContent = 'Authentication required for ' + data.extension_name;
+  header.textContent = I18n.t('authRequired.title', {name: data.extension_name});
   card.appendChild(header);
 
   if (data.instructions) {
@@ -843,9 +1206,9 @@ function showAuthCard(data) {
   if (data.auth_url) {
     const oauthBtn = document.createElement('button');
     oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = 'Authenticate with ' + data.extension_name;
+    oauthBtn.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
     oauthBtn.addEventListener('click', () => {
-      window.open(data.auth_url, '_blank', 'width=600,height=700');
+      openOAuthUrl(data.auth_url);
     });
     links.appendChild(oauthBtn);
   }
@@ -854,7 +1217,7 @@ function showAuthCard(data) {
     const setupLink = document.createElement('a');
     setupLink.href = data.setup_url;
     setupLink.target = '_blank';
-    setupLink.textContent = 'Get your token';
+    setupLink.textContent = I18n.t('authRequired.getToken');
     links.appendChild(setupLink);
   }
 
@@ -868,7 +1231,9 @@ function showAuthCard(data) {
 
   const tokenInput = document.createElement('input');
   tokenInput.type = 'password';
-  tokenInput.placeholder = 'Paste your API key or token';
+  tokenInput.placeholder = data.instructions
+    || I18n.t('auth.extensionTokenPlaceholder')
+    || I18n.t('auth.tokenPlaceholder');
   tokenInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
   });
@@ -887,33 +1252,42 @@ function showAuthCard(data) {
 
   const submitBtn = document.createElement('button');
   submitBtn.className = 'auth-submit';
-  submitBtn.textContent = 'Submit';
+  submitBtn.textContent = I18n.t('btn.submit');
   submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = I18n.t('btn.cancel');
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
 
   actions.appendChild(submitBtn);
   actions.appendChild(cancelBtn);
   card.appendChild(actions);
 
-  container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
   tokenInput.focus();
 }
 
 function removeAuthCard(extensionName) {
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
-  if (card) card.remove();
+  const overlay = getAuthOverlay(extensionName);
+  if (overlay) {
+    overlay.remove();
+    return;
+  }
+  const card = getAuthCard(extensionName);
+  if (card) {
+    const parentOverlay = card.closest('.auth-overlay');
+    if (parentOverlay) parentOverlay.remove();
+    else card.remove();
+  }
 }
 
 function submitAuthToken(extensionName, tokenValue) {
   if (!tokenValue || !tokenValue.trim()) return;
 
   // Disable submit button while in flight
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
+  const card = getAuthCard(extensionName);
   if (card) {
     const btns = card.querySelectorAll('button');
     btns.forEach((b) => { b.disabled = true; });
@@ -924,8 +1298,10 @@ function submitAuthToken(extensionName, tokenValue) {
     body: { extension_name: extensionName, token: tokenValue.trim() },
   }).then((result) => {
     if (result.success) {
+      // Close immediately for responsiveness; the authoritative success UX
+      // (toast + extensions refresh) still comes from auth_completed SSE.
       removeAuthCard(extensionName);
-      addMessage('system', result.message);
+      enableChatInput();
     } else {
       showAuthCardError(extensionName, result.message);
     }
@@ -944,7 +1320,7 @@ function cancelAuth(extensionName) {
 }
 
 function showAuthCardError(extensionName, message) {
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
+  const card = getAuthCard(extensionName);
   if (!card) return;
   // Re-enable buttons
   const btns = card.querySelectorAll('button');
@@ -976,7 +1352,9 @@ function loadHistory(before) {
       // Fresh load: clear and render
       container.innerHTML = '';
       for (const turn of data.turns) {
-        addMessage('user', turn.user_input);
+        if (turn.user_input) {
+          addMessage('user', turn.user_input);
+        }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
         }
@@ -998,8 +1376,10 @@ function loadHistory(before) {
       const savedHeight = container.scrollHeight;
       const fragment = document.createDocumentFragment();
       for (const turn of data.turns) {
-        const userDiv = createMessageElement('user', turn.user_input);
-        fragment.appendChild(userDiv);
+        if (turn.user_input) {
+          const userDiv = createMessageElement('user', turn.user_input);
+          fragment.appendChild(userDiv);
+        }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           fragment.appendChild(createToolCallsSummaryElement(turn.tool_calls));
         }
@@ -1027,12 +1407,31 @@ function loadHistory(before) {
 function createMessageElement(role, content) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
-  if (role === 'user') {
-    div.textContent = content;
+
+  if (role === 'assistant' || role === 'user') {
+    div.classList.add('has-copy');
+    div.setAttribute('data-copy-text', content);
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'message-copy-btn';
+    copyBtn.type = 'button';
+    copyBtn.setAttribute('aria-label', 'Copy message');
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      copyMessage(copyBtn);
+    });
+    div.appendChild(copyBtn);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'message-content';
+  if (role === 'user' || role === 'system') {
+    body.textContent = content;
   } else {
     div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
+    body.innerHTML = renderMarkdown(content);
   }
+  div.appendChild(body);
   return div;
 }
 
@@ -1098,6 +1497,37 @@ function removeScrollSpinner() {
 
 // --- Threads ---
 
+function threadTitle(thread) {
+  if (thread.title) return thread.title;
+  const ch = thread.channel || 'gateway';
+  if (thread.thread_type === 'heartbeat') return 'Heartbeat Alerts';
+  if (thread.thread_type === 'routine') return 'Routine';
+  if (ch !== 'gateway') return ch.charAt(0).toUpperCase() + ch.slice(1);
+  if (thread.turn_count === 0) return 'New chat';
+  return thread.id.substring(0, 8);
+}
+
+function relativeTime(isoStr) {
+  if (!isoStr) return '';
+  const diff = Date.now() - new Date(isoStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  const days = Math.floor(hrs / 24);
+  return days + 'd ago';
+}
+
+function isReadOnlyChannel(channel) {
+  return channel && channel !== 'gateway' && channel !== 'routine' && channel !== 'heartbeat';
+}
+
+function debouncedLoadThreads() {
+  if (_loadThreadsTimer) clearTimeout(_loadThreadsTimer);
+  _loadThreadsTimer = setTimeout(() => { _loadThreadsTimer = null; loadThreads(); }, 500);
+}
+
 function loadThreads() {
   apiFetch('/api/chat/threads').then((data) => {
     // Pinned assistant thread
@@ -1106,9 +1536,13 @@ function loadThreads() {
       const el = document.getElementById('assistant-thread');
       const isActive = currentThreadId === assistantThreadId;
       el.className = 'assistant-item' + (isActive ? ' active' : '');
+      const labelEl = document.getElementById('assistant-label');
+      if (labelEl) {
+        const at = data.assistant_thread;
+        labelEl.textContent = 'Assistant';
+      }
       const meta = document.getElementById('assistant-meta');
-      const count = data.assistant_thread.turn_count || 0;
-      meta.textContent = count > 0 ? count + ' turns' : '';
+      meta.textContent = relativeTime(data.assistant_thread.updated_at);
     }
 
     // Regular threads
@@ -1117,16 +1551,38 @@ function loadThreads() {
     const threads = data.threads || [];
     for (const thread of threads) {
       const item = document.createElement('div');
-      item.className = 'thread-item' + (thread.id === currentThreadId ? ' active' : '');
+      const isActive = thread.id === currentThreadId;
+      item.className = 'thread-item' + (isActive ? ' active' : '');
+
+      // Channel badge for non-gateway threads
+      const ch = thread.channel || 'gateway';
+      if (ch !== 'gateway') {
+        const badge = document.createElement('span');
+        badge.className = 'thread-badge thread-badge-' + ch;
+        badge.textContent = ch;
+        item.appendChild(badge);
+      }
+
       const label = document.createElement('span');
       label.className = 'thread-label';
-      label.textContent = thread.title || thread.id.substring(0, 8);
-      label.title = thread.title ? thread.title + ' (' + thread.id + ')' : thread.id;
+      label.textContent = threadTitle(thread);
+      label.title = (thread.title || '') + ' (' + thread.id + ')';
       item.appendChild(label);
+
       const meta = document.createElement('span');
       meta.className = 'thread-meta';
-      meta.textContent = (thread.turn_count || 0) + ' turns';
+      meta.textContent = relativeTime(thread.updated_at);
       item.appendChild(meta);
+
+      // Unread dot
+      const unread = unreadThreads.get(thread.id) || 0;
+      if (unread > 0 && !isActive) {
+        const dot = document.createElement('span');
+        dot.className = 'thread-unread';
+        dot.textContent = unread > 9 ? '9+' : String(unread);
+        item.appendChild(dot);
+      }
+
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
     }
@@ -1136,17 +1592,36 @@ function loadThreads() {
       switchToAssistant();
     }
 
-    // Enable chat input once a thread is available
+    // Enable/disable chat input based on channel type
     if (currentThreadId) {
-      enableChatInput();
+      const currentThread = threads.find(t => t.id === currentThreadId);
+      const ch = currentThread ? currentThread.channel : 'gateway';
+      currentThreadIsReadOnly = isReadOnlyChannel(ch);
+      if (currentThreadIsReadOnly) {
+        disableChatInputReadOnly();
+      } else {
+        enableChatInput();
+      }
     }
   }).catch(() => {});
+}
+
+function disableChatInputReadOnly() {
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('send-btn');
+  if (input) {
+    input.disabled = true;
+    input.placeholder = 'Read-only thread (external channel)';
+  }
+  if (btn) btn.disabled = true;
 }
 
 function switchToAssistant() {
   if (!assistantThreadId) return;
   finalizeActivityGroup();
   currentThreadId = assistantThreadId;
+  currentThreadIsReadOnly = false;
+  unreadThreads.delete(assistantThreadId);
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
@@ -1156,6 +1631,7 @@ function switchToAssistant() {
 function switchThread(threadId) {
   finalizeActivityGroup();
   currentThreadId = threadId;
+  unreadThreads.delete(threadId);
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
@@ -1212,7 +1688,7 @@ chatInput.addEventListener('keydown', (e) => {
     }
   }
 
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     hideSlashAutocomplete();
     sendMessage();
@@ -1326,22 +1802,25 @@ function renderNodes(nodes, container, depth) {
     const row = document.createElement('div');
     row.className = 'tree-row';
     row.style.paddingLeft = (depth * 16 + 8) + 'px';
+    row.tabIndex = 0;
+    row.setAttribute('role', 'treeitem');
 
     if (node.is_dir) {
+      row.setAttribute('aria-expanded', node.expanded ? 'true' : 'false');
       const arrow = document.createElement('span');
       arrow.className = 'expand-arrow' + (node.expanded ? ' expanded' : '');
       arrow.textContent = '\u25B6';
-      arrow.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleExpand(node);
-      });
       row.appendChild(arrow);
 
       const label = document.createElement('span');
       label.className = 'tree-label dir';
       label.textContent = node.name;
-      label.addEventListener('click', () => toggleExpand(node));
       row.appendChild(label);
+
+      row.addEventListener('click', () => toggleExpand(node));
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(node); }
+      });
     } else {
       const spacer = document.createElement('span');
       spacer.className = 'expand-arrow-spacer';
@@ -1350,8 +1829,12 @@ function renderNodes(nodes, container, depth) {
       const label = document.createElement('span');
       label.className = 'tree-label file';
       label.textContent = node.name;
-      label.addEventListener('click', () => readMemoryFile(node.path));
       row.appendChild(label);
+
+      row.addEventListener('click', () => readMemoryFile(node.path));
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); readMemoryFile(node.path); }
+      });
     }
 
     container.appendChild(row);
@@ -1452,13 +1935,11 @@ function saveMemoryEdit() {
 
 function buildBreadcrumb(path) {
   const parts = path.split('/');
-  let html = '<a onclick="loadMemoryTree()">workspace</a>';
+  let html = '<a data-action="breadcrumb-root" href="#">workspace</a>';
   let current = '';
   for (const part of parts) {
     current += (current ? '/' : '') + part;
-    // Store the path in data-path (HTML-escaped) and read it back via this.dataset.path
-    // to avoid single-quote injection in inline JS string literals.
-    html += ' / <a onclick="readMemoryFile(this.dataset.path)" data-path="' + escapeHtml(current) + '">' + escapeHtml(part) + '</a>';
+    html += ' / <a data-action="breadcrumb-file" data-path="' + escapeHtml(current) + '" href="#">' + escapeHtml(part) + '</a>';
   }
   return html;
 }
@@ -1596,7 +2077,7 @@ function prependLogEntry(entry) {
 function toggleLogsPause() {
   logsPaused = !logsPaused;
   const btn = document.getElementById('logs-pause-btn');
-  btn.textContent = logsPaused ? 'Resume' : 'Pause';
+  btn.textContent = logsPaused ? I18n.t('logs.resume') : I18n.t('logs.pause');
 
   if (!logsPaused) {
     // Flush buffer: oldest-first + prepend naturally puts newest at top
@@ -1668,7 +2149,7 @@ function loadExtensions() {
   ]).then(([extData, toolData, registryData]) => {
     // Render installed extensions
     if (extData.extensions.length === 0) {
-      extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
+      extList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noInstalled') + '</div>';
     } else {
       extList.innerHTML = '';
       for (const ext of extData.extensions) {
@@ -1682,7 +2163,7 @@ function loadExtensions() {
 
     // Available WASM extensions
     if (wasmEntries.length === 0) {
-      wasmList.innerHTML = '<div class="empty-state">No additional WASM extensions available</div>';
+      wasmList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noAvailable') + '</div>';
     } else {
       wasmList.innerHTML = '';
       for (const entry of wasmEntries) {
@@ -1692,7 +2173,7 @@ function loadExtensions() {
 
     // MCP servers (show both installed and uninstalled)
     if (mcpEntries.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+      mcpList.innerHTML = '<div class="empty-state">' + I18n.t('mcp.noServers') + '</div>';
     } else {
       mcpList.innerHTML = '';
       for (const entry of mcpEntries) {
@@ -1731,6 +2212,13 @@ function renderAvailableExtensionCard(entry) {
   kind.textContent = kindLabels[entry.kind] || entry.kind;
   header.appendChild(kind);
 
+  if (entry.version) {
+    const ver = document.createElement('span');
+    ver.className = 'ext-version';
+    ver.textContent = 'v' + entry.version;
+    header.appendChild(ver);
+  }
+
   card.appendChild(header);
 
   const desc = document.createElement('div');
@@ -1750,16 +2238,25 @@ function renderAvailableExtensionCard(entry) {
 
   const installBtn = document.createElement('button');
   installBtn.className = 'btn-ext install';
-  installBtn.textContent = 'Install';
+  installBtn.textContent = I18n.t('extensions.install');
   installBtn.addEventListener('click', function() {
     installBtn.disabled = true;
-    installBtn.textContent = 'Installing...';
+    installBtn.textContent = I18n.t('extensions.installing');
     apiFetch('/api/extensions/install', {
       method: 'POST',
       body: { name: entry.name, kind: entry.kind },
     }).then(function(res) {
       if (res.success) {
-        showToast('Installed ' + entry.display_name, 'success');
+        showToast(I18n.t('extensions.installedSuccess', {name: entry.display_name}), 'success');
+        // OAuth popup if auth started during install (builtin creds)
+        if (res.auth_url) {
+          showAuthCard({
+            extension_name: entry.name,
+            auth_url: res.auth_url,
+          });
+          showToast('Opening authentication for ' + entry.display_name, 'info');
+          openOAuthUrl(res.auth_url);
+        }
         loadExtensions();
         // Auto-open configure for WASM channels
         if (entry.kind === 'wasm_channel') {
@@ -1818,39 +2315,39 @@ function renderMcpServerCard(entry, installedExt) {
     if (!installedExt.active) {
       var activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      activateBtn.textContent = I18n.t('common.activate');
       activateBtn.addEventListener('click', function() { activateExtension(installedExt.name); });
       actions.appendChild(activateBtn);
     } else {
       var activeLabel = document.createElement('span');
       activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
+      activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
     }
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
-    removeBtn.textContent = 'Remove';
+    removeBtn.textContent = I18n.t('ext.remove');
     removeBtn.addEventListener('click', function() { removeExtension(installedExt.name); });
     actions.appendChild(removeBtn);
   } else {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
-    installBtn.textContent = 'Install';
+    installBtn.textContent = I18n.t('ext.install');
     installBtn.addEventListener('click', function() {
       installBtn.disabled = true;
-      installBtn.textContent = 'Installing...';
+      installBtn.textContent = I18n.t('ext.installing');
       apiFetch('/api/extensions/install', {
         method: 'POST',
         body: { name: entry.name, kind: entry.kind },
       }).then(function(res) {
         if (res.success) {
-          showToast('Installed ' + entry.display_name, 'success');
+          showToast(I18n.t('extensions.installedSuccess', { name: entry.display_name }), 'success');
         } else {
-          showToast('Install: ' + (res.message || 'unknown error'), 'error');
+          showToast(I18n.t('ext.install') + ': ' + (res.message || 'unknown error'), 'error');
         }
         loadExtensions();
       }).catch(function(err) {
-        showToast('Install failed: ' + err.message, 'error');
+        showToast(I18n.t('ext.installFailed', { message: err.message }), 'error');
         loadExtensions();
       });
     });
@@ -1864,7 +2361,7 @@ function renderMcpServerCard(entry, installedExt) {
 function createReconfigureButton(extName) {
   var btn = document.createElement('button');
   btn.className = 'btn-ext configure';
-  btn.textContent = 'Reconfigure';
+  btn.textContent = I18n.t('ext.reconfigure');
   btn.addEventListener('click', function() { showConfigureModal(extName); });
   return btn;
 }
@@ -1885,6 +2382,13 @@ function renderExtensionCard(ext) {
   kind.className = 'ext-kind kind-' + ext.kind;
   kind.textContent = kindLabels[ext.kind] || ext.kind;
   header.appendChild(kind);
+
+  if (ext.version) {
+    const ver = document.createElement('span');
+    ver.className = 'ext-version';
+    ver.textContent = 'v' + ext.version;
+    header.appendChild(ver);
+  }
 
   // Auth dot only for non-WASM-channel extensions (channels use the stepper instead)
   if (ext.kind !== 'wasm_channel') {
@@ -1916,7 +2420,7 @@ function renderExtensionCard(ext) {
     card.appendChild(url);
   }
 
-  if (ext.tools.length > 0) {
+  if (ext.tools && ext.tools.length > 0) {
     const tools = document.createElement('div');
     tools.className = 'ext-tools';
     tools.textContent = 'Tools: ' + ext.tools.join(', ');
@@ -1931,14 +2435,6 @@ function renderExtensionCard(ext) {
     card.appendChild(errorDiv);
   }
 
-  // Show "coming soon" note for non-Telegram channels that are configured but not fully supported yet
-  if (ext.kind === 'wasm_channel' && ext.name !== 'telegram'
-      && (ext.activation_status === 'configured' || ext.active)) {
-    const noteDiv = document.createElement('div');
-    noteDiv.className = 'ext-note';
-    noteDiv.textContent = 'Full integration coming soon. Use the CLI to complete setup.';
-    card.appendChild(noteDiv);
-  }
 
   const actions = document.createElement('div');
   actions.className = 'ext-actions';
@@ -1949,13 +2445,13 @@ function renderExtensionCard(ext) {
     if (status === 'active') {
       var activeLabel = document.createElement('span');
       activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
+      activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'pairing') {
       var pairingLabel = document.createElement('span');
       pairingLabel.className = 'ext-pairing-label';
-      pairingLabel.textContent = 'Awaiting Pairing';
+      pairingLabel.textContent = I18n.t('status.awaitingPairing');
       actions.appendChild(pairingLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'failed') {
@@ -1964,29 +2460,34 @@ function renderExtensionCard(ext) {
       // installed or configured: show Setup button
       var setupBtn = document.createElement('button');
       setupBtn.className = 'btn-ext configure';
-      setupBtn.textContent = 'Setup';
+      setupBtn.textContent = I18n.t('ext.setup');
       setupBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
       actions.appendChild(setupBtn);
     }
   } else {
-    // Non-WASM-channel extensions: original behavior
-    if (!ext.active) {
+    // WASM tools / MCP servers
+    const activeLabel = document.createElement('span');
+    activeLabel.className = 'ext-active-label';
+    activeLabel.textContent = ext.active ? I18n.t('ext.active') : I18n.t('status.installed');
+    actions.appendChild(activeLabel);
+
+    // MCP servers and channel-relay extensions may be installed but inactive — show Activate button
+    if ((ext.kind === 'mcp_server' || ext.kind === 'channel_relay') && !ext.active) {
       const activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      activateBtn.textContent = I18n.t('common.activate');
       activateBtn.addEventListener('click', () => activateExtension(ext.name));
       actions.appendChild(activateBtn);
-    } else {
-      const activeLabel = document.createElement('span');
-      activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
-      actions.appendChild(activeLabel);
     }
 
-    if (ext.needs_setup) {
+    // Show Configure/Reconfigure button when there are secrets to enter.
+    // Skip when has_auth is true but needs_setup is false and not yet authenticated —
+    // this means OAuth credentials resolve automatically (builtin/env) and the user
+    // just needs to complete the OAuth flow, not fill in a config form.
+    if (ext.needs_setup || (ext.has_auth && ext.authenticated)) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
-      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Setup';
+      configBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.configure');
       configBtn.addEventListener('click', () => showConfigureModal(ext.name));
       actions.appendChild(configBtn);
     }
@@ -1994,7 +2495,7 @@ function renderExtensionCard(ext) {
 
   const removeBtn = document.createElement('button');
   removeBtn.className = 'btn-ext remove';
-  removeBtn.textContent = 'Remove';
+  removeBtn.textContent = I18n.t('ext.remove');
   removeBtn.addEventListener('click', () => removeExtension(ext.name));
   actions.appendChild(removeBtn);
 
@@ -2016,13 +2517,26 @@ function activateExtension(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/activate', { method: 'POST' })
     .then((res) => {
       if (res.success) {
+        // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
+        if (res.auth_url) {
+          showAuthCard({
+            extension_name: name,
+            auth_url: res.auth_url,
+          });
+          showToast('Opening authentication for ' + name, 'info');
+          openOAuthUrl(res.auth_url);
+        }
         loadExtensions();
         return;
       }
 
       if (res.auth_url) {
+        showAuthCard({
+          extension_name: name,
+          auth_url: res.auth_url,
+        });
         showToast('Opening authentication for ' + name, 'info');
-        window.open(res.auth_url, '_blank');
+        openOAuthUrl(res.auth_url);
       } else if (res.awaiting_token) {
         showConfigureModal(name);
       } else {
@@ -2034,29 +2548,29 @@ function activateExtension(name) {
 }
 
 function removeExtension(name) {
-  if (!confirm('Remove extension "' + name + '"?')) return;
+  if (!confirm(I18n.t('ext.confirmRemove', { name: name }))) return;
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
     .then((res) => {
       if (!res.success) {
-        showToast('Remove failed: ' + res.message, 'error');
+        showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
       } else {
-        showToast('Removed ' + name, 'success');
+        showToast(I18n.t('ext.removed', { name: name }), 'success');
       }
       loadExtensions();
     })
-    .catch((err) => showToast('Remove failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
 }
 
 function showConfigureModal(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
       const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
-      const fields = Array.isArray(setup.fields) ? setup.fields : [];
-      if (secrets.length === 0 && fields.length === 0) {
+      const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
+      if (secrets.length === 0 && setupFields.length === 0) {
         showToast('No configuration needed for ' + name, 'info');
         return;
       }
-      renderConfigureModal(name, secrets, fields);
+      renderConfigureModal(name, secrets, setupFields);
     })
     .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
 }
@@ -2065,6 +2579,7 @@ function renderConfigureModal(name, secrets, setupFields) {
   closeConfigureModal();
   const overlay = document.createElement('div');
   overlay.className = 'configure-overlay';
+  overlay.setAttribute('data-extension-name', name);
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) closeConfigureModal();
   });
@@ -2073,7 +2588,7 @@ function renderConfigureModal(name, secrets, setupFields) {
   modal.className = 'configure-modal';
 
   const header = document.createElement('h3');
-  header.textContent = 'Configure ' + name;
+  header.textContent = I18n.t('config.title', { name: name });
   modal.appendChild(header);
 
   const form = document.createElement('div');
@@ -2089,7 +2604,7 @@ function renderConfigureModal(name, secrets, setupFields) {
     if (secret.optional) {
       const opt = document.createElement('span');
       opt.className = 'field-optional';
-      opt.textContent = ' (optional)';
+      opt.textContent = I18n.t('config.optional');
       label.appendChild(opt);
     }
     field.appendChild(label);
@@ -2100,7 +2615,7 @@ function renderConfigureModal(name, secrets, setupFields) {
     const input = document.createElement('input');
     input.type = 'password';
     input.name = secret.name;
-    input.placeholder = secret.provided ? '(already set — leave empty to keep)' : '';
+    input.placeholder = secret.provided ? I18n.t('config.alreadySet') : '';
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') submitConfigureModal(name, fields);
     });
@@ -2110,13 +2625,13 @@ function renderConfigureModal(name, secrets, setupFields) {
       const badge = document.createElement('span');
       badge.className = 'field-provided';
       badge.textContent = '\u2713';
-      badge.title = 'Already configured';
+      badge.title = I18n.t('config.alreadyConfigured');
       inputRow.appendChild(badge);
     }
     if (secret.auto_generate && !secret.provided) {
       const hint = document.createElement('span');
       hint.className = 'field-autogen';
-      hint.textContent = 'Auto-generated if empty';
+      hint.textContent = I18n.t('config.autoGenerate');
       inputRow.appendChild(hint);
     }
 
@@ -2134,7 +2649,7 @@ function renderConfigureModal(name, secrets, setupFields) {
     if (setupField.optional) {
       const opt = document.createElement('span');
       opt.className = 'field-optional';
-      opt.textContent = ' (optional)';
+      opt.textContent = I18n.t('config.optional');
       label.appendChild(opt);
     }
     field.appendChild(label);
@@ -2145,7 +2660,7 @@ function renderConfigureModal(name, secrets, setupFields) {
     const input = document.createElement('input');
     input.type = setupField.input_type === 'password' ? 'password' : 'text';
     input.name = setupField.name;
-    input.placeholder = setupField.provided ? '(already set — leave empty to keep)' : '';
+    input.placeholder = setupField.provided ? I18n.t('config.alreadySet') : '';
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') submitConfigureModal(name, fields);
     });
@@ -2155,7 +2670,7 @@ function renderConfigureModal(name, secrets, setupFields) {
       const badge = document.createElement('span');
       badge.className = 'field-provided';
       badge.textContent = '\u2713';
-      badge.title = 'Already configured';
+      badge.title = I18n.t('config.alreadyConfigured');
       inputRow.appendChild(badge);
     }
 
@@ -2171,13 +2686,13 @@ function renderConfigureModal(name, secrets, setupFields) {
 
   const submitBtn = document.createElement('button');
   submitBtn.className = 'btn-ext activate';
-  submitBtn.textContent = 'Save';
+  submitBtn.textContent = I18n.t('config.save');
   submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
   actions.appendChild(submitBtn);
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = I18n.t('config.cancel');
   cancelBtn.addEventListener('click', closeConfigureModal);
   actions.appendChild(cancelBtn);
 
@@ -2204,7 +2719,8 @@ function submitConfigureModal(name, fields) {
   }
 
   // Disable buttons to prevent double-submit
-  var btns = document.querySelectorAll('.configure-actions button');
+  const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
+  var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];
   btns.forEach(function(b) { b.disabled = true; });
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
@@ -2212,19 +2728,26 @@ function submitConfigureModal(name, fields) {
     body: { secrets, fields: setupFields },
   })
     .then((res) => {
-      closeConfigureModal();
       if (res.success) {
-        if (res.needs_restart) {
+        closeConfigureModal();
+        if (res.auth_url) {
+          showAuthCard({
+            extension_name: name,
+            auth_url: res.auth_url,
+          });
+          showToast('Opening OAuth authorization for ' + name, 'info');
+          openOAuthUrl(res.auth_url);
+          loadExtensions();
+        } else if (res.needs_restart) {
           showToast('Configured ' + name + '. Restart IronClaw to apply all changes.', 'info');
-        } else if (res.activated) {
-          showToast('Configured and activated ' + name, 'success');
-        } else {
-          showToast(res.message, 'success');
         }
+        // For non-OAuth success: the server always broadcasts auth_completed SSE,
+        // which will show the toast and refresh extensions — no need to do it here too.
       } else {
+        // Keep modal open so the user can correct their input and retry.
+        btns.forEach(function(b) { b.disabled = false; });
         showToast(res.message || 'Configuration failed', 'error');
       }
-      loadExtensions();
     })
     .catch((err) => {
       btns.forEach(function(b) { b.disabled = false; });
@@ -2232,9 +2755,29 @@ function submitConfigureModal(name, fields) {
     });
 }
 
-function closeConfigureModal() {
-  const existing = document.querySelector('.configure-overlay');
+function closeConfigureModal(extensionName) {
+  if (typeof extensionName !== 'string') extensionName = null;
+  const existing = getConfigureOverlay(extensionName);
   if (existing) existing.remove();
+}
+
+// Validate that a server-supplied OAuth URL is HTTPS before opening a popup.
+// Rejects javascript:, data:, and other non-HTTPS schemes to prevent URL-injection.
+// Uses the URL constructor to safely parse and validate the scheme, which also
+// handles non-string values (objects, null, etc.) that would throw on .startsWith().
+function openOAuthUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      throw new Error('non-HTTPS protocol: ' + parsed.protocol);
+    }
+  } catch (e) {
+    console.warn('Blocked invalid/non-HTTPS OAuth URL:', url, e.message);
+    showToast('Invalid OAuth URL returned by server', 'error');
+    return;
+  }
+  window.open(parsed.href, '_blank', 'width=600,height=700');
 }
 
 // --- Pairing ---
@@ -2283,7 +2826,7 @@ function approvePairing(channel, code, container) {
   }).then(res => {
     if (res.success) {
       showToast('Pairing approved', 'success');
-      loadPairingRequests(channel, container);
+      loadExtensions();
     } else {
       showToast(res.message || 'Approve failed', 'error');
     }
@@ -2306,53 +2849,6 @@ function stopPairingPoll() {
   }
 }
 
-// --- Gateway restart ---
-
-function restartGateway() {
-  if (!confirm('Restart IronClaw gateway? Active connections will be dropped.')) return;
-
-  apiFetch('/api/gateway/restart', { method: 'POST' })
-    .then(function() {
-      showRestartOverlay();
-    })
-    .catch(function() {
-      showRestartOverlay();
-    });
-}
-
-function showRestartOverlay() {
-  var overlay = document.createElement('div');
-  overlay.className = 'restart-overlay';
-  overlay.innerHTML = '<div class="restart-message">'
-    + '<div class="restart-spinner"></div>'
-    + '<h2>Restarting IronClaw...</h2>'
-    + '<p>Waiting for server to come back online</p>'
-    + '</div>';
-  document.body.appendChild(overlay);
-
-  var pollCount = 0;
-  var pollTimer = setInterval(function() {
-    pollCount++;
-    if (pollCount > 30) { // 60 seconds
-      clearInterval(pollTimer);
-      overlay.querySelector('h2').textContent = 'Restart timed out';
-      overlay.querySelector('p').textContent = 'Server did not come back within 60 seconds. Check logs.';
-      overlay.querySelector('.restart-spinner').style.display = 'none';
-      return;
-    }
-    fetch('/api/gateway/status', {
-      headers: { 'Authorization': 'Bearer ' + token },
-    })
-    .then(function(r) {
-      if (r.ok) {
-        clearInterval(pollTimer);
-        window.location.reload();
-      }
-    })
-    .catch(function() { /* still restarting */ });
-  }, 2000);
-}
-
 // --- WASM channel stepper ---
 
 function renderWasmChannelStepper(ext) {
@@ -2360,23 +2856,17 @@ function renderWasmChannelStepper(ext) {
   stepper.className = 'ext-stepper';
 
   var status = ext.activation_status || 'installed';
-  var isTelegram = ext.name === 'telegram';
 
-  // Telegram gets a 3-step stepper (Installed → Configured → Active/Pairing).
-  // Other channels only get 2 steps (Installed → Configured) since full
-  // integration isn't available in the web UI yet.
   var steps = [
     { label: 'Installed', key: 'installed' },
     { label: 'Configured', key: 'configured' },
+    { label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' },
   ];
-  if (isTelegram) {
-    steps.push({ label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' });
-  }
 
   var reachedIdx;
-  if (status === 'active') reachedIdx = isTelegram ? 2 : 1;
+  if (status === 'active') reachedIdx = 2;
   else if (status === 'pairing') reachedIdx = 2;
-  else if (status === 'failed') reachedIdx = isTelegram ? 2 : 1;
+  else if (status === 'failed') reachedIdx = 2;
   else if (status === 'configured') reachedIdx = 1;
   else reachedIdx = 0;
 
@@ -2455,11 +2945,11 @@ function loadJobs() {
 
 function renderJobsSummary(s) {
   document.getElementById('jobs-summary').innerHTML = ''
-    + summaryCard('Total', s.total, '')
-    + summaryCard('In Progress', s.in_progress, 'active')
-    + summaryCard('Completed', s.completed, 'completed')
-    + summaryCard('Failed', s.failed, 'failed')
-    + summaryCard('Stuck', s.stuck, 'stuck');
+    + summaryCard(I18n.t('jobs.summary.total'), s.total, '')
+    + summaryCard(I18n.t('jobs.summary.inProgress'), s.in_progress, 'active')
+    + summaryCard(I18n.t('jobs.summary.completed'), s.completed, 'completed')
+    + summaryCard(I18n.t('jobs.summary.failed'), s.failed, 'failed')
+    + summaryCard(I18n.t('jobs.summary.stuck'), s.stuck, 'stuck');
 }
 
 function summaryCard(label, count, cls) {
@@ -2486,12 +2976,11 @@ function renderJobsList(jobs) {
 
     let actionBtns = '';
     if (job.state === 'pending' || job.state === 'in_progress') {
-      actionBtns = '<button class="btn-cancel" onclick="event.stopPropagation(); cancelJob(\'' + job.id + '\')">Cancel</button>';
-    } else if (job.state === 'failed' || job.state === 'interrupted') {
-      actionBtns = '<button class="btn-restart" onclick="event.stopPropagation(); restartJob(\'' + job.id + '\')">Restart</button>';
+      actionBtns = '<button class="btn-cancel" data-action="cancel-job" data-id="' + escapeHtml(job.id) + '">Cancel</button>';
     }
+    // Retry is only shown in the detail view where can_restart is available.
 
-    return '<tr class="job-row" onclick="openJobDetail(\'' + job.id + '\')">'
+    return '<tr class="job-row" data-action="open-job" data-id="' + escapeHtml(job.id) + '">'
       + '<td title="' + escapeHtml(job.id) + '">' + shortId + '</td>'
       + '<td>' + escapeHtml(job.title) + '</td>'
       + '<td><span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span></td>'
@@ -2518,10 +3007,12 @@ function restartJob(jobId) {
   apiFetch('/api/jobs/' + jobId + '/restart', { method: 'POST' })
     .then((res) => {
       showToast('Job restarted as ' + (res.new_job_id || '').substring(0, 8), 'success');
-      loadJobs();
     })
     .catch((err) => {
       showToast('Failed to restart job: ' + err.message, 'error');
+    })
+    .finally(() => {
+      loadJobs();
     });
 }
 
@@ -2552,12 +3043,12 @@ function renderJobDetail(job) {
   const header = document.createElement('div');
   header.className = 'job-detail-header';
 
-  let headerHtml = '<button class="btn-back" onclick="closeJobDetail()">&larr; Back</button>'
+  let headerHtml = '<button class="btn-back" data-action="close-job-detail">&larr; Back</button>'
     + '<h2>' + escapeHtml(job.title) + '</h2>'
     + '<span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span>';
 
-  if (job.state === 'failed' || job.state === 'interrupted') {
-    headerHtml += '<button class="btn-restart" onclick="restartJob(\'' + job.id + '\')">Restart</button>';
+  if ((job.state === 'failed' || job.state === 'interrupted') && job.can_restart === true) {
+    headerHtml += '<button class="btn-restart" data-action="restart-job" data-id="' + escapeHtml(job.id) + '">Retry</button>';
   }
   if (job.browse_url) {
     headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">Browse Files</a>';
@@ -2804,7 +3295,7 @@ function renderJobActivity(container, job) {
   activityCurrentJobId = job ? job.id : null;
   activityRenderedLiveIndex = 0;
 
-  container.innerHTML = '<div class="activity-toolbar">'
+  let html = '<div class="activity-toolbar">'
     + '<select id="activity-type-filter">'
     + '<option value="all">All Events</option>'
     + '<option value="message">Messages</option>'
@@ -2813,12 +3304,17 @@ function renderJobActivity(container, job) {
     + '</select>'
     + '<label class="logs-checkbox"><input type="checkbox" id="activity-autoscroll" checked> Auto-scroll</label>'
     + '</div>'
-    + '<div class="activity-terminal" id="activity-terminal"></div>'
-    + '<div class="activity-input-bar" id="activity-input-bar">'
-    + '<input type="text" id="activity-prompt-input" placeholder="Send follow-up prompt..." />'
-    + '<button id="activity-send-btn">Send</button>'
-    + '<button id="activity-done-btn" title="Signal done">Done</button>'
-    + '</div>';
+    + '<div class="activity-terminal" id="activity-terminal"></div>';
+
+  if (job && job.can_prompt === true) {
+    html += '<div class="activity-input-bar" id="activity-input-bar">'
+      + '<input type="text" id="activity-prompt-input" placeholder="Send follow-up prompt..." />'
+      + '<button id="activity-send-btn">Send</button>'
+      + '<button id="activity-done-btn" title="Signal done">Done</button>'
+      + '</div>';
+  }
+
+  container.innerHTML = html;
 
   document.getElementById('activity-type-filter').addEventListener('change', applyActivityFilter);
 
@@ -2827,9 +3323,9 @@ function renderJobActivity(container, job) {
   const sendBtn = document.getElementById('activity-send-btn');
   const doneBtn = document.getElementById('activity-done-btn');
 
-  sendBtn.addEventListener('click', () => sendJobPrompt(job.id, false));
-  doneBtn.addEventListener('click', () => sendJobPrompt(job.id, true));
-  input.addEventListener('keydown', (e) => {
+  if (sendBtn) sendBtn.addEventListener('click', () => sendJobPrompt(job.id, false));
+  if (doneBtn) doneBtn.addEventListener('click', () => sendJobPrompt(job.id, true));
+  if (input) input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendJobPrompt(job.id, false);
   });
 
@@ -2983,11 +3479,11 @@ function loadRoutines() {
 
 function renderRoutinesSummary(s) {
   document.getElementById('routines-summary').innerHTML = ''
-    + summaryCard('Total', s.total, '')
-    + summaryCard('Enabled', s.enabled, 'active')
-    + summaryCard('Disabled', s.disabled, '')
-    + summaryCard('Failing', s.failing, 'failed')
-    + summaryCard('Runs Today', s.runs_today, 'completed');
+    + summaryCard(I18n.t('routines.summary.total'), s.total, '')
+    + summaryCard(I18n.t('routines.summary.enabled'), s.enabled, 'active')
+    + summaryCard(I18n.t('routines.summary.disabled'), s.disabled, '')
+    + summaryCard(I18n.t('routines.summary.failing'), s.failing, 'failed')
+    + summaryCard(I18n.t('routines.summary.runsToday'), s.runs_today, 'completed');
 }
 
 function renderRoutinesList(routines) {
@@ -3009,7 +3505,7 @@ function renderRoutinesList(routines) {
     const toggleLabel = r.enabled ? 'Disable' : 'Enable';
     const toggleClass = r.enabled ? 'btn-cancel' : 'btn-restart';
 
-    return '<tr class="routine-row" onclick="openRoutineDetail(\'' + r.id + '\')">'
+    return '<tr class="routine-row" data-action="open-routine" data-id="' + escapeHtml(r.id) + '">'
       + '<td>' + escapeHtml(r.name) + '</td>'
       + '<td>' + escapeHtml(r.trigger_summary) + '</td>'
       + '<td>' + escapeHtml(r.action_type) + '</td>'
@@ -3018,9 +3514,9 @@ function renderRoutinesList(routines) {
       + '<td>' + r.run_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(r.status) + '</span></td>'
       + '<td>'
-      + '<button class="' + toggleClass + '" onclick="event.stopPropagation(); toggleRoutine(\'' + r.id + '\')">' + toggleLabel + '</button> '
-      + '<button class="btn-restart" onclick="event.stopPropagation(); triggerRoutine(\'' + r.id + '\')">Run</button> '
-      + '<button class="btn-cancel" onclick="event.stopPropagation(); deleteRoutine(\'' + r.id + '\', \'' + escapeHtml(r.name) + '\')">Delete</button>'
+      + '<button class="' + toggleClass + '" data-action="toggle-routine" data-id="' + escapeHtml(r.id) + '">' + toggleLabel + '</button> '
+      + '<button class="btn-restart" data-action="trigger-routine" data-id="' + escapeHtml(r.id) + '">Run</button> '
+      + '<button class="btn-cancel" data-action="delete-routine" data-id="' + escapeHtml(r.id) + '" data-name="' + escapeHtml(r.name) + '">Delete</button>'
       + '</td>'
       + '</tr>';
   }).join('');
@@ -3056,7 +3552,7 @@ function renderRoutineDetail(routine) {
     : 'active';
 
   let html = '<div class="job-detail-header">'
-    + '<button class="btn-back" onclick="closeRoutineDetail()">&larr; Back</button>'
+    + '<button class="btn-back" data-action="close-routine-detail">&larr; Back</button>'
     + '<h2>' + escapeHtml(routine.name) + '</h2>'
     + '<span class="badge ' + statusClass + '">' + escapeHtml(statusLabel) + '</span>'
     + '</div>';
@@ -3103,7 +3599,7 @@ function renderRoutineDetail(routine) {
         + '<td>' + formatDate(run.completed_at) + '</td>'
         + '<td><span class="badge ' + runStatusClass + '">' + escapeHtml(run.status) + '</span></td>'
         + '<td>' + escapeHtml(run.result_summary || '-')
-          + (run.job_id ? ' <a href="#" onclick="event.preventDefault(); switchTab(\'jobs\'); openJobDetail(\'' + run.job_id + '\')">[view job]</a>' : '')
+          + (run.job_id ? ' <a href="#" data-action="view-run-job" data-id="' + escapeHtml(run.job_id) + '">[view job]</a>' : '')
           + '</td>'
         + '<td>' + (run.tokens_used != null ? run.tokens_used : '-') + '</td>'
         + '</tr>';
@@ -3116,7 +3612,11 @@ function renderRoutineDetail(routine) {
 
 function triggerRoutine(id) {
   apiFetch('/api/routines/' + id + '/trigger', { method: 'POST' })
-    .then(() => showToast('Routine triggered', 'success'))
+    .then(() => {
+      showToast('Routine triggered', 'success');
+      if (currentRoutineId === id) openRoutineDetail(id);
+      else loadRoutines();
+    })
     .catch((err) => showToast('Trigger failed: ' + err.message, 'error'));
 }
 
@@ -3149,17 +3649,18 @@ function formatRelativeTime(isoString) {
   const absDiff = Math.abs(diffMs);
   const future = diffMs < 0;
 
-  if (absDiff < 60000) return future ? 'in <1m' : '<1m ago';
+  if (absDiff < 60000)
+    return future ? I18n.t('time.lessThan1MinuteFromNow') : I18n.t('time.lessThan1MinuteAgo');
   if (absDiff < 3600000) {
     const m = Math.floor(absDiff / 60000);
-    return future ? 'in ' + m + 'm' : m + 'm ago';
+    return future ? I18n.t('time.minutesFromNow', { n: m }) : I18n.t('time.minutesAgo', { n: m });
   }
   if (absDiff < 86400000) {
     const h = Math.floor(absDiff / 3600000);
-    return future ? 'in ' + h + 'h' : h + 'h ago';
+    return future ? I18n.t('time.hoursFromNow', { n: h }) : I18n.t('time.hoursAgo', { n: h });
   }
   const days = Math.floor(absDiff / 86400000);
-  return future ? 'in ' + days + 'd' : days + 'd ago';
+  return future ? I18n.t('time.daysFromNow', { n: days }) : I18n.t('time.daysAgo', { n: days });
 }
 
 // --- Gateway status widget ---
@@ -3195,22 +3696,32 @@ function shortModelName(model) {
 
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
+    // Update restart button visibility
+    restartEnabled = data.restart_enabled || false;
+    updateRestartButtonVisibility();
+
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
+    // Version
+    if (data.version) {
+      html += '<div class="gw-section-label">IronClaw v' + escapeHtml(data.version) + '</div>';
+      html += '<div class="gw-divider"></div>';
+    }
+
     // Connection info
-    html += '<div class="gw-section-label">Connections</div>';
-    html += '<div class="gw-stat"><span>SSE</span><span>' + (data.sse_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>WebSocket</span><span>' + (data.ws_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>Uptime</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
+    html += '<div class="gw-section-label">' + I18n.t('dashboard.connections') + '</div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.sse') + '</span><span>' + (data.sse_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.websocket') + '</span><span>' + (data.ws_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.uptime') + '</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
 
     // Cost tracker
     if (data.daily_cost != null) {
       html += '<div class="gw-divider"></div>';
-      html += '<div class="gw-section-label">Cost Today</div>';
-      html += '<div class="gw-stat"><span>Spent</span><span>' + formatCost(data.daily_cost) + '</span></div>';
+      html += '<div class="gw-section-label">' + I18n.t('dashboard.costToday') + '</div>';
+      html += '<div class="gw-stat"><span>' + I18n.t('dashboard.spent') + '</span><span>' + formatCost(data.daily_cost) + '</span></div>';
       if (data.actions_this_hour != null) {
-        html += '<div class="gw-stat"><span>Actions/hr</span><span>' + data.actions_this_hour + '</span></div>';
+        html += '<div class="gw-stat"><span>' + I18n.t('dashboard.actionsPerHour') + '</span><span>' + data.actions_this_hour + '</span></div>';
       }
     }
 
@@ -3254,10 +3765,15 @@ let teeReportCache = null;
 let teeReportLoading = false;
 
 function teeApiBase() {
-  var parts = window.location.hostname.split('.');
-  if (parts.length < 2) return null;
-  var domain = parts.slice(1).join('.');
-  return window.location.protocol + '//api.' + domain;
+    var hostname = window.location.hostname;
+    // Skip IP addresses (IPv4 and IPv6) and localhost
+    if (hostname === "localhost" || /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(hostname) || hostname.indexOf(":") !== -1) {
+        return null;
+    }
+    var parts = hostname.split(".");
+    if (parts.length < 2) return null;
+    var domain = parts.slice(1).join(".");
+    return window.location.protocol + "//api." + domain;
 }
 
 function teeInstanceName() {
@@ -3268,13 +3784,19 @@ function checkTeeStatus() {
   var base = teeApiBase();
   if (!base) return;
   var name = teeInstanceName();
-  fetch(base + '/instances/' + encodeURIComponent(name) + '/attestation').then(function(res) {
-    if (!res.ok) throw new Error(res.status);
-    return res.json();
-  }).then(function(data) {
-    teeInfo = data;
-    document.getElementById('tee-shield').style.display = 'flex';
-  }).catch(function() {});
+  try {
+    fetch(base + '/instances/' + encodeURIComponent(name) + '/attestation').then(function(res) {
+      if (!res.ok) throw new Error(res.status);
+      return res.json();
+    }).then(function(data) {
+      teeInfo = data;
+      document.getElementById('tee-shield').style.display = 'flex';
+    }).catch(function(err) {
+      console.warn('Failed to fetch TEE attestation:', err);
+    });
+  } catch (e) {
+    console.warn("Failed to check TEE status:", e);
+  }
 }
 
 function fetchTeeReport() {
@@ -3320,7 +3842,7 @@ function renderTeePopover(report) {
     + '<div class="tee-field"><div class="tee-field-label">VM Config</div>'
     + '<div class="tee-field-value">' + escapeHtml(vmConfig) + '</div></div>'
     + '<div class="tee-popover-actions">'
-    + '<button class="tee-btn-copy" onclick="copyTeeReport()">Copy Full Report</button></div>';
+    + '<button class="tee-btn-copy" data-action="copy-tee-report">Copy Full Report</button></div>';
 }
 
 function copyTeeReport() {
@@ -3407,7 +3929,7 @@ function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   apiFetch('/api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
-      skillsList.innerHTML = '<div class="empty-state">No skills installed</div>';
+      skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
       return;
     }
     skillsList.innerHTML = '';
@@ -3415,7 +3937,7 @@ function loadSkills() {
       skillsList.appendChild(renderSkillCard(data.skills[i]));
     }
   }).catch(function(err) {
-    skillsList.innerHTML = '<div class="empty-state">Failed to load skills: ' + escapeHtml(err.message) + '</div>';
+    skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.loadFailed', {message: escapeHtml(err.message)}) + '</div>';
   });
 }
 
@@ -3452,7 +3974,7 @@ function renderSkillCard(skill) {
   if (skill.keywords && skill.keywords.length > 0) {
     var kw = document.createElement('div');
     kw.className = 'ext-keywords';
-    kw.textContent = 'Activates on: ' + skill.keywords.join(', ');
+    kw.textContent = I18n.t('skills.activatesOn') + ': ' + skill.keywords.join(', ');
     card.appendChild(kw);
   }
 
@@ -3463,7 +3985,7 @@ function renderSkillCard(skill) {
   if (skill.trust.toLowerCase() !== 'trusted') {
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
-    removeBtn.textContent = 'Remove';
+    removeBtn.textContent = I18n.t('skills.remove');
     removeBtn.addEventListener('click', function() { removeSkill(skill.name); });
     actions.appendChild(removeBtn);
   }
@@ -3478,7 +4000,7 @@ function searchClawHub() {
   if (!query) return;
 
   var resultsDiv = document.getElementById('skill-search-results');
-  resultsDiv.innerHTML = '<div class="empty-state">Searching...</div>';
+  resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.searching') + '</div>';
 
   apiFetch('/api/skills/search', {
     method: 'POST',
@@ -3494,7 +4016,7 @@ function searchClawHub() {
       warning.style.borderLeft = '3px solid #f0ad4e';
       warning.style.paddingLeft = '12px';
       warning.style.marginBottom = '16px';
-      warning.textContent = 'Could not reach ClawHub registry: ' + data.catalog_error;
+      warning.textContent = I18n.t('skills.registryError', {message: data.catalog_error});
       resultsDiv.appendChild(warning);
     }
 
@@ -3526,10 +4048,10 @@ function searchClawHub() {
     }
 
     if (resultsDiv.children.length === 0) {
-      resultsDiv.innerHTML = '<div class="empty-state">No skills found for "' + escapeHtml(query) + '"</div>';
+      resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.noResults', {query: escapeHtml(query)}) + '</div>';
     }
   }).catch(function(err) {
-    resultsDiv.innerHTML = '<div class="empty-state">Search failed: ' + escapeHtml(err.message) + '</div>';
+    resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.searchFailed', {message: escapeHtml(err.message)}) + '</div>';
   });
 }
 
@@ -3623,17 +4145,17 @@ function renderCatalogSkillCard(entry, installedNames) {
   if (isInstalled) {
     var label = document.createElement('span');
     label.className = 'ext-active-label';
-    label.textContent = 'Installed';
+    label.textContent = I18n.t('status.installed');
     actions.appendChild(label);
   } else {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
-    installBtn.textContent = 'Install';
+    installBtn.textContent = I18n.t('extensions.install');
     installBtn.addEventListener('click', (function(s, btn) {
       return function() {
         if (!confirm('Install skill "' + s + '" from ClawHub?')) return;
         btn.disabled = true;
-        btn.textContent = 'Installing...';
+        btn.textContent = I18n.t('extensions.installing');
         installSkill(s, null, btn);
       };
     })(slug, installBtn));
@@ -3666,7 +4188,7 @@ function formatTimeAgo(epochMs) {
 }
 
 function installSkill(nameOrSlug, url, btn) {
-  var body = { name: nameOrSlug };
+  var body = { name: nameOrSlug, slug: nameOrSlug };
   if (url) body.url = url;
 
   apiFetch('/api/skills/install', {
@@ -3675,7 +4197,7 @@ function installSkill(nameOrSlug, url, btn) {
     body: body,
   }).then(function(res) {
     if (res.success) {
-      showToast('Installed skill "' + nameOrSlug + '"', 'success');
+      showToast(I18n.t('skills.installedSuccess', {name: nameOrSlug}), 'success');
     } else {
       showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
     }
@@ -3688,19 +4210,19 @@ function installSkill(nameOrSlug, url, btn) {
 }
 
 function removeSkill(name) {
-  if (!confirm('Remove skill "' + name + '"?')) return;
+  if (!confirm(I18n.t('skills.confirmRemove', { name: name }))) return;
   apiFetch('/api/skills/' + encodeURIComponent(name), {
     method: 'DELETE',
     headers: { 'X-Confirm-Action': 'true' },
   }).then(function(res) {
     if (res.success) {
-      showToast('Removed skill "' + name + '"', 'success');
+      showToast(I18n.t('skills.removed', { name: name }), 'success');
     } else {
-      showToast('Remove failed: ' + (res.message || 'unknown error'), 'error');
+      showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
     }
     loadSkills();
   }).catch(function(err) {
-    showToast('Remove failed: ' + err.message, 'error');
+    showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
   });
 }
 
@@ -3802,3 +4324,94 @@ function formatDate(isoString) {
   const d = new Date(isoString);
   return d.toLocaleString();
 }
+
+// --- Event Listener Registration (CSP-safe, no inline handlers) ---
+
+document.getElementById('auth-connect-btn').addEventListener('click', () => authenticate());
+document.getElementById('restart-overlay').addEventListener('click', () => cancelRestart());
+document.getElementById('restart-close-btn').addEventListener('click', () => cancelRestart());
+document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());
+document.getElementById('restart-confirm-btn').addEventListener('click', () => confirmRestart());
+document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
+document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
+document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
+document.getElementById('assistant-thread').addEventListener('click', () => switchToAssistant());
+document.getElementById('send-btn').addEventListener('click', () => sendMessage());
+document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
+document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());
+document.getElementById('memory-cancel-btn').addEventListener('click', () => cancelMemoryEdit());
+document.getElementById('logs-server-level').addEventListener('change', (e) => setServerLogLevel(e.target.value));
+document.getElementById('logs-pause-btn').addEventListener('click', () => toggleLogsPause());
+document.getElementById('logs-clear-btn').addEventListener('click', () => clearLogs());
+document.getElementById('wasm-install-btn').addEventListener('click', () => installWasmExtension());
+document.getElementById('mcp-add-btn').addEventListener('click', () => addMcpServer());
+document.getElementById('skill-search-btn').addEventListener('click', () => searchClawHub());
+document.getElementById('skill-install-btn').addEventListener('click', () => installSkillFromForm());
+
+// --- Delegated Event Handlers (for dynamically generated HTML) ---
+
+document.addEventListener('click', function(e) {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+
+  switch (action) {
+    case 'copy-code':
+      copyCodeBlock(el);
+      break;
+    case 'breadcrumb-root':
+      e.preventDefault();
+      loadMemoryTree();
+      break;
+    case 'breadcrumb-file':
+      e.preventDefault();
+      readMemoryFile(el.dataset.path);
+      break;
+    case 'cancel-job':
+      e.stopPropagation();
+      cancelJob(el.dataset.id);
+      break;
+    case 'open-job':
+      openJobDetail(el.dataset.id);
+      break;
+    case 'close-job-detail':
+      closeJobDetail();
+      break;
+    case 'restart-job':
+      restartJob(el.dataset.id);
+      break;
+    case 'open-routine':
+      openRoutineDetail(el.dataset.id);
+      break;
+    case 'toggle-routine':
+      e.stopPropagation();
+      toggleRoutine(el.dataset.id);
+      break;
+    case 'trigger-routine':
+      e.stopPropagation();
+      triggerRoutine(el.dataset.id);
+      break;
+    case 'delete-routine':
+      e.stopPropagation();
+      deleteRoutine(el.dataset.id, el.dataset.name);
+      break;
+    case 'close-routine-detail':
+      closeRoutineDetail();
+      break;
+    case 'view-run-job':
+      e.preventDefault();
+      switchTab('jobs');
+      openJobDetail(el.dataset.id);
+      break;
+    case 'copy-tee-report':
+      copyTeeReport();
+      break;
+    case 'switch-language':
+      if (typeof switchLanguage === 'function') switchLanguage(el.dataset.lang);
+      break;
+  }
+});
+
+document.getElementById('language-btn').addEventListener('click', function() {
+  if (typeof toggleLanguageMenu === 'function') toggleLanguageMenu();
+});

@@ -15,6 +15,12 @@
 </p>
 
 <p align="center">
+  <a href="README.md">English</a> |
+  <a href="README.zh-CN.md">简体中文</a> |
+  <a href="README.ru.md">Русский</a>
+</p>
+
+<p align="center">
   <a href="#philosophy">Philosophy</a> •
   <a href="#features">Features</a> •
   <a href="#installation">Installation</a> •

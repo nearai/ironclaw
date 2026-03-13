@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::settings::Settings;
 
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command() -> anyhow::Result<()> {
@@ -15,14 +16,35 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     let mut passed = 0u32;
     let mut failed = 0u32;
+    let mut skipped = 0u32;
 
-    // ── Configuration checks ──────────────────────────────────
+    // Load settings once for checks that need them.
+    let settings = Settings::load();
+
+    // ── Settings & core config ─────────────────────────────────
+
+    check(
+        "Settings file",
+        check_settings_file(),
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
 
     check(
         "NEAR AI session",
         check_nearai_session().await,
         &mut passed,
         &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "LLM configuration",
+        check_llm_config(&settings),
+        &mut passed,
+        &mut failed,
+        &mut skipped,
     );
 
     check(
@@ -30,6 +52,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         check_database().await,
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
     check(
@@ -37,15 +60,75 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         check_workspace_dir(),
         &mut passed,
         &mut failed,
+        &mut skipped,
+    );
+
+    // ── Subsystem configuration checks ─────────────────────────
+
+    check(
+        "Embeddings",
+        check_embeddings(&settings),
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "Routines config",
+        check_routines_config(),
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "Gateway config",
+        check_gateway_config(&settings),
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "MCP servers",
+        check_mcp_config().await,
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "Skills",
+        check_skills().await,
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "Secrets",
+        check_secrets(&settings),
+        &mut passed,
+        &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "Service",
+        check_service_installed(),
+        &mut passed,
+        &mut failed,
+        &mut skipped,
     );
 
     // ── External binary checks ────────────────────────────────
 
     check(
-        "Docker",
-        check_binary("docker", &["--version"]),
+        "Docker daemon",
+        check_docker_daemon().await,
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
     check(
@@ -53,6 +136,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         check_binary("cloudflared", &["--version"]),
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
     check(
@@ -60,6 +144,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         check_binary("ngrok", &["version"]),
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
     check(
@@ -67,12 +152,13 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         check_binary("tailscale", &["version"]),
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
     // ── Summary ───────────────────────────────────────────────
 
     println!();
-    println!("  {passed} passed, {failed} failed");
+    println!("  {passed} passed, {failed} failed, {skipped} skipped");
 
     if failed > 0 {
         println!("\n  Some checks failed. This is normal if you don't use those features.");
@@ -83,7 +169,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
 // ── Individual checks ───────────────────────────────────────
 
-fn check(name: &str, result: CheckResult, passed: &mut u32, failed: &mut u32) {
+fn check(name: &str, result: CheckResult, passed: &mut u32, failed: &mut u32, skipped: &mut u32) {
     match result {
         CheckResult::Pass(detail) => {
             *passed += 1;
@@ -94,6 +180,7 @@ fn check(name: &str, result: CheckResult, passed: &mut u32, failed: &mut u32) {
             println!("  [FAIL] {name}: {detail}");
         }
         CheckResult::Skip(reason) => {
+            *skipped += 1;
             println!("  [skip] {name}: {reason}");
         }
     }
@@ -105,12 +192,35 @@ enum CheckResult {
     Skip(String),
 }
 
+// ── Settings file ───────────────────────────────────────────
+
+fn check_settings_file() -> CheckResult {
+    let path = Settings::default_path();
+    if !path.exists() {
+        return CheckResult::Pass("no settings file (defaults will be used)".into());
+    }
+
+    match std::fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str::<serde_json::Value>(&data) {
+            Ok(_) => CheckResult::Pass(format!("valid ({})", path.display())),
+            Err(e) => CheckResult::Fail(format!(
+                "settings.json is malformed: {}. Fix or delete {}",
+                e,
+                path.display()
+            )),
+        },
+        Err(e) => CheckResult::Fail(format!("cannot read {}: {}", path.display(), e)),
+    }
+}
+
+// ── NEAR AI session ─────────────────────────────────────────
+
 async fn check_nearai_session() -> CheckResult {
     // Check if session file exists
-    let session_path = crate::llm::session::default_session_path();
+    let session_path = crate::config::llm::default_session_path();
     if !session_path.exists() {
         // Check for API key mode
-        if std::env::var("NEARAI_API_KEY").is_ok() {
+        if crate::config::helpers::env_or_override("NEARAI_API_KEY").is_some() {
             return CheckResult::Pass("API key configured".into());
         }
         return CheckResult::Fail(format!(
@@ -128,6 +238,27 @@ async fn check_nearai_session() -> CheckResult {
         Err(e) => CheckResult::Fail(format!("cannot read session file: {e}")),
     }
 }
+
+// ── LLM configuration ──────────────────────────────────────
+
+fn check_llm_config(settings: &Settings) -> CheckResult {
+    match crate::llm::LlmConfig::resolve(settings) {
+        Ok(config) => {
+            // Show the model for the active backend, not always nearai.model.
+            let model = if let Some(ref bedrock) = config.bedrock {
+                &bedrock.model
+            } else if let Some(ref provider) = config.provider {
+                &provider.model
+            } else {
+                &config.nearai.model
+            };
+            CheckResult::Pass(format!("backend={}, model={}", config.backend, model))
+        }
+        Err(e) => CheckResult::Fail(format!("LLM config error: {e}")),
+    }
+}
+
+// ── Database ────────────────────────────────────────────────
 
 async fn check_database() -> CheckResult {
     let backend = std::env::var("DATABASE_BACKEND")
@@ -192,6 +323,8 @@ async fn try_pg_connect() -> Result<(), String> {
     Err("postgres feature not compiled in".into())
 }
 
+// ── Workspace directory ─────────────────────────────────────
+
 fn check_workspace_dir() -> CheckResult {
     let dir = ironclaw_base_dir();
 
@@ -205,6 +338,222 @@ fn check_workspace_dir() -> CheckResult {
         CheckResult::Pass(format!("{} will be created on first run", dir.display()))
     }
 }
+
+// ── Embeddings ──────────────────────────────────────────────
+
+fn check_embeddings(settings: &Settings) -> CheckResult {
+    match crate::config::EmbeddingsConfig::resolve(settings) {
+        Ok(config) => {
+            if !config.enabled {
+                return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());
+            }
+            let has_creds = match config.provider.as_str() {
+                "openai" => config.openai_api_key().is_some(),
+                "nearai" => {
+                    // NearAiEmbeddings uses SessionManager::get_token() which
+                    // only returns session tokens, NOT NEARAI_API_KEY
+                    // (src/workspace/embeddings.rs:309, src/llm/session.rs:132).
+                    let session_path = crate::config::llm::default_session_path();
+                    session_path.exists()
+                        && std::fs::read_to_string(&session_path)
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false)
+                }
+                "ollama" => true, // local, no creds needed
+                _ => config.openai_api_key().is_some(),
+            };
+            if has_creds {
+                CheckResult::Pass(format!(
+                    "provider={}, model={}",
+                    config.provider, config.model
+                ))
+            } else {
+                let hint = match config.provider.as_str() {
+                    "nearai" => "run `ironclaw onboard` to create a session",
+                    _ => "set OPENAI_API_KEY",
+                };
+                CheckResult::Fail(format!(
+                    "provider={} but credentials missing ({})",
+                    config.provider, hint
+                ))
+            }
+        }
+        Err(e) => CheckResult::Fail(format!("config error: {e}")),
+    }
+}
+
+// ── Routines config ─────────────────────────────────────────
+
+fn check_routines_config() -> CheckResult {
+    match crate::config::RoutineConfig::resolve() {
+        Ok(config) => {
+            if config.enabled {
+                CheckResult::Pass(format!(
+                    "enabled (interval={}s, max_concurrent={})",
+                    config.cron_check_interval_secs, config.max_concurrent_routines
+                ))
+            } else {
+                CheckResult::Skip("disabled".into())
+            }
+        }
+        Err(e) => CheckResult::Fail(format!("config error: {e}")),
+    }
+}
+
+// ── Gateway config ──────────────────────────────────────────
+
+fn check_gateway_config(settings: &Settings) -> CheckResult {
+    // Use the same resolve() path as runtime so invalid env values
+    // (e.g. GATEWAY_PORT=abc) are caught here too.
+    match crate::config::ChannelsConfig::resolve(settings) {
+        Ok(channels) => match channels.gateway {
+            Some(gw) => {
+                if gw.auth_token.is_some() {
+                    CheckResult::Pass(format!(
+                        "enabled at {}:{} (auth token set)",
+                        gw.host, gw.port
+                    ))
+                } else {
+                    CheckResult::Pass(format!(
+                        "enabled at {}:{} (no auth token — random token will be generated)",
+                        gw.host, gw.port
+                    ))
+                }
+            }
+            None => CheckResult::Skip("disabled (GATEWAY_ENABLED=false)".into()),
+        },
+        Err(e) => CheckResult::Fail(format!("config error: {e}")),
+    }
+}
+
+// ── MCP servers ─────────────────────────────────────────────
+
+async fn check_mcp_config() -> CheckResult {
+    match crate::tools::mcp::config::load_mcp_servers().await {
+        Ok(file) => {
+            let servers: Vec<_> = file.enabled_servers().collect();
+            if servers.is_empty() {
+                return CheckResult::Skip("no MCP servers configured".into());
+            }
+
+            let mut invalid = Vec::new();
+            for server in &servers {
+                if let Err(e) = server.validate() {
+                    invalid.push(format!("{}: {}", server.name, e));
+                }
+            }
+
+            if invalid.is_empty() {
+                CheckResult::Pass(format!("{} server(s) configured, all valid", servers.len()))
+            } else {
+                CheckResult::Fail(format!(
+                    "{} server(s), {} invalid: {}",
+                    servers.len(),
+                    invalid.len(),
+                    invalid.join("; ")
+                ))
+            }
+        }
+        Err(e) => {
+            // Distinguish no config from corrupted config
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("No such file") {
+                CheckResult::Skip("no MCP config file".into())
+            } else {
+                CheckResult::Fail(format!("config error: {e}"))
+            }
+        }
+    }
+}
+
+// ── Skills ──────────────────────────────────────────────────
+
+async fn check_skills() -> CheckResult {
+    let user_dir = ironclaw_base_dir().join("skills");
+    let installed_dir = ironclaw_base_dir().join("installed_skills");
+
+    let mut registry = crate::skills::SkillRegistry::new(user_dir.clone());
+    registry = registry.with_installed_dir(installed_dir);
+
+    // discover_all() returns loaded skill names (not warnings).
+    let _loaded_names = registry.discover_all().await;
+
+    let count = registry.count();
+    if count == 0 {
+        return CheckResult::Skip("no skills discovered".into());
+    }
+
+    CheckResult::Pass(format!("{count} skill(s) loaded"))
+}
+
+// ── Secrets ─────────────────────────────────────────────────
+
+fn check_secrets(settings: &Settings) -> CheckResult {
+    match settings.secrets_master_key_source {
+        crate::settings::KeySource::Keychain => {
+            CheckResult::Pass("master key source: OS keychain".into())
+        }
+        crate::settings::KeySource::Env => {
+            if std::env::var("SECRETS_MASTER_KEY").is_ok() {
+                CheckResult::Pass("master key source: env var (set)".into())
+            } else {
+                CheckResult::Fail(
+                    "master key source: env var but SECRETS_MASTER_KEY not set".into(),
+                )
+            }
+        }
+        crate::settings::KeySource::None => {
+            CheckResult::Skip("secrets not configured (run `ironclaw onboard`)".into())
+        }
+    }
+}
+
+// ── Service ─────────────────────────────────────────────────
+
+fn check_service_installed() -> CheckResult {
+    if cfg!(target_os = "macos") {
+        let plist =
+            dirs::home_dir().map(|h| h.join("Library/LaunchAgents/com.ironclaw.daemon.plist"));
+        match plist {
+            Some(path) if path.exists() => {
+                CheckResult::Pass(format!("launchd plist installed ({})", path.display()))
+            }
+            Some(_) => CheckResult::Skip("not installed (run `ironclaw service install`)".into()),
+            None => CheckResult::Skip("cannot determine home directory".into()),
+        }
+    } else if cfg!(target_os = "linux") {
+        let unit = dirs::home_dir().map(|h| h.join(".config/systemd/user/ironclaw.service"));
+        match unit {
+            Some(path) if path.exists() => {
+                CheckResult::Pass(format!("systemd unit installed ({})", path.display()))
+            }
+            Some(_) => CheckResult::Skip("not installed (run `ironclaw service install`)".into()),
+            None => CheckResult::Skip("cannot determine home directory".into()),
+        }
+    } else {
+        CheckResult::Skip("service management not supported on this platform".into())
+    }
+}
+
+// ── Docker daemon ───────────────────────────────────────────
+
+async fn check_docker_daemon() -> CheckResult {
+    let detection = crate::sandbox::check_docker().await;
+    match detection.status {
+        crate::sandbox::DockerStatus::Available => CheckResult::Pass("running".into()),
+        crate::sandbox::DockerStatus::NotInstalled => CheckResult::Skip(format!(
+            "not installed. {}",
+            detection.platform.install_hint()
+        )),
+        crate::sandbox::DockerStatus::NotRunning => CheckResult::Fail(format!(
+            "installed but not running. {}",
+            detection.platform.start_hint()
+        )),
+        crate::sandbox::DockerStatus::Disabled => CheckResult::Skip("sandbox disabled".into()),
+    }
+}
+
+// ── External binary ─────────────────────────────────────────
 
 fn check_binary(name: &str, args: &[&str]) -> CheckResult {
     match std::process::Command::new(name)
@@ -270,6 +619,193 @@ mod tests {
         let result = check_nearai_session().await;
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[test]
+    fn check_settings_file_handles_missing() {
+        // Settings::default_path() might or might not exist, but must not panic
+        let result = check_settings_file();
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[test]
+    fn check_llm_config_does_not_panic() {
+        let settings = Settings::default();
+        let result = check_llm_config(&settings);
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[test]
+    fn check_routines_config_does_not_panic() {
+        let result = check_routines_config();
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[test]
+    fn check_gateway_config_does_not_panic() {
+        let settings = Settings::default();
+        let result = check_gateway_config(&settings);
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[test]
+    fn check_embeddings_does_not_panic() {
+        let settings = Settings::default();
+        let result = check_embeddings(&settings);
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[test]
+    fn check_secrets_none_returns_skip() {
+        let settings = Settings::default();
+        match check_secrets(&settings) {
+            CheckResult::Skip(msg) => {
+                assert!(
+                    msg.contains("not configured"),
+                    "expected 'not configured' in skip message, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Skip for default settings, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn check_service_installed_does_not_panic() {
+        let result = check_service_installed();
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn check_docker_daemon_does_not_panic() {
+        let result = check_docker_daemon().await;
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn check_mcp_config_does_not_panic() {
+        let result = check_mcp_config().await;
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn check_skills_does_not_panic() {
+        let result = check_skills().await;
+        match result {
+            CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[test]
+    fn check_llm_config_shows_nearai_model_for_nearai_backend() {
+        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+        }
+        let settings = Settings::default();
+        match check_llm_config(&settings) {
+            CheckResult::Pass(msg) => {
+                assert!(
+                    msg.contains("backend=nearai"),
+                    "expected nearai backend, got: {msg}"
+                );
+                // Must NOT show a bedrock or registry model when backend is nearai
+                assert!(
+                    !msg.contains("anthropic.claude"),
+                    "should not show bedrock model for nearai backend: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Pass for default LLM config, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn check_embeddings_disabled_by_default_returns_skip() {
+        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+        }
+        let settings = Settings::default();
+        match check_embeddings(&settings) {
+            CheckResult::Skip(msg) => {
+                assert!(
+                    msg.contains("disabled"),
+                    "expected 'disabled' in skip message, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Skip for disabled embeddings, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn check_routines_enabled_by_default() {
+        let _guard = crate::config::helpers::ENV_MUTEX.lock().expect("env mutex");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("ROUTINES_ENABLED");
+        }
+        match check_routines_config() {
+            CheckResult::Pass(msg) => {
+                assert!(
+                    msg.contains("enabled"),
+                    "routines should be enabled by default, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Pass for default routines, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn check_secrets_env_without_var_returns_fail() {
+        let settings = Settings {
+            secrets_master_key_source: crate::settings::KeySource::Env,
+            ..Default::default()
+        };
+        match check_secrets(&settings) {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    msg.contains("SECRETS_MASTER_KEY not set"),
+                    "expected mention of missing env var, got: {msg}"
+                );
+            }
+            CheckResult::Pass(_) => {
+                // If SECRETS_MASTER_KEY happens to be set in the environment,
+                // Pass is correct — don't fail the test.
+            }
+            other => panic!(
+                "expected Fail or Pass for env key source, got: {}",
+                format_result(&other)
+            ),
         }
     }
 

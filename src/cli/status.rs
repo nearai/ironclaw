@@ -8,9 +8,35 @@ use std::path::PathBuf;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::settings::Settings;
 
+/// Load settings from JSON and TOML config files, matching the runtime
+/// priority: TOML overlay > settings.json > defaults.
+///
+/// This mirrors the loading chain in `Config::from_env_with_toml()` but
+/// without resolving the full `Config` (which requires async + secrets).
+fn load_settings() -> Settings {
+    load_settings_from(&Settings::default_path(), &Settings::default_toml_path())
+}
+
+/// Inner implementation with injectable paths (testable).
+fn load_settings_from(json_path: &std::path::Path, toml_path: &std::path::Path) -> Settings {
+    let mut settings = Settings::load_from(json_path);
+
+    match Settings::load_toml(toml_path) {
+        Ok(Some(toml_settings)) => {
+            settings.merge_from(&toml_settings);
+        }
+        Ok(None) => {} // File not found — fine for default path
+        Err(e) => {
+            eprintln!("Warning: failed to parse {}: {}", toml_path.display(), e);
+        }
+    }
+
+    settings
+}
+
 /// Run the status command, printing system health info.
 pub async fn run_status_command() -> anyhow::Result<()> {
-    let settings = Settings::default();
+    let settings = load_settings();
 
     println!("IronClaw Status");
     println!("===============\n");
@@ -57,7 +83,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
 
     // Session / Auth
     print!("  Session:     ");
-    let session_path = crate::llm::session::default_session_path();
+    let session_path = crate::config::llm::default_session_path();
     if session_path.exists() {
         println!("found ({})", session_path.display());
     } else {
@@ -208,4 +234,100 @@ fn default_tools_dir() -> PathBuf {
 
 fn default_channels_dir() -> PathBuf {
     ironclaw_base_dir().join("channels")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_settings_from;
+
+    /// Regression test for #354: load_settings_from must read config.toml.
+    #[test]
+    fn reads_toml_heartbeat_enabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json_path = dir.path().join("settings.json");
+        let toml_path = dir.path().join("config.toml");
+
+        // No JSON file — only TOML
+        std::fs::write(
+            &toml_path,
+            "[heartbeat]\nenabled = true\ninterval_secs = 600",
+        )
+        .expect("write toml");
+
+        let settings = load_settings_from(&json_path, &toml_path);
+        assert!(settings.heartbeat.enabled);
+        assert_eq!(settings.heartbeat.interval_secs, 600);
+    }
+
+    /// Without any config files, defaults are returned.
+    #[test]
+    fn defaults_without_config_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = load_settings_from(
+            &dir.path().join("nonexistent.json"),
+            &dir.path().join("nonexistent.toml"),
+        );
+        assert!(!settings.heartbeat.enabled);
+    }
+
+    /// settings.json is respected.
+    #[test]
+    fn reads_json_heartbeat_enabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json_path = dir.path().join("settings.json");
+        let toml_path = dir.path().join("nonexistent.toml");
+
+        std::fs::write(
+            &json_path,
+            r#"{"heartbeat":{"enabled":true,"interval_secs":900}}"#,
+        )
+        .expect("write json");
+
+        let settings = load_settings_from(&json_path, &toml_path);
+        assert!(settings.heartbeat.enabled);
+        assert_eq!(settings.heartbeat.interval_secs, 900);
+    }
+
+    /// TOML overlay wins over JSON settings.
+    #[test]
+    fn toml_overlay_wins_over_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json_path = dir.path().join("settings.json");
+        let toml_path = dir.path().join("config.toml");
+
+        std::fs::write(
+            &json_path,
+            r#"{"heartbeat":{"enabled":false,"interval_secs":100}}"#,
+        )
+        .expect("write json");
+        std::fs::write(
+            &toml_path,
+            "[heartbeat]\nenabled = true\ninterval_secs = 200",
+        )
+        .expect("write toml");
+
+        let settings = load_settings_from(&json_path, &toml_path);
+        assert!(settings.heartbeat.enabled);
+        assert_eq!(settings.heartbeat.interval_secs, 200);
+    }
+
+    /// Invalid TOML is warned but doesn't crash; falls back to JSON/defaults.
+    #[test]
+    fn invalid_toml_falls_back_gracefully() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json_path = dir.path().join("settings.json");
+        let toml_path = dir.path().join("config.toml");
+
+        std::fs::write(
+            &json_path,
+            r#"{"heartbeat":{"enabled":true,"interval_secs":500}}"#,
+        )
+        .expect("write json");
+        std::fs::write(&toml_path, "this is not valid toml [[[").expect("write bad toml");
+
+        let settings = load_settings_from(&json_path, &toml_path);
+        // Should fall back to JSON values, not crash
+        assert!(settings.heartbeat.enabled);
+        assert_eq!(settings.heartbeat.interval_secs, 500);
+    }
 }

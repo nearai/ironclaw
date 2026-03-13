@@ -81,6 +81,7 @@ impl WasmChannelLoader {
                     let cap_bytes = fs::read(cap_path).await?;
                     let cap_file = ChannelCapabilitiesFile::from_bytes(&cap_bytes)
                         .map_err(|e| WasmChannelError::InvalidCapabilities(e.to_string()))?;
+                    cap_file.validate();
 
                     // Debug: log raw capabilities
                     tracing::debug!(
@@ -88,6 +89,14 @@ impl WasmChannelLoader {
                         raw_capabilities = ?cap_file.capabilities,
                         "Parsed capabilities file"
                     );
+
+                    // Check WIT version compatibility
+                    crate::tools::wasm::loader::check_wit_version_compat(
+                        name,
+                        cap_file.wit_version.as_deref(),
+                        crate::tools::wasm::WIT_CHANNEL_VERSION,
+                    )
+                    .map_err(|e| WasmChannelError::IncompatibleWitVersion(e.to_string()))?;
 
                     let caps = cap_file.to_capabilities();
 
@@ -175,18 +184,32 @@ impl WasmChannelLoader {
     /// └── telegram.capabilities.json
     /// ```
     pub async fn load_from_dir(&self, dir: &Path) -> Result<LoadResults, WasmChannelError> {
-        if !dir.is_dir() {
-            return Err(WasmChannelError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotADirectory,
-                format!("{} is not a directory", dir.display()),
-            )));
+        match fs::metadata(dir).await {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(WasmChannelError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotADirectory,
+                    format!("{} is not a directory", dir.display()),
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmChannelError::Io(e)),
         }
 
         let mut results = LoadResults::default();
 
         // Collect all .wasm entries first, then load in parallel
         let mut channel_entries = Vec::new();
-        let mut entries = fs::read_dir(dir).await?;
+        // Handle TOCTOU: if read_dir fails with NotFound, treat as empty
+        let mut entries = match fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LoadResults::default());
+            }
+            Err(e) => return Err(WasmChannelError::Io(e)),
+        };
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
@@ -274,6 +297,13 @@ impl LoadedChannel {
         self.capabilities_file
             .as_ref()
             .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()))
+    }
+
+    /// Get the HMAC-SHA256 signing secret name from capabilities.
+    pub fn hmac_secret_name(&self) -> Option<String> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()))
     }
 
     /// Get the webhook secret name from capabilities.
@@ -469,5 +499,22 @@ mod tests {
         // Empty name
         let result = loader.load_from_files("", &wasm_path, None).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_from_dir_returns_empty_when_dir_missing() {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None);
+
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent_channels_dir");
+
+        let results = loader.load_from_dir(&missing).await;
+
+        // Must succeed with empty results, not error
+        let results = results.expect("missing dir should return Ok, not Err");
+        assert!(results.loaded.is_empty());
+        assert!(results.errors.is_empty());
     }
 }

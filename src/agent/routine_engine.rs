@@ -25,10 +25,20 @@ use crate::agent::routine::{
 };
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
+use crate::context::JobContext;
 use crate::db::Database;
 use crate::error::RoutineError;
-use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
+use crate::llm::{
+    ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
+};
+use crate::safety::SafetyLayer;
+use crate::tools::{ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry};
 use crate::workspace::Workspace;
+
+enum EventMatcher {
+    Message { routine: Routine, regex: Regex },
+    System { routine: Routine },
+}
 
 /// The routine execution engine.
 pub struct RoutineEngine {
@@ -40,13 +50,18 @@ pub struct RoutineEngine {
     notify_tx: mpsc::Sender<OutgoingResponse>,
     /// Currently running routine count (across all routines).
     running_count: Arc<AtomicUsize>,
-    /// Compiled event regex cache: routine_id -> compiled regex.
-    event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
+    /// Cached matchers for all event-driven routines.
+    event_cache: Arc<RwLock<Vec<EventMatcher>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
+    /// Tool registry for lightweight routine tool execution.
+    tools: Arc<ToolRegistry>,
+    /// Safety layer for tool output sanitization.
+    safety: Arc<SafetyLayer>,
 }
 
 impl RoutineEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: RoutineConfig,
         store: Arc<dyn Database>,
@@ -54,6 +69,8 @@ impl RoutineEngine {
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
         scheduler: Option<Arc<Scheduler>>,
+        tools: Arc<ToolRegistry>,
+        safety: Arc<SafetyLayer>,
     ) -> Self {
         Self {
             config,
@@ -64,6 +81,8 @@ impl RoutineEngine {
             running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
             scheduler,
+            tools,
+            safety,
         }
     }
 
@@ -73,9 +92,12 @@ impl RoutineEngine {
             Ok(routines) => {
                 let mut cache = Vec::new();
                 for routine in routines {
-                    if let Trigger::Event { ref pattern, .. } = routine.trigger {
-                        match Regex::new(pattern) {
-                            Ok(re) => cache.push((routine.id, routine.clone(), re)),
+                    match &routine.trigger {
+                        Trigger::Event { pattern, .. } => match Regex::new(pattern) {
+                            Ok(re) => cache.push(EventMatcher::Message {
+                                routine: routine.clone(),
+                                regex: re,
+                            }),
                             Err(e) => {
                                 tracing::warn!(
                                     routine = %routine.name,
@@ -83,12 +105,18 @@ impl RoutineEngine {
                                     pattern, e
                                 );
                             }
+                        },
+                        Trigger::SystemEvent { .. } => {
+                            cache.push(EventMatcher::System {
+                                routine: routine.clone(),
+                            });
                         }
+                        _ => {}
                     }
                 }
                 let count = cache.len();
                 *self.event_cache.write().await = cache;
-                tracing::debug!("Refreshed event cache: {} routines", count);
+                tracing::trace!("Refreshed event cache: {} routines", count);
             }
             Err(e) => {
                 tracing::error!("Failed to refresh event cache: {}", e);
@@ -104,7 +132,11 @@ impl RoutineEngine {
         let cache = self.event_cache.read().await;
         let mut fired = 0;
 
-        for (_, routine, re) in cache.iter() {
+        for matcher in cache.iter() {
+            let (routine, re) = match matcher {
+                EventMatcher::Message { routine, regex } => (routine, regex),
+                EventMatcher::System { .. } => continue,
+            };
             // Channel filter
             if let Trigger::Event {
                 channel: Some(ch), ..
@@ -121,13 +153,13 @@ impl RoutineEngine {
 
             // Cooldown check
             if !self.check_cooldown(routine) {
-                tracing::debug!(routine = %routine.name, "Skipped: cooldown active");
+                tracing::trace!(routine = %routine.name, "Skipped: cooldown active");
                 continue;
             }
 
             // Concurrent run check
             if !self.check_concurrent(routine).await {
-                tracing::debug!(routine = %routine.name, "Skipped: max concurrent reached");
+                tracing::trace!(routine = %routine.name, "Skipped: max concurrent reached");
                 continue;
             }
 
@@ -139,6 +171,88 @@ impl RoutineEngine {
 
             let detail = truncate(&message.content, 200);
             self.spawn_fire(routine.clone(), "event", Some(detail));
+            fired += 1;
+        }
+
+        fired
+    }
+
+    /// Emit a structured event to system-event routines.
+    ///
+    /// Returns the number of routines that were fired.
+    pub async fn emit_system_event(
+        &self,
+        source: &str,
+        event_type: &str,
+        payload: &serde_json::Value,
+        user_id: Option<&str>,
+    ) -> usize {
+        let cache = self.event_cache.read().await;
+        let mut fired = 0;
+
+        for matcher in cache.iter() {
+            let routine = match matcher {
+                EventMatcher::System { routine } => routine,
+                EventMatcher::Message { .. } => continue,
+            };
+
+            let Trigger::SystemEvent {
+                source: expected_source,
+                event_type: expected_event,
+                filters,
+            } = &routine.trigger
+            else {
+                continue;
+            };
+
+            if !expected_source.eq_ignore_ascii_case(source)
+                || !expected_event.eq_ignore_ascii_case(event_type)
+            {
+                continue;
+            }
+
+            if let Some(uid) = user_id
+                && routine.user_id != uid
+            {
+                continue;
+            }
+
+            let mut matched = true;
+            for (key, expected) in filters {
+                let Some(actual) = payload
+                    .get(key)
+                    .and_then(crate::agent::routine::json_value_as_filter_string)
+                else {
+                    tracing::debug!(routine = %routine.name, filter_key = %key, "Filter key not found in payload");
+                    matched = false;
+                    break;
+                };
+                if !actual.eq_ignore_ascii_case(expected) {
+                    matched = false;
+                    break;
+                }
+            }
+            if !matched {
+                continue;
+            }
+
+            if !self.check_cooldown(routine) {
+                tracing::debug!(routine = %routine.name, "Skipped: cooldown active");
+                continue;
+            }
+
+            if !self.check_concurrent(routine).await {
+                tracing::debug!(routine = %routine.name, "Skipped: max concurrent reached");
+                continue;
+            }
+
+            if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
+                tracing::warn!(routine = %routine.name, "Skipped: global max concurrent reached");
+                continue;
+            }
+
+            let detail = truncate(&format!("{source}:{event_type}"), 200);
+            self.spawn_fire(routine.clone(), "system_event", Some(detail));
             fired += 1;
         }
 
@@ -169,7 +283,7 @@ impl RoutineEngine {
                 continue;
             }
 
-            let detail = if let Trigger::Cron { ref schedule } = routine.trigger {
+            let detail = if let Trigger::Cron { ref schedule, .. } = routine.trigger {
                 Some(schedule.clone())
             } else {
                 None
@@ -180,7 +294,14 @@ impl RoutineEngine {
     }
 
     /// Fire a routine manually (from tool call or CLI).
-    pub async fn fire_manual(&self, routine_id: Uuid) -> Result<Uuid, RoutineError> {
+    ///
+    /// Bypasses cooldown checks (those only apply to cron/event triggers).
+    /// Still enforces enabled check and concurrent run limit.
+    pub async fn fire_manual(
+        &self,
+        routine_id: Uuid,
+        user_id: Option<&str>,
+    ) -> Result<Uuid, RoutineError> {
         let routine = self
             .store
             .get_routine(routine_id)
@@ -189,6 +310,13 @@ impl RoutineEngine {
                 reason: e.to_string(),
             })?
             .ok_or(RoutineError::NotFound { id: routine_id })?;
+
+        // Enforce ownership when a user_id is provided (gateway calls).
+        if let Some(uid) = user_id
+            && routine.user_id != uid
+        {
+            return Err(RoutineError::NotAuthorized { id: routine_id });
+        }
 
         if !routine.enabled {
             return Err(RoutineError::Disabled {
@@ -225,12 +353,15 @@ impl RoutineEngine {
 
         // Execute inline for manual triggers (caller wants to wait)
         let engine = EngineContext {
+            config: self.config.clone(),
             store: self.store.clone(),
             llm: self.llm.clone(),
             workspace: self.workspace.clone(),
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            tools: self.tools.clone(),
+            safety: self.safety.clone(),
         };
 
         tokio::spawn(async move {
@@ -257,12 +388,15 @@ impl RoutineEngine {
         };
 
         let engine = EngineContext {
+            config: self.config.clone(),
             store: self.store.clone(),
             llm: self.llm.clone(),
             workspace: self.workspace.clone(),
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
+            tools: self.tools.clone(),
+            safety: self.safety.clone(),
         };
 
         // Record the run in DB, then spawn execution
@@ -304,12 +438,15 @@ impl RoutineEngine {
 
 /// Shared context passed to the execution function.
 struct EngineContext {
+    config: RoutineConfig,
     store: Arc<dyn Database>,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,
     running_count: Arc<AtomicUsize>,
     scheduler: Option<Arc<Scheduler>>,
+    tools: Arc<ToolRegistry>,
+    safety: Arc<SafetyLayer>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -322,12 +459,37 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             prompt,
             context_paths,
             max_tokens,
-        } => execute_lightweight(&ctx, &routine, prompt, context_paths, *max_tokens).await,
+            use_tools,
+            max_tool_rounds,
+        } => {
+            execute_lightweight(
+                &ctx,
+                &routine,
+                prompt,
+                context_paths,
+                *max_tokens,
+                *use_tools,
+                *max_tool_rounds,
+            )
+            .await
+        }
         RoutineAction::FullJob {
             title,
             description,
             max_iterations,
-        } => execute_full_job(&ctx, &routine, &run, title, description, *max_iterations).await,
+            tool_permissions,
+        } => {
+            execute_full_job(
+                &ctx,
+                &routine,
+                &run,
+                title,
+                description,
+                *max_iterations,
+                tool_permissions,
+            )
+            .await
+        }
     };
 
     // Decrement running count
@@ -353,8 +515,12 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
 
     // Update routine runtime state
     let now = Utc::now();
-    let next_fire = if let Trigger::Cron { ref schedule } = routine.trigger {
-        next_cron_fire(schedule).unwrap_or(None)
+    let next_fire = if let Trigger::Cron {
+        ref schedule,
+        ref timezone,
+    } = routine.trigger
+    {
+        next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None)
     } else {
         None
     };
@@ -380,6 +546,39 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
     }
 
+    // Persist routine result to its dedicated conversation thread
+    let thread_id = match ctx
+        .store
+        .get_or_create_routine_conversation(routine.id, &routine.name, &routine.user_id)
+        .await
+    {
+        Ok(conv_id) => {
+            tracing::debug!(
+                routine = %routine.name,
+                routine_id = %routine.id,
+                conversation_id = %conv_id,
+                "Resolved routine conversation thread"
+            );
+            // Record the run result as a conversation message
+            let msg = match (&summary, status) {
+                (Some(s), _) => format!("[{}] {}: {}", run.trigger_type, status, s),
+                (None, _) => format!("[{}] {}", run.trigger_type, status),
+            };
+            if let Err(e) = ctx
+                .store
+                .add_conversation_message(conv_id, "assistant", &msg)
+                .await
+            {
+                tracing::error!(routine = %routine.name, "Failed to persist routine message: {}", e);
+            }
+            Some(conv_id.to_string())
+        }
+        Err(e) => {
+            tracing::error!(routine = %routine.name, "Failed to get routine conversation: {}", e);
+            None
+        }
+    };
+
     // Send notifications based on config
     send_notification(
         &ctx.notify_tx,
@@ -387,6 +586,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         &routine.name,
         status,
         summary.as_deref(),
+        thread_id.as_deref(),
     )
     .await;
 }
@@ -418,6 +618,7 @@ async fn execute_full_job(
     title: &str,
     description: &str,
     max_iterations: u32,
+    tool_permissions: &[String],
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let scheduler = ctx
         .scheduler
@@ -426,10 +627,26 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let metadata = serde_json::json!({ "max_iterations": max_iterations });
+    let mut metadata = serde_json::json!({ "max_iterations": max_iterations });
+    // Carry the routine's notify config in job metadata so the message tool
+    // can resolve channel/target per-job without global state mutation.
+    if let Some(channel) = &routine.notify.channel {
+        metadata["notify_channel"] = serde_json::json!(channel);
+    }
+    metadata["notify_user"] = serde_json::json!(&routine.notify.user);
+
+    // Build approval context: UnlessAutoApproved tools are auto-approved for routines;
+    // Always tools require explicit listing in tool_permissions.
+    let approval_context = ApprovalContext::autonomous_with_tools(tool_permissions.iter().cloned());
 
     let job_id = scheduler
-        .dispatch_job(&routine.user_id, title, description, Some(metadata))
+        .dispatch_job_with_context(
+            &routine.user_id,
+            title,
+            description,
+            Some(metadata),
+            approval_context,
+        )
         .await
         .map_err(|e| RoutineError::JobDispatchFailed {
             reason: format!("failed to dispatch job: {e}"),
@@ -456,13 +673,18 @@ async fn execute_full_job(
     Ok((RunStatus::Ok, Some(summary), None))
 }
 
-/// Execute a lightweight routine (single LLM call).
+/// Execute a lightweight routine with optional tool support.
+///
+/// If tools are enabled, this runs a simplified agentic loop (max 3-5 iterations).
+/// If tools are disabled, this does a single LLM call (original behavior).
 async fn execute_lightweight(
     ctx: &EngineContext,
     routine: &Routine,
     prompt: &str,
     context_paths: &[String],
     max_tokens: u32,
+    use_tools: bool,
+    max_tool_rounds: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Load context from workspace
     let mut context_parts = Vec::new();
@@ -488,7 +710,7 @@ async fn execute_lightweight(
         Err(_) => None,
     };
 
-    // Build the prompt
+    // Build the user-facing prompt
     let mut full_prompt = String::new();
     full_prompt.push_str(prompt);
 
@@ -516,15 +738,6 @@ async fn execute_lightweight(
         }
     };
 
-    let messages = if system_prompt.is_empty() {
-        vec![ChatMessage::user(&full_prompt)]
-    } else {
-        vec![
-            ChatMessage::system(&system_prompt),
-            ChatMessage::user(&full_prompt),
-        ]
-    };
-
     // Determine max_tokens from model metadata with fallback
     let effective_max_tokens = match ctx.llm.model_metadata().await {
         Ok(meta) => {
@@ -532,6 +745,46 @@ async fn execute_lightweight(
             from_api.max(max_tokens)
         }
         Err(_) => max_tokens,
+    };
+
+    // If tools are enabled (both globally and per-routine), use the tool execution loop
+    if use_tools && ctx.config.lightweight_tools_enabled {
+        execute_lightweight_with_tools(
+            ctx,
+            routine,
+            &system_prompt,
+            &full_prompt,
+            effective_max_tokens,
+            max_tool_rounds,
+        )
+        .await
+    } else {
+        execute_lightweight_no_tools(
+            ctx,
+            routine,
+            &system_prompt,
+            &full_prompt,
+            effective_max_tokens,
+        )
+        .await
+    }
+}
+
+/// Execute a lightweight routine without tool support (original single-call behavior).
+async fn execute_lightweight_no_tools(
+    ctx: &EngineContext,
+    _routine: &Routine,
+    system_prompt: &str,
+    full_prompt: &str,
+    effective_max_tokens: u32,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let messages = if system_prompt.is_empty() {
+        vec![ChatMessage::user(full_prompt)]
+    } else {
+        vec![
+            ChatMessage::system(system_prompt),
+            ChatMessage::user(full_prompt),
+        ]
     };
 
     let request = CompletionRequest::new(messages)
@@ -546,12 +799,28 @@ async fn execute_lightweight(
             reason: e.to_string(),
         })?;
 
-    let content = response.content.trim();
-    let tokens_used = Some((response.input_tokens + response.output_tokens) as i32);
+    handle_text_response(
+        &response.content,
+        response.finish_reason,
+        response.input_tokens,
+        response.output_tokens,
+    )
+}
 
-    // Empty content guard (same as heartbeat)
+/// Handle a text-only LLM response in lightweight routine execution.
+///
+/// Checks for the ROUTINE_OK sentinel, validates content, and returns appropriate status.
+fn handle_text_response(
+    content: &str,
+    finish_reason: FinishReason,
+    total_input_tokens: u32,
+    total_output_tokens: u32,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let content = content.trim();
+
+    // Empty content guard
     if content.is_empty() {
-        return if response.finish_reason == FinishReason::Length {
+        return if finish_reason == FinishReason::Length {
             Err(RoutineError::TruncatedResponse)
         } else {
             Err(RoutineError::EmptyResponse)
@@ -560,10 +829,269 @@ async fn execute_lightweight(
 
     // Check for the "nothing to do" sentinel
     if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
-        return Ok((RunStatus::Ok, None, tokens_used));
+        let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+        return Ok((RunStatus::Ok, None, total_tokens));
     }
 
-    Ok((RunStatus::Attention, Some(content.to_string()), tokens_used))
+    let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
+    Ok((
+        RunStatus::Attention,
+        Some(content.to_string()),
+        total_tokens,
+    ))
+}
+
+/// Execute a lightweight routine with tool execution support (agentic loop).
+///
+/// This is a simplified version of the full dispatcher loop:
+/// - Max 3-5 iterations (configurable)
+/// - Sequential tool execution (not parallel)
+/// - Auto-approval of non-Always tools
+/// - No hooks or approval dialogs
+async fn execute_lightweight_with_tools(
+    ctx: &EngineContext,
+    routine: &Routine,
+    system_prompt: &str,
+    full_prompt: &str,
+    effective_max_tokens: u32,
+    max_tool_rounds: u32,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let mut messages = if system_prompt.is_empty() {
+        vec![ChatMessage::user(full_prompt)]
+    } else {
+        vec![
+            ChatMessage::system(system_prompt),
+            ChatMessage::user(full_prompt),
+        ]
+    };
+
+    let max_iterations = max_tool_rounds
+        .min(ctx.config.lightweight_max_iterations)
+        .min(5);
+    let mut iteration = 0;
+    let mut total_input_tokens = 0;
+    let mut total_output_tokens = 0;
+
+    // Create a minimal job context for tool execution with unique run ID
+    let run_id = Uuid::new_v4();
+    let job_ctx = JobContext {
+        job_id: run_id,
+        user_id: routine.user_id.clone(),
+        title: "Lightweight Routine".to_string(),
+        description: routine.name.clone(),
+        ..Default::default()
+    };
+
+    loop {
+        iteration += 1;
+
+        // Force text-only response at iteration limit
+        let force_text = iteration >= max_iterations;
+
+        if force_text {
+            // Final iteration: no tools, just get text response
+            let request = CompletionRequest::new(messages)
+                .with_max_tokens(effective_max_tokens)
+                .with_temperature(0.3);
+
+            let response =
+                ctx.llm
+                    .complete(request)
+                    .await
+                    .map_err(|e| RoutineError::LlmFailed {
+                        reason: e.to_string(),
+                    })?;
+
+            total_input_tokens += response.input_tokens;
+            total_output_tokens += response.output_tokens;
+
+            return handle_text_response(
+                &response.content,
+                response.finish_reason,
+                total_input_tokens,
+                total_output_tokens,
+            );
+        } else {
+            // Tool-enabled iteration
+            let tool_defs = ctx
+                .tools
+                .tool_definitions_excluding(ROUTINE_TOOL_DENYLIST)
+                .await;
+
+            let request = ToolCompletionRequest::new(messages.clone(), tool_defs)
+                .with_max_tokens(effective_max_tokens)
+                .with_temperature(0.3);
+
+            let response = ctx.llm.complete_with_tools(request).await.map_err(|e| {
+                RoutineError::LlmFailed {
+                    reason: e.to_string(),
+                }
+            })?;
+
+            total_input_tokens += response.input_tokens;
+            total_output_tokens += response.output_tokens;
+
+            // Check if LLM returned text (no tool calls)
+            if response.tool_calls.is_empty() {
+                let content = response.content.unwrap_or_default();
+                return handle_text_response(
+                    &content,
+                    response.finish_reason,
+                    total_input_tokens,
+                    total_output_tokens,
+                );
+            }
+
+            // LLM returned tool calls: add assistant message and execute tools
+            messages.push(ChatMessage::assistant_with_tool_calls(
+                response.content.clone(),
+                response.tool_calls.clone(),
+            ));
+
+            // Execute tools sequentially
+            for tc in response.tool_calls {
+                let result = execute_routine_tool(ctx, &job_ctx, &tc).await;
+
+                // Sanitize and wrap result (including errors)
+                let result_content = match result {
+                    Ok(output) => {
+                        let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &output);
+                        ctx.safety.wrap_for_llm(
+                            &tc.name,
+                            &sanitized.content,
+                            sanitized.was_modified,
+                        )
+                    }
+                    Err(e) => {
+                        let error_msg = format!("Tool '{}' failed: {}", tc.name, e);
+                        let sanitized = ctx.safety.sanitize_tool_output(&tc.name, &error_msg);
+                        ctx.safety.wrap_for_llm(
+                            &tc.name,
+                            &sanitized.content,
+                            sanitized.was_modified,
+                        )
+                    }
+                };
+
+                // Add tool result to context
+                messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &result_content));
+            }
+
+            // Continue loop to next LLM call
+        }
+    }
+}
+
+/// Tools that must never be callable from lightweight routines.
+///
+/// These tools pose autonomy-escalation risks: a routine could self-replicate,
+/// modify its own triggers/prompts, delete other routines, or restart the agent.
+const ROUTINE_TOOL_DENYLIST: &[&str] = &[
+    "routine_create",
+    "routine_update",
+    "routine_delete",
+    "routine_fire",
+    "restart",
+];
+
+/// Execute a single tool for a lightweight routine.
+async fn execute_routine_tool(
+    ctx: &EngineContext,
+    job_ctx: &JobContext,
+    tc: &ToolCall,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Block tools that pose autonomy-escalation risks
+    if ROUTINE_TOOL_DENYLIST.contains(&tc.name.as_str()) {
+        return Err(format!(
+            "Tool '{}' is not available in lightweight routines",
+            tc.name
+        )
+        .into());
+    }
+
+    // Check if tool exists
+    let tool = ctx
+        .tools
+        .get(&tc.name)
+        .await
+        .ok_or_else(|| format!("Tool '{}' not found", tc.name))?;
+
+    // Check approval requirement: only allow Never tools in lightweight routines.
+    // UnlessAutoApproved and Always tools are blocked to prevent prompt injection attacks.
+    // Lightweight routines can be triggered by external events and may process untrusted data,
+    // making them vulnerable to prompt injection that could trick the LLM into calling
+    // sensitive tools. Blocking these tools entirely is the safest approach.
+    match tool.requires_approval(&tc.arguments) {
+        ApprovalRequirement::Never => {}
+        ApprovalRequirement::UnlessAutoApproved | ApprovalRequirement::Always => {
+            return Err(format!(
+                "Tool '{}' requires manual approval and cannot be used in lightweight routines",
+                tc.name
+            )
+            .into());
+        }
+    }
+
+    // Validate tool parameters
+    let validation = ctx.safety.validator().validate_tool_params(&tc.arguments);
+    if !validation.is_valid {
+        let details = validation
+            .errors
+            .iter()
+            .map(|e| format!("{}: {}", e.field, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("Invalid tool parameters: {}", details).into());
+    }
+
+    // Execute with per-tool timeout
+    let timeout = tool.execution_timeout();
+    let start = std::time::Instant::now();
+    let result = tokio::time::timeout(timeout, async {
+        tool.execute(tc.arguments.clone(), job_ctx).await
+    })
+    .await;
+    let elapsed = start.elapsed();
+
+    // Log tool execution result (single consolidated log)
+    match &result {
+        Ok(Ok(_)) => {
+            tracing::debug!(
+                tool = %tc.name,
+                elapsed_ms = elapsed.as_millis() as u64,
+                status = "succeeded",
+                "Lightweight routine tool execution completed"
+            );
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(
+                tool = %tc.name,
+                elapsed_ms = elapsed.as_millis() as u64,
+                error = %e,
+                status = "failed",
+                "Lightweight routine tool execution completed"
+            );
+        }
+        Err(_) => {
+            tracing::debug!(
+                tool = %tc.name,
+                elapsed_ms = elapsed.as_millis() as u64,
+                timeout_secs = timeout.as_secs(),
+                status = "timeout",
+                "Lightweight routine tool execution completed"
+            );
+        }
+    }
+
+    let result = result
+        .map_err(|_| ToolError::Timeout(timeout))
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
+    // Serialize result to JSON string
+    let result_str =
+        serde_json::to_string(&result.result).unwrap_or_else(|_| "<serialize error>".to_string());
+    Ok(result_str)
 }
 
 /// Send a notification based on the routine's notify config and run status.
@@ -573,6 +1101,7 @@ async fn send_notification(
     routine_name: &str,
     status: RunStatus,
     summary: Option<&str>,
+    thread_id: Option<&str>,
 ) {
     let should_notify = match status {
         RunStatus::Ok => notify.on_success,
@@ -599,7 +1128,7 @@ async fn send_notification(
 
     let response = OutgoingResponse {
         content: message,
-        thread_id: None,
+        thread_id: thread_id.map(String::from),
         attachments: Vec::new(),
         metadata: serde_json::json!({
             "source": "routine",
@@ -621,9 +1150,11 @@ pub fn spawn_cron_ticker(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Run one check immediately so routines due at startup don't wait
+        // an extra full polling interval.
+        engine.check_cron_triggers().await;
+
         let mut ticker = tokio::time::interval(interval);
-        // Skip immediate first tick
-        ticker.tick().await;
 
         loop {
             ticker.tick().await;
@@ -644,6 +1175,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{NotifyConfig, RunStatus};
+    use crate::config::RoutineConfig;
 
     #[test]
     fn test_notification_gating() {
@@ -671,5 +1203,168 @@ mod tests {
         ] {
             let _ = status.to_string();
         }
+    }
+
+    #[test]
+    fn test_routine_config_lightweight_tools_enabled_default() {
+        let config = RoutineConfig::default();
+        assert!(
+            config.lightweight_tools_enabled,
+            "Tools should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn test_routine_config_lightweight_max_iterations_default() {
+        let config = RoutineConfig::default();
+        assert_eq!(
+            config.lightweight_max_iterations, 3,
+            "Default should be 3 iterations"
+        );
+    }
+
+    #[test]
+    fn test_routine_config_can_hold_uncapped_max_iterations() {
+        // The `RoutineConfig` struct can hold a value greater than the safety cap.
+        let config = RoutineConfig {
+            lightweight_max_iterations: 10, // Set a value higher than the cap.
+            ..RoutineConfig::default()
+        };
+        // The actual capping to a maximum of 5 is handled at runtime in
+        // `execute_lightweight_with_tools` and during config resolution from env vars.
+        assert_eq!(
+            config.lightweight_max_iterations, 10,
+            "Config struct should store the provided value"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_routine_name_replaces_special_chars() {
+        let test_cases = vec![
+            ("valid-routine", "valid-routine"),
+            ("routine_with_underscore", "routine_with_underscore"),
+            ("Routine With Spaces", "Routine_With_Spaces"),
+            ("routine/with/slashes", "routine_with_slashes"),
+            ("routine@with#symbols", "routine_with_symbols"),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = super::sanitize_routine_name(input);
+            assert_eq!(
+                result, expected,
+                "sanitize_routine_name({}) should be {}",
+                input, expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_routine_name_preserves_alphanumeric_dash_underscore() {
+        let names = vec!["routine123", "routine-name", "routine_name", "ROUTINE"];
+        for name in names {
+            let result = super::sanitize_routine_name(name);
+            assert_eq!(result, name, "Should preserve {}", name);
+        }
+    }
+
+    #[test]
+    fn test_routine_sentinel_detection_exact_match() {
+        // The execute_lightweight_no_tools checks: content == "ROUTINE_OK" || content.contains("ROUTINE_OK")
+        // After trim(), whitespace is removed
+        let test_cases = vec![
+            ("ROUTINE_OK", true),
+            ("  ROUTINE_OK  ", true), // After trim, whitespace is removed so matches
+            ("something ROUTINE_OK something", true),
+            ("ROUTINE_OK is done", true),
+            ("done ROUTINE_OK", true),
+            ("no sentinel here", false),
+        ];
+
+        for (content, should_match) in test_cases {
+            let trimmed = content.trim();
+            let matches = trimmed == "ROUTINE_OK" || trimmed.contains("ROUTINE_OK");
+            assert_eq!(
+                matches, should_match,
+                "Content '{}' sentinel detection should be {}, got {}",
+                content, should_match, matches
+            );
+        }
+    }
+
+    #[test]
+    fn test_approval_requirement_pattern_matching() {
+        // Test the approval requirement logic (Never, UnlessAutoApproved, Always)
+        use crate::tools::ApprovalRequirement;
+
+        let requirements = vec![
+            (ApprovalRequirement::Never, "auto-approved"),
+            (ApprovalRequirement::UnlessAutoApproved, "auto-approved"),
+            (ApprovalRequirement::Always, "blocks"),
+        ];
+
+        for (req, expected) in requirements {
+            let can_auto_approve = matches!(
+                req,
+                ApprovalRequirement::Never | ApprovalRequirement::UnlessAutoApproved
+            );
+            let label = if can_auto_approve {
+                "auto-approved"
+            } else {
+                "blocks"
+            };
+            assert_eq!(label, expected, "Approval pattern should match");
+        }
+    }
+
+    #[test]
+    fn test_routine_tool_denylist_blocks_self_management_tools() {
+        let denylisted = vec![
+            "routine_create",
+            "routine_update",
+            "routine_delete",
+            "routine_fire",
+            "restart",
+        ];
+        for tool in &denylisted {
+            assert!(
+                super::ROUTINE_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should be in ROUTINE_TOOL_DENYLIST",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_routine_tool_denylist_allows_safe_tools() {
+        let allowed = vec!["echo", "time", "json", "http", "memory_search", "shell"];
+        for tool in &allowed {
+            assert!(
+                !super::ROUTINE_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should NOT be in ROUTINE_TOOL_DENYLIST",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_response_handling() {
+        // Simulate the empty content guard logic
+        let empty_content = "";
+        let finish_reason_length = crate::llm::FinishReason::Length;
+        let finish_reason_stop = crate::llm::FinishReason::Stop;
+
+        assert!(
+            empty_content.trim().is_empty(),
+            "Should detect empty content"
+        );
+        assert_eq!(finish_reason_length, crate::llm::FinishReason::Length);
+        assert_eq!(finish_reason_stop, crate::llm::FinishReason::Stop);
+    }
+
+    #[test]
+    fn test_truncate_adds_ellipsis_when_over_limit() {
+        let input = "abcdefghijk";
+        let out = super::truncate(input, 5);
+        assert_eq!(out, "abcde...");
     }
 }

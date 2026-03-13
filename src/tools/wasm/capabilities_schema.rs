@@ -35,12 +35,32 @@ use serde::{Deserialize, Serialize};
 use crate::secrets::{CredentialLocation, CredentialMapping};
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WorkspaceCapability,
+    ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
 };
 
 /// Root schema for a capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CapabilitiesFile {
+    /// Human-readable description of what the tool does.
+    /// Used as the `Tool::description()` return value.
+    /// If omitted, a generic fallback is used (with a warning).
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// JSON Schema for the tool's input parameters.
+    /// Used as the `Tool::parameters_schema()` return value.
+    /// If omitted, a permissive fallback is used (with a warning).
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+
+    /// Extension version (semver).
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// WIT interface version this extension was compiled against (semver).
+    #[serde(default)]
+    pub wit_version: Option<String>,
+
     /// HTTP request capability.
     #[serde(default)]
     pub http: Option<HttpCapabilitySchema>,
@@ -56,6 +76,10 @@ pub struct CapabilitiesFile {
     /// Workspace file read access.
     #[serde(default)]
     pub workspace: Option<WorkspaceCapabilitySchema>,
+
+    /// Tool webhook authentication/signature configuration.
+    #[serde(default)]
+    pub webhook: Option<WebhookCapabilitySchema>,
 
     /// Authentication setup instructions.
     /// Used by `ironclaw config` to guide users through auth setup.
@@ -95,14 +119,70 @@ impl CapabilitiesFile {
     fn resolve_nested(mut self) -> Self {
         if let Some(inner) = self.capabilities.take() {
             let inner = inner.resolve_nested();
+            self.description = self.description.or(inner.description);
+            self.parameters = self.parameters.or(inner.parameters);
             self.http = self.http.or(inner.http);
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
             self.workspace = self.workspace.or(inner.workspace);
+            self.webhook = self.webhook.or(inner.webhook);
             self.auth = self.auth.or(inner.auth);
             self.setup = self.setup.or(inner.setup);
         }
         self
+    }
+
+    /// Validate the capabilities file and emit warnings for common misconfigurations.
+    ///
+    /// Called once at load time to catch issues early. Warnings are emitted via
+    /// `tracing::warn` so they show up in startup logs without blocking loading.
+    pub fn validate(&self, name: &str) {
+        const MIN_PROMPT_LENGTH: usize = 30;
+
+        // setup.required_secrets present but no auth section → auth card won't display
+        if let Some(setup) = &self.setup {
+            if !setup.required_secrets.is_empty() && self.auth.is_none() {
+                tracing::warn!(
+                    tool = name,
+                    "setup.required_secrets defined but no 'auth' section — \
+                     chat-based auth card will not display for this tool"
+                );
+            }
+
+            // Check for short prompts
+            for secret in &setup.required_secrets {
+                if secret.prompt.len() < MIN_PROMPT_LENGTH {
+                    tracing::warn!(
+                        tool = name,
+                        secret = secret.name,
+                        prompt = secret.prompt,
+                        "setup.required_secrets prompt is shorter than {} chars — \
+                         consider a more descriptive prompt that tells the user where to find this value",
+                        MIN_PROMPT_LENGTH
+                    );
+                }
+            }
+        }
+
+        // Manual auth (no OAuth) checks
+        if let Some(auth) = &self.auth
+            && auth.oauth.is_none()
+        {
+            if auth.setup_url.is_none() {
+                tracing::warn!(
+                    tool = name,
+                    "auth section has no OAuth and no setup_url — \
+                     user has no link to obtain credentials"
+                );
+            }
+            if auth.instructions.is_none() {
+                tracing::warn!(
+                    tool = name,
+                    "auth section has no OAuth and no instructions — \
+                     user has no guidance on how to obtain credentials"
+                );
+            }
+        }
     }
 
     /// Convert to runtime Capabilities.
@@ -135,6 +215,10 @@ impl CapabilitiesFile {
                 allowed_prefixes: workspace.allowed_prefixes.clone(),
                 reader: None, // Injected at runtime
             });
+        }
+
+        if let Some(webhook) = &self.webhook {
+            caps.webhook = Some(webhook.to_webhook_capability());
         }
 
         caps
@@ -358,6 +442,46 @@ pub struct WorkspaceCapabilitySchema {
     pub allowed_prefixes: Vec<String>,
 }
 
+/// Webhook capability schema for tools.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WebhookCapabilitySchema {
+    /// HTTP header name for secret validation.
+    #[serde(default)]
+    pub secret_header: Option<String>,
+    /// Secret name in secrets store for shared-secret validation.
+    #[serde(default)]
+    pub secret_name: Option<String>,
+    /// Secret name in secrets store containing Ed25519 public key.
+    #[serde(default)]
+    pub signature_key_secret_name: Option<String>,
+    /// Secret name in secrets store for HMAC-SHA256 signing.
+    #[serde(default)]
+    pub hmac_secret_name: Option<String>,
+    /// Signature header for HMAC verification.
+    #[serde(default)]
+    pub hmac_signature_header: Option<String>,
+    /// Optional timestamp header for Slack-style v0 verification.
+    #[serde(default)]
+    pub hmac_timestamp_header: Option<String>,
+    /// Optional signature prefix for body-only HMAC mode (default sha256=).
+    #[serde(default)]
+    pub hmac_prefix: Option<String>,
+}
+
+impl WebhookCapabilitySchema {
+    fn to_webhook_capability(&self) -> WebhookCapability {
+        WebhookCapability {
+            secret_header: self.secret_header.clone(),
+            secret_name: self.secret_name.clone(),
+            signature_key_secret_name: self.signature_key_secret_name.clone(),
+            hmac_secret_name: self.hmac_secret_name.clone(),
+            hmac_signature_header: self.hmac_signature_header.clone(),
+            hmac_timestamp_header: self.hmac_timestamp_header.clone(),
+            hmac_prefix: self.hmac_prefix.clone(),
+        }
+    }
+}
+
 /// Authentication setup schema.
 ///
 /// Tools declare their auth requirements here. The agent uses this to provide
@@ -512,6 +636,11 @@ pub struct ValidationEndpointSchema {
     /// Expected HTTP status code for success (defaults to 200).
     #[serde(default = "default_success_status")]
     pub success_status: u16,
+
+    /// Additional headers to send with the validation request.
+    /// Used for service-specific requirements (e.g., Notion-Version for Notion API).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 fn default_method() -> String {
@@ -749,6 +878,28 @@ mod tests {
         let caps = CapabilitiesFile::from_json(json).unwrap();
         let workspace = caps.workspace.unwrap();
         assert_eq!(workspace.allowed_prefixes, vec!["context/", "daily/"]);
+    }
+
+    #[test]
+    fn test_parse_webhook_capability() {
+        let json = r#"{
+            "webhook": {
+                "hmac_secret_name": "github_webhook_secret",
+                "hmac_signature_header": "x-hub-signature-256",
+                "hmac_prefix": "sha256="
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let webhook = caps.webhook.unwrap();
+        assert_eq!(
+            webhook.hmac_secret_name.as_deref(),
+            Some("github_webhook_secret")
+        );
+        assert_eq!(
+            webhook.hmac_signature_header.as_deref(),
+            Some("x-hub-signature-256")
+        );
     }
 
     #[test]
@@ -1156,6 +1307,60 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_setup_without_auth_warns() {
+        // setup.required_secrets with no auth section — should not panic
+        let json = r#"{
+            "setup": {
+                "required_secrets": [
+                    { "name": "api_key", "prompt": "Enter your API key from the provider dashboard settings page" }
+                ]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        // Should not panic; warning is emitted via tracing
+        caps.validate("test-tool");
+    }
+
+    #[test]
+    fn test_validate_manual_auth_missing_fields() {
+        // auth without OAuth, missing setup_url and instructions
+        let json = r#"{
+            "auth": {
+                "secret_name": "my_api_key"
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        // Should not panic; warnings emitted for missing setup_url and instructions
+        caps.validate("test-tool");
+    }
+
+    #[test]
+    fn test_validate_clean_tool() {
+        // Well-configured tool with auth, setup_url, instructions, and good prompts
+        let json = r#"{
+            "auth": {
+                "secret_name": "my_api_key",
+                "setup_url": "https://example.com/api-keys",
+                "instructions": "Go to example.com/api-keys and create a new key"
+            },
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "my_api_key",
+                        "prompt": "Enter your API key from https://example.com/api-keys"
+                    }
+                ]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        // Should not panic and emits no warnings (has auth, setup_url, instructions, long prompt)
+        caps.validate("clean-tool");
+    }
+
+    #[test]
     fn test_resolve_nested_empty_capabilities_noop() {
         // Empty inner capabilities should not clobber outer http
         let json = r#"{
@@ -1170,6 +1375,116 @@ mod tests {
         assert_eq!(
             http.allowlist[0].host, "preserved.example.com",
             "Empty inner capabilities should not clobber outer http"
+        );
+    }
+
+    // ── Tool description and parameters schema ──────────────────────────
+
+    #[test]
+    fn test_parse_description_and_parameters() {
+        let json = r#"{
+            "description": "Search the web using Brave Search API",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of results"
+                    }
+                },
+                "required": ["query"]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("Search the web using Brave Search API")
+        );
+        let params = caps.parameters.unwrap();
+        assert_eq!(params["type"], "object");
+        assert!(params["properties"]["query"].is_object());
+        assert_eq!(params["required"][0], "query");
+    }
+
+    #[test]
+    fn test_parse_description_only() {
+        let json = r#"{
+            "description": "A tool without explicit parameters schema"
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("A tool without explicit parameters schema")
+        );
+        assert!(caps.parameters.is_none());
+    }
+
+    #[test]
+    fn test_parse_without_description_or_parameters() {
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "api.example.com" }]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert!(
+            caps.description.is_none(),
+            "description should be None when not provided"
+        );
+        assert!(
+            caps.parameters.is_none(),
+            "parameters should be None when not provided"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_description_promoted() {
+        let json = r#"{
+            "capabilities": {
+                "description": "Inner tool description",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": { "type": "string" }
+                    },
+                    "required": ["input"]
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("Inner tool description"),
+            "description should be promoted from inner capabilities"
+        );
+        assert!(
+            caps.parameters.is_some(),
+            "parameters should be promoted from inner capabilities"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_outer_description_takes_precedence() {
+        let json = r#"{
+            "description": "Outer description wins",
+            "capabilities": {
+                "description": "Inner description loses"
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            caps.description.as_deref(),
+            Some("Outer description wins"),
+            "Outer description should take precedence over inner"
         );
     }
 }

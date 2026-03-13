@@ -224,8 +224,16 @@ fn score_entry(entry: &RegistryEntry, tokens: &[String]) -> u32 {
 }
 
 /// Well-known extensions that ship with ironclaw.
-fn builtin_entries() -> Vec<RegistryEntry> {
-    vec![
+///
+/// If `relay_url` is provided, a channel-relay Slack entry is included in the list.
+/// Pass `None` when the relay is not configured.
+pub fn builtin_entries() -> Vec<RegistryEntry> {
+    builtin_entries_with_relay(std::env::var("CHANNEL_RELAY_URL").ok())
+}
+
+/// Well-known extensions, with an optional relay URL for the channel-relay entry.
+pub fn builtin_entries_with_relay(relay_url: Option<String>) -> Vec<RegistryEntry> {
+    let mut entries = vec![
         // -- MCP Servers --
         RegistryEntry {
             name: "notion".to_string(),
@@ -245,6 +253,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         },
         RegistryEntry {
             name: "linear".to_string(),
@@ -265,6 +274,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         },
         RegistryEntry {
             name: "github".to_string(),
@@ -285,6 +295,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         },
         RegistryEntry {
             name: "slack-mcp".to_string(),
@@ -305,6 +316,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         },
         RegistryEntry {
             name: "sentry".to_string(),
@@ -325,6 +337,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         },
         RegistryEntry {
             name: "stripe".to_string(),
@@ -345,6 +358,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         },
         RegistryEntry {
             name: "cloudflare".to_string(),
@@ -365,6 +379,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         },
         RegistryEntry {
             name: "asana".to_string(),
@@ -383,6 +398,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         },
         RegistryEntry {
             name: "intercom".to_string(),
@@ -402,11 +418,34 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         },
         // WASM channels (telegram, slack, discord, whatsapp) come from the embedded
         // registry catalog (registry/channels/*.json) with WasmDownload URLs pointing
         // to GitHub release artifacts. See new_with_catalog() for merging.
-    ]
+    ];
+
+    // Conditionally add channel-relay entries when relay URL is configured
+    if let Some(relay_url) = relay_url {
+        entries.push(RegistryEntry {
+            name: crate::channels::relay::DEFAULT_RELAY_NAME.to_string(),
+            display_name: "Slack".to_string(),
+            kind: ExtensionKind::ChannelRelay,
+            description: "Connect Slack workspace via channel relay".to_string(),
+            keywords: vec![
+                "slack".into(),
+                "chat".into(),
+                "messaging".into(),
+                "relay".into(),
+            ],
+            source: ExtensionSource::ChannelRelay { relay_url },
+            fallback_source: None,
+            auth_hint: AuthHint::ChannelRelayOAuth,
+            version: None,
+        });
+    }
+
+    entries
 }
 
 #[cfg(test)]
@@ -427,6 +466,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         };
 
         let score = score_entry(&entry, &["notion".to_string()]);
@@ -450,6 +490,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         };
 
         let score = score_entry(&entry, &["calendar".to_string()]);
@@ -473,6 +514,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         };
 
         let score = score_entry(&entry, &["wiki".to_string()]);
@@ -496,6 +538,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         };
 
         let score = score_entry(&entry, &["xyzfoobar".to_string()]);
@@ -560,6 +603,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         };
 
         registry.cache_discovered(vec![discovered]).await;
@@ -586,6 +630,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::None,
+            version: None,
         };
 
         registry.cache_discovered(vec![entry.clone()]).await;
@@ -611,6 +656,7 @@ mod tests {
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
             },
             // This shares a name with the builtin slack-mcp but has a different kind, so both should appear
             RegistryEntry {
@@ -626,6 +672,7 @@ mod tests {
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
             },
         ];
 
@@ -662,6 +709,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
+            version: None,
         }];
 
         let registry = ExtensionRegistry::new_with_catalog(catalog_entries);
@@ -689,6 +737,7 @@ mod tests {
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
             },
             RegistryEntry {
                 name: "telegram".to_string(),
@@ -703,6 +752,7 @@ mod tests {
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
             },
         ];
 
@@ -765,6 +815,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::None,
+            version: None,
         };
         let channel_entry = RegistryEntry {
             name: "cached-ext".to_string(),
@@ -779,6 +830,7 @@ mod tests {
             },
             fallback_source: None,
             auth_hint: AuthHint::None,
+            version: None,
         };
 
         registry
@@ -822,6 +874,7 @@ mod tests {
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
             },
             RegistryEntry {
                 name: "telegram".to_string(),
@@ -836,6 +889,7 @@ mod tests {
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
+                version: None,
             },
         ];
 
@@ -884,6 +938,7 @@ mod tests {
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::None,
+                version: None,
             },
             RegistryEntry {
                 name: "myext".to_string(),
@@ -898,6 +953,7 @@ mod tests {
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::None,
+                version: None,
             },
         ];
 
@@ -908,5 +964,31 @@ mod tests {
         assert!(entry.is_some());
         // The first catalog entry added is the channel.
         assert_eq!(entry.unwrap().kind, ExtensionKind::WasmChannel);
+    }
+
+    #[test]
+    fn test_builtin_entries_with_relay_none_excludes_relay() {
+        let entries = super::builtin_entries_with_relay(None);
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.kind == ExtensionKind::ChannelRelay),
+            "No ChannelRelay entry when relay URL is None"
+        );
+    }
+
+    #[test]
+    fn test_builtin_entries_with_relay_some_includes_relay() {
+        let entries =
+            super::builtin_entries_with_relay(Some("http://relay.example.com".to_string()));
+        let relay = entries
+            .iter()
+            .find(|e| e.kind == ExtensionKind::ChannelRelay);
+        assert!(relay.is_some(), "ChannelRelay entry should be present");
+        if let ExtensionSource::ChannelRelay { relay_url } = &relay.unwrap().source {
+            assert_eq!(relay_url, "http://relay.example.com");
+        } else {
+            panic!("Expected ChannelRelay source");
+        }
     }
 }

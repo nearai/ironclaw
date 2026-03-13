@@ -565,12 +565,19 @@ mod tests {
                         "description": { "type": "string", "description": "What it does" },
                         "trigger_type": {
                             "type": "string",
-                            "enum": ["cron", "event", "webhook", "manual"],
+                            "enum": ["cron", "event", "system_event", "manual"],
                             "description": "When the routine fires"
                         },
                         "schedule": { "type": "string", "description": "Cron expression" },
                         "event_pattern": { "type": "string", "description": "Regex pattern" },
                         "event_channel": { "type": "string", "description": "Channel filter" },
+                        "event_source": { "type": "string", "description": "System event source" },
+                        "event_type": { "type": "string", "description": "System event type" },
+                        "event_filters": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "description": "Exact-match payload filters"
+                        },
                         "prompt": { "type": "string", "description": "Instructions" },
                         "context_paths": {
                             "type": "array",
@@ -582,7 +589,14 @@ mod tests {
                             "enum": ["lightweight", "full_job"],
                             "description": "Execution mode"
                         },
-                        "cooldown_secs": { "type": "integer", "description": "Min seconds between fires" }
+                        "cooldown_secs": { "type": "integer", "description": "Min seconds between fires" },
+                        "tool_permissions": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Pre-authorized tools for full_job mode"
+                        },
+                        "notify_channel": { "type": "string", "description": "Channel for message tool" },
+                        "notify_user": { "type": "string", "description": "User/target to notify" }
                     },
                     "required": ["name", "trigger_type", "prompt"]
                 }),
@@ -620,6 +634,16 @@ mod tests {
                 }),
             ),
             (
+                "routine_fire",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Routine name" }
+                    },
+                    "required": ["name"]
+                }),
+            ),
+            (
                 "routine_history",
                 serde_json::json!({
                     "type": "object",
@@ -628,6 +652,18 @@ mod tests {
                         "limit": { "type": "integer", "description": "Max runs", "default": 10 }
                     },
                     "required": ["name"]
+                }),
+            ),
+            (
+                "event_emit",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "event_source": { "type": "string", "description": "Event source" },
+                        "event_type": { "type": "string", "description": "Event type" },
+                        "payload": { "type": "object", "description": "Event payload", "properties": {} }
+                    },
+                    "required": ["event_source", "event_type"]
                 }),
             ),
             // Job tools with complex deps

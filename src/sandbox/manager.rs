@@ -185,7 +185,7 @@ impl SandboxManager {
         self.initialized
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        tracing::info!("Sandbox shut down");
+        tracing::debug!("Sandbox shut down");
     }
 
     /// Execute a command in the sandbox.
@@ -207,8 +207,27 @@ impl SandboxManager {
         policy: SandboxPolicy,
         env: HashMap<String, String>,
     ) -> Result<ExecOutput> {
-        // FullAccess policy bypasses the sandbox entirely
+        // FullAccess policy bypasses the sandbox entirely.
+        // Double-check the allow_full_access guard at execution time as well,
+        // in case the policy was overridden per-call via execute_with_policy().
         if policy == SandboxPolicy::FullAccess {
+            if !self.config.allow_full_access {
+                tracing::error!(
+                    "FullAccess execution requested but SANDBOX_ALLOW_FULL_ACCESS is not \
+                     enabled. Refusing to execute on host. Falling back to error."
+                );
+                return Err(SandboxError::Config {
+                    reason: "FullAccess policy requires SANDBOX_ALLOW_FULL_ACCESS=true".to_string(),
+                });
+            }
+            // Log only the binary name to avoid leaking secrets embedded in
+            // command arguments (e.g. tokens in curl headers).
+            let binary = command.split_whitespace().next().unwrap_or("<empty>");
+            tracing::warn!(
+                binary = %binary,
+                cwd = %cwd.display(),
+                "[FullAccess] Executing command directly on host (no sandbox isolation)"
+            );
             return self.execute_direct(command, cwd, env).await;
         }
 
@@ -374,8 +393,19 @@ impl SandboxManagerBuilder {
     }
 
     /// Set the sandbox policy.
+    ///
+    /// **Note:** `SandboxPolicy::FullAccess` additionally requires
+    /// `allow_full_access(true)` to be set, or the manager will return
+    /// `SandboxError::Config` at execution time. This is an intentional
+    /// double opt-in to prevent accidental host execution.
     pub fn policy(mut self, policy: SandboxPolicy) -> Self {
         self.config.policy = policy;
+        self
+    }
+
+    /// Explicitly allow FullAccess policy (double opt-in).
+    pub fn allow_full_access(mut self, allow: bool) -> Self {
+        self.config.allow_full_access = allow;
         self
     }
 
@@ -485,6 +515,7 @@ mod tests {
         let manager = SandboxManager::new(SandboxConfig {
             enabled: true,
             policy: SandboxPolicy::FullAccess,
+            allow_full_access: true,
             ..Default::default()
         });
 
@@ -499,10 +530,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_direct_execution_blocked_without_allow() {
+        let manager = SandboxManager::new(SandboxConfig {
+            enabled: true,
+            policy: SandboxPolicy::FullAccess,
+            allow_full_access: false,
+            ..Default::default()
+        });
+
+        let result = manager
+            .execute("echo hello", Path::new("."), HashMap::new())
+            .await;
+
+        // Should be rejected because allow_full_access is false
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("SANDBOX_ALLOW_FULL_ACCESS"),
+            "Error should mention SANDBOX_ALLOW_FULL_ACCESS, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_full_access_without_allow_returns_error() {
+        let manager = SandboxManagerBuilder::new()
+            .enabled(true)
+            .policy(SandboxPolicy::FullAccess)
+            // Deliberately omitting .allow_full_access(true)
+            .build();
+
+        let result = manager
+            .execute("echo hello", Path::new("."), HashMap::new())
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("SANDBOX_ALLOW_FULL_ACCESS"),
+            "Error should mention SANDBOX_ALLOW_FULL_ACCESS, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
     async fn test_direct_execution_truncates_large_output() {
         let manager = SandboxManager::new(SandboxConfig {
             enabled: true,
             policy: SandboxPolicy::FullAccess,
+            allow_full_access: true,
             ..Default::default()
         });
 

@@ -1,4 +1,6 @@
 {
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "type": "channel",
   "name": "whatsapp",
   "description": "WhatsApp Cloud API channel for receiving and responding to WhatsApp messages",
@@ -6,7 +8,7 @@
     "required_secrets": [
       {
         "name": "whatsapp_access_token",
-        "prompt": "Enter your WhatsApp Cloud API access token (from Meta Developer Portal)",
+        "prompt": "Enter your WhatsApp Cloud API permanent access token (from the Meta Developer Portal under your app's WhatsApp > API Setup).",
         "validation": "^[A-Za-z0-9_-]+$"
       },
       {
@@ -16,7 +18,8 @@
         "auto_generate": { "length": 32 }
       }
     ],
-    "validation_endpoint": "https://graph.facebook.com/v18.0/me?access_token={whatsapp_access_token}"
+    "validation_endpoint": "https://graph.facebook.com/v18.0/me?access_token={whatsapp_access_token}",
+    "setup_url": "https://developers.facebook.com/apps"
   },
   "capabilities": {
     "http": {

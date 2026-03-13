@@ -3,6 +3,10 @@
 use crate::channels::web::types::{ToolCallInfo, TurnInfo};
 
 /// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
+///
+/// If the input is wrapped in `<tool_output …>…</tool_output>` and truncation
+/// removes the closing tag, the tag is re-appended so downstream XML parsers
+/// never see an unclosed element.
 pub fn truncate_preview(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
@@ -12,7 +16,14 @@ pub fn truncate_preview(s: &str, max_bytes: usize) -> String {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...", &s[..end])
+    let mut result = format!("{}...", &s[..end]);
+
+    // Re-close <tool_output> if truncation cut through the closing tag.
+    if s.starts_with("<tool_output") && !result.ends_with("</tool_output>") {
+        result.push_str("\n</tool_output>");
+    }
+
+    result
 }
 
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
@@ -83,6 +94,19 @@ pub fn build_turns_from_db_messages(
 
             turns.push(turn);
             turn_number += 1;
+        } else if msg.role == "assistant" {
+            // Standalone assistant message (e.g. routine output, heartbeat)
+            // with no preceding user message — render as a turn with empty input.
+            turns.push(TurnInfo {
+                turn_number,
+                user_input: String::new(),
+                response: Some(msg.content.clone()),
+                state: "Completed".to_string(),
+                started_at: msg.created_at.to_rfc3339(),
+                completed_at: Some(msg.created_at.to_rfc3339()),
+                tool_calls: Vec::new(),
+            });
+            turn_number += 1;
         }
     }
 
@@ -147,6 +171,33 @@ mod tests {
     #[test]
     fn test_truncate_preview_zero_max_bytes() {
         assert_eq!(truncate_preview("hello", 0), "...");
+    }
+
+    #[test]
+    fn test_truncate_preview_closes_tool_output_tag() {
+        let s = "<tool_output name=\"search\" sanitized=\"true\">\nSome very long content here\n</tool_output>";
+        // Truncate so it cuts before the closing tag
+        let result = truncate_preview(s, 60);
+        assert!(result.ends_with("</tool_output>"));
+        assert!(result.contains("..."));
+    }
+
+    #[test]
+    fn test_truncate_preview_no_extra_close_when_intact() {
+        let s = "<tool_output name=\"echo\" sanitized=\"false\">\nshort\n</tool_output>";
+        // The string is short enough not to be truncated
+        let result = truncate_preview(s, 500);
+        assert_eq!(result, s);
+        // Should not have a duplicate closing tag
+        assert_eq!(result.matches("</tool_output>").count(), 1);
+    }
+
+    #[test]
+    fn test_truncate_preview_non_xml_unaffected() {
+        let s = "Just a plain long string that gets truncated";
+        let result = truncate_preview(s, 10);
+        assert_eq!(result, "Just a pla...");
+        assert!(!result.contains("</tool_output>"));
     }
 
     // ---- build_turns_from_db_messages tests ----
@@ -218,6 +269,29 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].tool_calls.is_empty());
         assert_eq!(turns[0].response.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn test_build_turns_standalone_assistant_messages() {
+        // Routine conversations only have assistant messages (no user messages).
+        let messages = vec![
+            make_msg("assistant", "Routine executed: all checks passed", 0),
+            make_msg("assistant", "Routine executed: found 2 issues", 5000),
+        ];
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 2);
+        // Standalone assistant messages should have empty user_input
+        assert_eq!(turns[0].user_input, "");
+        assert_eq!(
+            turns[0].response.as_deref(),
+            Some("Routine executed: all checks passed")
+        );
+        assert_eq!(turns[0].state, "Completed");
+        assert_eq!(turns[1].user_input, "");
+        assert_eq!(
+            turns[1].response.as_deref(),
+            Some("Routine executed: found 2 issues")
+        );
     }
 
     #[test]

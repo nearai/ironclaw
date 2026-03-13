@@ -129,7 +129,9 @@ impl exports::near::agent::tool::Guest for GoogleCalendarTool {
     fn description() -> String {
         "Google Calendar integration for viewing, creating, updating, and deleting calendar \
          events. Requires a Google Calendar OAuth token with the calendar.events scope. \
-         Supports timed events, all-day events, attendees, locations, and free text search."
+         Supports timed events, all-day events, attendees, locations, and free text search. \
+         To discover all available API operations, use http GET to fetch \
+         <https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest> (public, no auth needed)."
             .to_string()
     }
 }

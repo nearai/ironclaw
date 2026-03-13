@@ -160,6 +160,8 @@ async fn llm_complete(
         input_tokens: resp.input_tokens,
         output_tokens: resp.output_tokens,
         finish_reason: format_finish_reason(resp.finish_reason),
+        cache_read_input_tokens: resp.cache_read_input_tokens,
+        cache_creation_input_tokens: resp.cache_creation_input_tokens,
     }))
 }
 
@@ -189,6 +191,8 @@ async fn llm_complete_with_tools(
         input_tokens: resp.input_tokens,
         output_tokens: resp.output_tokens,
         finish_reason: format_finish_reason(resp.finish_reason),
+        cache_read_input_tokens: resp.cache_read_input_tokens,
+        cache_creation_input_tokens: resp.cache_creation_input_tokens,
     }))
 }
 
@@ -657,12 +661,9 @@ mod tests {
 
     #[tokio::test]
     async fn credentials_returns_secrets_when_store_configured() {
+        use crate::testing::credentials::test_secrets_store;
         use secrecy::SecretString;
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(
-            crate::secrets::SecretsCrypto::new(SecretString::from(key.to_string())).unwrap(),
-        );
-        let secrets_store = Arc::new(crate::secrets::InMemorySecretsStore::new(crypto));
+        let secrets_store = Arc::new(test_secrets_store());
 
         // Create a secret
         secrets_store

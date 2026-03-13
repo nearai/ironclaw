@@ -181,6 +181,9 @@ pub async fn jobs_detail_handler(
             });
         }
 
+        let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
+        let is_claude_code = mode.as_deref() == Some("claude_code");
+
         return Ok(Json(JobDetailResponse {
             id: job.id,
             title: job.task.clone(),
@@ -193,11 +196,11 @@ pub async fn jobs_detail_handler(
             elapsed_secs,
             project_dir: Some(job.project_dir.clone()),
             browse_url: Some(format!("/projects/{}/", browse_id)),
-            job_mode: {
-                let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
-                mode.filter(|m| m != "worker")
-            },
+            job_mode: mode.filter(|m| m != "worker"),
             transitions,
+            can_restart: state.job_manager.is_some(),
+            can_prompt: is_claude_code && state.prompt_queue.is_some(),
+            job_kind: Some("sandbox".to_string()),
         }));
     }
 
@@ -208,6 +211,12 @@ pub async fn jobs_detail_handler(
             (end - start).num_seconds().max(0) as u64
         });
 
+        // Only show prompt bar for jobs that have a running worker (Pending/InProgress).
+        // Stuck jobs have no active worker loop, so messages would be silently dropped.
+        let is_promptable = matches!(
+            ctx.state,
+            crate::context::JobState::Pending | crate::context::JobState::InProgress
+        );
         return Ok(Json(JobDetailResponse {
             id: ctx.job_id,
             title: ctx.title.clone(),
@@ -222,6 +231,9 @@ pub async fn jobs_detail_handler(
             browse_url: None,
             job_mode: None,
             transitions: Vec::new(),
+            can_restart: state.scheduler.is_some(),
+            can_prompt: is_promptable && state.scheduler.is_some(),
+            job_kind: Some("agent".to_string()),
         }));
     }
 
@@ -264,11 +276,25 @@ pub async fn jobs_cancel_handler(
         })));
     }
 
-    // Fall back to agent job cancellation via DB status update.
+    // Fall back to agent job cancellation: stop the worker via the scheduler
+    // (which updates the in-memory ContextManager AND aborts the task handle),
+    // then persist the status to the DB as a fallback.
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_job(job_id).await
     {
         if job.state.is_active() {
+            // Try to stop via scheduler (aborts the worker task + updates
+            // in-memory ContextManager). This is best-effort — the job may
+            // not be in the scheduler map if it already finished.
+            if let Some(ref slot) = state.scheduler
+                && let Some(ref scheduler) = *slot.read().await
+            {
+                let _ = scheduler.stop(job_id).await;
+            }
+
+            // Always persist cancellation to the DB so the state is
+            // consistent even if the scheduler wasn't available or the
+            // job wasn't in its in-memory map.
             store
                 .update_job_status(
                     job_id,
@@ -295,108 +321,164 @@ pub async fn jobs_restart_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let jm = state.job_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Sandbox not enabled".to_string(),
-    ))?;
 
     let old_job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    let old_job = store
-        .get_sandbox_job(old_job_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+    // Try sandbox job restart first.
+    if let Ok(Some(old_job)) = store.get_sandbox_job(old_job_id).await {
+        if old_job.status != "interrupted" && old_job.status != "failed" {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("Cannot restart job in state '{}'", old_job.status),
+            ));
+        }
 
-    if old_job.status != "interrupted" && old_job.status != "failed" {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("Cannot restart job in state '{}'", old_job.status),
-        ));
+        let jm = state.job_manager.as_ref().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Sandbox not enabled".to_string(),
+        ))?;
+
+        // Enrich the task with failure context.
+        let task = if let Some(ref reason) = old_job.failure_reason {
+            format!(
+                "Previous attempt failed: {}. Retry: {}",
+                reason, old_job.task
+            )
+        } else {
+            old_job.task.clone()
+        };
+
+        let new_job_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+
+        let record = crate::history::SandboxJobRecord {
+            id: new_job_id,
+            task: task.clone(),
+            status: "creating".to_string(),
+            user_id: old_job.user_id.clone(),
+            project_dir: old_job.project_dir.clone(),
+            success: None,
+            failure_reason: None,
+            created_at: now,
+            started_at: None,
+            completed_at: None,
+            credential_grants_json: old_job.credential_grants_json.clone(),
+        };
+        store
+            .save_sandbox_job(&record)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let mode = match store.get_sandbox_job_mode(old_job_id).await {
+            Ok(Some(m)) if m == "claude_code" => {
+                crate::orchestrator::job_manager::JobMode::ClaudeCode
+            }
+            _ => crate::orchestrator::job_manager::JobMode::Worker,
+        };
+
+        let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
+            serde_json::from_str(&old_job.credential_grants_json).unwrap_or_else(|e| {
+                tracing::warn!(
+                    job_id = %old_job.id,
+                    "Failed to deserialize credential grants from stored job: {}. \
+                     Restarted job will have no credentials.",
+                    e
+                );
+                vec![]
+            });
+
+        let project_dir = std::path::PathBuf::from(&old_job.project_dir);
+        let _token = jm
+            .create_job(
+                new_job_id,
+                &task,
+                Some(project_dir),
+                mode,
+                credential_grants,
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to create container: {}", e),
+                )
+            })?;
+
+        store
+            .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        return Ok(Json(serde_json::json!({
+            "status": "restarted",
+            "old_job_id": old_job_id,
+            "new_job_id": new_job_id,
+        })));
     }
 
-    // Create a new job with the same task and project_dir.
-    let new_job_id = Uuid::new_v4();
-    let now = chrono::Utc::now();
+    // Try agent job restart: dispatch a new job via the scheduler.
+    if let Ok(Some(old_job)) = store.get_job(old_job_id).await {
+        if old_job.state.is_active() {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("Cannot restart job in state '{}'", old_job.state),
+            ));
+        }
 
-    let record = crate::history::SandboxJobRecord {
-        id: new_job_id,
-        task: old_job.task.clone(),
-        status: "creating".to_string(),
-        user_id: old_job.user_id.clone(),
-        project_dir: old_job.project_dir.clone(),
-        success: None,
-        failure_reason: None,
-        created_at: now,
-        started_at: None,
-        completed_at: None,
-        credential_grants_json: old_job.credential_grants_json.clone(),
-    };
-    store
-        .save_sandbox_job(&record)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let slot = state.scheduler.as_ref().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Scheduler not available".to_string(),
+        ))?;
+        let scheduler_guard = slot.read().await;
+        let scheduler = scheduler_guard.as_ref().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent not started yet".to_string(),
+        ))?;
 
-    // Look up the original job's mode so the restart uses the same mode.
-    let mode = match store.get_sandbox_job_mode(old_job_id).await {
-        Ok(Some(m)) if m == "claude_code" => crate::orchestrator::job_manager::JobMode::ClaudeCode,
-        _ => crate::orchestrator::job_manager::JobMode::Worker,
-    };
+        // Look up failure reason (O(1) point lookup).
+        let failure_reason = store
+            .get_agent_job_failure_reason(old_job_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
 
-    // Restore credential grants from the original job so the restarted container
-    // has access to the same secrets.
-    let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
-        serde_json::from_str(&old_job.credential_grants_json).unwrap_or_else(|e| {
-            tracing::warn!(
-                job_id = %old_job.id,
-                "Failed to deserialize credential grants from stored job: {}. \
-                 Restarted job will have no credentials.",
-                e
-            );
-            vec![]
-        });
-
-    let project_dir = std::path::PathBuf::from(&old_job.project_dir);
-    let _token = jm
-        .create_job(
-            new_job_id,
-            &old_job.task,
-            Some(project_dir),
-            mode,
-            credential_grants,
-        )
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to create container: {}", e),
+        let title = if !failure_reason.is_empty() {
+            format!(
+                "Previous attempt failed: {}. Retry: {}",
+                failure_reason, old_job.title
             )
-        })?;
+        } else {
+            old_job.title.clone()
+        };
 
-    store
-        .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let new_job_id = scheduler
+            .dispatch_job(&old_job.user_id, &title, &old_job.description, None)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "status": "restarted",
-        "old_job_id": old_job_id,
-        "new_job_id": new_job_id,
-    })))
+        return Ok(Json(serde_json::json!({
+            "status": "restarted",
+            "old_job_id": old_job_id,
+            "new_job_id": new_job_id,
+        })));
+    }
+
+    Err((StatusCode::NOT_FOUND, "Job not found".to_string()))
 }
 
-/// Submit a follow-up prompt to a running Claude Code sandbox job.
+/// Submit a follow-up prompt to a running job.
+///
+/// Routes to the appropriate backend:
+/// - Claude Code sandbox jobs → prompt queue (polled by the bridge)
+/// - Agent (non-sandbox) jobs → WorkerMessage injection via scheduler
+/// - Worker-mode sandbox jobs → not supported (no mechanism to inject)
 pub async fn jobs_prompt_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let prompt_queue = state.prompt_queue.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Claude Code not configured".to_string(),
-    ))?;
-
     let job_id: uuid::Uuid = id
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
@@ -412,17 +494,57 @@ pub async fn jobs_prompt_handler(
 
     let done = body.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let prompt = crate::orchestrator::api::PendingPrompt { content, done };
-
+    // Try sandbox job path: check if we have a sandbox record for this ID.
+    if let Some(ref s) = state.store
+        && let Ok(Some(_)) = s.get_sandbox_job(job_id).await
     {
-        let mut queue = prompt_queue.lock().await;
-        queue.entry(job_id).or_default().push_back(prompt);
+        // It's a sandbox job. Check if Claude Code mode.
+        let mode = s.get_sandbox_job_mode(job_id).await.ok().flatten();
+        if mode.as_deref() == Some("claude_code") {
+            let prompt_queue = state.prompt_queue.as_ref().ok_or((
+                StatusCode::NOT_IMPLEMENTED,
+                "Claude Code not configured".to_string(),
+            ))?;
+            let prompt = crate::orchestrator::api::PendingPrompt { content, done };
+            {
+                let mut queue = prompt_queue.lock().await;
+                queue.entry(job_id).or_default().push_back(prompt);
+            }
+            return Ok(Json(serde_json::json!({
+                "status": "queued",
+                "job_id": job_id.to_string(),
+            })));
+        } else {
+            return Err((
+                StatusCode::NOT_IMPLEMENTED,
+                "Follow-up prompts are not supported for worker-mode sandbox jobs".to_string(),
+            ));
+        }
     }
 
-    Ok(Json(serde_json::json!({
-        "status": "queued",
-        "job_id": job_id.to_string(),
-    })))
+    // Try agent job path: send via scheduler.
+    let slot = state.scheduler.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Agent job prompts require the scheduler to be configured".to_string(),
+    ))?;
+    let scheduler_guard = slot.read().await;
+    if let Some(ref scheduler) = *scheduler_guard
+        && scheduler.is_running(job_id).await
+    {
+        scheduler
+            .send_message(job_id, content)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Ok(Json(serde_json::json!({
+            "status": "sent",
+            "job_id": job_id.to_string(),
+        })));
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        "Job not found or not running".to_string(),
+    ))
 }
 
 /// Load persisted job events for a job (for history replay on page open).

@@ -1,0 +1,41 @@
+{
+  "model_name": "advanced-tool-intent-nudge-recovery",
+  "steps": [
+    {
+      "response": {
+        "type": "text",
+        "content": "Let me search for that file now.",
+        "input_tokens": 50,
+        "output_tokens": 10
+      }
+    },
+    {
+      "request_hint": { "last_user_message_contains": "tool_calls mechanism" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_echo_1",
+            "name": "echo",
+            "arguments": { "message": "found it" }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 15
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "I found the file you were looking for. The job is complete.",
+        "input_tokens": 150,
+        "output_tokens": 20
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": ["echo"],
+    "response_contains": ["found"],
+    "all_tools_succeeded": true
+  }
+}
