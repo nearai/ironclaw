@@ -173,6 +173,22 @@ impl SetupWizard {
             self.auto_setup_security().await?;
             self.persist_after_step().await;
 
+            // Pre-populate backend from env so step_inference_provider
+            // can offer "Keep current provider?" instead of asking from scratch.
+            if self.settings.llm_backend.is_none() {
+                if let Ok(b) = std::env::var("LLM_BACKEND") {
+                    self.settings.llm_backend = Some(b);
+                } else if std::env::var("NEARAI_API_KEY").is_ok() {
+                    self.settings.llm_backend = Some("nearai".to_string());
+                } else if std::env::var("ANTHROPIC_API_KEY").is_ok()
+                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
+                {
+                    self.settings.llm_backend = Some("anthropic".to_string());
+                } else if std::env::var("OPENAI_API_KEY").is_ok() {
+                    self.settings.llm_backend = Some("openai".to_string());
+                }
+            }
+
             print_step(1, 2, "Inference Provider");
             self.step_inference_provider().await?;
             self.persist_after_step().await;
@@ -1154,6 +1170,27 @@ impl SetupWizard {
     /// NEAR AI provider setup (extracted from the old step_authentication).
     async fn setup_nearai(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("nearai");
+
+        // Check if NEARAI_API_KEY is already provided via environment
+        if let Ok(existing) = std::env::var("NEARAI_API_KEY")
+            && !existing.is_empty()
+        {
+            print_info(&format!(
+                "NEARAI_API_KEY found: {}",
+                mask_api_key(&existing)
+            ));
+            if confirm("Use this key?", true).map_err(SetupError::Io)? {
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(existing.clone());
+                    if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                        tracing::warn!("Failed to persist NEARAI_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(existing));
+                print_success("NEAR AI configured (from env)");
+                return Ok(());
+            }
+        }
 
         // Check if we already have a session
         if let Some(ref session) = self.session_manager

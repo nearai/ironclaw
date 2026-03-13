@@ -580,7 +580,7 @@ mod advanced {
 
         // Follow-up: user responds, triggering profile write via memory_write.
         rig.send_message("I'm Alex, I'm a software engineer.").await;
-        let responses2 = rig.wait_for_responses(3, TIMEOUT).await;
+        let responses2 = rig.wait_for_responses(2, TIMEOUT).await;
         assert!(
             responses2.len() >= 2,
             "expected at least 2 total responses (bootstrap + follow-up), got {}",

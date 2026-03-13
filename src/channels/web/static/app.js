@@ -4271,34 +4271,6 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// --- Event delegation for dynamically-generated elements (CSP-compliant) ---
-
-document.addEventListener('click', function(e) {
-  const el = e.target.closest('[data-action]');
-  if (!el) return;
-  const action = el.dataset.action;
-  const id = el.dataset.id;
-
-  switch (action) {
-    // Code blocks
-    case 'copy-code': copyCodeBlock(el); break;
-    // Jobs
-    case 'cancel-job': e.stopPropagation(); cancelJob(id); break;
-    case 'open-job': openJobDetail(id); break;
-    case 'close-job-detail': closeJobDetail(); break;
-    case 'restart-job': restartJob(id); break;
-    // Routines
-    case 'open-routine': openRoutineDetail(id); break;
-    case 'toggle-routine': e.stopPropagation(); toggleRoutine(id); break;
-    case 'trigger-routine': e.stopPropagation(); triggerRoutine(id); break;
-    case 'delete-routine': e.stopPropagation(); deleteRoutine(id, el.dataset.name); break;
-    case 'close-routine-detail': closeRoutineDetail(); break;
-    case 'view-run-job': e.preventDefault(); switchTab('jobs'); openJobDetail(id); break;
-    // TEE
-    case 'copy-tee-report': copyTeeReport(); break;
-  }
-});
-
 // --- Toasts ---
 
 function showToast(message, type) {
@@ -4328,29 +4300,6 @@ function formatDate(isoString) {
   const d = new Date(isoString);
   return d.toLocaleString();
 }
-
-// --- Event Listener Registration (CSP-safe, no inline handlers) ---
-
-document.getElementById('auth-connect-btn').addEventListener('click', () => authenticate());
-document.getElementById('restart-overlay').addEventListener('click', () => cancelRestart());
-document.getElementById('restart-close-btn').addEventListener('click', () => cancelRestart());
-document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());
-document.getElementById('restart-confirm-btn').addEventListener('click', () => confirmRestart());
-document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
-document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
-document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
-document.getElementById('assistant-thread').addEventListener('click', () => switchToAssistant());
-document.getElementById('send-btn').addEventListener('click', () => sendMessage());
-document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
-document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());
-document.getElementById('memory-cancel-btn').addEventListener('click', () => cancelMemoryEdit());
-document.getElementById('logs-server-level').addEventListener('change', (e) => setServerLogLevel(e.target.value));
-document.getElementById('logs-pause-btn').addEventListener('click', () => toggleLogsPause());
-document.getElementById('logs-clear-btn').addEventListener('click', () => clearLogs());
-document.getElementById('wasm-install-btn').addEventListener('click', () => installWasmExtension());
-document.getElementById('mcp-add-btn').addEventListener('click', () => addMcpServer());
-document.getElementById('skill-search-btn').addEventListener('click', () => searchClawHub());
-document.getElementById('skill-install-btn').addEventListener('click', () => installSkillFromForm());
 
 // --- Delegated Event Handlers (for dynamically generated HTML) ---
 
@@ -4414,8 +4363,4 @@ document.addEventListener('click', function(e) {
       if (typeof switchLanguage === 'function') switchLanguage(el.dataset.lang);
       break;
   }
-});
-
-document.getElementById('language-btn').addEventListener('click', function() {
-  if (typeof toggleLanguageMenu === 'function') toggleLanguageMenu();
 });
