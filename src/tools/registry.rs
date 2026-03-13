@@ -576,23 +576,40 @@ impl ToolRegistry {
     /// CLI applications, and scripts. It uses an LLM-driven iterative build loop.
     ///
     /// This also registers the dev tools (shell, file operations) needed by the builder.
+    ///
+    /// # Parameters
+    ///
+    /// * `llm` - The LLM provider to use for code generation
+    /// * `config` - Optional builder configuration
+    /// * `wasm_runtime` - Optional WASM runtime for auto-registering built tools
+    /// * `wasm_store` - Optional WASM tool store for storing built tools
     pub async fn register_builder_tool(
         self: &Arc<Self>,
         llm: Arc<dyn LlmProvider>,
         config: Option<BuilderConfig>,
+        wasm_runtime: Option<Arc<WasmToolRuntime>>,
+        wasm_store: Option<Arc<dyn WasmToolStore>>,
     ) {
         // First register dev tools needed by the builder
         self.register_dev_tools();
 
         // Create the builder (arg order: config, llm, tools)
-        let builder = Arc::new(LlmSoftwareBuilder::new(
+        let mut builder = LlmSoftwareBuilder::new(
             config.unwrap_or_default(),
             llm,
             Arc::clone(self),
-        ));
+        );
+
+        // Add optional dependencies for auto-registration
+        if let Some(runtime) = wasm_runtime {
+            builder = builder.with_wasm_runtime(runtime);
+        }
+        if let Some(store) = wasm_store {
+            builder = builder.with_wasm_store(store);
+        }
 
         // Register the build_software tool
-        self.register(Arc::new(BuildSoftwareTool::new(builder)))
+        self.register(Arc::new(BuildSoftwareTool::new(Arc::new(builder))))
             .await;
 
         tracing::debug!("Registered software builder tool");
