@@ -127,7 +127,11 @@ fn cmd_list(
                 .unwrap_or("none");
             println!(
                 "{:<20} {:<8} {:<8} {:<10} {}",
-                m.name, m.kind, m.version.as_deref().unwrap_or("-"), auth, m.description
+                m.name,
+                m.kind,
+                m.version.as_deref().unwrap_or("-"),
+                auth,
+                m.description
             );
         } else {
             println!("{:<20} {:<8} {}", m.name, m.kind, m.description);

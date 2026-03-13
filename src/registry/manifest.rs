@@ -177,7 +177,13 @@ impl ExtensionManifest {
 
     /// Build a [`RegistryEntry`] for an MCP server manifest.
     fn to_mcp_registry_entry(&self) -> RegistryEntry {
-        let url = self.url.clone().unwrap_or_default();
+        let url = match &self.url {
+            Some(u) => u.clone(),
+            None => {
+                tracing::warn!("MCP server manifest '{}' is missing 'url' field", self.name);
+                String::new()
+            }
+        };
         let auth_hint = match self.auth.as_deref() {
             Some("dcr") | None => AuthHint::Dcr,
             Some("none") => AuthHint::None,
@@ -514,7 +520,9 @@ mod tests {
 
         let entry = manifest.to_registry_entry();
         assert_eq!(entry.kind, ExtensionKind::McpServer);
-        assert!(matches!(&entry.source, ExtensionSource::McpUrl { url } if url == "https://mcp.notion.com/mcp"));
+        assert!(
+            matches!(&entry.source, ExtensionSource::McpUrl { url } if url == "https://mcp.notion.com/mcp")
+        );
         assert!(matches!(&entry.auth_hint, AuthHint::Dcr));
         assert!(entry.fallback_source.is_none());
     }

@@ -1,0 +1,9 @@
+{
+  "name": "slack-mcp",
+  "display_name": "Slack MCP",
+  "kind": "mcp_server",
+  "description": "Connect to Slack via MCP for messaging, channel management, and team communication",
+  "keywords": ["messaging", "chat", "channels", "team", "communication"],
+  "url": "https://mcp.slack.com",
+  "auth": "dcr"
+}

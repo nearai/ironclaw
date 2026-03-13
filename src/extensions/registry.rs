@@ -362,8 +362,11 @@ mod tests {
     fn registry_with_catalog() -> ExtensionRegistry {
         let catalog = crate::registry::catalog::RegistryCatalog::load_or_embedded()
             .expect("catalog should load");
-        let catalog_entries: Vec<RegistryEntry> =
-            catalog.all().iter().map(|m| m.to_registry_entry()).collect();
+        let catalog_entries: Vec<RegistryEntry> = catalog
+            .all()
+            .iter()
+            .map(|m| m.to_registry_entry())
+            .collect();
         ExtensionRegistry::new_with_catalog(catalog_entries)
     }
 

@@ -161,13 +161,14 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
 
 /// Extract the source spec from a manifest, returning an error if absent.
 fn require_source(manifest: &ExtensionManifest) -> Result<&SourceSpec, RegistryError> {
-    manifest.source.as_ref().ok_or_else(|| {
-        RegistryError::InvalidManifest {
+    manifest
+        .source
+        .as_ref()
+        .ok_or_else(|| RegistryError::InvalidManifest {
             name: manifest.name.clone(),
             field: "source",
             reason: "WASM extensions must have a source spec".to_string(),
-        }
-    })
+        })
 }
 
 fn download_failure_reason(error: &reqwest::Error) -> String {
@@ -504,10 +505,7 @@ impl RegistryInstaller {
                 }
             } else if let Some(ref source) = manifest.source {
                 // Legacy fallback: try source tree
-                let caps_source = self
-                    .repo_root
-                    .join(&source.dir)
-                    .join(&source.capabilities);
+                let caps_source = self.repo_root.join(&source.dir).join(&source.capabilities);
                 if caps_source.exists() {
                     fs::copy(&caps_source, &target_caps)
                         .await

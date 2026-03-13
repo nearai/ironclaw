@@ -331,11 +331,10 @@ impl RegistryCatalog {
             0 => Err(RegistryError::ExtensionNotFound(name.to_string())),
             1 => {
                 let (prefix, _) = matches[0];
-                // Safe: we just checked contains_key above
-                Ok(self
-                    .manifests
-                    .get(&format!("{}/{}", prefix, name))
-                    .expect("key verified by contains_key"))
+                let key = format!("{}/{}", prefix, name);
+                self.manifests
+                    .get(&key)
+                    .ok_or_else(|| RegistryError::ExtensionNotFound(name.to_string()))
             }
             _ => {
                 let (prefix_a, kind_a) = matches[0];
@@ -371,7 +370,7 @@ impl RegistryCatalog {
             .collect();
 
         if matches.len() == 1 {
-            Some(matches.into_iter().next().unwrap_or_default())
+            matches.into_iter().next()
         } else {
             None // ambiguous or not found
         }
