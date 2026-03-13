@@ -10,6 +10,8 @@ mod support;
 mod tests {
     use std::time::Duration;
 
+    use ironclaw::agent::routine::{RoutineAction, Trigger};
+
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
 
@@ -123,6 +125,39 @@ mod tests {
             "routine_list should succeed: {completed:?}"
         );
 
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "daily-check")
+            .await
+            .expect("get_routine_by_name")
+            .expect("daily-check should exist");
+
+        match &routine.trigger {
+            Trigger::Cron { schedule, timezone } => {
+                assert_eq!(schedule, "0 0 9 * * *");
+                assert_eq!(timezone.as_deref(), Some("America/New_York"));
+            }
+            other => panic!("expected cron trigger, got {other:?}"),
+        }
+
+        match &routine.action {
+            RoutineAction::Lightweight {
+                context_paths,
+                use_tools,
+                max_tool_rounds,
+                ..
+            } => {
+                assert_eq!(context_paths, &vec!["context/priorities.md".to_string()]);
+                assert!(*use_tools, "lightweight routine should keep use_tools=true");
+                assert_eq!(*max_tool_rounds, 2);
+            }
+            other => panic!("expected lightweight action, got {other:?}"),
+        }
+
+        assert_eq!(routine.notify.channel.as_deref(), Some("telegram"));
+        assert_eq!(routine.notify.user.as_deref(), Some("ops-team"));
+        assert_eq!(routine.guardrails.cooldown.as_secs(), 600);
+
         rig.shutdown();
     }
 
@@ -168,7 +203,48 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 5: routine_history
+    // Test 5: routine_manual_create
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_manual_create() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_manual_create.json"
+        ))
+        .expect("failed to load routine_manual_create.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a manual routine for bug triage")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "manual-triage")
+            .await
+            .expect("get_routine_by_name")
+            .expect("manual-triage should exist");
+
+        assert!(matches!(routine.trigger, Trigger::Manual));
+        assert!(
+            matches!(&routine.action, RoutineAction::Lightweight { use_tools, .. } if !*use_tools),
+            "manual routine should default to lightweight without tools: {:?}",
+            routine.action
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: routine_history
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -205,7 +281,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: routine_system_event_emit
+    // Test 7: routine_system_event_emit
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -253,11 +329,47 @@ mod tests {
             emit_result.1
         );
 
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "gh-issue-emit-test")
+            .await
+            .expect("get_routine_by_name")
+            .expect("gh-issue-emit-test should exist");
+
+        match &routine.trigger {
+            Trigger::SystemEvent {
+                source,
+                event_type,
+                filters,
+            } => {
+                assert_eq!(source, "github");
+                assert_eq!(event_type, "issue.opened");
+                assert_eq!(
+                    filters.get("repository").map(String::as_str),
+                    Some("nearai/ironclaw")
+                );
+                assert_eq!(filters.get("priority").map(String::as_str), Some("p1"));
+            }
+            other => panic!("expected system_event trigger, got {other:?}"),
+        }
+
+        match &routine.action {
+            RoutineAction::FullJob {
+                description,
+                tool_permissions,
+                ..
+            } => {
+                assert!(description.contains("Summarize the new issue"));
+                assert_eq!(tool_permissions, &vec!["shell".to_string()]);
+            }
+            other => panic!("expected full_job action, got {other:?}"),
+        }
+
         rig.shutdown();
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: skill_install_routine_webhook_sim
+    // Test 8: skill_install_routine_webhook_sim
     // -----------------------------------------------------------------------
 
     #[tokio::test]

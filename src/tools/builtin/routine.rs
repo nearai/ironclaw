@@ -24,6 +24,132 @@ use crate::context::JobContext;
 use crate::db::Database;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
+pub(crate) fn routine_create_parameters_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Unique routine name, for example 'daily-pr-review'."
+            },
+            "description": {
+                "type": "string",
+                "description": "Short summary of what the routine is for."
+            },
+            "trigger_type": {
+                "type": "string",
+                "enum": ["cron", "event", "system_event", "manual"],
+                "description": "When the routine fires: 'cron' for schedules, 'event' for incoming messages, 'system_event' for structured emitted events, or 'manual' for explicit runs."
+            },
+            "schedule": {
+                "type": "string",
+                "description": "Cron schedule for 'cron' triggers. Uses 6 fields: second minute hour day month weekday."
+            },
+            "event_pattern": {
+                "type": "string",
+                "description": "Regex matched against incoming message text for 'event' triggers, for example '^bug\\\\b'."
+            },
+            "event_channel": {
+                "type": "string",
+                "description": "Optional platform filter for 'event' triggers, for example 'telegram'. Omit to match any channel. Not a chat or thread ID."
+            },
+            "event_source": {
+                "type": "string",
+                "description": "Structured event source for 'system_event' triggers, for example 'github'."
+            },
+            "event_type": {
+                "type": "string",
+                "description": "Structured event type for 'system_event' triggers, for example 'issue.opened'."
+            },
+            "event_filters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": {
+                    "type": ["string", "number", "boolean"]
+                },
+                "description": "Optional exact-match payload filters for 'system_event' triggers. Values can be strings, numbers, or booleans."
+            },
+            "prompt": {
+                "type": "string",
+                "description": "Instructions for what the routine should do after it fires."
+            },
+            "context_paths": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Workspace paths to load as extra context before running the routine."
+            },
+            "action_type": {
+                "type": "string",
+                "enum": ["lightweight", "full_job"],
+                "description": "Execution mode: 'lightweight' for one LLM turn or 'full_job' for a multi-step job with tools."
+            },
+            "use_tools": {
+                "type": "boolean",
+                "description": "Enable safe tool use in 'lightweight' mode. Ignored for 'full_job'."
+            },
+            "max_tool_rounds": {
+                "type": "integer",
+                "description": "Maximum tool-call rounds in 'lightweight' mode when 'use_tools' is true."
+            },
+            "cooldown_secs": {
+                "type": "integer",
+                "description": "Minimum seconds between fires."
+            },
+            "tool_permissions": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Pre-authorized tool names for 'full_job' routines."
+            },
+            "notify_channel": {
+                "type": "string",
+                "description": "Where routine output should be sent, for example 'telegram' or 'slack'. This does not control what triggers the routine."
+            },
+            "notify_user": {
+                "type": "string",
+                "description": "Optional explicit user or destination to notify, for example a username or chat ID. Omit it to use the configured owner's last-seen target for that channel."
+            },
+            "timezone": {
+                "type": "string",
+                "description": "IANA timezone used to evaluate 'cron' schedules, for example 'America/New_York'."
+            }
+        },
+        "required": ["name", "trigger_type", "prompt"]
+    })
+}
+
+pub(crate) fn routine_update_parameters_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Name of the routine to update."
+            },
+            "enabled": {
+                "type": "boolean",
+                "description": "Set to true to enable the routine or false to disable it."
+            },
+            "prompt": {
+                "type": "string",
+                "description": "Replace the routine instructions for what it should do after it fires."
+            },
+            "schedule": {
+                "type": "string",
+                "description": "New cron schedule for existing 'cron' routines only. This does not convert other trigger types."
+            },
+            "timezone": {
+                "type": "string",
+                "description": "New IANA timezone for existing 'cron' routines only, for example 'America/New_York'."
+            },
+            "description": {
+                "type": "string",
+                "description": "Replace the routine summary."
+            }
+        },
+        "required": ["name"]
+    })
+}
+
 // ==================== routine_create ====================
 
 pub struct RoutineCreateTool {
@@ -50,92 +176,7 @@ impl Tool for RoutineCreateTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Unique name for the routine (e.g. 'daily-pr-review')"
-                },
-                "description": {
-                    "type": "string",
-                    "description": "What this routine does"
-                },
-                "trigger_type": {
-                    "type": "string",
-                    "enum": ["cron", "event", "system_event", "manual"],
-                    "description": "When the routine fires"
-                },
-                "schedule": {
-                    "type": "string",
-                    "description": "Cron expression (for cron trigger). E.g. '0 9 * * MON-FRI' for weekdays at 9am. Uses 6-field cron (sec min hour day month weekday)."
-                },
-                "event_pattern": {
-                    "type": "string",
-                    "description": "Regex pattern to match messages (for event trigger)"
-                },
-                "event_channel": {
-                    "type": "string",
-                    "description": "Optional channel filter for event trigger (e.g. 'telegram')"
-                },
-                "event_source": {
-                    "type": "string",
-                    "description": "Event source for system_event triggers (e.g. 'github')"
-                },
-                "event_type": {
-                    "type": "string",
-                    "description": "Event type for system_event triggers (e.g. 'issue.opened')"
-                },
-                "event_filters": {
-                    "type": "object",
-                    "description": "Optional exact-match filters against payload fields for system_event triggers. Values can be strings, numbers, or booleans."
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "The prompt/instructions for the routine"
-                },
-                "context_paths": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Workspace paths to load as context (e.g. ['context/priorities.md'])"
-                },
-                "action_type": {
-                    "type": "string",
-                    "enum": ["lightweight", "full_job"],
-                    "description": "Execution mode: 'lightweight' (single LLM call, default) or 'full_job' (multi-turn with tools)"
-                },
-                "use_tools": {
-                    "type": "boolean",
-                    "description": "Enable tool access in lightweight mode (default: false). Only safe tools (no approval required) are available. Ignored for full_job mode."
-                },
-                "max_tool_rounds": {
-                    "type": "integer",
-                    "description": "Max tool call rounds in lightweight mode (default: 3). Only used when use_tools is true."
-                },
-                "cooldown_secs": {
-                    "type": "integer",
-                    "description": "Minimum seconds between fires (default: 300)"
-                },
-                "tool_permissions": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Tool names pre-authorized for Always-approval tools in full_job mode (e.g. ['shell']). UnlessAutoApproved tools are automatically permitted in routines."
-                },
-                "notify_channel": {
-                    "type": "string",
-                    "description": "Channel to send results to (e.g. 'telegram', 'slack', 'tui'). Sets the default channel for message tool calls in routine jobs."
-                },
-                "notify_user": {
-                    "type": "string",
-                    "description": "Optional explicit user/target to notify (e.g. username, chat ID). If omitted, IronClaw resolves the configured owner's last-seen target for that channel."
-                },
-                "timezone": {
-                    "type": "string",
-                    "description": "IANA timezone for cron schedule evaluation (e.g. 'America/New_York'). Defaults to UTC."
-                }
-            },
-            "required": ["name", "trigger_type", "prompt"]
-        })
+        routine_create_parameters_schema()
     }
 
     async fn execute(
@@ -199,9 +240,13 @@ impl Tool for RoutineCreateTool {
                             "event trigger requires 'event_pattern'".to_string(),
                         )
                     })?;
-                // Validate regex
-                regex::Regex::new(pattern)
-                    .map_err(|e| ToolError::InvalidParameters(format!("invalid regex: {e}")))?;
+                // Validate regex with size limit to prevent ReDoS (issue #825)
+                regex::RegexBuilder::new(pattern)
+                    .size_limit(64 * 1024)
+                    .build()
+                    .map_err(|e| {
+                        ToolError::InvalidParameters(format!("invalid or too complex regex: {e}"))
+                    })?;
                 let channel = params
                     .get("event_channel")
                     .and_then(|v| v.as_str())
@@ -477,41 +522,13 @@ impl Tool for RoutineUpdateTool {
     }
 
     fn description(&self) -> &str {
-        "Update an existing routine. Can modify trigger, prompt, schedule, or toggle enabled state. \
-         Pass the routine name and only the fields you want to change."
+        "Update an existing routine. Can change prompt, description, enabled state, or cron timing. \
+         Pass the routine name and only the fields you want to change. \
+         This does not convert one trigger type into another."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Name of the routine to update"
-                },
-                "enabled": {
-                    "type": "boolean",
-                    "description": "Enable or disable the routine"
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "New prompt/instructions"
-                },
-                "schedule": {
-                    "type": "string",
-                    "description": "New cron schedule (for cron triggers)"
-                },
-                "timezone": {
-                    "type": "string",
-                    "description": "IANA timezone for cron schedule (e.g. 'America/New_York'). Only valid for cron triggers."
-                },
-                "description": {
-                    "type": "string",
-                    "description": "New description"
-                }
-            },
-            "required": ["name"]
-        })
+        routine_update_parameters_schema()
     }
 
     async fn execute(
@@ -950,5 +967,119 @@ impl Tool for EventEmitTool {
 
     fn requires_sanitization(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{routine_create_parameters_schema, routine_update_parameters_schema};
+    use crate::tools::validate_tool_schema;
+
+    fn property<'a>(schema: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        schema
+            .get("properties")
+            .and_then(|props| props.get(name))
+            .unwrap_or_else(|| panic!("missing schema property {name}"))
+    }
+
+    #[test]
+    fn routine_create_schema_exposes_all_trigger_and_delivery_fields() {
+        let schema = routine_create_parameters_schema();
+        let errors = validate_tool_schema(&schema, "routine_create");
+        assert!(
+            errors.is_empty(),
+            "routine_create schema should validate cleanly: {errors:?}"
+        );
+
+        for field in [
+            "trigger_type",
+            "schedule",
+            "event_pattern",
+            "event_channel",
+            "event_source",
+            "event_type",
+            "event_filters",
+            "action_type",
+            "use_tools",
+            "max_tool_rounds",
+            "tool_permissions",
+            "notify_channel",
+            "notify_user",
+            "timezone",
+        ] {
+            let _ = property(&schema, field);
+        }
+    }
+
+    #[test]
+    fn routine_create_schema_descriptions_cover_event_trigger_gotchas() {
+        let schema = routine_create_parameters_schema();
+
+        let trigger_type = property(&schema, "trigger_type")
+            .get("description")
+            .and_then(|value| value.as_str())
+            .expect("trigger_type description");
+        assert!(trigger_type.contains("incoming messages"));
+        assert!(trigger_type.contains("structured emitted events"));
+
+        let event_pattern = property(&schema, "event_pattern")
+            .get("description")
+            .and_then(|value| value.as_str())
+            .expect("event_pattern description");
+        assert!(event_pattern.contains("incoming message text"));
+        assert!(event_pattern.contains("^bug\\\\b"));
+
+        let event_channel = property(&schema, "event_channel")
+            .get("description")
+            .and_then(|value| value.as_str())
+            .expect("event_channel description");
+        assert!(event_channel.contains("Omit to match any channel"));
+        assert!(event_channel.contains("Not a chat or thread ID"));
+
+        let notify_channel = property(&schema, "notify_channel")
+            .get("description")
+            .and_then(|value| value.as_str())
+            .expect("notify_channel description");
+        assert!(notify_channel.contains("does not control what triggers"));
+
+        let prompt = property(&schema, "prompt")
+            .get("description")
+            .and_then(|value| value.as_str())
+            .expect("prompt description");
+        assert!(prompt.contains("after it fires"));
+    }
+
+    #[test]
+    fn routine_update_schema_exposes_supported_fields_and_limits() {
+        let schema = routine_update_parameters_schema();
+        let errors = validate_tool_schema(&schema, "routine_update");
+        assert!(
+            errors.is_empty(),
+            "routine_update schema should validate cleanly: {errors:?}"
+        );
+
+        for field in [
+            "name",
+            "enabled",
+            "prompt",
+            "schedule",
+            "timezone",
+            "description",
+        ] {
+            let _ = property(&schema, field);
+        }
+
+        let schedule = property(&schema, "schedule")
+            .get("description")
+            .and_then(|value| value.as_str())
+            .expect("schedule description");
+        assert!(schedule.contains("existing 'cron' routines only"));
+        assert!(schedule.contains("does not convert other trigger types"));
+
+        let timezone = property(&schema, "timezone")
+            .get("description")
+            .and_then(|value| value.as_str())
+            .expect("timezone description");
+        assert!(timezone.contains("existing 'cron' routines only"));
     }
 }

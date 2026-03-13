@@ -93,19 +93,26 @@ impl RoutineEngine {
                 let mut cache = Vec::new();
                 for routine in routines {
                     match &routine.trigger {
-                        Trigger::Event { pattern, .. } => match Regex::new(pattern) {
-                            Ok(re) => cache.push(EventMatcher::Message {
-                                routine: routine.clone(),
-                                regex: re,
-                            }),
-                            Err(e) => {
-                                tracing::warn!(
-                                    routine = %routine.name,
-                                    "Invalid event regex '{}': {}",
-                                    pattern, e
-                                );
+                        Trigger::Event { pattern, .. } => {
+                            // Use RegexBuilder with size limit to prevent ReDoS
+                            // from user-supplied patterns (issue #825).
+                            match regex::RegexBuilder::new(pattern)
+                                .size_limit(64 * 1024) // 64KB compiled size limit
+                                .build()
+                            {
+                                Ok(re) => cache.push(EventMatcher::Message {
+                                    routine: routine.clone(),
+                                    regex: re,
+                                }),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        routine = %routine.name,
+                                        "Invalid or too complex event regex '{}': {}",
+                                        pattern, e
+                                    );
+                                }
                             }
-                        },
+                        }
                         Trigger::SystemEvent { .. } => {
                             cache.push(EventMatcher::System {
                                 routine: routine.clone(),
@@ -973,6 +980,18 @@ async fn execute_lightweight_with_tools(
                             sanitized.was_modified,
                         )
                     }
+                };
+
+                // Truncate oversized tool output to prevent unbounded context growth.
+                // Routine tool loops are lightweight and should not accumulate
+                // large payloads across iterations.
+                const MAX_TOOL_OUTPUT_CHARS: usize = 8192;
+                let result_content = if result_content.len() > MAX_TOOL_OUTPUT_CHARS {
+                    let truncated = &result_content
+                        [..result_content.floor_char_boundary(MAX_TOOL_OUTPUT_CHARS)];
+                    format!("{truncated}\n... [output truncated to {MAX_TOOL_OUTPUT_CHARS} chars]")
+                } else {
+                    result_content
                 };
 
                 // Add tool result to context
