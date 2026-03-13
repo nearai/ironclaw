@@ -59,6 +59,18 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return ironclaw::cli::run_registry_command(registry_cmd.clone()).await;
         }
+        Some(Command::Channels(channels_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_channels_command(
+                channels_cmd.clone(),
+                cli.config.as_deref(),
+            )
+            .await;
+        }
+        Some(Command::Routines(routines_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_routines_cli(routines_cmd, cli.config.as_deref()).await;
+        }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
             return run_mcp_command(*mcp_cmd.clone()).await;
@@ -74,6 +86,11 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
             return run_service_command(service_cmd);
+        }
+        Some(Command::Skills(skills_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_skills_command(skills_cmd.clone(), cli.config.as_deref())
+                .await;
         }
         Some(Command::Doctor) => {
             init_cli_tracing();
@@ -416,9 +433,8 @@ async fn async_main() -> anyhow::Result<()> {
         "Lifecycle hooks initialized"
     );
 
-    // Create session manager (shared between agent and web gateway)
-    let session_manager =
-        Arc::new(ironclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
+    // Reuse the shared agent session manager prepared by AppBuilder.
+    let session_manager = Arc::clone(&components.agent_session_manager);
 
     // Lazy scheduler slot — filled after Agent::new creates the Scheduler.
     // Allows CreateJobTool to dispatch local jobs via the Scheduler even though
@@ -459,6 +475,14 @@ async fn async_main() -> anyhow::Result<()> {
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
         if let Some(ref ext_mgr) = components.extension_manager {
+            // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
+            // instead of calling open::that() on the server.
+            let gw_base = config
+                .tunnel
+                .public_url
+                .clone()
+                .unwrap_or_else(|| format!("http://{}:{}", gw_config.host, gw_config.port));
+            ext_mgr.enable_gateway_mode(gw_base).await;
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
         if !components.catalog_entries.is_empty() {

@@ -159,18 +159,18 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `tui` | ✅ | ✅ | - | Ratatui TUI |
 | `config` | ✅ | ✅ | - | Read/write config plus validate/path helpers |
 | `backup` | ✅ | ❌ | P3 | Create/verify local backup archives |
-| `channels` | ✅ | ❌ | P2 | Channel management |
+| `channels` | ✅ | 🚧 | P2 | `list` implemented; `enable`/`disable`/`status` deferred pending config source unification |
 | `models` | ✅ | 🚧 | - | Model selector in TUI |
 | `status` | ✅ | ✅ | - | System status (enriched session details) |
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing (shows subagent models) |
 | `memory` | ✅ | ✅ | - | Memory search CLI |
-| `skills` | ✅ | ✅ | - | Skills tools + web API endpoints (install, list, activate) |
+| `skills` | ✅ | ✅ | - | CLI subcommands (list, search, info) + agent tools + web API endpoints |
 | `pairing` | ✅ | ✅ | - | list/approve, account selector |
 | `nodes` | ✅ | ❌ | P3 | Device management, remove/clear flows |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
 | `hooks` | ✅ | ✅ | P2 | Lifecycle hooks |
-| `cron` | ✅ | ❌ | P2 | Scheduled jobs (model/thinking fields in edit) |
+| `cron` | ✅ | 🚧 | P2 | list/create/edit/enable/disable/delete/history; TODO: `cron run`, model/thinking fields |
 | `webhooks` | ✅ | ❌ | P3 | Webhook config |
 | `message send` | ✅ | ❌ | P2 | Send to channels |
 | `browser` | ✅ | ❌ | P3 | Browser automation |
@@ -245,7 +245,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
 | MiniMax | ✅ | ❌ | P3 | Regional endpoint selection |
-| GLM-5 | ✅ | ❌ | P3 | |
+| GLM-5 | ✅ | ✅ | P3 | Via Z.AI provider (`zai`) using OpenAI-compatible chat completions |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
 | llama.cpp (native) | ❌ | 🔮 | P3 | Rust bindings |
 

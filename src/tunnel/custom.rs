@@ -69,10 +69,13 @@ impl Tunnel for CustomTunnel {
             .kill_on_drop(true)
             .spawn()?;
 
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
         let mut public_url = format!("http://{local_host}:{local_port}");
 
         if self.url_pattern.is_some()
-            && let Some(stdout) = child.stdout.take()
+            && let Some(stdout) = stdout
         {
             let mut reader = tokio::io::BufReader::new(stdout).lines();
             let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
@@ -100,6 +103,22 @@ impl Tunnel for CustomTunnel {
                     Err(_) => {}
                 }
             }
+            // Drain remaining stdout to prevent SIGPIPE/buffer stalls.
+            tokio::spawn(async move { while let Ok(Some(_)) = reader.next_line().await {} });
+        } else if let Some(stdout) = stdout {
+            // No url_pattern: still drain stdout to prevent pipe stalls.
+            tokio::spawn(async move {
+                let mut reader = tokio::io::BufReader::new(stdout).lines();
+                while let Ok(Some(_)) = reader.next_line().await {}
+            });
+        }
+
+        // Drain stderr silently.
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut reader = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(_)) = reader.next_line().await {}
+            });
         }
 
         if let Ok(mut guard) = self.url.write() {
@@ -245,5 +264,26 @@ mod tests {
     #[test]
     fn extract_url_none_when_absent() {
         assert_eq!(extract_url("no url here"), None);
+    }
+
+    #[tokio::test]
+    async fn stdout_drain_prevents_zombie() {
+        // `yes` floods stdout indefinitely; without the drain task the pipe
+        // buffer fills (64 KB) and the child blocks on write(), becoming a
+        // zombie. With draining the child stays alive and stop() can kill it.
+        let tunnel = CustomTunnel::new("yes".into(), None, None);
+        let url = tunnel.start("127.0.0.1", 19999).await.unwrap();
+        assert_eq!(url, "http://127.0.0.1:19999");
+
+        // Give the drain task time to consume some output.
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // Child should still be alive (not blocked/zombie).
+        assert!(
+            tunnel.health_check().await,
+            "yes process should still be alive"
+        );
+
+        tunnel.stop().await.unwrap();
     }
 }

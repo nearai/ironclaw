@@ -383,4 +383,121 @@ mod tests {
             HttpMcpTransport::new("http://localhost:8080", "test").with_custom_headers(headers);
         assert_eq!(transport.custom_headers.get("X-Custom").unwrap(), "value");
     }
+
+    // -- Wire-level echo server tests -----------------------------------------
+    //
+    // These tests spin up a real HTTP server that echoes received headers back
+    // as a JSON-RPC result, verifying that custom headers and Authorization
+    // handling work end-to-end through the actual HTTP transport.
+
+    /// Spawn a lightweight echo server that returns received headers as a
+    /// JSON-RPC response.  Returns `(url, join_handle)`.
+    async fn spawn_echo_server() -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{Router, extract::Request, routing::post};
+        use tokio::net::TcpListener;
+
+        async fn echo_headers(req: Request) -> axum::response::Json<serde_json::Value> {
+            let mut map = serde_json::Map::new();
+            for (name, value) in req.headers() {
+                if let Ok(v) = value.to_str() {
+                    map.insert(name.to_string(), serde_json::Value::String(v.to_string()));
+                }
+            }
+            axum::response::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": map,
+            }))
+        }
+
+        let app = Router::new().route("/", post(echo_headers));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn test_wire_custom_headers_sent() {
+        let (url, _handle) = spawn_echo_server().await;
+
+        let custom = HashMap::from([
+            ("X-Api-Key".to_string(), "secret-key".to_string()),
+            ("X-Org-Id".to_string(), "org-123".to_string()),
+        ]);
+        let transport = HttpMcpTransport::new(&url, "echo-test").with_custom_headers(custom);
+
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let per_request_headers = HashMap::new();
+        let response = transport
+            .send(&request, &per_request_headers)
+            .await
+            .unwrap();
+
+        let echoed = response.result.unwrap();
+        assert_eq!(echoed["x-api-key"], "secret-key");
+        assert_eq!(echoed["x-org-id"], "org-123");
+    }
+
+    #[tokio::test]
+    async fn test_wire_per_request_headers_override_custom() {
+        let (url, _handle) = spawn_echo_server().await;
+
+        let custom = HashMap::from([(
+            "authorization".to_string(),
+            "Bearer custom-token".to_string(),
+        )]);
+        let transport = HttpMcpTransport::new(&url, "echo-test").with_custom_headers(custom);
+
+        // Per-request header should override the custom header
+        let per_request = HashMap::from([(
+            "authorization".to_string(),
+            "Bearer oauth-token".to_string(),
+        )]);
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let response = transport.send(&request, &per_request).await.unwrap();
+
+        let echoed = response.result.unwrap();
+        // Per-request headers are inserted after custom headers via HeaderMap::insert,
+        // which replaces any existing entry for the same key.
+        assert_eq!(echoed["authorization"], "Bearer oauth-token");
+    }
+
+    #[tokio::test]
+    async fn test_wire_custom_auth_preserved_when_no_per_request_auth() {
+        let (url, _handle) = spawn_echo_server().await;
+
+        let custom = HashMap::from([(
+            "authorization".to_string(),
+            "Bearer custom-token".to_string(),
+        )]);
+        let transport = HttpMcpTransport::new(&url, "echo-test").with_custom_headers(custom);
+
+        let per_request = HashMap::new(); // no per-request auth
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let response = transport.send(&request, &per_request).await.unwrap();
+
+        let echoed = response.result.unwrap();
+        assert_eq!(echoed["authorization"], "Bearer custom-token");
+    }
 }

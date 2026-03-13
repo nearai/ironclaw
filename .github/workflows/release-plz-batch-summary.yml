@@ -1,0 +1,44 @@
+name: Release-plz Batch Summary
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "release-plz PR number to refresh"
+        required: true
+        type: string
+      dry_run:
+        description: "Compute the body update without editing the PR"
+        required: false
+        type: boolean
+        default: true
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  update-release-pr:
+    if: >
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'release-plz-')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.event.pull_request.base.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Update release-plz PR body with staging batch summary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: bash .github/scripts/update-release-plz-body.sh

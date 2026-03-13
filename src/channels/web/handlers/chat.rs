@@ -37,11 +37,17 @@ pub async fn chat_send_handler(
     let msg_id = msg.id;
     let thread_id = msg.thread_id.clone();
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tx.send(msg).await.map_err(|_| {
         (
@@ -111,11 +117,17 @@ pub async fn chat_approval_handler(
 
     let msg_id = msg.id;
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tx.send(msg).await.map_err(|_| {
         (
@@ -145,49 +157,33 @@ pub async fn chat_auth_token_handler(
         "Extension manager not available".to_string(),
     ))?;
 
-    let result = ext_mgr
-        .auth(&req.extension_name, Some(&req.token))
+    match ext_mgr
+        .configure_token(&req.extension_name, &req.token)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    {
+        Ok(result) => {
+            clear_auth_mode(&state).await;
 
-    if result.is_authenticated() {
-        // Auto-activate so tools are available immediately
-        let msg = match ext_mgr.activate(&req.extension_name).await {
-            Ok(r) => format!(
-                "{} authenticated ({} tools loaded)",
-                req.extension_name,
-                r.tools_loaded.len()
-            ),
-            Err(e) => format!(
-                "{} authenticated but activation failed: {}",
-                req.extension_name, e
-            ),
-        };
+            state.sse.broadcast(SseEvent::AuthCompleted {
+                extension_name: req.extension_name.clone(),
+                success: true,
+                message: result.message.clone(),
+            });
 
-        // Clear auth mode on the active thread
-        clear_auth_mode(&state).await;
-
-        state.sse.broadcast(SseEvent::AuthCompleted {
-            extension_name: req.extension_name,
-            success: true,
-            message: msg.clone(),
-        });
-
-        Ok(Json(ActionResponse::ok(msg)))
-    } else {
-        // Re-emit auth_required for retry
-        state.sse.broadcast(SseEvent::AuthRequired {
-            extension_name: req.extension_name.clone(),
-            instructions: result.instructions().map(String::from),
-            auth_url: result.auth_url().map(String::from),
-            setup_url: result.setup_url().map(String::from),
-        });
-        Ok(Json(ActionResponse::fail(
-            result
-                .instructions()
-                .map(String::from)
-                .unwrap_or_else(|| "Invalid token".to_string()),
-        )))
+            Ok(Json(ActionResponse::ok(result.message)))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: req.extension_name.clone(),
+                    instructions: Some(msg.clone()),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            }
+            Ok(Json(ActionResponse::fail(msg)))
+        }
     }
 }
 
@@ -550,11 +546,17 @@ pub async fn chat_new_thread_handler(
     // Persist the empty conversation row with thread_type metadata synchronously
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
-        if let Err(e) = store
+        match store
             .ensure_conversation(thread_id, "gateway", &state.user_id, None)
             .await
         {
-            tracing::warn!("Failed to persist new thread: {}", e);
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(
+                user = %state.user_id,
+                thread_id = %thread_id,
+                "Skipped persisting new thread due to ownership/channel conflict"
+            ),
+            Err(e) => tracing::warn!("Failed to persist new thread: {}", e),
         }
         let metadata_val = serde_json::json!("thread");
         if let Err(e) = store
