@@ -17,7 +17,7 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
-use crate::safety::SafetyLayer;
+use crate::safety::{LlmJudge, SafetyLayer};
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
 use crate::skills::catalog::SkillCatalog;
@@ -778,11 +778,22 @@ impl AppBuilder {
             self.init_llm().await?
         };
         let (safety, tools, embeddings, workspace, builder) = self.init_tools(&llm).await?;
+        let llm_judge = Arc::new(LlmJudge::from_env());
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
         let agent_session_manager =
             Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
+
+        // Register LLM-as-Judge hook (no-op when disabled).
+        if llm_judge.config.enabled {
+            hooks
+                .register(Arc::new(crate::hooks::LlmJudgeHook::new(Arc::clone(
+                    &llm_judge,
+                ))))
+                .await;
+            tracing::debug!("LLM-as-Judge hook registered");
+        }
 
         let (
             mcp_session_manager,
