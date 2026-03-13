@@ -1890,12 +1890,12 @@ mod tests {
             }
         });
 
-        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap());
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap()); // safety: test-only setup
         let mut prepared = runtime
             .prepare("sheets", b"\0asm\x0d\0\x01\0", None)
             .await
-            .unwrap();
-        Arc::get_mut(&mut prepared).unwrap().schema = typed_schema.clone();
+            .unwrap(); // safety: test-only setup
+        Arc::get_mut(&mut prepared).unwrap().schema = typed_schema.clone(); // safety: test-only setup
 
         let wrapper =
             super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default())
@@ -1906,6 +1906,7 @@ mod tests {
                 }));
 
         assert_eq!(
+            // safety: test-only assertion
             wrapper.parameters_schema(),
             serde_json::json!({
                 "type": "object",
@@ -1913,7 +1914,7 @@ mod tests {
                 "additionalProperties": true
             })
         );
-        assert_eq!(wrapper.discovery_schema(), typed_schema);
+        assert_eq!(wrapper.discovery_schema(), typed_schema); // safety: test-only assertion
     }
 
     /// Regression test: leak scan must run on raw headers (before credential

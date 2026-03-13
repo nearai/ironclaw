@@ -1089,11 +1089,11 @@ mod tests {
         registry.register(Arc::new(NormalizedApprovalTool)).await;
 
         let cm = Arc::new(ContextManager::new(5));
-        let job_id = cm.create_job("test", "normalized approval").await.unwrap();
+        let job_id = cm.create_job("test", "normalized approval").await.unwrap(); // safety: test-only setup
         cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test-only setup
+            .unwrap(); // safety: test-only setup
 
         let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,
@@ -1112,6 +1112,7 @@ mod tests {
         .await;
 
         assert!(
+            // safety: test-only assertion
             result.is_ok(),
             "stringified boolean should normalize before approval: {result:?}"
         );

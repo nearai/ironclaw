@@ -76,16 +76,16 @@ fn coerce_string_value(s: &str, schema: &serde_json::Value) -> Option<serde_json
         return None;
     }
 
-    if schema_allows_type(schema, "integer") {
-        if let Ok(v) = s.parse::<i64>() {
-            return Some(serde_json::Value::from(v));
-        }
+    if schema_allows_type(schema, "integer")
+        && let Ok(v) = s.parse::<i64>()
+    {
+        return Some(serde_json::Value::from(v));
     }
 
-    if schema_allows_type(schema, "number") {
-        if let Ok(v) = s.parse::<f64>() {
-            return Some(serde_json::Value::from(v));
-        }
+    if schema_allows_type(schema, "number")
+        && let Ok(v) = s.parse::<f64>()
+    {
+        return Some(serde_json::Value::from(v));
     }
 
     if schema_allows_type(schema, "boolean") {
@@ -182,9 +182,9 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
-        assert_eq!(result["count"], serde_json::json!(5.0));
-        assert_eq!(result["limit"], serde_json::json!(10));
-        assert_eq!(result["enabled"], serde_json::json!(true));
+        assert_eq!(result["count"], serde_json::json!(5.0)); // safety: test-only assertion
+        assert_eq!(result["limit"], serde_json::json!(10)); // safety: test-only assertion
+        assert_eq!(result["enabled"], serde_json::json!(true)); // safety: test-only assertion
     }
 
     #[test]
@@ -207,7 +207,7 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
-        assert_eq!(result["values"], serde_json::json!([[1, 2], [3, 4]]));
+        assert_eq!(result["values"], serde_json::json!([[1, 2], [3, 4]])); // safety: test-only assertion
     }
 
     #[test]
@@ -231,6 +231,7 @@ mod tests {
         let result = prepare_params_for_schema(&params, &schema);
 
         assert_eq!(
+            // safety: test-only assertion
             result["request"],
             serde_json::json!({"start_index": 12, "enabled": false})
         );
@@ -258,7 +259,7 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
-        assert_eq!(result["requests"], serde_json::json!([{ "enabled": true }]));
+        assert_eq!(result["requests"], serde_json::json!([{ "enabled": true }])); // safety: test-only assertion
     }
 
     #[test]
@@ -281,6 +282,7 @@ mod tests {
         let result = prepare_params_for_schema(&params, &schema);
 
         assert_eq!(
+            // safety: test-only assertion
             result,
             serde_json::json!({
                 "alpha": { "count": 5, "enabled": false },
@@ -306,7 +308,7 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
-        assert_eq!(result["requests"], serde_json::json!("[{\"oops\":]"));
+        assert_eq!(result["requests"], serde_json::json!("[{\"oops\":]")); // safety: test-only assertion
     }
 
     #[test]
@@ -323,7 +325,7 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
-        assert_eq!(result["value"], serde_json::json!("{\"mode\":\"raw\"}"));
+        assert_eq!(result["value"], serde_json::json!("{\"mode\":\"raw\"}")); // safety: test-only assertion
     }
 
     #[test]
@@ -337,7 +339,7 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
-        assert_eq!(result["count"], serde_json::json!("10"));
+        assert_eq!(result["count"], serde_json::json!("10")); // safety: test-only assertion
     }
 
     #[test]
@@ -360,6 +362,7 @@ mod tests {
         let result = prepare_tool_params(&tool, &params);
 
         assert_eq!(
+            // safety: test-only assertion
             result["requests"],
             serde_json::json!([{ "insertText": { "text": "hello" } }])
         );

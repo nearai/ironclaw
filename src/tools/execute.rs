@@ -396,11 +396,11 @@ mod tests {
             &test_job_ctx(),
         )
         .await
-        .expect("array_echo should succeed");
+        .expect("array_echo should succeed"); // safety: test-only assertion
 
         let output: serde_json::Value =
-            serde_json::from_str(&result).expect("tool result should be valid JSON");
-        assert_eq!(output["values"], serde_json::json!([1, 2, 3]));
+            serde_json::from_str(&result).expect("tool result should be valid JSON"); // safety: test-only assertion
+        assert_eq!(output["values"], serde_json::json!([1, 2, 3])); // safety: test-only assertion
     }
 
     #[test]
