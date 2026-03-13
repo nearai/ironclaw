@@ -1171,12 +1171,14 @@ pub fn spawn_cron_ticker(
     tokio::spawn(async move {
         // Run one check immediately so routines due at startup don't wait
         // an extra full polling interval.
+        engine.refresh_event_cache().await;
         engine.check_cron_triggers().await;
 
         let mut ticker = tokio::time::interval(interval);
 
         loop {
             ticker.tick().await;
+            engine.refresh_event_cache().await;
             engine.check_cron_triggers().await;
         }
     })
