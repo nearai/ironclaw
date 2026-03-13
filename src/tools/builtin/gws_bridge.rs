@@ -386,7 +386,7 @@ fn check_allowlist(args: &[String]) -> Result<(), &'static str> {
             let ok = matches!(resource, "messages" | "threads" | "labels")
                 && matches!(method, "list" | "get");
             if ok {
-                Ok(())
+                validate_extra_flags(args, 4)
             } else {
                 Err(
                     "Allowed gmail commands are read-only: gmail users {messages|threads|labels} {list|get}",
@@ -403,7 +403,7 @@ fn check_allowlist(args: &[String]) -> Result<(), &'static str> {
             let method = args[2].as_str();
             let ok = matches!(resource, "events" | "calendars") && matches!(method, "list" | "get");
             if ok {
-                Ok(())
+                validate_extra_flags(args, 3)
             } else {
                 Err(
                     "Allowed calendar commands are read-only: calendar {events|calendars} {list|get}",
@@ -418,7 +418,7 @@ fn check_allowlist(args: &[String]) -> Result<(), &'static str> {
             let method = args[2].as_str();
             let ok = matches!(resource, "files" | "drives") && matches!(method, "list" | "get");
             if ok {
-                Ok(())
+                validate_extra_flags(args, 3)
             } else {
                 Err("Allowed drive commands are read-only: drive {files|drives} {list|get}")
             }
@@ -427,6 +427,27 @@ fn check_allowlist(args: &[String]) -> Result<(), &'static str> {
             "Command not in strict allowlist (only auth status and read-only gmail/calendar/drive commands allowed)",
         ),
     }
+}
+
+fn validate_extra_flags(args: &[String], start_idx: usize) -> Result<(), &'static str> {
+    let mut i = start_idx;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--params" || arg == "--json" {
+            // Split form: requires a following JSON payload token.
+            if i + 1 >= args.len() {
+                return Err("Flag is missing required value");
+            }
+            i += 2;
+            continue;
+        }
+        if arg.starts_with("--params=") || arg.starts_with("--json=") {
+            i += 1;
+            continue;
+        }
+        return Err("Only --params/--json flags are permitted");
+    }
+    Ok(())
 }
 
 /// Apply basic regex redaction to hide common secret formats from outputs.
@@ -443,20 +464,12 @@ fn redact_secrets(input: &str) -> String {
     static SK_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?i)(sk-[a-zA-Z0-9]{32,})").unwrap());
 
-    let mut result = input.to_string();
-    result = BEARER_RE.replace_all(&result, "${1}[REDACTED]").to_string();
-    result = OAUTH_RE.replace_all(&result, "${1}[REDACTED]").to_string();
-    result = YA29_RE
-        .replace_all(&result, "[REDACTED_OAUTH_TOKEN]")
-        .to_string();
-    result = AKIA_RE
-        .replace_all(&result, "[REDACTED_AWS_KEY]")
-        .to_string();
-    result = SK_RE
-        .replace_all(&result, "[REDACTED_SECRET_KEY]")
-        .to_string();
-
-    result
+    let result = BEARER_RE.replace_all(input, "${1}[REDACTED]");
+    let result = OAUTH_RE.replace_all(&result, "${1}[REDACTED]");
+    let result = YA29_RE.replace_all(&result, "[REDACTED_OAUTH_TOKEN]");
+    let result = AKIA_RE.replace_all(&result, "[REDACTED_AWS_KEY]");
+    let result = SK_RE.replace_all(&result, "[REDACTED_SECRET_KEY]");
+    result.into_owned()
 }
 
 fn extract_message_count(args: &[String], parsed: &serde_json::Value) -> Option<usize> {
@@ -738,13 +751,12 @@ impl Tool for GwsBridgeTool {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
-        // Since we already block mutating commands in execute/check_allowlist,
-        // what remains is safe to auto-approve.
-        ApprovalRequirement::UnlessAutoApproved
+        // Host process execution should always require explicit user approval.
+        ApprovalRequirement::Always
     }
 
     fn domain(&self) -> ToolDomain {
-        ToolDomain::Orchestrator
+        ToolDomain::Container
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -801,6 +813,43 @@ mod tests {
     fn test_allowlist_blocks_unknown() {
         assert!(check_allowlist(&["unknown_command".to_string()]).is_err());
         assert!(check_allowlist(&[]).is_err());
+    }
+
+    #[test]
+    fn test_allowlist_blocks_dangerous_flags() {
+        assert!(
+            check_allowlist(&[
+                "gmail".to_string(),
+                "users".to_string(),
+                "messages".to_string(),
+                "list".to_string(),
+                "--config=/tmp/evil".to_string()
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_allowlist_accepts_supported_flags() {
+        assert!(
+            check_allowlist(&[
+                "calendar".to_string(),
+                "events".to_string(),
+                "list".to_string(),
+                "--params={\"calendarId\":\"primary\"}".to_string()
+            ])
+            .is_ok()
+        );
+        assert!(
+            check_allowlist(&[
+                "drive".to_string(),
+                "files".to_string(),
+                "list".to_string(),
+                "--json".to_string(),
+                "{}".to_string()
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1144,6 +1193,8 @@ mod tests {
     async fn test_gws_bridge_disabled_by_default() {
         let tool = GwsBridgeTool::new();
         let ctx = JobContext::default();
+        // SAFETY: This test mutates process environment in a single-threaded
+        // section to validate runtime opt-in behavior.
         unsafe { std::env::remove_var("GWS_BRIDGE_ENABLED") };
 
         let result = tool
