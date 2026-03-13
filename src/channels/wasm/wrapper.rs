@@ -760,10 +760,7 @@ fn resolve_message_scope(
     }
 }
 
-fn apply_emitted_metadata(
-    mut msg: IncomingMessage,
-    metadata_json: &str,
-) -> IncomingMessage {
+fn apply_emitted_metadata(mut msg: IncomingMessage, metadata_json: &str) -> IncomingMessage {
     if let Ok(metadata) = serde_json::from_str(metadata_json) {
         msg = msg.with_metadata(metadata);
         if msg.conversation_scope().is_none()
@@ -914,7 +911,10 @@ impl WasmChannel {
                 }
                 Ok(_) => {
                     if self.owner_scope_id != "default" {
-                        match store.get_setting("default", &self.broadcast_metadata_key()).await {
+                        match store
+                            .get_setting("default", &self.broadcast_metadata_key())
+                            .await
+                        {
                             Ok(Some(serde_json::Value::String(meta))) => {
                                 *self.last_broadcast_metadata.write().await = Some(meta);
                                 tracing::debug!(
@@ -1132,13 +1132,12 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
-        let host_credentials =
-            resolve_channel_host_credentials(
-                &self.capabilities,
-                self.secrets_store.as_deref(),
-                &self.owner_scope_id,
-            )
-                .await;
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
 
@@ -1276,13 +1275,12 @@ impl WasmChannel {
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let credentials = self.get_credentials().await;
-        let host_credentials =
-            resolve_channel_host_credentials(
-                &self.capabilities,
-                self.secrets_store.as_deref(),
-                &self.owner_scope_id,
-            )
-                .await;
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
 
@@ -1383,13 +1381,12 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
-        let host_credentials =
-            resolve_channel_host_credentials(
-                &self.capabilities,
-                self.secrets_store.as_deref(),
-                &self.owner_scope_id,
-            )
-                .await;
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
 
@@ -1494,13 +1491,12 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
-        let host_credentials =
-            resolve_channel_host_credentials(
-                &self.capabilities,
-                self.secrets_store.as_deref(),
-                &self.owner_scope_id,
-            )
-                .await;
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await;
         let pairing_store = self.pairing_store.clone();
 
         // Prepare response data
@@ -1639,13 +1635,12 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
-        let host_credentials =
-            resolve_channel_host_credentials(
-                &self.capabilities,
-                self.secrets_store.as_deref(),
-                &self.owner_scope_id,
-            )
-                .await;
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await;
         let pairing_store = self.pairing_store.clone();
 
         let user_id = user_id.to_string();
@@ -1747,13 +1742,12 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
-        let host_credentials =
-            resolve_channel_host_credentials(
-                &self.capabilities,
-                self.secrets_store.as_deref(),
-                &self.owner_scope_id,
-            )
-                .await;
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await;
         let pairing_store = self.pairing_store.clone();
 
         let wit_update = status_to_wit(status, metadata);
@@ -2250,14 +2244,16 @@ impl WasmChannel {
                                 // Process any emitted messages
                                 if !emitted_messages.is_empty()
                                     && let Err(e) = Self::dispatch_emitted_messages(
-                                        &channel_name,
-                                        &owner_scope_id,
-                                        owner_actor_id.as_deref(),
+                                        EmitDispatchContext {
+                                            channel_name: &channel_name,
+                                            owner_scope_id: &owner_scope_id,
+                                            owner_actor_id: owner_actor_id.as_deref(),
+                                            message_tx: &message_tx,
+                                            rate_limiter: &rate_limiter,
+                                            last_broadcast_metadata: &last_broadcast_metadata,
+                                            settings_store: settings_store.as_ref(),
+                                        },
                                         emitted_messages,
-                                        &message_tx,
-                                        &rate_limiter,
-                                        &last_broadcast_metadata,
-                                        settings_store.as_ref(),
                                     ).await {
                                         tracing::warn!(
                                             channel = %channel_name,
@@ -2379,27 +2375,21 @@ impl WasmChannel {
     /// This is a static helper used by the polling loop since it doesn't have
     /// access to `&self`.
     async fn dispatch_emitted_messages(
-        channel_name: &str,
-        owner_scope_id: &str,
-        owner_actor_id: Option<&str>,
+        dispatch: EmitDispatchContext<'_>,
         messages: Vec<EmittedMessage>,
-        message_tx: &RwLock<Option<mpsc::Sender<IncomingMessage>>>,
-        rate_limiter: &RwLock<ChannelEmitRateLimiter>,
-        last_broadcast_metadata: &tokio::sync::RwLock<Option<String>>,
-        settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
     ) -> Result<(), WasmChannelError> {
         tracing::info!(
-            channel = %channel_name,
+            channel = %dispatch.channel_name,
             message_count = messages.len(),
             "Processing emitted messages from polling callback"
         );
 
         // Clone sender to avoid holding RwLock read guard across send().await in the loop
         let tx = {
-            let tx_guard = message_tx.read().await;
+            let tx_guard = dispatch.message_tx.read().await;
             let Some(tx) = tx_guard.as_ref() else {
                 tracing::error!(
-                    channel = %channel_name,
+                    channel = %dispatch.channel_name,
                     count = messages.len(),
                     "Messages emitted but no sender available - channel may not be started!"
                 );
@@ -2411,25 +2401,29 @@ impl WasmChannel {
         for emitted in messages {
             // Check rate limit — acquire and release the write lock before send().await
             {
-                let mut limiter = rate_limiter.write().await;
+                let mut limiter = dispatch.rate_limiter.write().await;
                 if !limiter.check_and_record() {
                     tracing::warn!(
-                        channel = %channel_name,
+                        channel = %dispatch.channel_name,
                         "Message emission rate limited"
                     );
                     return Err(WasmChannelError::EmitRateLimited {
-                        name: channel_name.to_string(),
+                        name: dispatch.channel_name.to_string(),
                     });
                 }
             }
 
-            let (resolved_user_id, is_owner_sender) =
-                resolve_message_scope(owner_scope_id, owner_actor_id, &emitted.user_id);
+            let (resolved_user_id, is_owner_sender) = resolve_message_scope(
+                dispatch.owner_scope_id,
+                dispatch.owner_actor_id,
+                &emitted.user_id,
+            );
 
             // Convert to IncomingMessage
-            let mut msg = IncomingMessage::new(channel_name, &resolved_user_id, &emitted.content)
-                .with_owner_id(owner_scope_id)
-                .with_sender_id(&emitted.user_id);
+            let mut msg =
+                IncomingMessage::new(dispatch.channel_name, &resolved_user_id, &emitted.content)
+                    .with_owner_id(dispatch.owner_scope_id)
+                    .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
                 msg = msg.with_user_name(name);
@@ -2464,18 +2458,18 @@ impl WasmChannel {
             if is_owner_sender {
                 // Store for owner-target routing (chat_id etc.)
                 do_update_broadcast_metadata(
-                    channel_name,
-                    owner_scope_id,
+                    dispatch.channel_name,
+                    dispatch.owner_scope_id,
                     &emitted.metadata_json,
-                    last_broadcast_metadata,
-                    settings_store,
+                    dispatch.last_broadcast_metadata,
+                    dispatch.settings_store,
                 )
                 .await;
             }
 
             // Send to stream — no locks held across this await
             tracing::info!(
-                channel = %channel_name,
+                channel = %dispatch.channel_name,
                 user_id = %emitted.user_id,
                 content_len = emitted.content.len(),
                 attachment_count = msg.attachments.len(),
@@ -2484,20 +2478,30 @@ impl WasmChannel {
 
             if tx.send(msg).await.is_err() {
                 tracing::error!(
-                    channel = %channel_name,
+                    channel = %dispatch.channel_name,
                     "Failed to send polled message, channel closed"
                 );
                 break;
             }
 
             tracing::info!(
-                channel = %channel_name,
+                channel = %dispatch.channel_name,
                 "Message successfully sent to agent queue"
             );
         }
 
         Ok(())
     }
+}
+
+struct EmitDispatchContext<'a> {
+    channel_name: &'a str,
+    owner_scope_id: &'a str,
+    owner_actor_id: Option<&'a str>,
+    message_tx: &'a RwLock<Option<mpsc::Sender<IncomingMessage>>>,
+    rate_limiter: &'a RwLock<ChannelEmitRateLimiter>,
+    last_broadcast_metadata: &'a tokio::sync::RwLock<Option<String>>,
+    settings_store: Option<&'a Arc<dyn crate::db::SettingsStore>>,
 }
 
 #[async_trait]
@@ -2637,12 +2641,11 @@ impl Channel for WasmChannel {
                 }
             })?;
 
-            let metadata: serde_json::Value = serde_json::from_str(&metadata).map_err(|e| {
-                ChannelError::SendFailed {
+            let metadata: serde_json::Value =
+                serde_json::from_str(&metadata).map_err(|e| ChannelError::SendFailed {
                     name: self.name.clone(),
                     reason: format!("Invalid stored owner routing metadata: {e}"),
-                }
-            })?;
+                })?;
 
             crate::channels::routing_target_from_metadata(&metadata).ok_or_else(|| {
                 ChannelError::SendFailed {
@@ -3096,7 +3099,10 @@ async fn resolve_channel_host_credentials(
             continue;
         }
 
-        let secret = match store.get_decrypted(owner_scope_id, &mapping.secret_name).await {
+        let secret = match store
+            .get_decrypted(owner_scope_id, &mapping.secret_name)
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!(
@@ -3215,7 +3221,7 @@ mod tests {
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
-    use crate::channels::wasm::wrapper::{HttpResponse, WasmChannel};
+    use crate::channels::wasm::wrapper::{EmitDispatchContext, HttpResponse, WasmChannel};
     use crate::pairing::PairingStore;
     use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
     use crate::tools::wasm::ResourceLimits;
@@ -3324,7 +3330,7 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok()); // safety: test-only assertion
         assert!(result.unwrap().is_empty());
     }
 
@@ -3348,30 +3354,32 @@ mod tests {
 
         let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
-            "test-channel",
-            "default",
-            None,
+            EmitDispatchContext {
+                channel_name: "test-channel",
+                owner_scope_id: "default",
+                owner_actor_id: None,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
             messages,
-            &message_tx,
-            &rate_limiter,
-            &last_broadcast_metadata,
-            None,
         )
         .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok()); // safety: test-only assertion
 
         // Verify messages were sent
-        let msg1 = rx.try_recv().expect("Should receive first message");
-        assert_eq!(msg1.user_id, "user1");
-        assert_eq!(msg1.content, "Hello from polling!");
+        let msg1 = rx.try_recv().expect("Should receive first message"); // safety: test-only assertion
+        assert_eq!(msg1.user_id, "user1"); // safety: test-only assertion
+        assert_eq!(msg1.content, "Hello from polling!"); // safety: test-only assertion
 
-        let msg2 = rx.try_recv().expect("Should receive second message");
-        assert_eq!(msg2.user_id, "user2");
-        assert_eq!(msg2.content, "Another message");
+        let msg2 = rx.try_recv().expect("Should receive second message"); // safety: test-only assertion
+        assert_eq!(msg2.user_id, "user2"); // safety: test-only assertion
+        assert_eq!(msg2.content, "Another message"); // safety: test-only assertion
 
         // No more messages
-        assert!(rx.try_recv().is_err());
+        assert!(rx.try_recv().is_err()); // safety: test-only assertion
     }
 
     #[tokio::test]
@@ -3391,14 +3399,16 @@ mod tests {
         // Should return Ok even without a sender (logs warning but doesn't fail)
         let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
-            "test-channel",
-            "default",
-            None,
+            EmitDispatchContext {
+                channel_name: "test-channel",
+                owner_scope_id: "default",
+                owner_actor_id: None,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
             messages,
-            &message_tx,
-            &rate_limiter,
-            &last_broadcast_metadata,
-            None,
         )
         .await;
 
@@ -4379,44 +4389,46 @@ mod tests {
 
         let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
-            "test-channel",
-            "default",
-            None,
+            EmitDispatchContext {
+                channel_name: "test-channel",
+                owner_scope_id: "default",
+                owner_actor_id: None,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
             messages,
-            &message_tx,
-            &rate_limiter,
-            &last_broadcast_metadata,
-            None,
         )
         .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok()); // safety: test-only assertion
 
-        let msg = rx.try_recv().expect("Should receive message");
-        assert_eq!(msg.content, "Check these files");
-        assert_eq!(msg.attachments.len(), 2);
+        let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
+        assert_eq!(msg.content, "Check these files"); // safety: test-only assertion
+        assert_eq!(msg.attachments.len(), 2); // safety: test-only assertion
 
         // Verify first attachment
-        assert_eq!(msg.attachments[0].id, "photo123");
-        assert_eq!(msg.attachments[0].mime_type, "image/jpeg");
-        assert_eq!(msg.attachments[0].filename, Some("cat.jpg".to_string()));
-        assert_eq!(msg.attachments[0].size_bytes, Some(50_000));
+        assert_eq!(msg.attachments[0].id, "photo123"); // safety: test-only assertion
+        assert_eq!(msg.attachments[0].mime_type, "image/jpeg"); // safety: test-only assertion
+        assert_eq!(msg.attachments[0].filename, Some("cat.jpg".to_string())); // safety: test-only assertion
+        assert_eq!(msg.attachments[0].size_bytes, Some(50_000)); // safety: test-only assertion
         assert_eq!(
             msg.attachments[0].source_url,
             Some("https://api.telegram.org/file/photo123".to_string())
-        );
+        ); // safety: test-only assertion
 
         // Verify second attachment
-        assert_eq!(msg.attachments[1].id, "doc456");
-        assert_eq!(msg.attachments[1].mime_type, "application/pdf");
+        assert_eq!(msg.attachments[1].id, "doc456"); // safety: test-only assertion
+        assert_eq!(msg.attachments[1].mime_type, "application/pdf"); // safety: test-only assertion
         assert_eq!(
             msg.attachments[1].extracted_text,
             Some("Report contents...".to_string())
-        );
+        ); // safety: test-only assertion
         assert_eq!(
             msg.attachments[1].storage_key,
             Some("store/doc456".to_string())
-        );
+        ); // safety: test-only assertion
     }
 
     #[tokio::test]
@@ -4432,32 +4444,36 @@ mod tests {
         ));
         let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
 
-        let messages = vec![EmittedMessage::new("telegram-owner", "Hello from owner")
-            .with_metadata(r#"{"chat_id":12345}"#)];
+        let messages = vec![
+            EmittedMessage::new("telegram-owner", "Hello from owner")
+                .with_metadata(r#"{"chat_id":12345}"#),
+        ];
 
         let result = WasmChannel::dispatch_emitted_messages(
-            "telegram",
-            "owner-scope",
-            Some("telegram-owner"),
+            EmitDispatchContext {
+                channel_name: "telegram",
+                owner_scope_id: "owner-scope",
+                owner_actor_id: Some("telegram-owner"),
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
             messages,
-            &message_tx,
-            &rate_limiter,
-            &last_broadcast_metadata,
-            None,
         )
         .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok()); // safety: test-only assertion
 
-        let msg = rx.try_recv().expect("Should receive message");
-        assert_eq!(msg.user_id, "owner-scope");
-        assert_eq!(msg.owner_id, "owner-scope");
-        assert_eq!(msg.sender_id, "telegram-owner");
-        assert_eq!(msg.conversation_scope(), Some("12345"));
+        let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
+        assert_eq!(msg.user_id, "owner-scope"); // safety: test-only assertion
+        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
+        assert_eq!(msg.sender_id, "telegram-owner"); // safety: test-only assertion
+        assert_eq!(msg.conversation_scope(), Some("12345")); // safety: test-only assertion
         assert_eq!(
             last_broadcast_metadata.read().await.as_deref(),
             Some(r#"{"chat_id":12345}"#)
-        );
+        ); // safety: test-only assertion
     }
 
     #[tokio::test]
@@ -4478,31 +4494,33 @@ mod tests {
         ];
 
         let result = WasmChannel::dispatch_emitted_messages(
-            "telegram",
-            "owner-scope",
-            Some("telegram-owner"),
+            EmitDispatchContext {
+                channel_name: "telegram",
+                owner_scope_id: "owner-scope",
+                owner_actor_id: Some("telegram-owner"),
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
             messages,
-            &message_tx,
-            &rate_limiter,
-            &last_broadcast_metadata,
-            None,
         )
         .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok()); // safety: test-only assertion
 
-        let msg = rx.try_recv().expect("Should receive message");
-        assert_eq!(msg.user_id, "guest-42");
-        assert_eq!(msg.owner_id, "owner-scope");
-        assert_eq!(msg.sender_id, "guest-42");
-        assert_eq!(msg.conversation_scope(), Some("999"));
-        assert!(last_broadcast_metadata.read().await.is_none());
+        let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
+        assert_eq!(msg.user_id, "guest-42"); // safety: test-only assertion
+        assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
+        assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
+        assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
+        assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion
     }
 
     #[tokio::test]
     async fn test_broadcast_owner_scope_uses_stored_owner_metadata() {
-        let channel =
-            create_test_channel().with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
+        let channel = create_test_channel()
+            .with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
 
         *channel.last_broadcast_metadata.write().await = Some(r#"{"chat_id":12345}"#.to_string());
 
@@ -4513,27 +4531,30 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok()); // safety: test-only assertion
     }
 
     #[tokio::test]
     async fn test_broadcast_legacy_default_uses_owner_metadata() {
-        let channel =
-            create_test_channel().with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
+        let channel = create_test_channel()
+            .with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
 
         *channel.last_broadcast_metadata.write().await = Some(r#"{"chat_id":12345}"#.to_string());
 
         let result = channel
-            .broadcast("default", crate::channels::OutgoingResponse::text("legacy hello"))
+            .broadcast(
+                "default",
+                crate::channels::OutgoingResponse::text("legacy hello"),
+            )
             .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok()); // safety: test-only assertion
     }
 
     #[tokio::test]
     async fn test_broadcast_owner_scope_requires_stored_metadata() {
-        let channel =
-            create_test_channel().with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
+        let channel = create_test_channel()
+            .with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
 
         let result = channel
             .broadcast(
@@ -4542,13 +4563,13 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test-only assertion
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("Send a message from the owner on this channel first"),
             "expected missing owner routing metadata error, got: {}",
             err
-        );
+        ); // safety: test-only assertion
     }
 
     #[tokio::test]
@@ -4568,22 +4589,24 @@ mod tests {
 
         let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
-            "test-channel",
-            "default",
-            None,
+            EmitDispatchContext {
+                channel_name: "test-channel",
+                owner_scope_id: "default",
+                owner_actor_id: None,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
             messages,
-            &message_tx,
-            &rate_limiter,
-            &last_broadcast_metadata,
-            None,
         )
         .await;
 
-        assert!(result.is_ok());
+        assert!(result.is_ok()); // safety: test-only assertion
 
-        let msg = rx.try_recv().expect("Should receive message");
-        assert_eq!(msg.content, "Just text, no attachments");
-        assert!(msg.attachments.is_empty());
+        let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
+        assert_eq!(msg.content, "Just text, no attachments"); // safety: test-only assertion
+        assert!(msg.attachments.is_empty()); // safety: test-only assertion
     }
 
     #[test]
