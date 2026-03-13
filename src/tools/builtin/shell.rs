@@ -1179,6 +1179,61 @@ mod tests {
         );
     }
 
+    /// Regression: Low-risk commands with shell redirections must NOT return Never.
+    ///
+    /// The pipeline splitter does not split on `>` / `>>`, so `echo x > /etc/passwd`
+    /// is classified as Low (matches `echo`). If Low mapped to `Never`, this write
+    /// would bypass approval entirely. Mapping Low to `UnlessAutoApproved` prevents
+    /// the bypass while keeping the graduated risk metadata.
+    #[test]
+    fn test_low_risk_with_redirect_not_never() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = ShellTool::new();
+        // These are Low-risk commands but contain redirections — must NOT be Never.
+        for cmd in &[
+            "echo secret_data > /etc/passwd",
+            "cat /etc/shadow > /tmp/exfil.txt",
+            "printf '%s' value > /tmp/leak",
+            "ls -la >> /tmp/log.txt",
+        ] {
+            let approval = tool.requires_approval(&serde_json::json!({"command": cmd}));
+            assert_ne!(
+                approval,
+                ApprovalRequirement::Never,
+                "'{cmd}' must not be Never — redirect could write sensitive files"
+            );
+            assert_eq!(
+                approval,
+                ApprovalRequirement::UnlessAutoApproved,
+                "'{cmd}' should be UnlessAutoApproved"
+            );
+        }
+    }
+
+    /// Regression: `git push` (non-force) must match an explicit MEDIUM_RISK_PATTERNS
+    /// entry, not fall through to the unknown-command Medium default.
+    #[test]
+    fn test_git_push_explicit_medium_pattern() {
+        // These must be Medium via the explicit "git push" pattern.
+        assert_eq!(
+            classify_command_risk("git push origin main"),
+            RiskLevel::Medium
+        );
+        assert_eq!(
+            classify_command_risk("git push --set-upstream origin feature"),
+            RiskLevel::Medium
+        );
+        // Force variants must still be High.
+        assert_eq!(
+            classify_command_risk("git push --force origin main"),
+            RiskLevel::High
+        );
+        assert_eq!(
+            classify_command_risk("git push -f origin main"),
+            RiskLevel::High
+        );
+    }
+
     #[test]
     fn test_requires_approval_string_encoded_args() {
         use crate::tools::tool::ApprovalRequirement;
