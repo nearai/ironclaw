@@ -32,7 +32,7 @@ fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
                 .timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-.map_err(|e| AuthError::ClientSetupFailed(e.to_string()))
+                .map_err(|e| AuthError::Http(e.to_string()))
         })
         .as_ref()
         .map_err(Clone::clone)
@@ -1508,6 +1508,17 @@ mod tests {
                 "AuthError display mismatch for {:?}",
                 error
             );
+        }
+    }
+
+    #[test]
+    fn test_auth_error_clone_preserves_http_variant_and_payload() {
+        let original = AuthError::Http("builder failed".to_string());
+        let cloned = original.clone();
+
+        match cloned {
+            AuthError::Http(message) => assert_eq!(message, "builder failed"),
+            other => panic!("expected AuthError::Http variant, got {other:?}"),
         }
     }
 
