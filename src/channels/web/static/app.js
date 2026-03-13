@@ -1142,13 +1142,15 @@ function handleAuthRequired(data) {
 
 function handleAuthCompleted(data) {
   showToast(data.message, data.success ? 'success' : 'error');
-  if (!data.success) {
-    setAuthFlowPending(true, data.message);
-    return;
-  }
-  // Dismiss only the matching extension's UI so unrelated setup work is not interrupted.
+  // Dismiss only the matching extension's UI so stale prompts are cleared.
   removeAuthCard(data.extension_name);
   closeConfigureModal(data.extension_name);
+  if (!data.success) {
+    setAuthFlowPending(false);
+    if (currentTab === 'extensions') loadExtensions();
+    enableChatInput();
+    return;
+  }
   setAuthFlowPending(false);
   if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
     addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
