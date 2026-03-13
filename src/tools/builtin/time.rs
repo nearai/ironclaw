@@ -5,7 +5,7 @@ use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
 /// Tool for getting current time and date operations.
 pub struct TimeTool;
@@ -73,11 +73,7 @@ impl Tool for TimeTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        // Be lenient for common LLM omissions: if operation is missing, default to `now`.
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .unwrap_or("now");
+        let operation = require_str(&params, "operation")?;
 
         let result = match operation {
             "now" => execute_now(&params, ctx)?,
@@ -464,23 +460,6 @@ mod tests {
             .await
             .expect("execute");
         assert!(output.result.get("iso").is_some(), "should have iso");
-    }
-
-    #[tokio::test]
-    async fn test_missing_operation_defaults_to_now() {
-        let tool = TimeTool;
-        let ctx = JobContext::with_user("test", "chat", "test");
-
-        let output = tool
-            .execute(serde_json::json!({}), &ctx)
-            .await
-            .expect("execute");
-
-        assert!(output.result.get("iso").is_some(), "should have iso");
-        assert!(
-            output.result.get("utc_iso").is_some(),
-            "should have utc_iso"
-        );
     }
 
     #[tokio::test]

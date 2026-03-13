@@ -98,14 +98,6 @@ fn parse_params_json(args: &[String]) -> Option<serde_json::Value> {
     None
 }
 
-fn default_calendar_week_args() -> Vec<String> {
-    vec![
-        "calendar".to_string(),
-        "events".to_string(),
-        "list".to_string(),
-    ]
-}
-
 fn parse_args_from_params(params: &serde_json::Value) -> Result<Vec<String>, ToolError> {
     if let Some(args_val) = params.get("args") {
         return serde_json::from_value(args_val.clone()).map_err(|e| {
@@ -114,10 +106,11 @@ fn parse_args_from_params(params: &serde_json::Value) -> Result<Vec<String>, Too
     }
 
     let Some(obj) = params.as_object() else {
-        tracing::warn!(
-            "gws_bridge called with non-object params; defaulting to calendar week list"
-        );
-        return Ok(default_calendar_week_args());
+        return Err(ToolError::InvalidParameters(
+            "Expected object params with either 'args' or compatibility shape \
+             {service, resource, method}"
+                .to_string(),
+        ));
     };
 
     // Compatibility shape:
@@ -155,11 +148,11 @@ fn parse_args_from_params(params: &serde_json::Value) -> Result<Vec<String>, Too
         return Ok(args);
     }
 
-    tracing::warn!(
-        keys = ?obj.keys().collect::<Vec<_>>(),
-        "gws_bridge called without recognized argument shape; defaulting to calendar week list"
-    );
-    Ok(default_calendar_week_args())
+    Err(ToolError::InvalidParameters(format!(
+        "Unrecognized params shape for gws_bridge. Provide 'args' or compatibility \
+         shape with service/resource/method. Keys: {:?}",
+        obj.keys().collect::<Vec<_>>()
+    )))
 }
 
 /// Canonicalize common shorthand emitted by models into valid `gws` syntax.
@@ -375,37 +368,63 @@ fn check_allowlist(args: &[String]) -> Result<(), &'static str> {
         return Err("No command provided");
     }
 
-    let cmd = args[0].as_str();
-
-    match cmd {
+    match args[0].as_str() {
         "auth" => {
-            if args.len() > 1 && args[1] == "status" {
+            if args.len() == 2 && args[1] == "status" {
+                return Ok(());
+            }
+            Err("Only 'auth status' is permitted for auth commands")
+        }
+        "gmail" => {
+            if args.len() < 4 || args[1] != "users" {
+                return Err(
+                    "gmail commands must use canonical form: gmail users <resource> <method>",
+                );
+            }
+            let resource = args[2].as_str();
+            let method = args[3].as_str();
+            let ok = matches!(resource, "messages" | "threads" | "labels")
+                && matches!(method, "list" | "get");
+            if ok {
                 Ok(())
             } else {
-                Err("Only 'auth status' is permitted for auth commands")
+                Err(
+                    "Allowed gmail commands are read-only: gmail users {messages|threads|labels} {list|get}",
+                )
             }
         }
-        "gmail" | "calendar" | "drive" => {
-            // Check for mutating operations
-            let mutating_patterns = [
-                "create", "update", "delete", "send", "trash", "modify", "insert", "patch", "move",
-                "copy", "upload", "clear", "import", "export",
-            ];
-
-            for arg in &args[1..] {
-                let lower = arg.to_lowercase();
-                for pat in mutating_patterns {
-                    if lower.contains(pat) {
-                        return Err(
-                            "Mutating operations (create/update/delete/send/etc) are blocked in phase 1",
-                        );
-                    }
-                }
+        "calendar" => {
+            if args.len() < 3 {
+                return Err(
+                    "calendar commands must use canonical form: calendar <resource> <method>",
+                );
             }
-            Ok(())
+            let resource = args[1].as_str();
+            let method = args[2].as_str();
+            let ok = matches!(resource, "events" | "calendars") && matches!(method, "list" | "get");
+            if ok {
+                Ok(())
+            } else {
+                Err(
+                    "Allowed calendar commands are read-only: calendar {events|calendars} {list|get}",
+                )
+            }
+        }
+        "drive" => {
+            if args.len() < 3 {
+                return Err("drive commands must use canonical form: drive <resource> <method>");
+            }
+            let resource = args[1].as_str();
+            let method = args[2].as_str();
+            let ok = matches!(resource, "files" | "drives") && matches!(method, "list" | "get");
+            if ok {
+                Ok(())
+            } else {
+                Err("Allowed drive commands are read-only: drive {files|drives} {list|get}")
+            }
         }
         _ => Err(
-            "Command not in the strict phase 1 allowlist (only auth status, gmail read, calendar read, drive read allowed)",
+            "Command not in strict allowlist (only auth status and read-only gmail/calendar/drive commands allowed)",
         ),
     }
 }
@@ -473,7 +492,27 @@ fn should_retry_spam_zero(args: &[String], message_count: Option<usize>) -> bool
     {
         return false;
     }
-    true
+    let Some(params) = parse_params_json(args) else {
+        return false;
+    };
+    let Some(obj) = params.as_object() else {
+        return false;
+    };
+
+    let q_is_spam = obj
+        .get("q")
+        .and_then(|v| v.as_str())
+        .is_some_and(|q| q.to_lowercase().contains("in:spam"));
+    let labels_include_spam = match obj.get("labelIds") {
+        Some(serde_json::Value::String(s)) => s.to_lowercase().contains("spam"),
+        Some(serde_json::Value::Array(a)) => a.iter().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case("spam") || s.eq_ignore_ascii_case("SPAM"))
+        }),
+        _ => false,
+    };
+
+    q_is_spam || labels_include_spam
 }
 
 fn build_spam_retry_args(args: &[String]) -> Vec<String> {
@@ -725,7 +764,15 @@ mod tests {
 
     #[test]
     fn test_allowlist_read_only() {
-        assert!(check_allowlist(&["gmail".to_string(), "list".to_string()]).is_ok());
+        assert!(
+            check_allowlist(&[
+                "gmail".to_string(),
+                "users".to_string(),
+                "messages".to_string(),
+                "list".to_string()
+            ])
+            .is_ok()
+        );
         assert!(
             check_allowlist(&[
                 "calendar".to_string(),
@@ -734,7 +781,10 @@ mod tests {
             ])
             .is_ok()
         );
-        assert!(check_allowlist(&["drive".to_string(), "files".to_string()]).is_ok());
+        assert!(
+            check_allowlist(&["drive".to_string(), "files".to_string(), "list".to_string()])
+                .is_ok()
+        );
     }
 
     #[test]
@@ -957,7 +1007,7 @@ mod tests {
             "messages".to_string(),
             "list".to_string(),
         ];
-        assert!(should_retry_spam_zero(&args, Some(0)));
+        assert!(!should_retry_spam_zero(&args, Some(0)));
     }
 
     #[test]
@@ -981,7 +1031,7 @@ mod tests {
             "list".to_string(),
             "--params={\"userId\":\"me\",\"maxResults\":50}".to_string(),
         ];
-        assert!(should_retry_spam_zero(&args, Some(0)));
+        assert!(!should_retry_spam_zero(&args, Some(0)));
     }
 
     #[test]
@@ -1084,10 +1134,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_args_from_params_fallback_default_calendar() {
+    fn test_parse_args_from_params_unrecognized_shape_is_error() {
         let params = serde_json::json!({});
-        let out = parse_args_from_params(&params).expect("fallback parsed");
-        assert_eq!(out, default_calendar_week_args());
+        let out = parse_args_from_params(&params);
+        assert!(out.is_err());
     }
 
     #[tokio::test]

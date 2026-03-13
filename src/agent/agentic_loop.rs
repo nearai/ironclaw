@@ -305,12 +305,12 @@ fn latest_user_message(reason_ctx: &ReasoningContext) -> Option<&str> {
 }
 
 fn has_tool_result_since_last_user(reason_ctx: &ReasoningContext, tool_name: &str) -> bool {
-    let last_user_idx = reason_ctx
+    let slice_start = reason_ctx
         .messages
         .iter()
         .rposition(|m| m.role == Role::User)
-        .unwrap_or(0);
-    reason_ctx.messages[last_user_idx + 1..]
+        .map_or(0, |idx| idx + 1);
+    reason_ctx.messages[slice_start..]
         .iter()
         .any(|m| m.role == Role::Tool && m.name.as_deref().is_some_and(|n| n.eq(tool_name)))
 }
@@ -342,13 +342,13 @@ fn needs_fresh_calendar_tool_call(text: &str, reason_ctx: &ReasoningContext) -> 
 }
 
 fn has_calendar_events_tool_call_since_last_user(reason_ctx: &ReasoningContext) -> bool {
-    let last_user_idx = reason_ctx
+    let slice_start = reason_ctx
         .messages
         .iter()
         .rposition(|m| m.role == Role::User)
-        .unwrap_or(0);
+        .map_or(0, |idx| idx + 1);
 
-    reason_ctx.messages[last_user_idx + 1..].iter().any(|m| {
+    reason_ctx.messages[slice_start..].iter().any(|m| {
         if m.role != Role::Assistant {
             return false;
         }
@@ -869,5 +869,17 @@ mod tests {
         let text = "You have a job interview tomorrow (Thursday).";
         let today = chrono::NaiveDate::from_ymd_opt(2026, 3, 11).expect("valid date");
         assert!(!calendar_relative_day_mismatch_for_date(text, today));
+    }
+
+    #[test]
+    fn test_has_tool_result_since_last_user_handles_empty_context() {
+        let ctx = ReasoningContext::new();
+        assert!(!has_tool_result_since_last_user(&ctx, "gws_bridge"));
+    }
+
+    #[test]
+    fn test_has_calendar_events_tool_call_since_last_user_handles_empty_context() {
+        let ctx = ReasoningContext::new();
+        assert!(!has_calendar_events_tool_call_since_last_user(&ctx));
     }
 }

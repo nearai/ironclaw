@@ -91,18 +91,6 @@ pub fn llm_signals_tool_intent(response: &str) -> bool {
         }
     }
 
-    // Past-tense completion claims without tool calls are also suspect.
-    // Example: "I've checked your spam folder" (should have called a tool).
-    static COMPLETION_CLAIM_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
-            r"(?i)\b(i(?:'ve| have)?|i)\s+(checked|fetched|looked up|searched|queried|retrieved|read|ran|executed)\b",
-        )
-        .unwrap()
-    });
-    if COMPLETION_CLAIM_RE.is_match(&lower) {
-        return true;
-    }
-
     false
 }
 
@@ -2481,12 +2469,6 @@ That's my plan."#;
         assert!(llm_signals_tool_intent("Let me search for that file."));
         assert!(llm_signals_tool_intent("I'll fetch the data now."));
         assert!(llm_signals_tool_intent("I'm going to check the logs."));
-        assert!(llm_signals_tool_intent(
-            "I've checked your Gmail spam folder and it's empty."
-        ));
-        assert!(llm_signals_tool_intent(
-            "I checked the logs and found errors."
-        ));
         assert!(llm_signals_tool_intent("Let me add it now."));
         assert!(llm_signals_tool_intent("I will run the tests to verify."));
         assert!(llm_signals_tool_intent("I'll look up the documentation."));
