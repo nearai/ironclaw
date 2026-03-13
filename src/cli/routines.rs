@@ -292,6 +292,16 @@ async fn list(
 
 // ── Create ──────────────────────────────────────────────────
 
+fn cli_notify_config(notify_channel: Option<String>) -> NotifyConfig {
+    NotifyConfig {
+        channel: notify_channel,
+        user: None,
+        on_attention: true,
+        on_failure: true,
+        on_success: false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn create(
     db: &Arc<dyn Database>,
@@ -338,13 +348,7 @@ async fn create(
             max_concurrent: 1,
             dedup_window: None,
         },
-        notify: NotifyConfig {
-            channel: notify_channel,
-            user: Some(user_id.to_string()),
-            on_attention: true,
-            on_failure: true,
-            on_success: false,
-        },
+        notify: cli_notify_config(notify_channel),
         last_run_at: None,
         next_fire_at: next_fire,
         run_count: 0,
@@ -728,5 +732,15 @@ mod tests {
         assert!(result.ends_with(".."), "got: {result}");
         // Must be valid UTF-8 (would have panicked otherwise).
         assert!(result.is_char_boundary(result.len()));
+    }
+
+    #[test]
+    fn cli_notify_config_defaults_to_runtime_target_resolution() {
+        let notify = cli_notify_config(Some("telegram".to_string()));
+        assert_eq!(notify.channel.as_deref(), Some("telegram")); // safety: test-only assertion
+        assert_eq!(notify.user, None); // safety: test-only assertion
+        assert!(notify.on_attention); // safety: test-only assertion
+        assert!(notify.on_failure); // safety: test-only assertion
+        assert!(!notify.on_success); // safety: test-only assertion
     }
 }
