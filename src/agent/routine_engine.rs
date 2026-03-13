@@ -459,7 +459,20 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             prompt,
             context_paths,
             max_tokens,
-        } => execute_lightweight(&ctx, &routine, prompt, context_paths, *max_tokens).await,
+            use_tools,
+            max_tool_rounds,
+        } => {
+            execute_lightweight(
+                &ctx,
+                &routine,
+                prompt,
+                context_paths,
+                *max_tokens,
+                *use_tools,
+                *max_tool_rounds,
+            )
+            .await
+        }
         RoutineAction::FullJob {
             title,
             description,
@@ -670,6 +683,8 @@ async fn execute_lightweight(
     prompt: &str,
     context_paths: &[String],
     max_tokens: u32,
+    use_tools: bool,
+    max_tool_rounds: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Load context from workspace
     let mut context_parts = Vec::new();
@@ -732,14 +747,15 @@ async fn execute_lightweight(
         Err(_) => max_tokens,
     };
 
-    // If tools are enabled, use the tool execution loop; otherwise, single LLM call
-    if ctx.config.lightweight_tools_enabled {
+    // If tools are enabled (both globally and per-routine), use the tool execution loop
+    if use_tools && ctx.config.lightweight_tools_enabled {
         execute_lightweight_with_tools(
             ctx,
             routine,
             &system_prompt,
             &full_prompt,
             effective_max_tokens,
+            max_tool_rounds,
         )
         .await
     } else {
@@ -783,24 +799,12 @@ async fn execute_lightweight_no_tools(
             reason: e.to_string(),
         })?;
 
-    let content = response.content.trim();
-    let tokens_used = Some((response.input_tokens + response.output_tokens) as i32);
-
-    // Empty content guard
-    if content.is_empty() {
-        return if response.finish_reason == FinishReason::Length {
-            Err(RoutineError::TruncatedResponse)
-        } else {
-            Err(RoutineError::EmptyResponse)
-        };
-    }
-
-    // Check for the "nothing to do" sentinel
-    if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
-        return Ok((RunStatus::Ok, None, tokens_used));
-    }
-
-    Ok((RunStatus::Attention, Some(content.to_string()), tokens_used))
+    handle_text_response(
+        &response.content,
+        response.finish_reason,
+        response.input_tokens,
+        response.output_tokens,
+    )
 }
 
 /// Handle a text-only LLM response in lightweight routine execution.
@@ -850,6 +854,7 @@ async fn execute_lightweight_with_tools(
     system_prompt: &str,
     full_prompt: &str,
     effective_max_tokens: u32,
+    max_tool_rounds: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let mut messages = if system_prompt.is_empty() {
         vec![ChatMessage::user(full_prompt)]
@@ -860,7 +865,9 @@ async fn execute_lightweight_with_tools(
         ]
     };
 
-    let max_iterations = ctx.config.lightweight_max_iterations.min(5);
+    let max_iterations = max_tool_rounds
+        .min(ctx.config.lightweight_max_iterations)
+        .min(5);
     let mut iteration = 0;
     let mut total_input_tokens = 0;
     let mut total_output_tokens = 0;
@@ -906,7 +913,10 @@ async fn execute_lightweight_with_tools(
             );
         } else {
             // Tool-enabled iteration
-            let tool_defs = ctx.tools.tool_definitions().await;
+            let tool_defs = ctx
+                .tools
+                .tool_definitions_excluding(ROUTINE_TOOL_DENYLIST)
+                .await;
 
             let request = ToolCompletionRequest::new(messages.clone(), tool_defs)
                 .with_max_tokens(effective_max_tokens)
@@ -972,12 +982,33 @@ async fn execute_lightweight_with_tools(
     }
 }
 
+/// Tools that must never be callable from lightweight routines.
+///
+/// These tools pose autonomy-escalation risks: a routine could self-replicate,
+/// modify its own triggers/prompts, delete other routines, or restart the agent.
+const ROUTINE_TOOL_DENYLIST: &[&str] = &[
+    "routine_create",
+    "routine_update",
+    "routine_delete",
+    "routine_fire",
+    "restart",
+];
+
 /// Execute a single tool for a lightweight routine.
 async fn execute_routine_tool(
     ctx: &EngineContext,
     job_ctx: &JobContext,
     tc: &ToolCall,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Block tools that pose autonomy-escalation risks
+    if ROUTINE_TOOL_DENYLIST.contains(&tc.name.as_str()) {
+        return Err(format!(
+            "Tool '{}' is not available in lightweight routines",
+            tc.name
+        )
+        .into());
+    }
+
     // Check if tool exists
     let tool = ctx
         .tools
@@ -1119,9 +1150,11 @@ pub fn spawn_cron_ticker(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Run one check immediately so routines due at startup don't wait
+        // an extra full polling interval.
+        engine.check_cron_triggers().await;
+
         let mut ticker = tokio::time::interval(interval);
-        // Skip immediate first tick
-        ticker.tick().await;
 
         loop {
             ticker.tick().await;
@@ -1284,6 +1317,36 @@ mod tests {
     }
 
     #[test]
+    fn test_routine_tool_denylist_blocks_self_management_tools() {
+        let denylisted = vec![
+            "routine_create",
+            "routine_update",
+            "routine_delete",
+            "routine_fire",
+            "restart",
+        ];
+        for tool in &denylisted {
+            assert!(
+                super::ROUTINE_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should be in ROUTINE_TOOL_DENYLIST",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_routine_tool_denylist_allows_safe_tools() {
+        let allowed = vec!["echo", "time", "json", "http", "memory_search", "shell"];
+        for tool in &allowed {
+            assert!(
+                !super::ROUTINE_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should NOT be in ROUTINE_TOOL_DENYLIST",
+                tool
+            );
+        }
+    }
+
+    #[test]
     fn test_empty_response_handling() {
         // Simulate the empty content guard logic
         let empty_content = "";
@@ -1296,5 +1359,12 @@ mod tests {
         );
         assert_eq!(finish_reason_length, crate::llm::FinishReason::Length);
         assert_eq!(finish_reason_stop, crate::llm::FinishReason::Stop);
+    }
+
+    #[test]
+    fn test_truncate_adds_ellipsis_when_over_limit() {
+        let input = "abcdefghijk";
+        let out = super::truncate(input, 5);
+        assert_eq!(out, "abcde...");
     }
 }

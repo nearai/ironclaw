@@ -3350,7 +3350,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -3386,6 +3386,7 @@ dependencies = [
  "hyper-util",
  "iana-time-zone",
  "insta",
+ "ironclaw_safety",
  "json5",
  "libsql",
  "lru",
@@ -3440,6 +3441,18 @@ dependencies = [
  "wasmtime-wasi",
  "zbus",
  "zip",
+]
+
+[[package]]
+name = "ironclaw_safety"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "regex",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
 ]
 
 [[package]]

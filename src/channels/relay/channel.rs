@@ -408,12 +408,120 @@ impl Channel for RelayChannel {
         Ok(())
     }
 
-    /// Status updates are not forwarded to messaging providers to avoid noise.
     async fn send_status(
         &self,
-        _status: StatusUpdate,
-        _metadata: &serde_json::Value,
+        status: StatusUpdate,
+        metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
+        // Only handle ApprovalNeeded — all other variants are no-ops
+        let StatusUpdate::ApprovalNeeded {
+            request_id,
+            tool_name,
+            description,
+            parameters,
+        } = status
+        else {
+            return Ok(());
+        };
+
+        // Only send buttons in DMs (dispatcher gates upstream, but guard here too)
+        let event_type = metadata
+            .get("event_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if event_type != "direct_message" {
+            tracing::warn!(
+                tool = %tool_name,
+                event_type,
+                "Approval requested in non-DM, skipping buttons"
+            );
+            return Ok(());
+        }
+
+        // Extract required metadata — error if missing
+        let channel_id = metadata
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ChannelError::SendFailed {
+                name: self.name().to_string(),
+                reason: "Missing channel_id for approval buttons".into(),
+            })?;
+        let sender_id = metadata
+            .get("sender_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ChannelError::SendFailed {
+                name: self.name().to_string(),
+                reason: "Missing sender_id for approval buttons".into(),
+            })?;
+        let thread_id = metadata.get("thread_id").and_then(|v| v.as_str());
+        let team_id = metadata
+            .get("team_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&self.team_id);
+
+        // Button value payload (Slack limits button values to 2000 chars;
+        // safe with typical UUIDs but documented here as a constraint)
+        let value_payload = serde_json::json!({
+            "instance_id": self.instance_id,
+            "team_id": team_id,
+            "channel_id": channel_id,
+            "thread_ts": thread_id,
+            "request_id": request_id,
+            "sender_id": sender_id,
+        });
+        let value_str = value_payload.to_string();
+
+        // Parameters are already redacted via redact_params() in dispatcher.rs
+        let params_display =
+            serde_json::to_string_pretty(&parameters).unwrap_or_else(|_| parameters.to_string());
+
+        let blocks = serde_json::json!([
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format!(
+                        "*Tool approval required*\n`{tool_name}`: {description}\n```{params_display}```"
+                    )
+                }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "Approve" },
+                        "style": "primary",
+                        "action_id": "approve_tool",
+                        "value": value_str,
+                    },
+                    {
+                        "type": "button",
+                        "text": { "type": "plain_text", "text": "Deny" },
+                        "style": "danger",
+                        "action_id": "deny_tool",
+                        "value": value_str,
+                    }
+                ]
+            }
+        ]);
+
+        let mut body = serde_json::json!({
+            "channel": channel_id,
+            "text": format!("Tool approval required: {tool_name} - {description}"),
+            "blocks": blocks,
+        });
+        if let Some(tid) = thread_id {
+            body["thread_ts"] = serde_json::Value::String(tid.to_string());
+        }
+
+        self.proxy_send(team_id, "chat.postMessage", body)
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: self.name().to_string(),
+                reason: e.to_string(),
+            })?;
+
         Ok(())
     }
 
@@ -638,5 +746,119 @@ mod tests {
         assert_eq!(channel.team_id, "");
         // The reconnect loop now skips team validation when team_id is empty,
         // so the channel remains alive.
+    }
+
+    #[tokio::test]
+    async fn test_send_status_non_approval_is_noop() {
+        let channel = RelayChannel::new(
+            test_client(),
+            "token".into(),
+            "T123".into(),
+            "inst1".into(),
+            "user1".into(),
+        );
+        let metadata = serde_json::json!({});
+        let result = channel
+            .send_status(
+                StatusUpdate::ToolStarted {
+                    name: "echo".into(),
+                },
+                &metadata,
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_send_status_approval_non_dm_skips() {
+        let channel = RelayChannel::new(
+            test_client(),
+            "token".into(),
+            "T123".into(),
+            "inst1".into(),
+            "user1".into(),
+        );
+        let metadata = serde_json::json!({
+            "event_type": "message",
+            "channel_id": "C456",
+            "sender_id": "U789",
+        });
+        let result = channel
+            .send_status(
+                StatusUpdate::ApprovalNeeded {
+                    request_id: "req1".into(),
+                    tool_name: "shell".into(),
+                    description: "run command".into(),
+                    parameters: serde_json::json!({}),
+                },
+                &metadata,
+            )
+            .await;
+        // Non-DM approval requests are silently skipped (no HTTP call)
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_send_status_approval_dm_missing_channel_id_errors() {
+        let channel = RelayChannel::new(
+            test_client(),
+            "token".into(),
+            "T123".into(),
+            "inst1".into(),
+            "user1".into(),
+        );
+        let metadata = serde_json::json!({
+            "event_type": "direct_message",
+            "sender_id": "U789",
+        });
+        let result = channel
+            .send_status(
+                StatusUpdate::ApprovalNeeded {
+                    request_id: "req1".into(),
+                    tool_name: "shell".into(),
+                    description: "run command".into(),
+                    parameters: serde_json::json!({}),
+                },
+                &metadata,
+            )
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("channel_id"),
+            "expected channel_id error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_status_approval_dm_missing_sender_id_errors() {
+        let channel = RelayChannel::new(
+            test_client(),
+            "token".into(),
+            "T123".into(),
+            "inst1".into(),
+            "user1".into(),
+        );
+        let metadata = serde_json::json!({
+            "event_type": "direct_message",
+            "channel_id": "C456",
+        });
+        let result = channel
+            .send_status(
+                StatusUpdate::ApprovalNeeded {
+                    request_id: "req1".into(),
+                    tool_name: "shell".into(),
+                    description: "run command".into(),
+                    parameters: serde_json::json!({}),
+                },
+                &metadata,
+            )
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("sender_id"),
+            "expected sender_id error, got: {err}"
+        );
     }
 }

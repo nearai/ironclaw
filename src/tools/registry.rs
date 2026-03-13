@@ -23,7 +23,7 @@ use crate::tools::builtin::{
     ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{Tool, ToolDomain};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -75,6 +75,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_generate",
     "image_edit",
     "image_analyze",
+    "tool_info",
 ];
 
 /// Registry of available tools.
@@ -245,6 +246,17 @@ impl ToolRegistry {
         tracing::debug!("Registered {} built-in tools", self.count());
     }
 
+    /// Register the `tool_info` discovery tool.
+    ///
+    /// Requires `Arc<Self>` so the tool can query the registry for other tools'
+    /// schemas at runtime. Call after `register_builtin_tools()`.
+    pub fn register_tool_info(self: &Arc<Self>) {
+        use crate::tools::builtin::ToolInfoTool;
+        let tool = ToolInfoTool::new(Arc::downgrade(self));
+        self.register_sync(Arc::new(tool));
+        tracing::debug!("Registered tool_info discovery tool");
+    }
+
     /// Register only orchestrator-domain tools (safe for the main process).
     ///
     /// This registers tools that don't touch the filesystem or run shell commands:
@@ -276,6 +288,38 @@ impl ToolRegistry {
                 parameters: tool.parameters_schema(),
             })
             .collect()
+    }
+
+    /// Get tool definitions excluding specific tools by name.
+    ///
+    /// Used by lightweight routines to filter out denylisted and approval-gated tools
+    /// so the LLM only sees tools it is actually allowed to call.
+    pub async fn tool_definitions_excluding(&self, deny: &[&str]) -> Vec<ToolDefinition> {
+        let empty_params = serde_json::Value::Object(serde_json::Map::new());
+        let mut defs: Vec<ToolDefinition> = self
+            .tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| {
+                // Exclude denylisted tools
+                if deny.contains(&tool.name()) {
+                    return false;
+                }
+                // Exclude tools that require approval
+                matches!(
+                    tool.requires_approval(&empty_params),
+                    ApprovalRequirement::Never
+                )
+            })
+            .map(|tool| ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters: tool.parameters_schema(),
+            })
+            .collect();
+        defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        defs
     }
 
     /// Register development tools for building software.

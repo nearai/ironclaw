@@ -458,6 +458,37 @@ async def test_install_wasm_channel_triggers_configure(page):
     assert await modal.is_visible()
 
 
+async def test_install_with_auth_url_opens_popup_and_shows_auth_prompt(page):
+    """Install responses with auth_url should surface the same auth prompt used elsewhere."""
+    await page.evaluate("window.open = (url) => { window._lastOpenedUrl = url; }")
+    await mock_ext_apis(page, registry=[_REGISTRY_WASM])
+
+    async def handle_install(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"success": True, "auth_url": "https://example.com/oauth"}),
+        )
+
+    await page.route("**/api/extensions/install", handle_install)
+    await go_to_extensions(page)
+
+    install_btn = page.locator(SEL["available_wasm_list"]).locator(SEL["ext_install_btn"]).first
+    await install_btn.wait_for(state="visible", timeout=5000)
+    await install_btn.click()
+
+    await page.wait_for_function(
+        "() => window._lastOpenedUrl !== null && window._lastOpenedUrl !== undefined",
+        timeout=5000,
+    )
+    opened = await page.evaluate("window._lastOpenedUrl")
+    assert opened is not None, "window.open was not called"
+    assert "example.com" in opened
+    await page.locator(SEL["auth_card"] + '[data-extension-name="registry-tool"]').wait_for(
+        state="visible", timeout=5000
+    )
+
+
 # ─── Group F: Remove flow ─────────────────────────────────────────────────────
 
 async def test_remove_installed_extension_confirmed(page):
@@ -612,7 +643,7 @@ async def test_configure_modal_save_success(page):
 
 
 async def test_configure_modal_save_oauth(page):
-    """Save response with auth_url opens a popup via window.open."""
+    """Save response with auth_url opens a popup and shows the global auth prompt."""
     await page.evaluate("window.open = (url) => { window._lastOpenedUrl = url; }")
 
     async def handle_setup(route):
@@ -639,6 +670,9 @@ async def test_configure_modal_save_oauth(page):
     opened = await page.evaluate("window._lastOpenedUrl")
     assert opened is not None, "window.open was not called"
     assert "oauth" in opened or "example.com" in opened
+    await page.locator(SEL["auth_card"] + '[data-extension-name="test-ext"]').wait_for(
+        state="visible", timeout=5000
+    )
 
 
 async def test_configure_modal_save_failure(page):
@@ -699,7 +733,7 @@ async def test_configure_modal_enter_key_submits(page):
 # ─── Group H: Auth card (SSE-triggered) ───────────────────────────────────────
 
 async def _show_auth_card(page, **kwargs):
-    """Inject an auth card via JS and wait for it to appear."""
+    """Inject the global auth prompt via JS and wait for it to appear."""
     payload = json.dumps(kwargs)
     await page.evaluate(f"showAuthCard({payload})")
     await page.locator(SEL["auth_card"]).wait_for(state="visible", timeout=5000)
@@ -812,12 +846,43 @@ async def test_auth_card_replaces_existing_same_extension(page):
     assert "Second" in await page.locator(SEL["auth_instructions"]).text_content()
 
 
-async def test_auth_card_multiple_extensions_coexist(page):
-    """Auth cards for different extensions can coexist."""
+async def test_auth_card_for_different_extension_replaces_existing_prompt(page):
+    """A new auth prompt replaces the previous one to keep the UX modal and global."""
     await page.evaluate('showAuthCard({extension_name: "ext-a", instructions: "Token A"})')
     await page.evaluate('showAuthCard({extension_name: "ext-b", instructions: "Token B"})')
-    await page.locator(SEL["auth_card"]).nth(1).wait_for(state="visible", timeout=3000)
-    assert await page.locator(SEL["auth_card"]).count() == 2
+    await page.locator(SEL["auth_card"]).wait_for(state="visible", timeout=3000)
+    assert await page.locator(SEL["auth_card"]).count() == 1
+    assert await page.locator(SEL["auth_card"] + '[data-extension-name="ext-a"]').count() == 0
+    assert await page.locator(SEL["auth_card"] + '[data-extension-name="ext-b"]').count() == 1
+
+
+async def test_auth_and_configure_helpers_escape_selector_sensitive_extension_names(page):
+    """Quoted extension names should not break auth/configure modal helpers."""
+    result = await page.evaluate(
+        """({ name }) => {
+            showAuthCard({ extension_name: name, instructions: 'Paste token' });
+            showAuthCardError(name, 'Bad token');
+            const errorText = document.querySelector('.auth-error')?.textContent || '';
+            removeAuthCard(name);
+            const authStillPresent = Array.from(document.querySelectorAll('.auth-card'))
+              .some((card) => card.getAttribute('data-extension-name') === name);
+
+            const overlay = document.createElement('div');
+            overlay.className = 'configure-overlay';
+            overlay.setAttribute('data-extension-name', name);
+            document.body.appendChild(overlay);
+            closeConfigureModal(name);
+            const configureStillPresent = Array.from(document.querySelectorAll('.configure-overlay'))
+              .some((node) => node.getAttribute('data-extension-name') === name);
+
+            return { errorText, authStillPresent, configureStillPresent };
+        }""",
+        {"name": 'quoted "ext" name'},
+    )
+
+    assert result["errorText"] == "Bad token"
+    assert result["authStillPresent"] is False
+    assert result["configureStillPresent"] is False
 
 
 async def test_auth_completed_sse_dismisses_card(page):
@@ -826,11 +891,93 @@ async def test_auth_completed_sse_dismisses_card(page):
 
     # Simulate the auth_completed SSE event being fired
     await page.evaluate("""
-        // Call the handler the same way the SSE listener does
-        removeAuthCard('myext');
+        handleAuthCompleted({
+          extension_name: 'myext',
+          success: true,
+          message: 'Authenticated!',
+        });
     """)
 
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="myext"]').count() == 0
+
+
+async def test_auth_completed_for_other_extension_keeps_configure_modal_open(page):
+    """Auth completion should not close a different extension's configure modal."""
+    async def handle_setup(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"secrets": [{"name": "token", "prompt": "Token", "provided": False, "optional": False, "auto_generate": False}]}),
+        )
+
+    await page.route("**/api/extensions/test-ext/setup", handle_setup)
+    await page.evaluate("showConfigureModal('test-ext')")
+    await page.locator(SEL["configure_modal"]).wait_for(state="visible", timeout=5000)
+
+    await page.evaluate("""
+        handleAuthCompleted({
+          extension_name: 'other-ext',
+          success: true,
+          message: 'Other extension connected.',
+        });
+    """)
+
+    assert await page.locator(SEL["configure_overlay"]).is_visible(), (
+        "Configure modal should remain open when another extension finishes auth"
+    )
+
+
+async def test_auth_completed_failure_sse_shows_error_toast_and_reloads_extensions(page):
+    """Failed auth_completed handling should clear stale UI and refresh extensions."""
+    reload_count = []
+
+    async def counting_handler(route):
+        path = route.request.url.split("?")[0]
+        if path.endswith("/api/extensions"):
+            reload_count.append(1)
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"extensions": []}),
+            )
+        else:
+            await route.continue_()
+
+    async def handle_tools(route):
+        await route.fulfill(status=200, content_type="application/json", body='{"tools":[]}')
+
+    async def handle_registry(route):
+        await route.fulfill(status=200, content_type="application/json", body='{"entries":[]}')
+
+    await page.route("**/api/extensions*", counting_handler)
+    await page.route("**/api/extensions/tools", handle_tools)
+    await page.route("**/api/extensions/registry", handle_registry)
+
+    await go_to_extensions(page)
+    count_before = len(reload_count)
+
+    await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth")
+    assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 1
+
+    await page.evaluate("""
+        handleAuthCompleted({
+          extension_name: 'gmail',
+          success: false,
+          message: 'OAuth flow expired. Please try again.',
+        });
+    """)
+
+    await wait_for_toast(page, "OAuth flow expired. Please try again.")
+    assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 0
+    assert (
+        await page.locator(
+            SEL["toast_error"], has_text="OAuth flow expired. Please try again."
+        ).count()
+        >= 1
+    )
+
+    await page.wait_for_timeout(600)
+    assert len(reload_count) > count_before, "Extensions list did not reload after auth failure"
 
 
 # ─── Group I: Activate flow ────────────────────────────────────────────────────
@@ -902,8 +1049,8 @@ async def test_activate_failure_shows_error_toast(page):
     await wait_for_toast(page, "Config missing")
 
 
-async def test_activate_with_auth_url_opens_popup(page):
-    """Activate response with auth_url calls window.open."""
+async def test_activate_with_auth_url_opens_popup_and_shows_auth_prompt(page):
+    """Activate response with auth_url calls window.open and shows the auth prompt."""
     await page.evaluate("window.open = (url) => { window._lastOpenedUrl = url; }")
     await mock_ext_apis(page, installed=[_MCP_INACTIVE])
 
@@ -921,6 +1068,9 @@ async def test_activate_with_auth_url_opens_popup(page):
     opened = await page.evaluate("window._lastOpenedUrl")
     assert opened is not None, "window.open was not called"
     assert "example.com" in opened
+    await page.locator(
+        SEL["auth_card"] + '[data-extension-name="test-mcp-inactive"]'
+    ).wait_for(state="visible", timeout=5000)
 
 
 # ─── Group J: Tab reload behaviour ────────────────────────────────────────────
@@ -947,9 +1097,9 @@ async def test_extensions_tab_reloads_on_revisit(page):
     async def handle_registry(route):
         await route.fulfill(status=200, content_type="application/json", body='{"entries":[]}')
 
+    await page.route("**/api/extensions*", counting_handler)
     await page.route("**/api/extensions/tools", handle_tools)
     await page.route("**/api/extensions/registry", handle_registry)
-    await page.route("**/api/extensions*", counting_handler)
 
     # First visit
     await go_to_extensions(page)
@@ -990,19 +1140,20 @@ async def test_auth_completed_sse_triggers_extensions_reload(page):
     async def handle_registry(route):
         await route.fulfill(status=200, content_type="application/json", body='{"entries":[]}')
 
+    await page.route("**/api/extensions*", counting_handler)
     await page.route("**/api/extensions/tools", handle_tools)
     await page.route("**/api/extensions/registry", handle_registry)
-    await page.route("**/api/extensions*", counting_handler)
 
     await go_to_extensions(page)
     count_before = len(reload_count)
 
-    # Simulate auth_completed by calling loadExtensions directly (as the SSE handler does)
+    # Simulate auth_completed via the shared handler.
     await page.evaluate("""
-        // Simulate what the auth_completed SSE handler does when currentTab === 'extensions'
-        if (typeof loadExtensions === 'function') {
-            loadExtensions();
-        }
+        handleAuthCompleted({
+          extension_name: 'reload-ext',
+          success: true,
+          message: 'Reloaded.',
+        });
     """)
 
     await page.wait_for_timeout(600)

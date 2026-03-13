@@ -43,4 +43,4 @@ Already a hit on the Oculus Rift, this space dogfighting game was one of the fir
 - [Review: ‘Madden NFL 17’ runs hard, plays it safe](https://www.yahoo.com/tech/review-madden-nfl-17-runs-000000394.html)
 
 
-*Ben Silverman is on Twitter at*[*ben_silverman*](https://twitter.com/ben_silverman)*.*
+*Ben Silverman is on Twitter at* [*ben_silverman*](https://twitter.com/ben_silverman)*.*

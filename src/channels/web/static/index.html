@@ -9,12 +9,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
-  
+
   <!-- i18n Modules -->
   <script src="/i18n/index.js"></script>
   <script src="/i18n/en.js"></script>
   <script src="/i18n/zh-CN.js"></script>
-  
+
   <script
     src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.3/purify.min.js"
     integrity="sha384-osZDKVu4ipZP703HmPOhWdyBajcFyjX2Psjk//TG1Rc0AdwEtuToaylrmcK3LdAl"
@@ -37,7 +37,7 @@
       <div class="auth-form">
         <label for="token-input" data-i18n="auth.tokenLabel">Gateway Token</label>
         <input type="password" id="token-input" data-i18n="auth.tokenPlaceholder" data-i18n-attr="placeholder" placeholder="Paste your auth token" autofocus>
-        <button id="auth-btn" data-i18n="auth.connect">Connect</button>
+        <button id="auth-connect-btn" data-i18n="auth.connect">Connect</button>
       </div>
       <div id="auth-error"></div>
       <p class="auth-hint" data-i18n="auth.hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
@@ -46,11 +46,11 @@
 
   <!-- Restart Confirmation Modal -->
   <div id="restart-confirm-modal" class="restart-modal" style="display: none;">
-    <div class="restart-modal-overlay" id="restart-modal-overlay"></div>
+    <div class="restart-modal-overlay" id="restart-overlay"></div>
     <div class="restart-modal-content">
       <div class="restart-modal-header">
         <h2 data-i18n="restart.title">Restart IronClaw Instance</h2>
-        <button class="restart-modal-close" id="restart-modal-close" data-i18n="restart.closeTooltip" data-i18n-attr="title"
+        <button class="restart-modal-close" id="restart-close-btn" data-i18n="restart.closeTooltip" data-i18n-attr="title"
           title="Close">×</button>
       </div>
       <div class="restart-modal-body">
@@ -98,17 +98,17 @@
       <button data-tab="extensions" data-i18n="tab.extensions">Extensions</button>
       <button data-tab="skills" data-i18n="tab.skills">Skills</button>
       <div class="spacer"></div>
-      
+
       <!-- Language Switcher -->
       <div class="language-switcher">
         <button class="language-btn" id="language-btn" type="button" title="Switch Language"
           aria-label="Switch language" aria-haspopup="true" aria-expanded="false" aria-controls="language-menu">🌐</button>
         <div class="language-menu" id="language-menu" style="display: none;">
-          <button type="button" class="language-option" data-lang="en">English</button>
-          <button type="button" class="language-option" data-lang="zh-CN">简体中文</button>
+          <button type="button" class="language-option" data-action="switch-language" data-lang="en">English</button>
+          <button type="button" class="language-option" data-action="switch-language" data-lang="zh-CN">简体中文</button>
         </div>
       </div>
-      
+
       <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
       <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

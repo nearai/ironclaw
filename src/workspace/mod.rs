@@ -55,7 +55,9 @@ pub use embeddings::{
 };
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
-pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
+pub use search::{
+    FusionStrategy, RankedResult, SearchConfig, SearchResult, fuse_results, reciprocal_rank_fusion,
+};
 
 use std::sync::Arc;
 
@@ -279,6 +281,8 @@ pub struct Workspace {
     /// Safety net: when true, BOOTSTRAP.md injection is suppressed even if
     /// the file still exists. Set from `profile_onboarding_completed` setting.
     bootstrap_completed: std::sync::atomic::AtomicBool,
+    /// Default search configuration applied to all queries.
+    search_defaults: SearchConfig,
 }
 
 impl Workspace {
@@ -292,6 +296,7 @@ impl Workspace {
             embeddings: None,
             bootstrap_pending: std::sync::atomic::AtomicBool::new(false),
             bootstrap_completed: std::sync::atomic::AtomicBool::new(false),
+            search_defaults: SearchConfig::default(),
         }
     }
 
@@ -306,6 +311,7 @@ impl Workspace {
             embeddings: None,
             bootstrap_pending: std::sync::atomic::AtomicBool::new(false),
             bootstrap_completed: std::sync::atomic::AtomicBool::new(false),
+            search_defaults: SearchConfig::default(),
         }
     }
 
@@ -338,6 +344,16 @@ impl Workspace {
     /// Set the embedding provider for semantic search.
     pub fn with_embeddings(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embeddings = Some(provider);
+        self
+    }
+
+    /// Set the default search configuration from workspace search config.
+    pub fn with_search_config(mut self, config: &crate::config::WorkspaceSearchConfig) -> Self {
+        self.search_defaults = SearchConfig::default()
+            .with_fusion_strategy(config.fusion_strategy)
+            .with_rrf_k(config.rrf_k)
+            .with_fts_weight(config.fts_weight)
+            .with_vector_weight(config.vector_weight);
         self
     }
 
@@ -957,13 +973,13 @@ impl Workspace {
     /// Hybrid search across all memory documents.
     ///
     /// Combines full-text search (BM25) with semantic search (vector similarity)
-    /// using Reciprocal Rank Fusion (RRF).
+    /// using the configured fusion strategy.
     pub async fn search(
         &self,
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
-        self.search_with_config(query, SearchConfig::default().with_limit(limit))
+        self.search_with_config(query, self.search_defaults.clone().with_limit(limit))
             .await
     }
 
