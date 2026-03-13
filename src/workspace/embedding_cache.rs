@@ -22,7 +22,8 @@ pub struct EmbeddingCacheConfig {
     ///
     /// Approximate raw embedding payload: `max_entries × dimension × 4 bytes`.
     /// At 10,000 entries × 1536 floats ≈ 58 MB (payload only; actual memory
-    /// is higher due to HashMap, String keys, and per-entry overhead).
+    /// is higher due to HashMap buckets, `[u8; 32]` hash keys, `Vec`/`Instant`
+    /// per-entry overhead).
     pub max_entries: usize,
 }
 
@@ -142,7 +143,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = guard.get_mut(&key) {
                 entry.last_accessed = Instant::now();
-                tracing::debug!("embedding cache hit");
+                tracing::trace!("embedding cache hit");
                 return Ok(entry.embedding.clone());
             }
         }
@@ -166,7 +167,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             );
         }
 
-        tracing::debug!("embedding cache miss");
+        tracing::trace!("embedding cache miss");
         Ok(embedding)
     }
 
@@ -195,7 +196,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         // Lock released before HTTP call
 
         if miss_indices.is_empty() {
-            tracing::debug!(count = texts.len(), "embedding batch: all cache hits");
+            tracing::trace!(count = texts.len(), "embedding batch: all cache hits");
             // All slots populated from cache hits
             return results
                 .into_iter()
@@ -222,7 +223,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             )));
         }
 
-        tracing::debug!(
+        tracing::trace!(
             hits = texts.len() - miss_indices.len(),
             misses = miss_indices.len(),
             "embedding batch: partial cache"
