@@ -13,6 +13,7 @@
 mod agent_loop;
 pub mod agentic_loop;
 mod attachments;
+pub mod cognitive;
 mod commands;
 pub mod compaction;
 pub mod context_monitor;
@@ -34,6 +35,7 @@ pub mod undo;
 
 pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps};
+pub use cognitive::{CognitiveConfig, CognitiveGuardian, Nudge};
 pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
 pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat};
