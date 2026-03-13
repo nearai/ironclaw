@@ -33,14 +33,9 @@ pub struct PatternPrivacyClassifier {
     patterns: Vec<Regex>,
 }
 
-impl Default for PatternPrivacyClassifier {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl PatternPrivacyClassifier {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, regex::Error> {
         let pattern_strs = [
             // SSN — always PII
             r"\b\d{3}-\d{2}-\d{4}\b",
@@ -51,9 +46,9 @@ impl PatternPrivacyClassifier {
         ];
         let patterns = pattern_strs
             .iter()
-            .map(|p| Regex::new(p).expect("hardcoded regex must compile"))
-            .collect();
-        Self { patterns }
+            .map(|p| Regex::new(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { patterns })
     }
 }
 
@@ -116,7 +111,7 @@ mod tests {
     use super::*;
 
     fn classifier() -> PatternPrivacyClassifier {
-        PatternPrivacyClassifier::new()
+        PatternPrivacyClassifier::new().unwrap()
     }
 
     // Hard PII — must always trigger
