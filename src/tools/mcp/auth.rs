@@ -1517,7 +1517,7 @@ mod tests {
         let cloned = original.clone();
 
         match cloned {
-            AuthError::Http(message) => assert_eq!(message, "builder failed"),
+            AuthError::Http(message) => assert_eq!(message, "builder failed"), // safety: test assertion in #[cfg(test)] module; not production panic path
             other => panic!("expected AuthError::Http variant, got {other:?}"),
         }
     }
