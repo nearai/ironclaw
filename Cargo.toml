@@ -267,7 +267,9 @@ cache-builds = true
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
+x86_64-unknown-linux-musl = "ubuntu-22.04"
 x86_64-pc-windows-msvc = "windows-2022"
 x86_64-apple-darwin = "macos-15-intel"
 aarch64-apple-darwin = "macos-14"
