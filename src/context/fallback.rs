@@ -109,15 +109,7 @@ impl FallbackDeliverable {
 
 /// Truncate a string to at most `max_len` bytes on a char boundary.
 fn truncate_str(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        return s;
-    }
-    // Find the last char boundary at or before max_len
-    let mut end = max_len;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+    &s[..crate::util::floor_char_boundary(s, max_len)]
 }
 
 #[cfg(test)]
