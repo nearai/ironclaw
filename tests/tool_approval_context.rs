@@ -47,23 +47,25 @@ impl Tool for TestTool {
 }
 
 #[test]
-fn test_job_context_default_has_approval_context() {
+fn test_job_context_default_has_no_approval_context() {
     let ctx = JobContext::default();
     assert!(
-        ctx.approval_context.is_some(),
-        "JobContext::default() should have approval_context set"
+        ctx.approval_context.is_none(),
+        "JobContext::default() should NOT have approval_context set for security"
     );
 }
 
 #[test]
 fn test_job_context_with_approval_context() {
-    let ctx = JobContext::default().with_approval_context(ApprovalContext::autonomous());
+    let ctx = JobContext::new("Test", "Test job")
+        .with_approval_context(ApprovalContext::autonomous());
     assert!(ctx.approval_context.is_some());
 }
 
 #[test]
 fn test_approval_context_autonomous_allows_unless_auto_approved() {
-    let ctx = JobContext::default();
+    let ctx = JobContext::new("Test", "Test job")
+        .with_approval_context(ApprovalContext::autonomous());
     let tool = TestTool {
         approval_req: ApprovalRequirement::UnlessAutoApproved,
     };
@@ -75,7 +77,8 @@ fn test_approval_context_autonomous_allows_unless_auto_approved() {
 
 #[test]
 fn test_approval_context_autonomous_blocks_always() {
-    let ctx = JobContext::default();
+    let ctx = JobContext::new("Test", "Test job")
+        .with_approval_context(ApprovalContext::autonomous());
     let tool = TestTool {
         approval_req: ApprovalRequirement::Always,
     };
@@ -92,8 +95,8 @@ fn test_approval_context_autonomous_blocks_always() {
 
 #[test]
 fn test_approval_context_autonomous_with_tools_allows_specific() {
-    let ctx = JobContext::default().with_approval_context(
-        ApprovalContext::autonomous_with_tools(["shell".to_string(), "http".to_string()]),
+    let ctx = JobContext::new("Test", "Test job").with_approval_context(
+        ApprovalContext::autonomous_with_tools(["shell".to_string(), "read_file".to_string()]),
     );
     let tool = TestTool {
         approval_req: ApprovalRequirement::Always,
@@ -103,8 +106,8 @@ fn test_approval_context_autonomous_with_tools_allows_specific() {
     check_approval_in_context(&ctx, "shell", tool.requires_approval(&serde_json::json!({})))
         .expect("Listed tool should be allowed");
 
-    // http should be allowed (explicitly listed)
-    check_approval_in_context(&ctx, "http", tool.requires_approval(&serde_json::json!({})))
+    // read_file should be allowed (explicitly listed)
+    check_approval_in_context(&ctx, "read_file", tool.requires_approval(&serde_json::json!({})))
         .expect("Listed tool should be allowed");
 
     // write_file should be blocked (not listed)
@@ -119,21 +122,22 @@ fn test_approval_context_autonomous_with_tools_allows_specific() {
 #[test]
 fn test_builder_tools_approval_context() {
     // Verify the builder creates the correct approval context
-    let ctx = JobContext::default().with_approval_context(ApprovalContext::autonomous_with_tools([
-        "shell".into(),
-        "read_file".into(),
-        "write_file".into(),
-        "list_dir".into(),
-        "apply_patch".into(),
-        "http".into(),
-    ]));
+    let ctx = JobContext::new("Test", "Test job").with_approval_context(
+        ApprovalContext::autonomous_with_tools([
+            "shell".into(),
+            "read_file".into(),
+            "write_file".into(),
+            "list_dir".into(),
+            "apply_patch".into(),
+        ]),
+    );
 
     let tool = TestTool {
         approval_req: ApprovalRequirement::Always,
     };
 
     // All build tools should be allowed
-    for tool_name in &["shell", "read_file", "write_file", "list_dir", "apply_patch", "http"] {
+    for tool_name in &["shell", "read_file", "write_file", "list_dir", "apply_patch"] {
         check_approval_in_context(&ctx, tool_name, tool.requires_approval(&serde_json::json!({})))
             .unwrap_or_else(|e| {
                 panic!("Builder tool '{}' should be allowed, got: {}", tool_name, e)
@@ -147,4 +151,43 @@ fn test_builder_tools_approval_context() {
         tool.requires_approval(&serde_json::json!({})),
     );
     assert!(result.is_err(), "Non-build Always tool should be blocked");
+}
+
+#[test]
+fn test_default_context_blocks_non_never_tools() {
+    // JobContext::default() has no approval_context, which should block
+    // all non-Never tools (secure default)
+    let ctx = JobContext::default();
+
+    let tool = TestTool {
+        approval_req: ApprovalRequirement::UnlessAutoApproved,
+    };
+
+    // UnlessAutoApproved should be blocked with no approval_context
+    let result = check_approval_in_context(
+        &ctx,
+        "test_tool",
+        tool.requires_approval(&serde_json::json!({})),
+    );
+    assert!(
+        result.is_err(),
+        "UnlessAutoApproved should be blocked with no approval_context"
+    );
+
+    let always_tool = TestTool {
+        approval_req: ApprovalRequirement::Always,
+    };
+    let result = check_approval_in_context(
+        &ctx,
+        "test_tool",
+        always_tool.requires_approval(&serde_json::json!({})),
+    );
+    assert!(result.is_err(), "Always should be blocked with no approval_context");
+
+    // Never should still be allowed
+    let never_tool = TestTool {
+        approval_req: ApprovalRequirement::Never,
+    };
+    check_approval_in_context(&ctx, "test_tool", never_tool.requires_approval(&serde_json::json!({})))
+        .expect("Never should be allowed even with no approval_context");
 }

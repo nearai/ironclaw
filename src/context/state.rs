@@ -338,8 +338,10 @@ impl JobContext {
 
 impl Default for JobContext {
     fn default() -> Self {
+        // Default has no approval_context - safer default that requires explicit
+        // opt-in for autonomous execution. Code that creates JobContext directly
+        // must use with_approval_context() to enable autonomous tool use.
         Self::with_user("default", "Untitled", "No description")
-            .with_approval_context(ApprovalContext::autonomous())
     }
 }
 

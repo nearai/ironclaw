@@ -387,6 +387,16 @@ pub fn require_param<'a>(
 ///
 /// Returns `Ok(())` if the tool is allowed, `Err(ToolError::NotAuthorized)` if blocked.
 ///
+/// # Security semantics
+///
+/// When `approval_context` is `None`, this function uses **legacy blocking behavior**:
+/// - `Never` tools: allowed
+/// - `UnlessAutoApproved` tools: blocked (require interactive approval)
+/// - `Always` tools: blocked (require explicit approval)
+///
+/// This matches the worker-level `ApprovalContext::is_blocked_or_default()` semantics
+/// to prevent privilege escalation.
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -406,16 +416,13 @@ pub fn check_approval_in_context(
     tool_name: &str,
     requirement: ApprovalRequirement,
 ) -> Result<(), ToolError> {
-    if let Some(ref approval_ctx) = ctx.approval_context {
-        if approval_ctx.is_blocked(tool_name, requirement) {
-            return Err(ToolError::NotAuthorized(format!(
-                "Tool '{}' requires approval in this context",
-                tool_name
-            )));
-        }
+    // Match worker-level approval semantics exactly to prevent inconsistency
+    if ApprovalContext::is_blocked_or_default(&ctx.approval_context, tool_name, requirement) {
+        return Err(ToolError::NotAuthorized(format!(
+            "Tool '{}' requires approval in this context",
+            tool_name
+        )));
     }
-    // If no approval_context in job, this is a legacy path - assume allowed
-    // (the worker-level check would have caught it if called through worker)
     Ok(())
 }
 

@@ -779,7 +779,9 @@ Create alongside the .wasm file to grant capabilities:
                 ToolError::ExecutionFailed(format!("Tool not found: {}", tool_name))
             })?;
 
-        // Create context with build-specific approval permissions
+        // Create context with build-specific approval permissions.
+        // Note: shell commands (cargo, npm, pip, etc.) handle network access
+        // for dependency fetching, so we don't need to grant direct http tool access.
         let ctx = JobContext::default().with_approval_context(
             ApprovalContext::autonomous_with_tools([
                 "shell".into(),
@@ -787,7 +789,6 @@ Create alongside the .wasm file to grant capabilities:
                 "write_file".into(),
                 "list_dir".into(),
                 "apply_patch".into(),
-                "http".into(),
             ])
         );
 
