@@ -7,7 +7,7 @@ use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::registry::catalog::RegistryError;
-use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind};
+use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind, SourceSpec};
 
 // GitHub-only by design. New trusted hosts (e.g. a NEAR AI CDN) must be
 // explicitly added here; unknown hosts fall back to source build with a
@@ -98,12 +98,29 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
         });
     }
 
+    // MCP servers are not installed via this path
+    if manifest.kind == ManifestKind::McpServer {
+        return Ok(());
+    }
+
+    let source = match &manifest.source {
+        Some(s) => s,
+        None => {
+            return Err(RegistryError::InvalidManifest {
+                name: manifest.name.clone(),
+                field: "source",
+                reason: "WASM extensions must have a source spec".to_string(),
+            });
+        }
+    };
+
     let expected_prefix = match manifest.kind {
         ManifestKind::Tool => "tools-src/",
         ManifestKind::Channel => "channels-src/",
+        ManifestKind::McpServer => unreachable!(),
     };
 
-    if !manifest.source.dir.starts_with(expected_prefix) {
+    if !source.dir.starts_with(expected_prefix) {
         return Err(RegistryError::InvalidManifest {
             name: manifest.name.clone(),
             field: "source.dir",
@@ -111,7 +128,7 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
         });
     }
 
-    let source_path = Path::new(&manifest.source.dir);
+    let source_path = Path::new(&source.dir);
     let has_unsafe_component = source_path.components().any(|component| {
         matches!(
             component,
@@ -127,9 +144,9 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
         });
     }
 
-    let has_path_separator = manifest.source.capabilities.contains('/')
-        || manifest.source.capabilities.contains('\\')
-        || manifest.source.capabilities.contains("..");
+    let has_path_separator = source.capabilities.contains('/')
+        || source.capabilities.contains('\\')
+        || source.capabilities.contains("..");
 
     if has_path_separator {
         return Err(RegistryError::InvalidManifest {
@@ -140,6 +157,17 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
     }
 
     Ok(())
+}
+
+/// Extract the source spec from a manifest, returning an error if absent.
+fn require_source(manifest: &ExtensionManifest) -> Result<&SourceSpec, RegistryError> {
+    manifest.source.as_ref().ok_or_else(|| {
+        RegistryError::InvalidManifest {
+            name: manifest.name.clone(),
+            field: "source",
+            reason: "WASM extensions must have a source spec".to_string(),
+        }
+    })
 }
 
 fn download_failure_reason(error: &reqwest::Error) -> String {
@@ -205,8 +233,9 @@ impl RegistryInstaller {
         force: bool,
     ) -> Result<InstallOutcome, RegistryError> {
         validate_manifest_install_inputs(manifest)?;
+        let source = require_source(manifest)?;
 
-        let source_dir = self.repo_root.join(&manifest.source.dir);
+        let source_dir = self.repo_root.join(&source.dir);
         if !source_dir.exists() {
             return Err(RegistryError::ManifestRead {
                 path: source_dir.clone(),
@@ -217,6 +246,13 @@ impl RegistryInstaller {
         let target_dir = match manifest.kind {
             ManifestKind::Tool => &self.tools_dir,
             ManifestKind::Channel => &self.channels_dir,
+            ManifestKind::McpServer => {
+                return Err(RegistryError::InvalidManifest {
+                    name: manifest.name.clone(),
+                    field: "kind",
+                    reason: "MCP servers cannot be installed from source".to_string(),
+                });
+            }
         };
 
         fs::create_dir_all(target_dir)
@@ -242,7 +278,7 @@ impl RegistryInstaller {
             manifest.display_name,
             source_dir.display()
         );
-        let crate_name = &manifest.source.crate_name;
+        let crate_name = &source.crate_name;
         let wasm_path =
             crate::registry::artifacts::build_wasm_component(&source_dir, crate_name, true)
                 .await
@@ -258,7 +294,7 @@ impl RegistryInstaller {
             .map_err(RegistryError::Io)?;
 
         // Copy capabilities file
-        let caps_source = source_dir.join(&manifest.source.capabilities);
+        let caps_source = source_dir.join(&source.capabilities);
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
         let has_capabilities = if caps_source.exists() {
             fs::copy(&caps_source, &target_caps)
@@ -295,6 +331,7 @@ impl RegistryInstaller {
         // which install path runs, without relying on inner methods to
         // catch it first.
         validate_manifest_install_inputs(manifest)?;
+        let source = require_source(manifest)?;
 
         let has_artifact = manifest
             .artifacts
@@ -306,7 +343,7 @@ impl RegistryInstaller {
             return self.install_from_source(manifest, force).await;
         }
 
-        let source_dir = self.repo_root.join(&manifest.source.dir);
+        let source_dir = self.repo_root.join(&source.dir);
 
         match self.install_from_artifact(manifest, force).await {
             Ok(outcome) => Ok(outcome),
@@ -391,6 +428,13 @@ impl RegistryInstaller {
         let target_dir = match manifest.kind {
             ManifestKind::Tool => &self.tools_dir,
             ManifestKind::Channel => &self.channels_dir,
+            ManifestKind::McpServer => {
+                return Err(RegistryError::InvalidManifest {
+                    name: manifest.name.clone(),
+                    field: "kind",
+                    reason: "MCP servers cannot be installed as artifacts".to_string(),
+                });
+            }
         };
 
         fs::create_dir_all(target_dir)
@@ -458,12 +502,12 @@ impl RegistryInstaller {
                         false
                     }
                 }
-            } else {
+            } else if let Some(ref source) = manifest.source {
                 // Legacy fallback: try source tree
                 let caps_source = self
                     .repo_root
-                    .join(&manifest.source.dir)
-                    .join(&manifest.source.capabilities);
+                    .join(&source.dir)
+                    .join(&source.capabilities);
                 if caps_source.exists() {
                     fs::copy(&caps_source, &target_caps)
                         .await
@@ -472,6 +516,8 @@ impl RegistryInstaller {
                 } else {
                     false
                 }
+            } else {
+                false
             }
         };
 
@@ -775,17 +821,19 @@ mod tests {
             name: name.to_string(),
             display_name: name.to_string(),
             kind,
-            version: "0.1.0".to_string(),
+            version: Some("0.1.0".to_string()),
             description: "test manifest".to_string(),
             keywords: Vec::new(),
-            source: SourceSpec {
+            source: Some(SourceSpec {
                 dir: source_dir.to_string(),
                 capabilities: format!("{}.capabilities.json", name),
                 crate_name: name.to_string(),
-            },
+            }),
             artifacts,
             auth_summary: None,
             tags: Vec::new(),
+            url: None,
+            auth: None,
         }
     }
 
