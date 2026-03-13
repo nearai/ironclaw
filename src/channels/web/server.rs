@@ -802,7 +802,7 @@ async fn oauth_callback_handler(
     // OAuth success is independent of activation — tokens are already stored.
     // Report auth as successful and attempt activation as a bonus step.
     let final_message = if success {
-        match ext_mgr.activate(&flow.extension_name).await {
+        match ext_mgr.activate(&flow.extension_name, &flow.user_id).await {
             Ok(result) => result.message,
             Err(e) => {
                 tracing::warn!(
@@ -987,7 +987,7 @@ async fn slack_relay_oauth_callback_handler(
 
         // Activate the relay channel
         ext_mgr
-            .activate_stored_relay(DEFAULT_RELAY_NAME)
+            .activate_stored_relay(DEFAULT_RELAY_NAME, &state.default_user_id)
             .await
             .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
 
@@ -1257,7 +1257,7 @@ async fn chat_auth_token_handler(
     ))?;
 
     match ext_mgr
-        .configure_token(&req.extension_name, &req.token)
+        .configure_token(&req.extension_name, &req.token, &user.user_id)
         .await
     {
         Ok(result) => {
@@ -1994,6 +1994,7 @@ async fn logs_level_set_handler(
 
 async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
@@ -2001,7 +2002,7 @@ async fn extensions_list_handler(
     ))?;
 
     let installed = ext_mgr
-        .list(None, false)
+        .list(None, false, &user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2076,6 +2077,7 @@ async fn extensions_tools_handler(
 
 async fn extensions_install_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<InstallExtensionRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     // When extension manager isn't available, check registry entries for a helpful message
@@ -2111,7 +2113,7 @@ async fn extensions_install_handler(
     });
 
     match ext_mgr
-        .install(&req.name, req.url.as_deref(), kind_hint)
+        .install(&req.name, req.url.as_deref(), kind_hint, &user.user_id)
         .await
     {
         Ok(result) => {
@@ -2119,7 +2121,7 @@ async fn extensions_install_handler(
 
             // Auto-activate WASM tools after install (install = active).
             if result.kind == crate::extensions::ExtensionKind::WasmTool {
-                if let Err(e) = ext_mgr.activate(&req.name).await {
+                if let Err(e) = ext_mgr.activate(&req.name, &user.user_id).await {
                     tracing::debug!(
                         extension = %req.name,
                         error = %e,
@@ -2131,7 +2133,7 @@ async fn extensions_install_handler(
                 // expansion and for first-time auth when credentials are already
                 // configured (e.g., built-in providers). We only surface an auth_url
                 // when the extension reports it is awaiting authorization.
-                match ext_mgr.auth(&req.name).await {
+                match ext_mgr.auth(&req.name, &user.user_id).await {
                     Ok(auth_result) if auth_result.auth_url().is_some() => {
                         // Scope expansion or initial OAuth: user needs to authorize
                         resp.auth_url = auth_result.auth_url().map(String::from);
@@ -2148,6 +2150,7 @@ async fn extensions_install_handler(
 
 async fn extensions_activate_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -2155,14 +2158,14 @@ async fn extensions_activate_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.activate(&name).await {
+    match ext_mgr.activate(&name, &user.user_id).await {
         Ok(result) => {
             // Activation loaded the WASM module. Check if the tool needs
             // OAuth scope expansion (e.g., adding google-docs when gmail
             // already has a token but missing the documents scope).
             // Initial OAuth setup is triggered via configure.
             let mut resp = ActionResponse::ok(result.message);
-            if let Ok(auth_result) = ext_mgr.auth(&name).await
+            if let Ok(auth_result) = ext_mgr.auth(&name, &user.user_id).await
                 && auth_result.auth_url().is_some()
             {
                 resp.auth_url = auth_result.auth_url().map(String::from);
@@ -2180,10 +2183,10 @@ async fn extensions_activate_handler(
             }
 
             // Activation failed due to auth; try authenticating first.
-            match ext_mgr.auth(&name).await {
+            match ext_mgr.auth(&name, &user.user_id).await {
                 Ok(auth_result) if auth_result.is_authenticated() => {
                     // Auth succeeded, retry activation.
-                    match ext_mgr.activate(&name).await {
+                    match ext_mgr.activate(&name, &user.user_id).await {
                         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
                         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
                     }
@@ -2307,6 +2310,7 @@ async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Res
 
 async fn extensions_remove_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -2314,7 +2318,7 @@ async fn extensions_remove_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.remove(&name).await {
+    match ext_mgr.remove(&name, &user.user_id).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
@@ -2322,6 +2326,7 @@ async fn extensions_remove_handler(
 
 async fn extensions_registry_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Query(params): Query<RegistrySearchQuery>,
 ) -> Json<RegistrySearchResponse> {
     let query = params.query.unwrap_or_default();
@@ -2354,7 +2359,7 @@ async fn extensions_registry_handler(
     let installed: std::collections::HashSet<(String, String)> =
         if let Some(ext_mgr) = state.extension_manager.as_ref() {
             ext_mgr
-                .list(None, false)
+                .list(None, false, &user.user_id)
                 .await
                 .unwrap_or_default()
                 .into_iter()
@@ -2385,6 +2390,7 @@ async fn extensions_registry_handler(
 
 async fn extensions_setup_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
 ) -> Result<Json<ExtensionSetupResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -2393,12 +2399,12 @@ async fn extensions_setup_handler(
     ))?;
 
     let secrets = ext_mgr
-        .get_setup_schema(&name)
+        .get_setup_schema(&name, &user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let kind = ext_mgr
-        .list(None, false)
+        .list(None, false, &user.user_id)
         .await
         .ok()
         .and_then(|list| list.into_iter().find(|e| e.name == name))
@@ -2414,6 +2420,7 @@ async fn extensions_setup_handler(
 
 async fn extensions_setup_submit_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
     Json(req): Json<ExtensionSetupRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
@@ -2422,7 +2429,7 @@ async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.configure(&name, &req.secrets).await {
+    match ext_mgr.configure(&name, &req.secrets, &user.user_id).await {
         Ok(result) => {
             // Broadcast auth_completed so the chat UI can dismiss any in-progress
             // auth card or setup modal that was triggered by tool_auth/tool_activate.
@@ -3555,7 +3562,6 @@ mod tests {
             wasm_tools_dir.path().to_path_buf(),
             wasm_channels_dir.path().to_path_buf(),
             None,
-            "test".to_string(),
             None,
             vec![],
         ));

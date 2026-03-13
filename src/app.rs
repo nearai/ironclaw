@@ -665,7 +665,6 @@ impl AppBuilder {
                 self.config.wasm.tools_dir.clone(),
                 self.config.channels.wasm_channels_dir.clone(),
                 self.config.tunnel.public_url.clone(),
-                "default".to_string(),
                 self.db.clone(),
                 catalog_entries.clone(),
             ));

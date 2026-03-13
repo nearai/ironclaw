@@ -1509,7 +1509,7 @@ impl Agent {
         };
 
         match ext_mgr
-            .configure_token(&pending.extension_name, token)
+            .configure_token(&pending.extension_name, token, &message.user_id)
             .await
         {
             Ok(result) => {

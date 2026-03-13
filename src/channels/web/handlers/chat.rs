@@ -150,6 +150,7 @@ pub async fn chat_approval_handler(
 /// The token never touches the LLM, chat history, or SSE stream.
 pub async fn chat_auth_token_handler(
     State(state): State<Arc<GatewayState>>,
+    crate::channels::web::auth::AuthenticatedUser(user): crate::channels::web::auth::AuthenticatedUser,
     Json(req): Json<AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -158,7 +159,7 @@ pub async fn chat_auth_token_handler(
     ))?;
 
     match ext_mgr
-        .configure_token(&req.extension_name, &req.token)
+        .configure_token(&req.extension_name, &req.token, &user.user_id)
         .await
     {
         Ok(result) => {

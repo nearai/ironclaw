@@ -267,7 +267,7 @@ async fn handle_client_message(
             token,
         } => {
             if let Some(ref ext_mgr) = state.extension_manager {
-                match ext_mgr.configure_token(&extension_name, &token).await {
+                match ext_mgr.configure_token(&extension_name, &token, user_id).await {
                     Ok(result) => {
                         crate::channels::web::server::clear_auth_mode(state, user_id).await;
                         state.sse.broadcast_for_user(

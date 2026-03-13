@@ -210,13 +210,12 @@ async fn extension_manager_with_process_manager_constructs() {
         tools_dir.path().to_path_buf(),
         channels_dir.path().to_path_buf(),
         None,
-        "test".to_string(),
         None,
         Vec::new(),
     );
 
     // Verify the manager is functional — list returns Ok.
-    let result = manager.list(None, false).await;
+    let result = manager.list(None, false, "test").await;
     assert!(result.is_ok(), "list should succeed on empty manager");
     assert!(result.unwrap().is_empty());
 }

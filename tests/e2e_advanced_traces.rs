@@ -629,7 +629,7 @@ mod advanced {
             .await
             .expect("failed to inject test token");
 
-        let activate_result = ext_mgr.activate("mock-notion").await;
+        let activate_result = ext_mgr.activate("mock-notion", "default").await;
         assert!(
             activate_result.is_ok(),
             "activation failed: {:?}",
