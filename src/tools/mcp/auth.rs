@@ -24,7 +24,7 @@ use crate::tools::mcp::config::McpServerConfig;
 /// Per-request timeouts can override the default via `.timeout()` on
 /// the request builder.
 fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
-    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, AuthError>> =
         std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -32,10 +32,10 @@ fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
                 .timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .map_err(|e| e.to_string())
+                .map_err(|e| AuthError::Http(e.to_string()))
         })
         .as_ref()
-        .map_err(|e| AuthError::Http(e.clone()))
+        .map_err(Clone::clone)
 }
 
 /// Log a debug message when a discovery/auth response is a redirect.
@@ -57,7 +57,7 @@ fn log_redirect_if_applicable(url: &str, response: &reqwest::Response) {
 }
 
 /// OAuth authorization error.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AuthError {
     #[error("Server does not support OAuth authorization")]
     NotSupported,
