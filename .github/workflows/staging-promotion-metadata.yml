@@ -25,7 +25,9 @@ permissions:
 jobs:
   refresh-single-pr:
     if: >
-      (github.event_name == 'pull_request_target' && startsWith(github.event.pull_request.head.ref, 'staging-promote/')) ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'staging-promote/')) ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
@@ -60,6 +62,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
+          # ubuntu-latest uses bash 5.x, so mapfile is available here.
           mapfile -t prs < <(gh pr list --repo "${REPO}" --label staging-promotion --state open \
             --json number,headRefName \
             --jq '.[] | select(.headRefName | startswith("staging-promote/")) | .number')

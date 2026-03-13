@@ -11,6 +11,9 @@ SECTION_END="<!-- staging-promotion-release-summary:end -->"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
+# shellcheck source=.github/scripts/pr-body-utils.sh
+source "$(dirname "$0")/pr-body-utils.sh"
+
 gh pr view "${PR_NUMBER}" --repo "${REPO}" --json body > "${TMP_DIR}/pr.json"
 jq -r '.body // ""' < "${TMP_DIR}/pr.json" > "${TMP_DIR}/body.md"
 
@@ -83,34 +86,12 @@ fi
   echo "${SECTION_END}"
 } >> "${TMP_DIR}/section.md"
 
-if grep -qF "${SECTION_START}" "${TMP_DIR}/body.md" && grep -qF "${SECTION_END}" "${TMP_DIR}/body.md"; then
-  awk -v start="${SECTION_START}" -v end="${SECTION_END}" -v replacement_file="${TMP_DIR}/section.md" '
-    BEGIN {
-      while ((getline line < replacement_file) > 0) {
-        replacement = replacement line ORS
-      }
-      in_block = 0
-    }
-    $0 == start {
-      printf "%s", replacement
-      in_block = 1
-      next
-    }
-    $0 == end {
-      in_block = 0
-      next
-    }
-    !in_block {
-      print
-    }
-  ' "${TMP_DIR}/body.md" > "${TMP_DIR}/new-body.md"
-else
-  cp "${TMP_DIR}/body.md" "${TMP_DIR}/new-body.md"
-  if [ -s "${TMP_DIR}/new-body.md" ]; then
-    printf '\n\n' >> "${TMP_DIR}/new-body.md"
-  fi
-  cat "${TMP_DIR}/section.md" >> "${TMP_DIR}/new-body.md"
-fi
+replace_marked_section \
+  "${TMP_DIR}/body.md" \
+  "${TMP_DIR}/section.md" \
+  "${SECTION_START}" \
+  "${SECTION_END}" \
+  "${TMP_DIR}/new-body.md"
 
 if [ "${DRY_RUN}" = "true" ]; then
   echo "Dry run enabled. Computed PR body for #${PR_NUMBER}:"
