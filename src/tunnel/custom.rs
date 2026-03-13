@@ -111,8 +111,7 @@ impl Tunnel for CustomTunnel {
             // fills up and the process blocks. So we drain it in a background task.
             // The task exits naturally when the process is killed (EOF).
             drain_handle = Some(tokio::spawn(async move {
-                while let Ok(Ok(Some(line))) = reader.next_line().await.map(Ok::<_, std::io::Error>)
-                {
+                while let Ok(Some(line)) = reader.next_line().await {
                     tracing::trace!("custom-tunnel: {line}");
                 }
             }));

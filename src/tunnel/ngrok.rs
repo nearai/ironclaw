@@ -122,7 +122,7 @@ impl Tunnel for NgrokTunnel {
         // blocks. So we drain it in a background task. The task exits
         // naturally when ngrok is killed (EOF on the pipe).
         let drain_handle = tokio::spawn(async move {
-            while let Ok(Ok(Some(line))) = reader.next_line().await.map(Ok::<_, std::io::Error>) {
+            while let Ok(Some(line)) = reader.next_line().await {
                 tracing::trace!("ngrok: {line}");
             }
         });

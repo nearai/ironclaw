@@ -452,16 +452,16 @@ mod tests {
     fn tunnel_target_prefers_http_port() {
         let channels = channels_with_http("0.0.0.0", 8080);
         let (host, port) = resolve_tunnel_target(&channels);
-        assert_eq!(host, "0.0.0.0");
-        assert_eq!(port, 8080);
+        assert_eq!(host, "0.0.0.0"); // safety: test-only
+        assert_eq!(port, 8080); // safety: test-only
     }
 
     #[test]
     fn tunnel_target_falls_back_to_gateway() {
         let channels = channels_gateway_only("10.0.0.1", 4000);
         let (host, port) = resolve_tunnel_target(&channels);
-        assert_eq!(host, "10.0.0.1");
-        assert_eq!(port, 4000);
+        assert_eq!(host, "10.0.0.1"); // safety: test-only
+        assert_eq!(port, 4000); // safety: test-only
     }
 
     #[test]
@@ -469,8 +469,8 @@ mod tests {
         let channels = channels_neither();
         let (host, port) = resolve_tunnel_target(&channels);
         // Matches the webhook server's hardcoded fallback in main.rs
-        assert_eq!(host, "0.0.0.0");
-        assert_eq!(port, 8080);
+        assert_eq!(host, "0.0.0.0"); // safety: test-only
+        assert_eq!(port, 8080); // safety: test-only
     }
 
     #[test]
@@ -478,8 +478,8 @@ mod tests {
         let channels = channels_with_http("192.168.1.1", 9090);
         let (host, port) = resolve_tunnel_target(&channels);
         // Should use HTTP config, not gateway's 127.0.0.1:3000
-        assert_eq!(host, "192.168.1.1");
-        assert_eq!(port, 9090);
+        assert_eq!(host, "192.168.1.1"); // safety: test-only
+        assert_eq!(port, 9090); // safety: test-only
     }
 
     #[test]
@@ -491,6 +491,6 @@ mod tests {
         // server.
         let channels = channels_neither();
         let (host, port) = resolve_tunnel_target(&channels);
-        assert_eq!((host, port), ("0.0.0.0", 8080));
+        assert_eq!((host, port), ("0.0.0.0", 8080)); // safety: test-only
     }
 }
