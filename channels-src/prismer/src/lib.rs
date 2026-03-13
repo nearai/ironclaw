@@ -581,7 +581,13 @@ impl Guest for PrismerChannel {
         };
 
         let conversations: Vec<IMConversation> = match im_result.data {
-            Some(data) => serde_json::from_value(data).unwrap_or_default(),
+            Some(data) => serde_json::from_value(data).unwrap_or_else(|e| {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Failed to parse conversations from data: {}", e),
+                );
+                Vec::new()
+            }),
             None => return,
         };
 
@@ -620,17 +626,62 @@ impl Guest for PrismerChannel {
                     }
                 };
 
-            if msg_status >= 300 {
+            // Handle 401 with re-register retry (JWT may expire mid-poll)
+            let (final_status, final_body) = if msg_status == 401 {
+                channel_host::log(
+                    channel_host::LogLevel::Info,
+                    &format!("JWT expired fetching messages for {}, re-registering", conv.id),
+                );
+                match attempt_re_register() {
+                    Ok(new_jwt) => match api_request("GET", &msg_url, &new_jwt, None) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            channel_host::log(
+                                channel_host::LogLevel::Error,
+                                &format!("Retry fetch messages for {} failed: {}", conv.id, e),
+                            );
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        channel_host::log(
+                            channel_host::LogLevel::Error,
+                            &format!("Re-register failed during message fetch: {}", e),
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                (msg_status, msg_body)
+            };
+
+            if final_status >= 300 {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Messages fetch for {} failed (HTTP {})", conv.id, final_status),
+                );
                 continue;
             }
 
-            let msg_result: IMResult = match serde_json::from_slice(&msg_body) {
+            let msg_result: IMResult = match serde_json::from_slice(&final_body) {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(e) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Error,
+                        &format!("Failed to parse messages response for {}: {}", conv.id, e),
+                    );
+                    continue;
+                }
             };
 
             let messages: Vec<IMMessage> = match msg_result.data {
-                Some(data) => serde_json::from_value(data).unwrap_or_default(),
+                Some(data) => serde_json::from_value(data).unwrap_or_else(|e| {
+                    channel_host::log(
+                        channel_host::LogLevel::Error,
+                        &format!("Failed to parse messages from data for {}: {}", conv.id, e),
+                    );
+                    Vec::new()
+                }),
                 None => continue,
             };
 
