@@ -329,6 +329,11 @@ impl Guest for SlackChannel {
         Err("broadcast not yet implemented for Slack channel".to_string())
     }
 
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        // Slack doesn't require mark_as_read functionality
+        Ok(())
+    }
+
     fn on_shutdown() {
         channel_host::log(channel_host::LogLevel::Info, "Slack channel shutting down");
     }

@@ -473,6 +473,11 @@ impl Guest for DiscordChannel {
         Err("broadcast not yet implemented for Discord channel".to_string())
     }
 
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        // Discord doesn't require mark_as_read functionality
+        Ok(())
+    }
+
     fn on_shutdown() {
         channel_host::log(
             channel_host::LogLevel::Info,
