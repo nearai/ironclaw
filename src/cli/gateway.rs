@@ -93,8 +93,9 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
 
     tracing::info!("Starting standalone gateway...");
 
-    // Capture owner_id before config is moved into AppBuilder.
+    // Capture values before config is moved into AppBuilder.
     let owner_id = config.owner_id.clone();
+    let tunnel_public_url = config.tunnel.public_url.clone();
 
     // Build core components via the standard AppBuilder pipeline.
     let session = create_session_manager(config.llm.session.clone()).await;
@@ -110,9 +111,9 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
     .await?;
 
     // Wire the GatewayChannel with available components.
-    // Standalone mode: no scheduler, no job_manager, no routine_engine, no prompt_queue.
-    // Unavailable APIs: chat send/ws (no msg_tx), routine trigger, job restart/cancel,
-    // job prompt. Read-only APIs (health, threads, history, memory, settings, etc.) work.
+    // NOTE: keep in sync with main.rs gateway setup (~line 468). Standalone mode
+    // intentionally omits: scheduler, job_manager, routine_engine, prompt_queue,
+    // ext_mgr gateway_mode. Those APIs return 503 in standalone.
     let session_manager =
         Arc::new(crate::agent::SessionManager::new().with_hooks(components.hooks.clone()));
     let mut gw =
@@ -125,6 +126,11 @@ async fn cmd_serve(config_path: Option<&Path>) -> anyhow::Result<()> {
     gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
     gw = gw.with_tool_registry(Arc::clone(&components.tools));
     if let Some(ref ext_mgr) = components.extension_manager {
+        // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
+        // instead of calling open::that() on the server.
+        let gw_base = tunnel_public_url
+            .unwrap_or_else(|| format!("http://{}:{}", gw_config.host, gw_config.port));
+        ext_mgr.enable_gateway_mode(gw_base).await;
         gw = gw.with_extension_manager(Arc::clone(ext_mgr));
     }
     if !components.catalog_entries.is_empty() {
@@ -180,10 +186,14 @@ async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {},
-            _ = sigterm.recv() => {},
+        if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        } else {
+            // SIGTERM registration failed — fall back to Ctrl-C only.
+            let _ = tokio::signal::ctrl_c().await;
         }
     }
     #[cfg(not(unix))]

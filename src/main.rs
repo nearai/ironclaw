@@ -594,6 +594,7 @@ async fn async_main() -> anyhow::Result<()> {
     );
 
     // ── Gateway channel ────────────────────────────────────────────────
+    // NOTE: keep in sync with cli/gateway.rs cmd_serve() standalone wiring.
 
     let mut gateway_url: Option<String> = None;
     let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
