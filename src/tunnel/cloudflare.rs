@@ -122,7 +122,7 @@ impl Tunnel for CloudflareTunnel {
         // buffer fills up and cloudflared blocks. So we drain it in a background
         // task. The task exits naturally when cloudflared is killed (EOF).
         let drain_handle = tokio::spawn(async move {
-            while let Ok(Ok(Some(line))) = reader.next_line().await.map(Ok::<_, std::io::Error>) {
+            while let Ok(Some(line)) = reader.next_line().await {
                 tracing::trace!("cloudflared: {line}");
             }
         });
