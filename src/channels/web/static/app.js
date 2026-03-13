@@ -639,22 +639,13 @@ function sendApprovalAction(requestId, action, threadId) {
     buttons.forEach((btn) => {
       btn.disabled = true;
     });
+    showApprovalResolved(card, action);
   }
 
   apiFetch('/api/chat/approval', {
     method: 'POST',
     body: { request_id: requestId, action: action, thread_id: approvalThreadId },
   }).then(() => {
-    if (!card) return;
-
-    const actions = card.querySelector('.approval-actions');
-    const label = document.createElement('span');
-    label.className = 'approval-resolved';
-    const labelText = action === 'approve' ? 'Approved' : action === 'always' ? 'Always approved' : 'Denied';
-    label.textContent = labelText;
-    actions.appendChild(label);
-    setTimeout(() => { card.remove(); }, 1500);
-
     // Approval can transition to another pending approval in the same turn.
     // If SSE is missed or delayed, poll briefly to recover next state.
     if (approvalThreadId) {
@@ -662,13 +653,21 @@ function sendApprovalAction(requestId, action, threadId) {
     }
   }).catch((err) => {
     addMessage('system', 'Failed to send approval: ' + err.message);
-    if (!card) return;
-
-    const buttons = card.querySelectorAll('.approval-actions button');
-    buttons.forEach((btn) => {
-      btn.disabled = false;
-    });
   });
+}
+
+function showApprovalResolved(card, action) {
+  if (!card) return;
+  const actions = card.querySelector('.approval-actions');
+  if (!actions) return;
+  if (actions.querySelector('.approval-resolved')) return;
+
+  const label = document.createElement('span');
+  label.className = 'approval-resolved';
+  const labelText = action === 'approve' ? 'Approved' : action === 'always' ? 'Always approved' : 'Denied';
+  label.textContent = labelText;
+  actions.appendChild(label);
+  setTimeout(() => { card.remove(); }, 1500);
 }
 
 function pollApprovalContinuation(threadId) {

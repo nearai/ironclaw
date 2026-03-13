@@ -206,7 +206,7 @@ pub async fn run_agentic_loop(
                         "Calendar response used inconsistent today/tomorrow weekday labels, nudging for rewrite"
                     );
                     reason_ctx.messages.push(ChatMessage::assistant(&text));
-                    reason_ctx.messages.push(ChatMessage::user(&format!(
+                    reason_ctx.messages.push(ChatMessage::user(format!(
                         "Rewrite the calendar summary with correct day mapping. \
                          Today is {} and tomorrow is {}. \
                          Use absolute dates and weekdays in the final answer.",
