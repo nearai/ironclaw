@@ -201,28 +201,35 @@ pub async fn start_managed_tunnel(
         return (config, None);
     };
 
-    let gateway_port = config
-        .channels
-        .gateway
-        .as_ref()
-        .map(|g| g.port)
-        .unwrap_or(3000);
-    let gateway_host = config
-        .channels
-        .gateway
-        .as_ref()
-        .map(|g| g.host.as_str())
-        .unwrap_or("127.0.0.1");
+    // Prefer the webhook server port (HTTP_PORT) since that's where webhook
+    // routes (Telegram, etc.) are served. Fall back to the gateway port.
+    let (tunnel_host, tunnel_port) = if let Some(ref http) = config.channels.http {
+        (http.host.as_str(), http.port)
+    } else {
+        let host = config
+            .channels
+            .gateway
+            .as_ref()
+            .map(|g| g.host.as_str())
+            .unwrap_or("127.0.0.1");
+        let port = config
+            .channels
+            .gateway
+            .as_ref()
+            .map(|g| g.port)
+            .unwrap_or(3000);
+        (host, port)
+    };
 
     match create_tunnel(provider_config) {
         Ok(Some(tunnel)) => {
             tracing::info!(
                 "Starting {} tunnel on {}:{}...",
                 tunnel.name(),
-                gateway_host,
-                gateway_port
+                tunnel_host,
+                tunnel_port
             );
-            match tunnel.start(gateway_host, gateway_port).await {
+            match tunnel.start(tunnel_host, tunnel_port).await {
                 Ok(url) => {
                     tracing::info!("Tunnel started: {}", url);
                     config.tunnel.public_url = Some(url);
