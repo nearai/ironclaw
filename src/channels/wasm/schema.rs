@@ -185,6 +185,33 @@ impl ChannelCapabilitiesFile {
             .and_then(|w| w.secret_name.clone())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.name))
     }
+
+    /// Get the webhook verification mode for this channel.
+    ///
+    /// Returns the verification mode declared in `webhook.verification_mode`:
+    /// - None/default: Require secret header for all requests
+    /// - "query_param": Skip host-level secret validation for GET, WASM validates via query param
+    /// - "signature": Always require signature validation
+    pub fn webhook_verification_mode(&self) -> Option<&str> {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .and_then(|w| w.verification_mode.as_deref())
+    }
+
+    /// Get the JSON pointer path to extract message ID from metadata.
+    ///
+    /// Returns the JSON pointer declared in `webhook.message_id_json_pointer`,
+    /// used for ACK key construction and deduplication.
+    /// If None, the router falls back to using user_id.
+    pub fn webhook_message_id_json_pointer(&self) -> Option<&str> {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .and_then(|w| w.message_id_json_pointer.as_deref())
+    }
 }
 
 /// Schema for channel capabilities.
@@ -302,6 +329,21 @@ pub struct WebhookSchema {
     /// Secret name in secrets store for HMAC-SHA256 signing (Slack-style).
     #[serde(default)]
     pub hmac_secret_name: Option<String>,
+
+    /// How to handle GET request validation:
+    /// - None/default: Require secret header for all requests (current behavior)
+    /// - "query_param": Skip host-level secret validation for GET requests;
+    ///   the WASM module validates via query param (e.g., WhatsApp hub.verify_token)
+    /// - "signature": Always require signature validation (for Discord-style Ed25519)
+    #[serde(default)]
+    pub verification_mode: Option<String>,
+
+    /// JSON pointer path to extract message ID from metadata_json.
+    /// Used for ACK key construction and deduplication.
+    /// Format: "/field1/field2" to access {"field1": {"field2": "value"}}
+    /// If None, the router falls back to using user_id.
+    #[serde(default)]
+    pub message_id_json_pointer: Option<String>,
 }
 
 /// Setup configuration schema.
@@ -804,6 +846,60 @@ mod tests {
         assert!(
             secrets_caps.is_allowed("discord_public_key"),
             "discord_public_key must be in the secrets allowlist"
+        );
+    }
+
+    #[test]
+    fn test_webhook_verification_mode_parsing() {
+        let json = r#"{
+            "name": "test",
+            "capabilities": {
+                "channel": {
+                    "webhook": {
+                        "verification_mode": "query_param"
+                    }
+                }
+            }
+        }"#;
+
+        let cap: ChannelCapabilitiesFile = serde_json::from_str(json).unwrap();
+        assert_eq!(cap.webhook_verification_mode(), Some("query_param"));
+    }
+
+    #[test]
+    fn test_webhook_hmac_secret_name_parsing() {
+        let json = r#"{
+            "name": "test",
+            "capabilities": {
+                "channel": {
+                    "webhook": {
+                        "hmac_secret_name": "whatsapp_app_secret"
+                    }
+                }
+            }
+        }"#;
+
+        let cap: ChannelCapabilitiesFile = serde_json::from_str(json).unwrap();
+        assert_eq!(cap.hmac_secret_name(), Some("whatsapp_app_secret"));
+    }
+
+    #[test]
+    fn test_webhook_message_id_json_pointer_parsing() {
+        let json = r#"{
+            "name": "test",
+            "capabilities": {
+                "channel": {
+                    "webhook": {
+                        "message_id_json_pointer": "/message_id"
+                    }
+                }
+            }
+        }"#;
+
+        let cap: ChannelCapabilitiesFile = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cap.webhook_message_id_json_pointer(),
+            Some("/message_id")
         );
     }
 }

@@ -1709,6 +1709,81 @@ impl WasmChannel {
         }
     }
 
+    /// Execute the on_message_persisted callback.
+    ///
+    /// Called after a message has been successfully persisted to the database.
+    /// Channels can use this for follow-up actions like WhatsApp mark_as_read.
+    ///
+    /// Returns Ok(()) even on failure - this is best-effort and should not block ACKs.
+    pub async fn call_on_message_persisted(
+        &self,
+        metadata_json: &str,
+    ) -> Result<(), WasmChannelError> {
+        // If no WASM bytes, return Ok (for testing)
+        if self.prepared.component().is_none() {
+            tracing::debug!(
+                channel = %self.name,
+                "on_message_persisted called (no WASM module)"
+            );
+            return Ok(());
+        }
+
+        let runtime = Arc::clone(&self.runtime);
+        let prepared = Arc::clone(&self.prepared);
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
+        let timeout = self.runtime.config().callback_timeout;
+        let credentials = self.get_credentials().await;
+        let host_credentials =
+            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+                .await;
+        let pairing_store = self.pairing_store.clone();
+        let metadata_json = metadata_json.to_string();
+        let channel_name = self.name.clone();
+
+        let result = tokio::time::timeout(timeout, async move {
+            tokio::task::spawn_blocking(move || {
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    host_credentials,
+                    pairing_store,
+                )?;
+                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
+
+                let channel_iface = instance.near_agent_channel();
+                let _ = channel_iface
+                    .call_on_message_persisted(&mut store, &metadata_json)
+                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+
+                Ok::<_, WasmChannelError>(())
+            })
+            .await
+            .map_err(|e| WasmChannelError::ExecutionPanicked {
+                name: channel_name,
+                reason: e.to_string(),
+            })?
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => {
+                tracing::debug!(channel = %self.name, "on_message_persisted completed");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                // Log but don't fail - this is best-effort
+                tracing::warn!(channel = %self.name, error = %e, "on_message_persisted failed");
+                Ok(())
+            }
+            Err(_timeout) => {
+                tracing::warn!(channel = %self.name, "on_message_persisted timed out");
+                Ok(())
+            }
+        }
+    }
+
     /// Execute a single on_status callback with a fresh WASM instance.
     ///
     /// Static method for use by the background typing repeat task (which

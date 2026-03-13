@@ -1,11 +1,19 @@
-//! Webhook signature verification (Discord Ed25519 and Slack HMAC-SHA256).
+//! Webhook signature verification (Discord Ed25519, Slack HMAC-SHA256, WhatsApp HMAC-SHA256).
 //!
 //! Validates request signatures for incoming webhooks:
 //! - Discord: `X-Signature-Ed25519` and `X-Signature-Timestamp` headers
 //! - Slack: `X-Slack-Signature` and `X-Slack-Request-Timestamp` headers
+//! - WhatsApp: `X-Hub-Signature-256` header (simple body-only HMAC)
 //!
 //! See: <https://discord.com/developers/docs/interactions/overview#validating-security-request-headers>
 //! See: <https://api.slack.com/authentication/verifying-requests-from-slack>
+//! See: <https://developers.facebook.com/docs/graph-api/webhooks/getting-started#validating-payloads>
+
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Verify a Discord interaction signature.
 ///
@@ -52,6 +60,47 @@ pub fn verify_discord_signature(
     verifying_key.verify_strict(&message, &signature).is_ok()
 }
 
+/// Verify HMAC-SHA256 signature (WhatsApp style, simple body-only).
+///
+/// # Arguments
+/// * `secret` - The HMAC secret (App Secret)
+/// * `signature_header` - Value from X-Hub-Signature-256 header (format: "sha256=<hex>")
+/// * `body` - Raw request body bytes
+///
+/// # Returns
+/// `true` if signature is valid, `false` otherwise
+pub fn verify_hmac_sha256(secret: &str, signature_header: &str, body: &[u8]) -> bool {
+    // Parse header format: "sha256=<hex_signature>"
+    let Some(hex_signature) = signature_header.strip_prefix("sha256=") else {
+        return false;
+    };
+
+    // Decode expected signature
+    let Ok(expected_sig) = hex::decode(hex_signature) else {
+        return false;
+    };
+
+    // SHA-256 produces 32-byte signatures - reject wrong lengths early
+    if expected_sig.len() != 32 {
+        return false;
+    }
+
+    // Compute HMAC-SHA256
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+    let result = mac.finalize();
+    let computed_sig = result.into_bytes();
+
+    // Constant-time comparison to prevent timing attacks
+    computed_sig
+        .as_slice()
+        .ct_eq(expected_sig.as_slice())
+        .into()
+}
+
 /// Verify a Slack webhook signature using HMAC-SHA256.
 ///
 /// Slack signs each webhook request with HMAC-SHA256 using:
@@ -69,9 +118,6 @@ pub fn verify_slack_signature(
     signature_header: &str,
     now_secs: i64,
 ) -> bool {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
     // 1. Parse and check staleness (5-minute window)
     let ts: i64 = match timestamp.parse() {
         Ok(v) => v,
@@ -89,7 +135,7 @@ pub fn verify_slack_signature(
     basestring.extend_from_slice(body);
 
     // 3. Compute HMAC-SHA256
-    let mut mac = match Hmac::<Sha256>::new_from_slice(signing_secret.as_bytes()) {
+    let mut mac = match HmacSha256::new_from_slice(signing_secret.as_bytes()) {
         Ok(m) => m,
         Err(_) => return false,
     };
@@ -99,7 +145,6 @@ pub fn verify_slack_signature(
     let expected = format!("v0={}", computed_hex);
 
     // 4. Constant-time compare (avoids timing side-channels)
-    use subtle::ConstantTimeEq;
     expected
         .as_bytes()
         .ct_eq(signature_header.as_bytes())
@@ -116,11 +161,7 @@ pub fn verify_hmac_sha256_prefixed(
     signature_header: &str,
     prefix: &str,
 ) -> bool {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    use subtle::ConstantTimeEq;
-
-    let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
         Ok(m) => m,
         Err(_) => return false,
     };
@@ -698,6 +739,78 @@ mod tests {
         assert!(
             !verify_slack_signature(signing_secret, "", body, "v0=abc123", 0),
             "Empty timestamp should be rejected"
+        );
+    }
+
+    // ── Category: HMAC-SHA256 Signature Verification (WhatsApp/Meta) ────────────
+
+    /// Helper: compute HMAC-SHA256 signature in WhatsApp/Meta format (`sha256=<hex>`).
+    fn compute_whatsapp_style_hmac_signature(secret: &str, body: &[u8]) -> String {
+        use hmac::Mac;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let result = mac.finalize();
+        format!("sha256={}", hex::encode(result.into_bytes()))
+    }
+
+    #[test]
+    fn test_hmac_valid_signature_succeeds() {
+        let secret = "my_app_secret";
+        let body = br#"{"entry":[{"id":"123"}]}"#;
+        let sig_header = compute_whatsapp_style_hmac_signature(secret, body);
+
+        assert!(
+            verify_hmac_sha256(secret, &sig_header, body),
+            "Valid HMAC signature should verify"
+        );
+    }
+
+    #[test]
+    fn test_hmac_wrong_secret_fails() {
+        let secret = "correct_secret";
+        let wrong_secret = "wrong_secret";
+        let body = br#"{"test":"data"}"#;
+        let sig_header = compute_whatsapp_style_hmac_signature(secret, body);
+
+        assert!(
+            !verify_hmac_sha256(wrong_secret, &sig_header, body),
+            "Signature with wrong secret should fail"
+        );
+    }
+
+    #[test]
+    fn test_hmac_tampered_body_fails() {
+        let secret = "my_secret";
+        let body = br#"original body"#;
+        let tampered = br#"tampered body"#;
+        let sig_header = compute_whatsapp_style_hmac_signature(secret, body);
+
+        assert!(
+            !verify_hmac_sha256(secret, &sig_header, tampered),
+            "Tampered body should fail verification"
+        );
+    }
+
+    #[test]
+    fn test_hmac_invalid_header_format_fails() {
+        let secret = "secret";
+        let body = br#"data"#;
+
+        assert!(!verify_hmac_sha256(secret, "invalid", body));
+        assert!(!verify_hmac_sha256(secret, "sha256=not_hex!", body));
+        assert!(!verify_hmac_sha256(secret, "", body));
+    }
+
+    #[test]
+    fn test_hmac_wrong_length_fails() {
+        let secret = "secret";
+        let body = br#"data"#;
+        // 16 bytes instead of 32
+        let short_sig = format!("sha256={}", "a".repeat(16));
+
+        assert!(
+            !verify_hmac_sha256(secret, &short_sig, body),
+            "Wrong-length signature should fail"
         );
     }
 }

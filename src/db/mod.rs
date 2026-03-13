@@ -505,6 +505,29 @@ pub trait WorkspaceStore: Send + Sync {
     ) -> Result<Vec<SearchResult>, WorkspaceError>;
 }
 
+/// Webhook message deduplication store.
+///
+/// Prevents duplicate processing when channels retry webhooks on errors.
+/// WhatsApp, for example, retries for up to 7 days on 5xx responses.
+#[async_trait]
+pub trait WebhookDedupStore: Send + Sync {
+    /// Try to record that a message is processed, atomically.
+    ///
+    /// Returns `true` if this is a new message (was inserted),
+    /// `false` if it was a duplicate (key already exists).
+    async fn record_webhook_message_processed(
+        &self,
+        channel_name: &str,
+        message_id: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Clean up old dedup records.
+    ///
+    /// Called periodically to prevent unbounded growth.
+    /// Returns the number of records deleted.
+    async fn cleanup_old_webhook_dedup_records(&self) -> Result<u64, DatabaseError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -518,6 +541,7 @@ pub trait Database:
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore
+    + WebhookDedupStore
     + Send
     + Sync
 {

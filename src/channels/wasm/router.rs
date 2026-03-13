@@ -46,6 +46,12 @@ pub struct WasmChannelRouter {
     signature_keys: RwLock<HashMap<String, String>>,
     /// HMAC-SHA256 signing secrets for signature verification by channel name (Slack-style).
     hmac_secrets: RwLock<HashMap<String, String>>,
+    /// Verification mode per channel: "query_param", "signature", etc.
+    verification_modes: RwLock<HashMap<String, String>>,
+    /// JSON pointers for extracting message IDs from metadata_json by channel name.
+    message_id_json_pointers: RwLock<HashMap<String, String>>,
+    /// Database for webhook message deduplication (optional - graceful degradation if not set).
+    db: RwLock<Option<Arc<dyn crate::db::WebhookDedupStore>>>,
 }
 
 impl WasmChannelRouter {
@@ -58,7 +64,24 @@ impl WasmChannelRouter {
             secret_headers: RwLock::new(HashMap::new()),
             signature_keys: RwLock::new(HashMap::new()),
             hmac_secrets: RwLock::new(HashMap::new()),
+            verification_modes: RwLock::new(HashMap::new()),
+            message_id_json_pointers: RwLock::new(HashMap::new()),
+            db: RwLock::new(None),
         }
+    }
+
+    /// Set the database for webhook message deduplication.
+    ///
+    /// If not called, deduplication is disabled (webhooks process without idempotency check).
+    pub async fn set_db(&self, db: Arc<dyn crate::db::WebhookDedupStore>) {
+        *self.db.write().await = Some(db);
+    }
+
+    /// Get the database for webhook message deduplication.
+    ///
+    /// Returns None if deduplication is not configured.
+    pub async fn get_db(&self) -> Option<Arc<dyn crate::db::WebhookDedupStore>> {
+        self.db.read().await.clone()
     }
 
     /// Register a channel with its endpoints.
@@ -69,12 +92,16 @@ impl WasmChannelRouter {
     /// * `secret` - Optional webhook secret for validation
     /// * `secret_header` - Optional HTTP header name for secret validation
     ///   (e.g., "X-Telegram-Bot-Api-Secret-Token"). Defaults to "X-Webhook-Secret".
+    /// * `verification_mode` - Optional verification mode: "query_param", "signature", etc.
+    /// * `message_id_json_pointer` - Optional JSON pointer to extract message ID from metadata.
     pub async fn register(
         &self,
         channel: Arc<WasmChannel>,
         endpoints: Vec<RegisteredEndpoint>,
         secret: Option<String>,
         secret_header: Option<String>,
+        verification_mode: Option<String>,
+        message_id_json_pointer: Option<String>,
     ) {
         let name = channel.channel_name().to_string();
 
@@ -92,6 +119,7 @@ impl WasmChannelRouter {
                 "Registered WASM channel HTTP endpoint"
             );
         }
+        drop(path_map);
 
         // Store secret if provided
         if let Some(s) = secret {
@@ -100,7 +128,17 @@ impl WasmChannelRouter {
 
         // Store secret header if provided
         if let Some(h) = secret_header {
-            self.secret_headers.write().await.insert(name, h);
+            self.secret_headers.write().await.insert(name.clone(), h);
+        }
+
+        // Store verification mode if provided
+        if let Some(m) = verification_mode {
+            self.verification_modes.write().await.insert(name.clone(), m);
+        }
+
+        // Store message ID JSON pointer if provided
+        if let Some(p) = message_id_json_pointer {
+            self.message_id_json_pointers.write().await.insert(name, p);
         }
     }
 
@@ -229,6 +267,28 @@ impl WasmChannelRouter {
     /// Returns `None` if no secret is registered (no HMAC check needed).
     pub async fn get_hmac_secret(&self, channel_name: &str) -> Option<String> {
         self.hmac_secrets.read().await.get(channel_name).cloned()
+    }
+
+    /// Get the verification mode for a channel.
+    ///
+    /// Returns `None` if no mode is configured (default behavior applies).
+    pub async fn get_verification_mode(&self, channel_name: &str) -> Option<String> {
+        self.verification_modes
+            .read()
+            .await
+            .get(channel_name)
+            .cloned()
+    }
+
+    /// Get the message ID JSON pointer for a channel.
+    ///
+    /// Returns `None` if no pointer is configured.
+    pub async fn get_message_id_json_pointer(&self, channel_name: &str) -> Option<String> {
+        self.message_id_json_pointers
+            .read()
+            .await
+            .get(channel_name)
+            .cloned()
     }
 }
 
@@ -691,7 +751,14 @@ mod tests {
         }];
 
         router
-            .register(channel, endpoints, Some("secret123".to_string()), None)
+            .register(
+                channel,
+                endpoints,
+                Some("secret123".to_string()),
+                None,
+                None,
+                None,
+            )
             .await;
 
         // Should find channel by path
@@ -710,7 +777,7 @@ mod tests {
         let channel = create_test_channel("slack");
 
         router
-            .register(channel, vec![], Some("secret123".to_string()), None)
+            .register(channel, vec![], Some("secret123".to_string()), None, None, None)
             .await;
 
         // Correct secret
@@ -721,7 +788,7 @@ mod tests {
 
         // Channel without secret always validates
         let channel2 = create_test_channel("telegram");
-        router.register(channel2, vec![], None, None).await;
+        router.register(channel2, vec![], None, None, None, None).await;
         assert!(router.validate_secret("telegram", "anything").await);
     }
 
@@ -737,7 +804,7 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None).await;
+        router.register(channel, endpoints, None, None, None, None).await;
 
         // Should exist
         assert!(
@@ -766,8 +833,8 @@ mod tests {
         let channel1 = create_test_channel("slack");
         let channel2 = create_test_channel("telegram");
 
-        router.register(channel1, vec![], None, None).await;
-        router.register(channel2, vec![], None, None).await;
+        router.register(channel1, vec![], None, None, None, None).await;
+        router.register(channel2, vec![], None, None, None, None).await;
 
         let channels = router.list_channels().await;
         assert_eq!(channels.len(), 2);
@@ -799,7 +866,7 @@ mod tests {
         // Channel without custom header should use default
         let channel2 = create_test_channel("slack");
         router
-            .register(channel2, vec![], Some("secret456".to_string()), None)
+            .register(channel2, vec![], Some("secret456".to_string()), None, None, None)
             .await;
         assert_eq!(router.get_secret_header("slack").await, "X-Webhook-Secret");
     }
@@ -811,7 +878,7 @@ mod tests {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("slack");
 
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         let hmac_secret = "my-slack-signing-secret";
         router.register_hmac_secret("slack", hmac_secret).await;
@@ -824,7 +891,7 @@ mod tests {
     async fn test_no_hmac_secret_returns_none() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("slack");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         // Slack has no HMAC secret registered
         let secret = router.get_hmac_secret("slack").await;
@@ -843,7 +910,7 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None).await;
+        router.register(channel, endpoints, None, None, None, None).await;
         router.register_hmac_secret("slack", "signing-secret").await;
 
         // Secret should exist
@@ -863,7 +930,7 @@ mod tests {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
 
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         let fake_pub_key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
         router
@@ -879,7 +946,7 @@ mod tests {
     async fn test_no_signature_key_returns_none() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("slack");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         // Slack has no signature key registered
         let key = router.get_signature_key("slack").await;
@@ -898,7 +965,7 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None).await;
+        router.register(channel, endpoints, None, None, None, None).await;
         // Use a valid 32-byte Ed25519 key for this test
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
         router
@@ -922,7 +989,7 @@ mod tests {
     async fn test_register_valid_signature_key_succeeds() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         // Valid 32-byte Ed25519 public key (from test keypair)
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
@@ -934,7 +1001,7 @@ mod tests {
     async fn test_register_invalid_hex_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         let result = router
             .register_signature_key("discord", "not-valid-hex-zzz")
@@ -946,7 +1013,7 @@ mod tests {
     async fn test_register_wrong_length_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         // 16 bytes instead of 32
         let short_key = hex::encode([0u8; 16]);
@@ -958,7 +1025,7 @@ mod tests {
     async fn test_register_empty_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         let result = router.register_signature_key("discord", "").await;
         assert!(result.is_err(), "Empty key should be rejected");
@@ -968,7 +1035,7 @@ mod tests {
     async fn test_valid_key_is_retrievable() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
         router
@@ -984,7 +1051,7 @@ mod tests {
     async fn test_invalid_key_does_not_store() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None, None).await;
 
         // Attempt to register invalid key
         let _ = router
@@ -1018,7 +1085,7 @@ mod tests {
             require_secret: false,
         }];
 
-        wasm_router.register(channel, endpoints, None, None).await;
+        wasm_router.register(channel, endpoints, None, None, None, None).await;
 
         let app = create_wasm_channel_router(wasm_router.clone(), None);
         (wasm_router, app)
@@ -1245,7 +1312,14 @@ mod tests {
 
         // Register with BOTH secret and signature key
         wasm_router
-            .register(channel, endpoints, Some("my-secret".to_string()), None)
+            .register(
+                channel,
+                endpoints,
+                Some("my-secret".to_string()),
+                None,
+                None,
+                None,
+            )
             .await;
 
         let signing_key = test_signing_key();
@@ -1303,7 +1377,7 @@ mod tests {
             require_secret: false,
         }];
 
-        wasm_router.register(channel, endpoints, None, None).await;
+        wasm_router.register(channel, endpoints, None, None, None, None).await;
 
         let app = create_wasm_channel_router(wasm_router.clone(), None);
         (wasm_router, app)
