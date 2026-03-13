@@ -97,7 +97,13 @@ pub fn spawn_jsonrpc_reader<R: AsyncBufRead + Unpin + Send + 'static>(
                 }
             };
 
-            let id = response.id.unwrap_or(0);
+            let Some(id) = response.id else {
+                tracing::debug!(
+                    "[{}] Received JSON-RPC notification (no id), skipping dispatch",
+                    server_name
+                );
+                continue;
+            };
             let mut map = pending.lock().await;
             if let Some(tx) = map.remove(&id) {
                 // Ignore send error — the receiver may have been dropped (timeout).
@@ -113,6 +119,76 @@ pub fn spawn_jsonrpc_reader<R: AsyncBufRead + Unpin + Send + 'static>(
 
         tracing::debug!("[{}] JSON-RPC reader finished", server_name);
     })
+}
+
+/// Send a JSON-RPC request over a stream-based transport (stdio / unix socket).
+///
+/// Handles notification fire-and-forget, pending response registration,
+/// write, timeout, and cleanup. Used by both [`StdioMcpTransport`] and
+/// [`UnixMcpTransport`] to avoid duplicating the send logic.
+pub(crate) async fn stream_transport_send<W: AsyncWrite + Unpin>(
+    writer: &Mutex<W>,
+    pending: &Mutex<HashMap<u64, oneshot::Sender<McpResponse>>>,
+    request: &McpRequest,
+    server_name: &str,
+    timeout_duration: std::time::Duration,
+) -> Result<McpResponse, ToolError> {
+    // JSON-RPC notifications (no id) are fire-and-forget: the server
+    // will not send a response, so we must not wait for one.
+    if request.id.is_none() {
+        let mut w = writer.lock().await;
+        write_jsonrpc_line(&mut *w, request).await?;
+        return Ok(McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        });
+    }
+
+    let id = request.id.unwrap_or(0);
+    let (tx, rx) = oneshot::channel();
+
+    // Register the pending response handler before writing the request,
+    // so we don't miss a fast response from the server.
+    {
+        let mut map = pending.lock().await;
+        map.insert(id, tx);
+    }
+
+    // Write the request.
+    {
+        let mut w = writer.lock().await;
+        if let Err(e) = write_jsonrpc_line(&mut *w, request).await {
+            // Remove the pending entry on write failure.
+            let mut map = pending.lock().await;
+            map.remove(&id);
+            return Err(e);
+        }
+    }
+
+    // Wait for the response with a timeout.
+    match tokio::time::timeout(timeout_duration, rx).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => {
+            // Sender was dropped (reader task ended). Clean up pending entry.
+            let mut map = pending.lock().await;
+            map.remove(&id);
+            Err(ToolError::ExternalService(format!(
+                "[{}] MCP server closed connection before responding to request {:?}",
+                server_name, request.id
+            )))
+        }
+        Err(_) => {
+            // Timeout: remove the pending entry.
+            let mut map = pending.lock().await;
+            map.remove(&id);
+            Err(ToolError::ExternalService(format!(
+                "[{}] Timeout waiting for response to request {:?} after {:?}",
+                server_name, request.id, timeout_duration
+            )))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +266,34 @@ mod tests {
             .await
             .expect("should receive response despite earlier invalid line");
         assert_eq!(resp.id, Some(7));
+
+        handle.await.expect("reader task should finish");
+    }
+
+    /// Issue 9 regression: a JSON-RPC notification (no id) must not resolve
+    /// a pending request keyed by id 0 (the old `unwrap_or(0)` default).
+    #[tokio::test]
+    async fn test_notification_does_not_resolve_pending_id_zero() {
+        // A notification response (no id), followed by a proper response for id 0.
+        let notification = r#"{"jsonrpc":"2.0","method":"notifications/progress","params":{}}"#;
+        let real_response = r#"{"jsonrpc":"2.0","id":0,"result":{"ok":true}}"#;
+        let input = format!("{notification}\n{real_response}\n");
+
+        let reader = std::io::Cursor::new(input.into_bytes());
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<McpResponse>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut map = pending.lock().await;
+            map.insert(0, tx);
+        }
+
+        let handle = spawn_jsonrpc_reader(reader, pending.clone(), "test".into());
+
+        let resp = rx.await.expect("should receive the real id=0 response");
+        assert_eq!(resp.id, Some(0));
+        assert!(resp.result.is_some());
 
         handle.await.expect("reader task should finish");
     }

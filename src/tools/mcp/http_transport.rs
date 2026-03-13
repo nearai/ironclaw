@@ -139,7 +139,7 @@ impl McpTransport for HttpMcpTransport {
             .to_string();
 
         if content_type.contains("text/event-stream") {
-            self.parse_sse_response(response).await
+            self.parse_sse_response(response, request.id).await
         } else {
             response.json().await.map_err(|e| {
                 ToolError::ExternalService(format!(
@@ -161,11 +161,14 @@ impl McpTransport for HttpMcpTransport {
 }
 
 impl HttpMcpTransport {
-    /// Parse a Server-Sent Events response, returning the first valid JSON-RPC
-    /// `data:` line as an [`McpResponse`].
+    /// Parse a Server-Sent Events response, returning the JSON-RPC response
+    /// whose `id` matches `request_id`. Non-matching events (e.g. server
+    /// notifications or progress updates) are skipped so that the caller
+    /// receives the actual result for its request.
     async fn parse_sse_response(
         &self,
         response: reqwest::Response,
+        request_id: Option<u64>,
     ) -> Result<McpResponse, ToolError> {
         use futures::StreamExt;
 
@@ -202,9 +205,10 @@ impl HttpMcpTransport {
                     remaining_start = i + 1;
 
                     if let Some(json_str) = line.strip_prefix("data: ")
-                        && let Ok(response) = serde_json::from_str::<McpResponse>(json_str)
+                        && let Ok(resp) = serde_json::from_str::<McpResponse>(json_str)
+                        && resp.id == request_id
                     {
-                        return Ok(response);
+                        return Ok(resp);
                     }
                 }
             }
@@ -216,14 +220,15 @@ impl HttpMcpTransport {
 
         // Process any remaining data without a trailing newline.
         if let Some(json_str) = buffer.strip_prefix("data: ")
-            && let Ok(response) = serde_json::from_str::<McpResponse>(json_str.trim())
+            && let Ok(resp) = serde_json::from_str::<McpResponse>(json_str.trim())
+            && resp.id == request_id
         {
-            return Ok(response);
+            return Ok(resp);
         }
 
         Err(ToolError::ExternalService(format!(
-            "[{}] No valid data in SSE response: {}",
-            self.server_name, buffer
+            "[{}] No matching response (id={:?}) in SSE stream",
+            self.server_name, request_id
         )))
     }
 }
