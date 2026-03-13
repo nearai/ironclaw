@@ -625,9 +625,7 @@ impl WasmToolWrapper {
             oauth_refresh: None,
             tool_executor: None,
             tool_executor_slot: None,
-        };
-        wrapper.append_schema_hint_if_permissive();
-        wrapper
+        }
     }
 
     /// Override the tool description.
