@@ -280,6 +280,7 @@ static MEDIUM_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         "move",
         "git commit",
         "git add",
+        "git push",
         "git checkout",
         "git switch",
         "git merge",
@@ -896,7 +897,13 @@ impl Tool for ShellTool {
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
         match self.risk_level_for(params) {
-            RiskLevel::Low => ApprovalRequirement::Never,
+            // Low maps to UnlessAutoApproved rather than Never: shell redirections
+            // (e.g. `cat /etc/shadow > /tmp/out`) are not split on `>`, so a Low command
+            // with a redirect would bypass approval entirely with Never. Keeping
+            // UnlessAutoApproved preserves the graduated metadata for audit while
+            // ensuring approval policy stays conservative until redirect-aware parsing
+            // is in place.
+            RiskLevel::Low => ApprovalRequirement::UnlessAutoApproved,
             RiskLevel::Medium => ApprovalRequirement::UnlessAutoApproved,
             RiskLevel::High => ApprovalRequirement::Always,
         }
@@ -1160,14 +1167,15 @@ mod tests {
             tool.requires_approval(&serde_json::json!({"command": "cargo build"})),
             ApprovalRequirement::UnlessAutoApproved
         );
-        // Low-risk commands return Never (no approval needed).
+        // Low-risk commands also return UnlessAutoApproved (conservative until
+        // redirect-aware parsing is in place — see RiskLevel::Low mapping comment).
         assert_eq!(
             tool.requires_approval(&serde_json::json!({"command": "echo hello"})),
-            ApprovalRequirement::Never
+            ApprovalRequirement::UnlessAutoApproved
         );
         assert_eq!(
             tool.requires_approval(&serde_json::json!({"command": "ls -la"})),
-            ApprovalRequirement::Never
+            ApprovalRequirement::UnlessAutoApproved
         );
     }
 
