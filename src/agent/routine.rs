@@ -889,16 +889,10 @@ mod tests {
     fn test_describe_cron_edge_cases() {
         assert_eq!(describe_cron("", None), "cron: (empty)"); // safety: test-only assertion in #[cfg(test)] module
         assert_eq!(describe_cron("not a cron", None), "cron: not a cron"); // safety: test-only assertion in #[cfg(test)] module
-        assert_eq!(
-            // safety: test-only assertion in #[cfg(test)] module
-            describe_cron("0 9 * * MON-FRI", None),
-            "Weekdays at 9:00 AM"
-        );
-        assert_eq!(
-            // safety: test-only assertion in #[cfg(test)] module
-            describe_cron("0 0 9 * * MON-FRI *", None),
-            "Weekdays at 9:00 AM"
-        );
+        let weekdays_5_field = describe_cron("0 9 * * MON-FRI", None);
+        assert_eq!(weekdays_5_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
+        let weekdays_7_field = describe_cron("0 0 9 * * MON-FRI *", None);
+        assert_eq!(weekdays_7_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
     }
 
     #[test]
