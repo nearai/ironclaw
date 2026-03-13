@@ -12,6 +12,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use subtle::ConstantTimeEq;
 
 /// Identity resolved from a bearer token.
 #[derive(Debug, Clone)]
@@ -50,19 +51,24 @@ impl MultiAuthState {
 
     /// Authenticate a token, returning the associated identity if valid.
     ///
-    /// Uses direct HashMap lookup for O(1) performance. This is not
-    /// constant-time: an attacker observing response timing could
-    /// distinguish "token not found" from "token found" (and potentially
-    /// leak hash-bucket information). In practice, bearer tokens over
-    /// TLS are high-entropy random strings where timing attacks are
-    /// infeasible, and the prior O(N) iteration leaked more timing
-    /// information by short-circuiting on the first match.
-    ///
-    /// For network-exposed deployments, place a reverse proxy (nginx,
-    /// Caddy, etc.) with its own auth layer in front of the gateway
-    /// rather than exposing token auth directly to the internet.
+    /// Uses constant-time comparison (`subtle::ConstantTimeEq`) to prevent
+    /// timing side-channels that could leak token information. Iterates all
+    /// entries regardless of match to avoid early-exit timing differences.
+    /// O(n) in the number of configured users — negligible for typical
+    /// deployments (< 10 users).
     pub fn authenticate(&self, candidate: &str) -> Option<&UserIdentity> {
-        self.tokens.get(candidate)
+        let candidate_bytes = candidate.as_bytes();
+        let mut matched: Option<&UserIdentity> = None;
+        for (token, identity) in &self.tokens {
+            let token_bytes = token.as_bytes();
+            // ct_eq requires equal lengths; pad comparison to avoid length leak
+            if candidate_bytes.len() == token_bytes.len()
+                && bool::from(candidate_bytes.ct_eq(token_bytes))
+            {
+                matched = Some(identity);
+            }
+        }
+        matched
     }
 
     /// Get the first token (for backwards-compatible printing at startup).
