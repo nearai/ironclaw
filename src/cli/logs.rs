@@ -62,7 +62,7 @@ pub fn run_logs_command(args: &Logs, log_path: &Path) -> Result<()> {
     Ok(())
 }
 
-// ✅ Tests use the same tail_lines function as production code
+// Tests use the same tail_lines function as production code
 #[cfg(test)]
 mod tests {
     use super::*;
