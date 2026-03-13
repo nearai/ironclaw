@@ -8,7 +8,9 @@
 //! - WebSocket connections are scoped to the authenticated user
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -22,6 +24,7 @@ use ironclaw::channels::web::auth::{
 };
 use ironclaw::channels::web::server::{GatewayState, PerUserRateLimiter, RateLimiter};
 use ironclaw::channels::web::sse::SseManager;
+use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
 use ironclaw::channels::web::ws::WsConnectionTracker;
 
 // ---------------------------------------------------------------------------
@@ -553,4 +556,295 @@ fn gateway_state_has_multi_tenant_fields() {
 
     assert_eq!(state.default_user_id, "fallback");
     assert!(state.workspace_pool.is_none());
+}
+
+// ===========================================================================
+// Full-server handler-level tests (real HTTP through auth middleware)
+// ===========================================================================
+
+/// Build a MultiAuthState with two users and start a real server.
+async fn start_multi_user_server() -> (SocketAddr, Arc<GatewayState>) {
+    let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(64);
+    let auth = two_user_auth();
+    TestGatewayBuilder::new()
+        .msg_tx(agent_tx)
+        .start_multi(auth)
+        .await
+        .expect("Failed to start multi-user test server")
+}
+
+#[tokio::test]
+async fn full_server_alice_can_access_protected_endpoint() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/gateway/status", addr))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn full_server_bob_can_access_protected_endpoint() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/gateway/status", addr))
+        .header("Authorization", format!("Bearer {}", BOB_TOKEN))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn full_server_unknown_token_returns_401() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/gateway/status", addr))
+        .header("Authorization", "Bearer wrong-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn full_server_no_auth_header_returns_401() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/gateway/status", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn full_server_health_is_public() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/health", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn full_server_chat_send_accepted_for_alice() {
+    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel(64);
+    let auth = two_user_auth();
+    let (addr, _state) = TestGatewayBuilder::new()
+        .msg_tx(agent_tx)
+        .start_multi(auth)
+        .await
+        .expect("Failed to start server");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"hello from alice"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 202); // ACCEPTED
+
+    // Verify the message reached the agent channel
+    let msg = tokio::time::timeout(Duration::from_secs(2), agent_rx.recv())
+        .await
+        .expect("Timed out waiting for agent message")
+        .expect("Agent channel closed");
+
+    assert_eq!(msg.content, "hello from alice");
+    assert_eq!(msg.channel, "gateway");
+}
+
+#[tokio::test]
+async fn full_server_chat_send_rejected_without_auth() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Content-Type", "application/json")
+        .body(r#"{"content":"unauthorized message"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn full_server_query_token_works_for_sse() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    // SSE endpoint should accept query token
+    let resp = client
+        .get(format!(
+            "http://{}/api/chat/events?token={}",
+            addr, ALICE_TOKEN
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    // Should get 200 (SSE stream starts)
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn full_server_query_token_rejected_for_non_sse() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    // Non-SSE endpoint should NOT accept query token
+    let resp = client
+        .get(format!(
+            "http://{}/api/gateway/status?token={}",
+            addr, ALICE_TOKEN
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn full_server_jobs_endpoint_returns_503_without_db() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    // Jobs endpoint requires database — should return 503 (no DB configured)
+    // but NOT 401 (auth should pass)
+    let resp = client
+        .get(format!("http://{}/api/jobs", addr))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .send()
+        .await
+        .unwrap();
+
+    // Without a database, this should return a server error, not an auth error
+    let status = resp.status().as_u16();
+    assert_ne!(status, 401, "Should not be auth error — token is valid");
+    assert_ne!(status, 403, "Should not be forbidden — token is valid");
+}
+
+#[tokio::test]
+async fn full_server_jobs_endpoint_rejected_without_auth() {
+    let (addr, _state) = start_multi_user_server().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/api/jobs", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn full_server_ws_multi_user_event_isolation() {
+    use futures::StreamExt;
+    use ironclaw::channels::web::types::SseEvent;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let (addr, state) = start_multi_user_server().await;
+
+    // Connect Alice's WS
+    let alice_url = format!("ws://{}/api/chat/ws?token={}", addr, ALICE_TOKEN);
+    let mut alice_req = alice_url.into_client_request().unwrap();
+    alice_req.headers_mut().insert(
+        "Origin",
+        format!("http://127.0.0.1:{}", addr.port()).parse().unwrap(),
+    );
+    let (mut alice_ws, _) = tokio_tungstenite::connect_async(alice_req)
+        .await
+        .expect("Alice WS connect failed");
+
+    // Connect Bob's WS
+    let bob_url = format!("ws://{}/api/chat/ws?token={}", addr, BOB_TOKEN);
+    let mut bob_req = bob_url.into_client_request().unwrap();
+    bob_req.headers_mut().insert(
+        "Origin",
+        format!("http://127.0.0.1:{}", addr.port()).parse().unwrap(),
+    );
+    let (mut bob_ws, _) = tokio_tungstenite::connect_async(bob_req)
+        .await
+        .expect("Bob WS connect failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Broadcast an event scoped to Alice only
+    state.sse.broadcast_for_user(
+        ALICE_USER_ID,
+        SseEvent::Status {
+            message: "alice-only-event".to_string(),
+            thread_id: None,
+        },
+    );
+
+    // Broadcast a global heartbeat so Bob has something to receive
+    state.sse.broadcast(SseEvent::Heartbeat);
+
+    // Alice should get her scoped event
+    let alice_msg = tokio::time::timeout(Duration::from_secs(2), alice_ws.next())
+        .await
+        .expect("Alice WS timed out")
+        .expect("Alice stream ended")
+        .expect("Alice WS error");
+
+    if let Message::Text(text) = alice_msg {
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["type"], "event");
+        assert_eq!(parsed["event_type"], "status");
+        assert_eq!(parsed["data"]["message"], "alice-only-event");
+    } else {
+        panic!("Expected Text frame from Alice WS, got {:?}", alice_msg);
+    }
+
+    // Bob should only get the heartbeat, NOT alice's event
+    let bob_msg = tokio::time::timeout(Duration::from_secs(2), bob_ws.next())
+        .await
+        .expect("Bob WS timed out")
+        .expect("Bob stream ended")
+        .expect("Bob WS error");
+
+    if let Message::Text(text) = bob_msg {
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["type"], "event");
+        assert_eq!(
+            parsed["event_type"], "heartbeat",
+            "Bob should only see heartbeat, not alice's event. Got: {}",
+            text
+        );
+    } else {
+        panic!("Expected Text frame from Bob WS, got {:?}", bob_msg);
+    }
+
+    alice_ws.close(None).await.ok();
+    bob_ws.close(None).await.ok();
 }

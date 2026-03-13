@@ -106,4 +106,18 @@ impl TestGatewayBuilder {
         let bound = start_server(addr, state.clone(), auth).await?;
         Ok((bound, state))
     }
+
+    /// Build the state and start a gateway server with multi-user auth.
+    /// Returns the bound address and the shared state.
+    pub async fn start_multi(
+        self,
+        auth: MultiAuthState,
+    ) -> Result<(SocketAddr, Arc<GatewayState>), crate::error::ChannelError> {
+        let state = self.build();
+        let addr: SocketAddr = "127.0.0.1:0"
+            .parse()
+            .expect("hard-coded address must parse");
+        let bound = start_server(addr, state.clone(), auth).await?;
+        Ok((bound, state))
+    }
 }
