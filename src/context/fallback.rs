@@ -64,16 +64,23 @@ impl FallbackDeliverable {
         let last_action = memory.last_action().map(|a| {
             // Use sanitized output to avoid leaking secrets through the fallback API surface.
             // For failed actions (no sanitized output), fall back to the error message.
-            let preview_source = a
-                .output_sanitized
-                .as_ref()
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other).unwrap_or_default(),
-                })
-                .or_else(|| a.error.clone())
-                .unwrap_or_default();
-            let preview = truncate_str(&preview_source, 200);
+            // Borrow the string slice directly when possible to avoid cloning
+            // potentially large outputs just for truncation.
+            let owned_fallback;
+            let preview_str: &str = if let Some(v) = a.output_sanitized.as_ref() {
+                match v {
+                    serde_json::Value::String(s) => s.as_str(),
+                    other => {
+                        owned_fallback = serde_json::to_string(other).unwrap_or_default();
+                        &owned_fallback
+                    }
+                }
+            } else if let Some(ref err) = a.error {
+                err.as_str()
+            } else {
+                ""
+            };
+            let preview = truncate_str(preview_str, 200);
             LastAction {
                 tool_name: a.tool_name.clone(),
                 output_preview: preview.to_string(),
