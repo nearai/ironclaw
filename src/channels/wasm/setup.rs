@@ -243,7 +243,9 @@ async fn register_channel(
     // Register HMAC signing secret if declared in capabilities.
     if let Some(ref hmac_secret_name) = hmac_secret_name
         && let Some(secrets) = secrets_store
-        && let Ok(secret) = secrets.get_decrypted(&config.owner_id, hmac_secret_name).await
+        && let Ok(secret) = secrets
+            .get_decrypted(&config.owner_id, hmac_secret_name)
+            .await
     {
         wasm_router
             .register_hmac_secret(&channel_name, secret.expose())

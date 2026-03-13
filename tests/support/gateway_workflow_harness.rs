@@ -239,6 +239,7 @@ impl GatewayWorkflowHarness {
         let mut agent = Agent::new(
             components.config.agent.clone(),
             AgentDeps {
+                owner_id: components.config.owner_id.clone(),
                 store: components.db,
                 llm: components.llm,
                 cheap_llm: components.cheap_llm,

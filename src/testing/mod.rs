@@ -439,6 +439,7 @@ impl TestHarnessBuilder {
         };
 
         let deps = AgentDeps {
+            owner_id: "default".to_string(),
             store: Some(Arc::clone(&db)),
             llm,
             cheap_llm: None,

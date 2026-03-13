@@ -701,6 +701,7 @@ async fn async_main() -> anyhow::Result<()> {
         .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
 
     let deps = AgentDeps {
+        owner_id: config.owner_id.clone(),
         store: components.db,
         llm: components.llm,
         cheap_llm: components.cheap_llm,

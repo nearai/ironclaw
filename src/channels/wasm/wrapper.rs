@@ -4498,10 +4498,8 @@ mod tests {
         assert_eq!(msg.owner_id, "owner-scope"); // safety: test-only assertion
         assert_eq!(msg.sender_id, "telegram-owner"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("12345")); // safety: test-only assertion
-        assert_eq!(
-            last_broadcast_metadata.read().await.as_deref(),
-            Some(r#"{"chat_id":12345}"#)
-        ); // safety: test-only assertion
+        let stored_metadata = last_broadcast_metadata.read().await.clone();
+        assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":12345}"#)); // safety: test-only assertion
     }
 
     #[tokio::test]
@@ -4593,11 +4591,9 @@ mod tests {
 
         assert!(result.is_err()); // safety: test-only assertion
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Send a message from the owner on this channel first"),
-            "expected missing owner routing metadata error, got: {}",
-            err
-        ); // safety: test-only assertion
+        let mentions_missing_owner_route =
+            err.contains("Send a message from the owner on this channel first");
+        assert!(mentions_missing_owner_route); // safety: test-only assertion
     }
 
     #[tokio::test]

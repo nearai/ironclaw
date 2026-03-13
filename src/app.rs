@@ -140,7 +140,9 @@ impl AppBuilder {
         self.handles = Some(handles);
 
         // Post-init: migrate disk config, reload config from DB, attach session, cleanup
-        if let Err(e) = crate::bootstrap::migrate_disk_to_db(db.as_ref(), &self.config.owner_id).await {
+        if let Err(e) =
+            crate::bootstrap::migrate_disk_to_db(db.as_ref(), &self.config.owner_id).await
+        {
             tracing::warn!("Disk-to-DB settings migration failed: {}", e);
         }
 

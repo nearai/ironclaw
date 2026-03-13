@@ -716,6 +716,8 @@ DROP TABLE routines;
 ALTER TABLE routines_new RENAME TO routines;
 
 CREATE INDEX IF NOT EXISTS idx_routines_user ON routines(user_id);
+CREATE INDEX IF NOT EXISTS idx_routines_next_fire ON routines(next_fire_at);
+CREATE INDEX IF NOT EXISTS idx_routines_event_triggers ON routines(user_id);
 
 PRAGMA foreign_keys=ON;
 "#,

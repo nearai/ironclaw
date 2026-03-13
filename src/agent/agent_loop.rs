@@ -77,6 +77,8 @@ fn should_fallback_routine_notification(error: &ChannelError) -> bool {
 ///
 /// Bundles the shared components to reduce argument count.
 pub struct AgentDeps {
+    /// Resolved durable owner scope for the instance.
+    pub owner_id: String,
     pub store: Option<Arc<dyn Database>>,
     pub llm: Arc<dyn LlmProvider>,
     /// Cheap/fast LLM for lightweight tasks (heartbeat, routing, evaluation).
@@ -126,7 +128,7 @@ impl Agent {
             .workspace
             .as_ref()
             .map(|workspace| workspace.user_id())
-            .unwrap_or("default")
+            .unwrap_or(&self.deps.owner_id)
     }
 
     /// Create a new agent.

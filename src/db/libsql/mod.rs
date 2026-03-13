@@ -438,10 +438,8 @@ mod tests {
         assert_eq!(normalize_notify_user(Some(String::new())), None); // safety: test-only assertion
         assert_eq!(normalize_notify_user(Some("   ".to_string())), None); // safety: test-only assertion
         assert_eq!(normalize_notify_user(Some("default".to_string())), None); // safety: test-only assertion
-        assert_eq!(
-            normalize_notify_user(Some("123456789".to_string())),
-            Some("123456789".to_string())
-        ); // safety: test-only assertion
+        let normalized = normalize_notify_user(Some("123456789".to_string()));
+        assert_eq!(normalized, Some("123456789".to_string())); // safety: test-only assertion
     }
 
     #[test]

@@ -683,18 +683,12 @@ mod tests {
             .execute(serde_json::json!({"content": "NEAR price is $5"}), &ctx)
             .await;
 
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test-only assertion
         let err = result.unwrap_err().to_string();
-        assert!(
-            !err.contains("No target specified"),
-            "Should not get 'No target specified' when ctx.user_id can be used, got: {}",
-            err
-        );
-        assert!(
-            !err.contains("No channel specified"),
-            "Should not get 'No channel specified' when metadata has notify_channel, got: {}",
-            err
-        );
+        let mentions_missing_target = err.contains("No target specified");
+        assert!(!mentions_missing_target); // safety: test-only assertion
+        let mentions_missing_channel = err.contains("No channel specified");
+        assert!(!mentions_missing_channel); // safety: test-only assertion
     }
 
     #[tokio::test]

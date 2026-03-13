@@ -316,8 +316,7 @@ impl Channel for ReplChannel {
 
             // Single message mode: send it and return
             if let Some(msg) = single_message {
-                let incoming =
-                    IncomingMessage::new("repl", &user_id, &msg).with_timezone(&sys_tz);
+                let incoming = IncomingMessage::new("repl", &user_id, &msg).with_timezone(&sys_tz);
                 let _ = tx.blocking_send(incoming);
                 // Ensure the agent exits after handling exactly one turn in -m mode,
                 // even when other channels (gateway/http) are enabled.
