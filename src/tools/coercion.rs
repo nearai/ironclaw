@@ -43,25 +43,18 @@ fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_
             return value.clone();
         }
 
-        let mut coerced = obj.clone();
         let properties = schema.get("properties").and_then(|p| p.as_object());
+        let additional_schema = schema.get("additionalProperties").filter(|v| v.is_object());
+        let mut coerced = obj.clone();
 
-        if let Some(props) = properties {
-            for (key, prop_schema) in props {
-                if let Some(current) = coerced.get(key).cloned() {
-                    coerced.insert(key.clone(), coerce_value(&current, prop_schema));
-                }
+        for (key, current) in &mut coerced {
+            if let Some(prop_schema) = properties.and_then(|props| props.get(key)) {
+                *current = coerce_value(current, prop_schema);
+                continue;
             }
-        }
 
-        if let Some(additional_schema) =
-            schema.get("additionalProperties").filter(|v| v.is_object())
-        {
-            for (key, current) in obj {
-                if properties.is_some_and(|props| props.contains_key(key)) {
-                    continue;
-                }
-                coerced.insert(key.clone(), coerce_value(current, additional_schema));
+            if let Some(additional_schema) = additional_schema {
+                *current = coerce_value(current, additional_schema);
             }
         }
 

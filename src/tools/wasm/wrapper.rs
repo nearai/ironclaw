@@ -515,7 +515,7 @@ impl WasmToolSchemas {
             .map(|props| {
                 props
                     .values()
-                    .filter(|prop| prop.get("type").and_then(|t| t.as_str()).is_some())
+                    .filter(|prop| schema_is_typed_property(prop))
                     .count()
             })
             .unwrap_or(0)
@@ -1289,13 +1289,48 @@ fn schema_contains_container_properties(schema: &serde_json::Value) -> bool {
         .and_then(|p| p.as_object())
         .map(|props| {
             props.values().any(|prop| {
-                matches!(
-                    prop.get("type").and_then(|t| t.as_str()),
-                    Some("array" | "object")
-                )
+                schema_declares_type(prop, "array") || schema_declares_type(prop, "object")
             })
         })
         .unwrap_or(false)
+}
+
+fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::String(t)) => t == expected,
+        Some(serde_json::Value::Array(types)) => types.iter().any(|t| t.as_str() == Some(expected)),
+        _ => match expected {
+            "object" => {
+                schema
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .is_some()
+                    || schema
+                        .get("additionalProperties")
+                        .is_some_and(serde_json::Value::is_object)
+            }
+            "array" => schema.get("items").is_some(),
+            _ => false,
+        },
+    }
+}
+
+fn schema_is_typed_property(schema: &serde_json::Value) -> bool {
+    matches!(
+        schema.get("type"),
+        Some(serde_json::Value::String(_)) | Some(serde_json::Value::Array(_))
+    ) || schema.get("$ref").is_some()
+        || schema.get("anyOf").is_some()
+        || schema.get("oneOf").is_some()
+        || schema.get("allOf").is_some()
+        || schema.get("items").is_some()
+        || schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .is_some()
+        || schema
+            .get("additionalProperties")
+            .is_some_and(serde_json::Value::is_object)
 }
 
 fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String {
@@ -1884,7 +1919,7 @@ mod tests {
             "type": "object",
             "properties": {
                 "values": {
-                    "type": "array",
+                    "type": ["array", "null"],
                     "items": { "type": "array" }
                 }
             }
@@ -1915,6 +1950,23 @@ mod tests {
             })
         );
         assert_eq!(wrapper.discovery_schema(), typed_schema); // safety: test-only assertion
+    }
+
+    #[test]
+    fn test_build_tool_usage_hint_detects_nullable_container_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "requests": {
+                    "type": ["array", "null"],
+                    "items": { "type": "object" }
+                }
+            }
+        });
+
+        let hint = super::build_tool_usage_hint("google_docs", &schema);
+
+        assert!(hint.contains("native JSON arrays/objects")); // safety: test-only assertion
     }
 
     /// Regression test: leak scan must run on raw headers (before credential
