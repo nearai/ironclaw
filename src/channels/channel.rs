@@ -67,14 +67,24 @@ pub struct IncomingMessage {
     pub id: Uuid,
     /// Channel this message came from.
     pub channel: String,
-    /// User identifier within the channel.
+    /// Storage/persistence scope for this interaction.
+    ///
+    /// For owner-capable channels this is the stable instance owner ID when the
+    /// configured owner is speaking; otherwise it can be a guest/sender-scoped
+    /// identifier to preserve isolation.
     pub user_id: String,
+    /// Stable instance owner scope for this IronClaw deployment.
+    pub owner_id: String,
+    /// Channel-specific sender/actor identifier.
+    pub sender_id: String,
     /// Optional display name.
     pub user_name: Option<String>,
     /// Message content.
     pub content: String,
     /// Thread/conversation ID for threaded conversations.
     pub thread_id: Option<String>,
+    /// Stable channel/chat/thread scope for this conversation.
+    pub conversation_scope_id: Option<String>,
     /// When the message was received.
     pub received_at: DateTime<Utc>,
     /// Channel-specific metadata.
@@ -83,11 +93,6 @@ pub struct IncomingMessage {
     pub timezone: Option<String>,
     /// File or media attachments on this message.
     pub attachments: Vec<IncomingAttachment>,
-    /// Internal-only flag: message was generated inside the process (e.g. job
-    /// monitor) and must bypass the normal user-input pipeline.  This field is
-    /// **not** settable via `with_metadata()` — only trusted code paths inside
-    /// the binary can set it, preventing external channels from spoofing it.
-    pub(crate) is_internal: bool,
 }
 
 impl IncomingMessage {
@@ -97,24 +102,47 @@ impl IncomingMessage {
         user_id: impl Into<String>,
         content: impl Into<String>,
     ) -> Self {
+        let user_id = user_id.into();
         Self {
             id: Uuid::new_v4(),
             channel: channel.into(),
-            user_id: user_id.into(),
+            owner_id: user_id.clone(),
+            sender_id: user_id.clone(),
+            user_id,
             user_name: None,
             content: content.into(),
             thread_id: None,
+            conversation_scope_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: Vec::new(),
-            is_internal: false,
         }
     }
 
     /// Set the thread ID.
     pub fn with_thread(mut self, thread_id: impl Into<String>) -> Self {
-        self.thread_id = Some(thread_id.into());
+        let thread_id = thread_id.into();
+        self.conversation_scope_id = Some(thread_id.clone());
+        self.thread_id = Some(thread_id);
+        self
+    }
+
+    /// Set the stable owner scope for this message.
+    pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
+        self.owner_id = owner_id.into();
+        self
+    }
+
+    /// Set the channel-specific sender/actor identifier.
+    pub fn with_sender_id(mut self, sender_id: impl Into<String>) -> Self {
+        self.sender_id = sender_id.into();
+        self
+    }
+
+    /// Set the conversation scope for this message.
+    pub fn with_conversation_scope(mut self, scope_id: impl Into<String>) -> Self {
+        self.conversation_scope_id = Some(scope_id.into());
         self
     }
 
@@ -142,11 +170,48 @@ impl IncomingMessage {
         self
     }
 
-    /// Mark this message as internal (bypasses user-input pipeline).
-    pub(crate) fn into_internal(mut self) -> Self {
-        self.is_internal = true;
-        self
+    /// Effective conversation scope, falling back to thread_id for legacy callers.
+    pub fn conversation_scope(&self) -> Option<&str> {
+        self.conversation_scope_id
+            .as_deref()
+            .or(self.thread_id.as_deref())
     }
+
+    /// Best-effort routing target for proactive replies on the current channel.
+    pub fn routing_target(&self) -> Option<String> {
+        routing_target_from_metadata(&self.metadata).or_else(|| {
+            if self.sender_id.is_empty() {
+                None
+            } else {
+                Some(self.sender_id.clone())
+            }
+        })
+    }
+}
+
+/// Extract a channel-specific proactive routing target from message metadata.
+pub fn routing_target_from_metadata(metadata: &serde_json::Value) -> Option<String> {
+    metadata
+        .get("signal_target")
+        .and_then(|value| match value {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .or_else(|| {
+            metadata.get("chat_id").and_then(|value| match value {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            metadata.get("target").and_then(|value| match value {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+        })
 }
 
 /// Stream of incoming messages.
