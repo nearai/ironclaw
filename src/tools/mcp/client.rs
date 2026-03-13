@@ -487,6 +487,88 @@ fn extract_server_name(url: &str) -> String {
         .replace('.', "_")
 }
 
+fn infer_actor_role(ctx: &JobContext) -> &'static str {
+    if let Some(role) = ctx
+        .metadata
+        .get("agent_role")
+        .and_then(|value| value.as_str())
+    {
+        match role {
+            "main" => return "main",
+            "mentor" => return "mentor",
+            "sub" => return "sub",
+            "operator" => return "operator",
+            _ => {}
+        }
+    }
+
+    match ctx.metadata.get("source").and_then(|value| value.as_str()) {
+        Some("mentor_command") => "mentor",
+        Some("sub_agent")
+        | Some("sub_agent_job")
+        | Some("subtask")
+        | Some("child_agent")
+        | Some("autonomous_subtask") => "sub",
+        _ => "main",
+    }
+}
+
+fn is_commerce_server(server_name: &str) -> bool {
+    server_name.eq_ignore_ascii_case("commerce") || server_name.eq_ignore_ascii_case("commerce-mcp")
+}
+
+fn is_solana_server(server_name: &str) -> bool {
+    server_name.eq_ignore_ascii_case("solana") || server_name.eq_ignore_ascii_case("solana-mcp")
+}
+
+fn is_role_aware_tool(server_name: &str, tool_name: &str) -> bool {
+    is_commerce_server(server_name)
+        || is_solana_server(server_name)
+        || tool_name.starts_with("commerce.")
+        || tool_name.starts_with("solana.")
+}
+
+fn is_commerce_tool(server_name: &str, tool_name: &str) -> bool {
+    is_commerce_server(server_name) || tool_name.starts_with("commerce.")
+}
+
+fn is_operator_only_commerce_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "commerce.record_approval" | "commerce.identity_register" | "commerce.identity_set_wallet"
+    )
+}
+
+fn inject_commerce_actor_role(
+    arguments: serde_json::Value,
+    ctx: &JobContext,
+    server_name: &str,
+    tool_name: &str,
+) -> serde_json::Value {
+    if !is_role_aware_tool(server_name, tool_name) {
+        return arguments;
+    }
+
+    let mut object = match arguments {
+        serde_json::Value::Object(map) => map,
+        other => return other,
+    };
+
+    object
+        .entry("actorRole".to_string())
+        .or_insert_with(|| serde_json::Value::String(infer_actor_role(ctx).to_string()));
+
+    if let Ok(token) = std::env::var("LIPPY_INTERNAL_MCP_TOKEN")
+        && !token.trim().is_empty()
+    {
+        object
+            .entry("internalAuthToken".to_string())
+            .or_insert_with(|| serde_json::Value::String(token));
+    }
+
+    serde_json::Value::Object(object)
+}
+
 /// Wrapper that implements Tool for an MCP tool.
 struct McpToolWrapper {
     tool: McpTool,
@@ -512,9 +594,11 @@ impl Tool for McpToolWrapper {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let params =
+            inject_commerce_actor_role(params, ctx, self.client.server_name(), &self.tool.name);
 
         // Use the original tool name (without prefix) for the actual call
         let result = self.client.call_tool(&self.tool.name, params).await?;
@@ -539,6 +623,15 @@ impl Tool for McpToolWrapper {
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        if is_commerce_tool(self.client.server_name(), &self.tool.name)
+            && is_operator_only_commerce_tool(&self.tool.name)
+        {
+            // Commerce identity/bootstrap actions are sensitive, but in the
+            // self-hosted actor model they should respect session-level
+            // auto-approval when the operator explicitly answers "always".
+            return ApprovalRequirement::UnlessAutoApproved;
+        }
+
         // Delegate to the MCP protocol type's own requires_approval() bool method
         if self.tool.requires_approval() {
             ApprovalRequirement::UnlessAutoApproved
@@ -582,5 +675,52 @@ mod tests {
         assert_eq!(client.server_url(), "http://localhost:8080");
         assert!(client.session_manager.is_none());
         assert!(client.secrets.is_none());
+    }
+
+    #[test]
+    fn test_infer_actor_role_from_metadata() {
+        let mut ctx = JobContext::with_user("user-1", "title", "desc");
+        ctx.metadata = serde_json::json!({"source": "mentor_command"});
+        assert_eq!(infer_actor_role(&ctx), "mentor");
+
+        ctx.metadata = serde_json::json!({"agent_role": "operator"});
+        assert_eq!(infer_actor_role(&ctx), "operator");
+
+        ctx.metadata = serde_json::json!({"source": "subtask"});
+        assert_eq!(infer_actor_role(&ctx), "sub");
+    }
+
+    #[test]
+    fn test_inject_commerce_actor_role() {
+        let mut ctx = JobContext::with_user("user-1", "title", "desc");
+        ctx.metadata = serde_json::json!({"source": "mentor_command"});
+
+        let args = serde_json::json!({"amountUsd": 1.25});
+        let injected =
+            inject_commerce_actor_role(args, &ctx, "commerce", "commerce.payment_requirement");
+        assert_eq!(injected["actorRole"], "mentor");
+
+        let already_set = serde_json::json!({"actorRole": "operator"});
+        let preserved =
+            inject_commerce_actor_role(already_set, &ctx, "commerce", "commerce.identity_register");
+        assert_eq!(preserved["actorRole"], "operator");
+    }
+
+    #[test]
+    fn test_inject_internal_auth_token() {
+        let mut ctx = JobContext::with_user("user-1", "title", "desc");
+        ctx.metadata = serde_json::json!({"source": "subtask"});
+
+        unsafe {
+            std::env::set_var("LIPPY_INTERNAL_MCP_TOKEN", "test-token");
+        }
+        let injected =
+            inject_commerce_actor_role(serde_json::json!({}), &ctx, "solana", "solana.trade");
+        unsafe {
+            std::env::remove_var("LIPPY_INTERNAL_MCP_TOKEN");
+        }
+
+        assert_eq!(injected["internalAuthToken"], "test-token");
+        assert_eq!(injected["actorRole"], "sub");
     }
 }
