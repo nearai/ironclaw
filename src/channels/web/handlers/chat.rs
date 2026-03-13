@@ -273,12 +273,7 @@ pub async fn chat_history_handler(
         "Session manager not available".to_string(),
     ))?;
 
-<<<<<<< HEAD
-    let session = session_manager.get_or_create_session(&state.user_id).await;
-=======
     let session = session_manager.get_or_create_session(&state.default_user_id).await;
-    let sess = session.lock().await;
->>>>>>> ea8150f (feat: handler auth and ownership checks)
 
     let limit = query.limit.unwrap_or(50);
     let before_cursor = query
@@ -437,12 +432,7 @@ pub async fn chat_threads_handler(
         "Session manager not available".to_string(),
     ))?;
 
-<<<<<<< HEAD
-    let session = session_manager.get_or_create_session(&state.user_id).await;
-=======
     let session = session_manager.get_or_create_session(&state.default_user_id).await;
-    let sess = session.lock().await;
->>>>>>> ea8150f (feat: handler auth and ownership checks)
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
@@ -453,11 +443,7 @@ pub async fn chat_threads_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-<<<<<<< HEAD
-            .list_conversations_all_channels(&state.user_id, 50)
-=======
-            .list_conversations_with_preview(&state.default_user_id, "gateway", 50)
->>>>>>> ea8150f (feat: handler auth and ownership checks)
+            .list_conversations_all_channels(&state.default_user_id, 50)
             .await
         {
             let mut assistant_thread = None;
@@ -546,8 +532,7 @@ pub async fn chat_new_thread_handler(
         "Session manager not available".to_string(),
     ))?;
 
-<<<<<<< HEAD
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&state.default_user_id).await;
     let (thread_id, info) = {
         let mut sess = session.lock().await;
         let thread = sess.create_thread();
@@ -563,33 +548,18 @@ pub async fn chat_new_thread_handler(
             channel: Some("gateway".to_string()),
         };
         (id, info)
-=======
-    let session = session_manager.get_or_create_session(&state.default_user_id).await;
-    let mut sess = session.lock().await;
-    let thread = sess.create_thread();
-    let thread_id = thread.id;
-    let info = ThreadInfo {
-        id: thread.id,
-        state: format!("{:?}", thread.state),
-        turn_count: thread.turns.len(),
-        created_at: thread.created_at.to_rfc3339(),
-        updated_at: thread.updated_at.to_rfc3339(),
-        title: None,
-        thread_type: Some("thread".to_string()),
->>>>>>> ea8150f (feat: handler auth and ownership checks)
     };
 
     // Persist the empty conversation row with thread_type metadata synchronously
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
-<<<<<<< HEAD
         match store
-            .ensure_conversation(thread_id, "gateway", &state.user_id, None)
+            .ensure_conversation(thread_id, "gateway", &state.default_user_id, None)
             .await
         {
             Ok(true) => {}
             Ok(false) => tracing::warn!(
-                user = %state.user_id,
+                user = %state.default_user_id,
                 thread_id = %thread_id,
                 "Skipped persisting new thread due to ownership/channel conflict"
             ),
@@ -602,25 +572,6 @@ pub async fn chat_new_thread_handler(
         {
             tracing::warn!("Failed to set thread_type metadata: {}", e);
         }
-=======
-        let store = Arc::clone(store);
-        let user_id = state.default_user_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store
-                .ensure_conversation(thread_id, "gateway", &user_id, None)
-                .await
-            {
-                tracing::warn!("Failed to persist new thread: {}", e);
-            }
-            let metadata_val = serde_json::json!("thread");
-            if let Err(e) = store
-                .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
-                .await
-            {
-                tracing::warn!("Failed to set thread_type metadata: {}", e);
-            }
-        });
->>>>>>> ea8150f (feat: handler auth and ownership checks)
     }
 
     Ok(Json(info))

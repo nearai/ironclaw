@@ -61,7 +61,7 @@ impl SseManager {
     /// only be called before the server starts accepting connections (i.e.,
     /// during startup wiring). Calling it after connections are established
     /// will break connection tracking and allow exceeding `MAX_CONNECTIONS`.
-    pub fn from_sender(tx: broadcast::Sender<ScopedEvent>) -> Self {
+    pub(crate) fn from_sender(tx: broadcast::Sender<ScopedEvent>) -> Self {
         Self {
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
@@ -70,7 +70,7 @@ impl SseManager {
     }
 
     /// Get a clone of the broadcast sender for use by other components.
-    pub fn sender(&self) -> broadcast::Sender<ScopedEvent> {
+    pub(crate) fn sender(&self) -> broadcast::Sender<ScopedEvent> {
         self.tx.clone()
     }
 

@@ -419,8 +419,8 @@ pub struct PendingOAuthFlow {
     pub user_id: String,
     /// Secrets store reference for token persistence.
     pub secrets: Arc<dyn SecretsStore + Send + Sync>,
-    /// SSE broadcast sender for notifying the web UI.
-    pub sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// SSE broadcast manager for notifying the web UI.
+    pub sse_manager: Option<Arc<crate::channels::web::sse::SseManager>>,
     /// Gateway auth token for authenticating with the platform token exchange proxy.
     pub gateway_token: Option<String>,
     /// RFC 8707 resource parameter (MCP OAuth only).

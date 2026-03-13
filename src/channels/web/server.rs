@@ -66,7 +66,7 @@ pub type RoutineEngineSlot =
 /// Simple sliding-window rate limiter.
 ///
 /// Tracks the number of requests in the current window. Resets when the window expires.
-struct RateLimiter {
+pub struct RateLimiter {
     /// Requests remaining in the current window.
     remaining: AtomicU64,
     /// Epoch second when the current window started.
@@ -78,7 +78,7 @@ struct RateLimiter {
 }
 
 impl RateLimiter {
-    fn new(max_requests: u64, window_secs: u64) -> Self {
+    pub fn new(max_requests: u64, window_secs: u64) -> Self {
         Self {
             remaining: AtomicU64::new(max_requests),
             window_start: AtomicU64::new(
@@ -815,8 +815,8 @@ async fn oauth_callback_handler(
     };
 
     // Broadcast SSE event to notify the web UI
-    if let Some(ref sender) = flow.sse_sender {
-        let _ = sender.send(SseEvent::AuthCompleted {
+    if let Some(ref sse) = flow.sse_manager {
+        sse.broadcast(SseEvent::AuthCompleted {
             extension_name: flow.extension_name,
             success,
             message: final_message.clone(),
@@ -1083,8 +1083,8 @@ fn mime_to_ext(mime: &str) -> &str {
 
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
-    headers: axum::http::HeaderMap,
     AuthenticatedUser(user): AuthenticatedUser,
+    headers: axum::http::HeaderMap,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     tracing::trace!(
@@ -1256,13 +1256,16 @@ async fn chat_auth_token_handler(
     {
         Ok(result) => {
             // Clear auth mode on the active thread
-            clear_auth_mode(&state).await;
+            clear_auth_mode(&state, &user.user_id).await;
 
-            state.sse.broadcast(SseEvent::AuthCompleted {
-                extension_name: req.extension_name.clone(),
-                success: true,
-                message: result.message.clone(),
-            });
+            state.sse.broadcast_for_user(
+                &user.user_id,
+                SseEvent::AuthCompleted {
+                    extension_name: req.extension_name.clone(),
+                    success: true,
+                    message: result.message.clone(),
+                },
+            );
 
             Ok(Json(ActionResponse::ok(result.message)))
         }
@@ -1270,12 +1273,15 @@ async fn chat_auth_token_handler(
             let msg = e.to_string();
             // Re-emit auth_required for retry on validation errors
             if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                state.sse.broadcast(SseEvent::AuthRequired {
-                    extension_name: req.extension_name.clone(),
-                    instructions: Some(msg.clone()),
-                    auth_url: None,
-                    setup_url: None,
-                });
+                state.sse.broadcast_for_user(
+                    &user.user_id,
+                    SseEvent::AuthRequired {
+                        extension_name: req.extension_name.clone(),
+                        instructions: Some(msg.clone()),
+                        auth_url: None,
+                        setup_url: None,
+                    },
+                );
             }
             Ok(Json(ActionResponse::fail(msg)))
         }
@@ -3070,7 +3076,7 @@ mod tests {
     fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
         Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
-            sse: SseManager::new(),
+            sse: Arc::new(SseManager::new()),
             workspace: None,
             workspace_pool: None,
             session_manager: None,
@@ -3116,7 +3122,8 @@ mod tests {
         let state = test_gateway_state(None);
 
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let bound = start_server(addr, state.clone(), MultiAuthState::single("test-token".to_string(), "test".to_string()))
+        let auth = MultiAuthState::single("test-token".to_string(), "test".to_string());
+        let bound = start_server(addr, state.clone(), auth)
             .await
             .expect("server should start");
 
@@ -3278,7 +3285,7 @@ mod tests {
             scopes: vec![],
             user_id: "test".to_string(),
             secrets,
-            sse_sender: None,
+            sse_manager: None,
             gateway_token: None,
             resource: None,
             client_id_secret_name: None,
@@ -3449,7 +3456,7 @@ mod tests {
             scopes: vec![],
             user_id: "test".to_string(),
             secrets,
-            sse_sender: None,
+            sse_manager: None,
             gateway_token: None,
             resource: None,
             client_id_secret_name: None,

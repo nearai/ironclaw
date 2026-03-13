@@ -93,10 +93,8 @@ pub struct ExtensionManager {
     installed_relay_extensions: RwLock<HashSet<String>>,
     /// Last activation error for each WASM channel (ephemeral, cleared on success).
     activation_errors: RwLock<HashMap<String, String>>,
-<<<<<<< HEAD
-    /// SSE broadcast sender (set post-construction via `set_sse_sender()`).
-    sse_sender:
-        RwLock<Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>>,
+    /// SSE broadcast manager (set post-construction via `set_sse_sender()`).
+    sse_manager: RwLock<Option<Arc<crate::channels::web::sse::SseManager>>>,
     /// Shared registry of pending OAuth flows for gateway-routed callbacks.
     ///
     /// Keyed by CSRF `state` parameter. Populated in `start_wasm_oauth()`
@@ -141,10 +139,6 @@ fn sanitize_url_for_logging(url: &str) -> String {
         // Fallback: strip after ? or #
         url.split(['?', '#']).next().unwrap_or(url).to_string()
     }
-=======
-    /// SSE broadcast manager (set post-construction via `set_sse_sender()`).
-    sse_manager: RwLock<Option<Arc<crate::channels::web::sse::SseManager>>>,
->>>>>>> ea8150f (feat: handler auth and ownership checks)
 }
 
 impl ExtensionManager {
@@ -189,16 +183,12 @@ impl ExtensionManager {
             active_channel_names: RwLock::new(HashSet::new()),
             installed_relay_extensions: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
-<<<<<<< HEAD
-            sse_sender: RwLock::new(None),
+            sse_manager: RwLock::new(None),
             pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
             gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
             relay_config: crate::config::RelayConfig::from_env(),
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
-=======
-            sse_manager: RwLock::new(None),
->>>>>>> ea8150f (feat: handler auth and ownership checks)
         }
     }
 
@@ -1964,7 +1954,7 @@ impl ExtensionManager {
                 scopes,
                 user_id: self.user_id.clone(),
                 secrets: Arc::clone(&self.secrets),
-                sse_sender: self.sse_sender.read().await.clone(),
+                sse_manager: self.sse_manager.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
                 resource: Some(resource),
                 client_id_secret_name: if server.oauth.is_none() {
@@ -2491,7 +2481,7 @@ impl ExtensionManager {
                 scopes: merged_scopes,
                 user_id: self.user_id.clone(),
                 secrets: Arc::clone(&self.secrets),
-                sse_sender: self.sse_sender.read().await.clone(),
+                sse_manager: self.sse_manager.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
                 resource: None,
                 client_id_secret_name: None,
@@ -2536,7 +2526,7 @@ impl ExtensionManager {
             let validation_endpoint = auth.validation_endpoint.clone();
             let user_id = self.user_id.clone();
             let secrets = Arc::clone(&self.secrets);
-            let sse_sender = self.sse_sender.read().await.clone();
+            let sse_manager = self.sse_manager.read().await.clone();
             let ext_name = name.to_string();
 
             let task_handle = tokio::spawn(async move {
@@ -2615,8 +2605,8 @@ impl ExtensionManager {
                     }
                 }
 
-                if let Some(ref sender) = sse_sender {
-                    let _ = sender.send(crate::channels::web::types::SseEvent::AuthCompleted {
+                if let Some(ref sse) = sse_manager {
+                    sse.broadcast(crate::channels::web::types::SseEvent::AuthCompleted {
                         extension_name: ext_name,
                         success,
                         message,

@@ -173,29 +173,6 @@ pub async fn jobs_detail_handler(
                 (end - start).num_seconds().max(0) as u64
             });
 
-<<<<<<< HEAD
-        let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
-        let is_claude_code = mode.as_deref() == Some("claude_code");
-
-        return Ok(Json(JobDetailResponse {
-            id: job.id,
-            title: job.task.clone(),
-            description: String::new(),
-            state: ui_state.to_string(),
-            user_id: job.user_id.clone(),
-            created_at: job.created_at.to_rfc3339(),
-            started_at: job.started_at.map(|dt| dt.to_rfc3339()),
-            completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
-            elapsed_secs,
-            project_dir: Some(job.project_dir.clone()),
-            browse_url: Some(format!("/projects/{}/", browse_id)),
-            job_mode: mode.filter(|m| m != "worker"),
-            transitions,
-            can_restart: state.job_manager.is_some(),
-            can_prompt: is_claude_code && state.prompt_queue.is_some(),
-            job_kind: Some("sandbox".to_string()),
-        }));
-=======
             // Synthesize transitions from timestamps.
             let mut transitions = Vec::new();
             if let Some(started) = job.started_at {
@@ -215,6 +192,9 @@ pub async fn jobs_detail_handler(
                 });
             }
 
+            let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
+            let is_claude_code = mode.as_deref() == Some("claude_code");
+
             return Ok(Json(JobDetailResponse {
                 id: job.id,
                 title: job.task.clone(),
@@ -227,11 +207,11 @@ pub async fn jobs_detail_handler(
                 elapsed_secs,
                 project_dir: Some(job.project_dir.clone()),
                 browse_url: Some(format!("/projects/{}/", browse_id)),
-                job_mode: {
-                    let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
-                    mode.filter(|m| m != "worker")
-                },
+                job_mode: mode.filter(|m| m != "worker"),
                 transitions,
+                can_restart: state.job_manager.is_some(),
+                can_prompt: is_claude_code && state.prompt_queue.is_some(),
+                job_kind: Some("sandbox".to_string()),
             }));
         }
         Ok(None) => {}
@@ -241,7 +221,6 @@ pub async fn jobs_detail_handler(
                 format!("Database error: {}", e),
             ));
         }
->>>>>>> ea8150f (feat: handler auth and ownership checks)
     }
 
     // Fall back to agent job from DB.
@@ -255,32 +234,12 @@ pub async fn jobs_detail_handler(
                 (end - start).num_seconds().max(0) as u64
             });
 
-<<<<<<< HEAD
-        // Only show prompt bar for jobs that have a running worker (Pending/InProgress).
-        // Stuck jobs have no active worker loop, so messages would be silently dropped.
-        let is_promptable = matches!(
-            ctx.state,
-            crate::context::JobState::Pending | crate::context::JobState::InProgress
-        );
-        return Ok(Json(JobDetailResponse {
-            id: ctx.job_id,
-            title: ctx.title.clone(),
-            description: ctx.description.clone(),
-            state: ctx.state.to_string(),
-            user_id: ctx.user_id.clone(),
-            created_at: ctx.created_at.to_rfc3339(),
-            started_at: ctx.started_at.map(|dt| dt.to_rfc3339()),
-            completed_at: ctx.completed_at.map(|dt| dt.to_rfc3339()),
-            elapsed_secs,
-            project_dir: None,
-            browse_url: None,
-            job_mode: None,
-            transitions: Vec::new(),
-            can_restart: state.scheduler.is_some(),
-            can_prompt: is_promptable && state.scheduler.is_some(),
-            job_kind: Some("agent".to_string()),
-        }));
-=======
+            // Only show prompt bar for jobs that have a running worker (Pending/InProgress).
+            // Stuck jobs have no active worker loop, so messages would be silently dropped.
+            let is_promptable = matches!(
+                ctx.state,
+                crate::context::JobState::Pending | crate::context::JobState::InProgress
+            );
             Ok(Json(JobDetailResponse {
                 id: ctx.job_id,
                 title: ctx.title.clone(),
@@ -295,6 +254,9 @@ pub async fn jobs_detail_handler(
                 browse_url: None,
                 job_mode: None,
                 transitions: Vec::new(),
+                can_restart: state.scheduler.is_some(),
+                can_prompt: is_promptable && state.scheduler.is_some(),
+                job_kind: Some("agent".to_string()),
             }))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
@@ -302,7 +264,6 @@ pub async fn jobs_detail_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Database error: {}", e),
         )),
->>>>>>> ea8150f (feat: handler auth and ownership checks)
     }
 }
 
@@ -354,36 +315,9 @@ pub async fn jobs_cancel_handler(
         }
     }
 
-<<<<<<< HEAD
     // Fall back to agent job cancellation: stop the worker via the scheduler
     // (which updates the in-memory ContextManager AND aborts the task handle),
     // then persist the status to the DB as a fallback.
-    if let Some(ref store) = state.store
-        && let Ok(Some(job)) = store.get_job(job_id).await
-    {
-        if job.state.is_active() {
-            // Try to stop via scheduler (aborts the worker task + updates
-            // in-memory ContextManager). This is best-effort — the job may
-            // not be in the scheduler map if it already finished.
-            if let Some(ref slot) = state.scheduler
-                && let Some(ref scheduler) = *slot.read().await
-            {
-                let _ = scheduler.stop(job_id).await;
-            }
-
-            // Always persist cancellation to the DB so the state is
-            // consistent even if the scheduler wasn't available or the
-            // job wasn't in its in-memory map.
-            store
-                .update_job_status(
-                    job_id,
-                    crate::context::JobState::Cancelled,
-                    Some("Cancelled by user"),
-                )
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-=======
-    // Fall back to agent job cancellation via DB status update.
     if let Some(ref store) = state.store {
         match store.get_job(job_id).await {
             Ok(Some(job)) => {
@@ -391,6 +325,18 @@ pub async fn jobs_cancel_handler(
                     return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
                 }
                 if job.state.is_active() {
+                    // Try to stop via scheduler (aborts the worker task + updates
+                    // in-memory ContextManager). This is best-effort — the job may
+                    // not be in the scheduler map if it already finished.
+                    if let Some(ref slot) = state.scheduler
+                        && let Some(ref scheduler) = *slot.read().await
+                    {
+                        let _ = scheduler.stop(job_id).await;
+                    }
+
+                    // Always persist cancellation to the DB so the state is
+                    // consistent even if the scheduler wasn't available or the
+                    // job wasn't in its in-memory map.
                     store
                         .update_job_status(
                             job_id,
@@ -412,7 +358,6 @@ pub async fn jobs_cancel_handler(
                     format!("Database error: {}", e),
                 ));
             }
->>>>>>> ea8150f (feat: handler auth and ownership checks)
         }
     }
 
@@ -434,6 +379,9 @@ pub async fn jobs_restart_handler(
 
     // Try sandbox job restart first.
     if let Ok(Some(old_job)) = store.get_sandbox_job(old_job_id).await {
+        if old_job.user_id != user.user_id {
+            return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        }
         if old_job.status != "interrupted" && old_job.status != "failed" {
             return Err((
                 StatusCode::CONFLICT,
@@ -441,7 +389,6 @@ pub async fn jobs_restart_handler(
             ));
         }
 
-<<<<<<< HEAD
         let jm = state.job_manager.as_ref().ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "Sandbox not enabled".to_string(),
@@ -523,17 +470,6 @@ pub async fn jobs_restart_handler(
             "old_job_id": old_job_id,
             "new_job_id": new_job_id,
         })));
-=======
-    if old_job.user_id != user.user_id {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
-    }
-
-    if old_job.status != "interrupted" && old_job.status != "failed" {
-        return Err((
-            StatusCode::CONFLICT,
-            format!("Cannot restart job in state '{}'", old_job.status),
-        ));
->>>>>>> ea8150f (feat: handler auth and ownership checks)
     }
 
     // Try agent job restart: dispatch a new job via the scheduler.

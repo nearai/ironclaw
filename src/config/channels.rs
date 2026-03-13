@@ -398,6 +398,7 @@ mod tests {
             user_id: "default".to_string(),
             workspace_read_scopes: vec![],
             memory_layers: vec![],
+            user_tokens: None,
         };
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
@@ -414,6 +415,7 @@ mod tests {
             user_id: "anon".to_string(),
             workspace_read_scopes: vec![],
             memory_layers: vec![],
+            user_tokens: None,
         };
         assert!(cfg.auth_token.is_none());
     }
