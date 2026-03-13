@@ -111,7 +111,7 @@ async fn sensitive_content_redirected_to_private() {
     let db_clone = db.clone();
     let ws = Workspace::new_with_db("alice", db)
         .with_memory_layers(test_layers())
-        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new()));
+        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new().unwrap()));
 
     // Write content containing hard PII to shared layer -- should be redirected
     let result = ws
@@ -201,7 +201,7 @@ async fn sensitive_content_fails_without_private_layer() {
     ];
     let ws = Workspace::new_with_db("alice", db)
         .with_memory_layers(shared_only_layers)
-        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new()));
+        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new().unwrap()));
 
     // Writing PII content should fail (no private layer to redirect to)
     let result = ws
@@ -223,7 +223,7 @@ async fn append_sensitive_to_shared_redirects() {
     let (db, _dir) = setup().await;
     let ws = Workspace::new_with_db("alice", db)
         .with_memory_layers(test_layers())
-        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new()));
+        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new().unwrap()));
 
     // Append PII content to shared layer -- should be redirected
     let result = ws
@@ -246,7 +246,7 @@ async fn force_skips_privacy_redirect() {
     let (db, _dir) = setup().await;
     let ws = Workspace::new_with_db("alice", db)
         .with_memory_layers(test_layers())
-        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new()));
+        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new().unwrap()));
 
     // PII content with force=true should stay in shared layer
     let result = ws
