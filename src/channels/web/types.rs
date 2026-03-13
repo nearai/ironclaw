@@ -438,8 +438,8 @@ pub struct SetupFieldInfo {
     pub optional: bool,
     /// Whether this field already has a stored value.
     pub provided: bool,
-    /// Input type for web UI rendering ("text" or "password").
-    pub input_type: String,
+    /// Input type for web UI rendering.
+    pub input_type: crate::tools::wasm::ToolSetupFieldInputType,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1078,5 +1078,19 @@ mod tests {
         assert_eq!(req.secrets.get("api_key").unwrap(), "sk-123");
         assert_eq!(req.fields.get("llm_backend").unwrap(), "openai");
         assert_eq!(req.fields.get("selected_model").unwrap(), "gpt-4o");
+    }
+
+    #[test]
+    fn test_setup_field_info_serializes_input_type_as_enum_string() {
+        let field = SetupFieldInfo {
+            name: "selected_model".to_string(),
+            prompt: "Model".to_string(),
+            optional: false,
+            provided: true,
+            input_type: crate::tools::wasm::ToolSetupFieldInputType::Password,
+        };
+
+        let json = serde_json::to_value(field).unwrap();
+        assert_eq!(json["input_type"], "password");
     }
 }

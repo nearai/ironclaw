@@ -2478,14 +2478,7 @@ impl ExtensionManager {
                             prompt: field.prompt.clone(),
                             optional: field.optional,
                             provided,
-                            input_type: match field.input_type {
-                                crate::tools::wasm::ToolSetupFieldInputType::Text => {
-                                    "text".to_string()
-                                }
-                                crate::tools::wasm::ToolSetupFieldInputType::Password => {
-                                    "password".to_string()
-                                }
-                            },
+                            input_type: field.input_type,
                         });
                     }
                 }
