@@ -230,6 +230,7 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
+        #[rustfmt::skip]
         assert_eq!( // safety: test-only assertion
             result["request"],
             serde_json::json!({"start_index": 12, "enabled": false})
@@ -280,6 +281,7 @@ mod tests {
 
         let result = prepare_params_for_schema(&params, &schema);
 
+        #[rustfmt::skip]
         assert_eq!( // safety: test-only assertion
             result,
             serde_json::json!({
@@ -359,6 +361,7 @@ mod tests {
 
         let result = prepare_tool_params(&tool, &params);
 
+        #[rustfmt::skip]
         assert_eq!( // safety: test-only assertion
             result["requests"],
             serde_json::json!([{ "insertText": { "text": "hello" } }])

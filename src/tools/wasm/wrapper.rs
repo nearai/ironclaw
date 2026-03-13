@@ -1905,6 +1905,7 @@ mod tests {
                     "additionalProperties": true
                 }));
 
+        #[rustfmt::skip]
         assert_eq!( // safety: test-only assertion
             wrapper.parameters_schema(),
             serde_json::json!({

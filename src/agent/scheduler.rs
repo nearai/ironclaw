@@ -1111,6 +1111,7 @@ mod tests {
         )
         .await;
 
+        #[rustfmt::skip]
         assert!( // safety: test-only assertion
             result.is_ok(),
             "stringified boolean should normalize before approval: {result:?}"
