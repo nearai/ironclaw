@@ -108,6 +108,11 @@ async fn register_channel(
 ) -> (String, Box<dyn crate::channels::Channel>) {
     let channel_name = loaded.name().to_string();
     tracing::info!("Loaded WASM channel: {}", channel_name);
+    let owner_actor_id = config
+        .channels
+        .wasm_channel_owner_ids
+        .get(channel_name.as_str())
+        .map(ToString::to_string);
 
     let secret_name = loaded.webhook_secret_name();
     let sig_key_secret_name = loaded.signature_key_secret_name();
@@ -115,7 +120,7 @@ async fn register_channel(
 
     let webhook_secret = if let Some(secrets) = secrets_store {
         secrets
-            .get_decrypted("default", &secret_name)
+            .get_decrypted(&config.owner_id, &secret_name)
             .await
             .ok()
             .map(|s| s.expose().to_string())
@@ -133,7 +138,11 @@ async fn register_channel(
         require_secret: webhook_secret.is_some(),
     }];
 
-    let channel_arc = Arc::new(loaded.channel);
+    let channel_arc = Arc::new(
+        loaded
+            .channel
+            .with_owner_binding(config.owner_id.clone(), owner_actor_id.clone()),
+    );
 
     // Inject runtime config (tunnel URL, webhook secret, owner_id).
     {
@@ -191,7 +200,7 @@ async fn register_channel(
     // Register Ed25519 signature key if declared in capabilities.
     if let Some(ref sig_key_name) = sig_key_secret_name
         && let Some(secrets) = secrets_store
-        && let Ok(key_secret) = secrets.get_decrypted("default", sig_key_name).await
+        && let Ok(key_secret) = secrets.get_decrypted(&config.owner_id, sig_key_name).await
     {
         match wasm_router
             .register_signature_key(&channel_name, key_secret.expose())
@@ -209,7 +218,7 @@ async fn register_channel(
     // Register HMAC signing secret if declared in capabilities.
     if let Some(ref hmac_secret_name) = hmac_secret_name
         && let Some(secrets) = secrets_store
-        && let Ok(secret) = secrets.get_decrypted("default", hmac_secret_name).await
+        && let Ok(secret) = secrets.get_decrypted(&config.owner_id, hmac_secret_name).await
     {
         wasm_router
             .register_hmac_secret(&channel_name, secret.expose())
@@ -224,6 +233,7 @@ async fn register_channel(
             .as_ref()
             .map(|s| s.as_ref() as &dyn SecretsStore),
         &channel_name,
+        &config.owner_id,
     )
     .await
     {
@@ -261,6 +271,7 @@ pub async fn inject_channel_credentials(
     channel: &Arc<WasmChannel>,
     secrets: Option<&dyn SecretsStore>,
     channel_name: &str,
+    owner_id: &str,
 ) -> anyhow::Result<usize> {
     if channel_name.trim().is_empty() {
         return Ok(0);
@@ -272,7 +283,7 @@ pub async fn inject_channel_credentials(
     // 1. Try injecting from persistent secrets store if available
     if let Some(secrets) = secrets {
         let all_secrets = secrets
-            .list("default")
+            .list(owner_id)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
 
@@ -283,7 +294,7 @@ pub async fn inject_channel_credentials(
                 continue;
             }
 
-            let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
+            let decrypted = match secrets.get_decrypted(owner_id, &secret_meta.name).await {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(

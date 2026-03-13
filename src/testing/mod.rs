@@ -1077,7 +1077,7 @@ mod tests {
             },
             notify: NotifyConfig {
                 channel: None,
-                user: "user1".to_string(),
+                user: Some("user1".to_string()),
                 on_attention: true,
                 on_failure: true,
                 on_success: false,
@@ -1210,7 +1210,7 @@ mod tests {
             },
             notify: NotifyConfig {
                 channel: None,
-                user: "user1".to_string(),
+                user: Some("user1".to_string()),
                 on_attention: false,
                 on_failure: false,
                 on_success: false,

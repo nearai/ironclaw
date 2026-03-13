@@ -3034,6 +3034,9 @@ impl ExtensionManager {
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
         let channel_name = loaded.name().to_string();
+        let owner_actor_id = wasm_channel_owner_ids
+            .get(channel_name.as_str())
+            .map(ToString::to_string);
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
@@ -3047,7 +3050,11 @@ impl ExtensionManager {
             .ok()
             .map(|s| s.expose().to_string());
 
-        let channel_arc = Arc::new(loaded.channel);
+        let channel_arc = Arc::new(
+            loaded
+                .channel
+                .with_owner_binding(self.user_id.clone(), owner_actor_id),
+        );
 
         // Inject runtime config (tunnel_url, webhook_secret, owner_id)
         {

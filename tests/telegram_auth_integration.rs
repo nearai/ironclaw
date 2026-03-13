@@ -6,7 +6,8 @@
 //! 1. When owner_id is null and dm_policy is "allowlist", unauthorized users in
 //!    group chats are dropped even if they @mention the bot
 //! 2. When owner_id is null and dm_policy is "open", all users can interact
-//! 3. When owner_id is set, only that user can interact
+//! 3. When owner_id is set, the owner gets instance-global access while
+//!    non-owner senders remain channel-scoped guests subject to authorization
 //! 4. Authorization works correctly for both private and group chats
 
 use std::collections::HashMap;
@@ -238,7 +239,9 @@ async fn test_group_message_with_owner_id_set() {
 
     let channel = create_telegram_channel(runtime, &config).await;
 
-    // Message from different user (should be dropped)
+    // Message from different user. In the owner-scope model this sender stays a
+    // guest, so the webhook still accepts the update and leaves authorization
+    // decisions to the guest flow rather than hard-dropping on owner mismatch.
     let update = build_telegram_update(
         3,
         102,
@@ -263,8 +266,9 @@ async fn test_group_message_with_owner_id_set() {
 
     assert_eq!(response.status, 200);
 
-    // REGRESSION TEST: Non-owner messages are dropped when owner_id is set
-    // This behavior is consistent and not affected by the fix
+    // Regression: with owner_id set, non-owner senders should not be hard-
+    // dropped solely because they are not the owner. Guest isolation happens
+    // later in the host/runtime layer.
 }
 
 #[tokio::test]

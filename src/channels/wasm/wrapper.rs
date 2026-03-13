@@ -709,6 +709,12 @@ pub struct WasmChannel {
     /// Settings store for persisting broadcast metadata across restarts.
     settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
 
+    /// Stable owner scope for persistent data and owner-target routing.
+    owner_scope_id: String,
+
+    /// Channel-specific actor ID that maps to the instance owner on this channel.
+    owner_actor_id: Option<String>,
+
     /// Secrets store for host-based credential injection.
     /// Used to pre-resolve credentials before each WASM callback.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
@@ -719,6 +725,7 @@ pub struct WasmChannel {
 /// method and the static polling helper share one implementation.
 async fn do_update_broadcast_metadata(
     channel_name: &str,
+    owner_scope_id: &str,
     metadata: &str,
     last_broadcast_metadata: &tokio::sync::RwLock<Option<String>>,
     settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
@@ -731,7 +738,7 @@ async fn do_update_broadcast_metadata(
     if changed && let Some(store) = settings_store {
         let key = format!("channel_broadcast_metadata_{}", channel_name);
         let value = serde_json::Value::String(metadata.to_string());
-        if let Err(e) = store.set_setting("default", &key, &value).await {
+        if let Err(e) = store.set_setting(owner_scope_id, &key, &value).await {
             tracing::warn!(
                 channel = %channel_name,
                 "Failed to persist broadcast metadata: {}",
@@ -739,6 +746,33 @@ async fn do_update_broadcast_metadata(
             );
         }
     }
+}
+
+fn resolve_message_scope(
+    owner_scope_id: &str,
+    owner_actor_id: Option<&str>,
+    sender_id: &str,
+) -> (String, bool) {
+    if owner_actor_id.is_some_and(|owner_actor_id| owner_actor_id == sender_id) {
+        (owner_scope_id.to_string(), true)
+    } else {
+        (sender_id.to_string(), false)
+    }
+}
+
+fn apply_emitted_metadata(
+    mut msg: IncomingMessage,
+    metadata_json: &str,
+) -> IncomingMessage {
+    if let Ok(metadata) = serde_json::from_str(metadata_json) {
+        msg = msg.with_metadata(metadata);
+        if msg.conversation_scope().is_none()
+            && let Some(scope_id) = crate::channels::routing_target_from_metadata(&msg.metadata)
+        {
+            msg = msg.with_conversation_scope(scope_id);
+        }
+    }
+    msg
 }
 
 impl WasmChannel {
@@ -773,6 +807,8 @@ impl WasmChannel {
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
+            owner_scope_id: "default".to_string(),
+            owner_actor_id: None,
             secrets_store: None,
         }
     }
@@ -784,6 +820,17 @@ impl WasmChannel {
     /// the target host (e.g., Bearer token for api.slack.com).
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Bind this channel to the configured owner scope and external owner actor.
+    pub fn with_owner_binding(
+        mut self,
+        owner_scope_id: impl Into<String>,
+        owner_actor_id: Option<String>,
+    ) -> Self {
+        self.owner_scope_id = owner_scope_id.into();
+        self.owner_actor_id = owner_actor_id;
         self
     }
 
@@ -843,6 +890,7 @@ impl WasmChannel {
     async fn update_broadcast_metadata(&self, metadata: &str) {
         do_update_broadcast_metadata(
             &self.name,
+            &self.owner_scope_id,
             metadata,
             &self.last_broadcast_metadata,
             self.settings_store.as_ref(),
@@ -854,7 +902,7 @@ impl WasmChannel {
     async fn load_broadcast_metadata(&self) {
         if let Some(ref store) = self.settings_store {
             match store
-                .get_setting("default", &self.broadcast_metadata_key())
+                .get_setting(&self.owner_scope_id, &self.broadcast_metadata_key())
                 .await
             {
                 Ok(Some(serde_json::Value::String(meta))) => {
@@ -864,7 +912,27 @@ impl WasmChannel {
                         "Restored broadcast metadata from settings"
                     );
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    if self.owner_scope_id != "default" {
+                        match store.get_setting("default", &self.broadcast_metadata_key()).await {
+                            Ok(Some(serde_json::Value::String(meta))) => {
+                                *self.last_broadcast_metadata.write().await = Some(meta);
+                                tracing::debug!(
+                                    channel = %self.name,
+                                    "Restored legacy owner broadcast metadata from default scope"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    channel = %self.name,
+                                    "Failed to load legacy broadcast metadata: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(
                         channel = %self.name,
@@ -1065,7 +1133,11 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let host_credentials =
-            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+            resolve_channel_host_credentials(
+                &self.capabilities,
+                self.secrets_store.as_deref(),
+                &self.owner_scope_id,
+            )
                 .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
@@ -1205,7 +1277,11 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let credentials = self.get_credentials().await;
         let host_credentials =
-            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+            resolve_channel_host_credentials(
+                &self.capabilities,
+                self.secrets_store.as_deref(),
+                &self.owner_scope_id,
+            )
                 .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
@@ -1308,7 +1384,11 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let host_credentials =
-            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+            resolve_channel_host_credentials(
+                &self.capabilities,
+                self.secrets_store.as_deref(),
+                &self.owner_scope_id,
+            )
                 .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
@@ -1415,7 +1495,11 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let host_credentials =
-            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+            resolve_channel_host_credentials(
+                &self.capabilities,
+                self.secrets_store.as_deref(),
+                &self.owner_scope_id,
+            )
                 .await;
         let pairing_store = self.pairing_store.clone();
 
@@ -1556,7 +1640,11 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let host_credentials =
-            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+            resolve_channel_host_credentials(
+                &self.capabilities,
+                self.secrets_store.as_deref(),
+                &self.owner_scope_id,
+            )
                 .await;
         let pairing_store = self.pairing_store.clone();
 
@@ -1660,7 +1748,11 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let host_credentials =
-            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+            resolve_channel_host_credentials(
+                &self.capabilities,
+                self.secrets_store.as_deref(),
+                &self.owner_scope_id,
+            )
                 .await;
         let pairing_store = self.pairing_store.clone();
 
@@ -1829,6 +1921,7 @@ impl WasmChannel {
                 let repeater_host_credentials = resolve_channel_host_credentials(
                     &self.capabilities,
                     self.secrets_store.as_deref(),
+                    &self.owner_scope_id,
                 )
                 .await;
                 let pairing_store = self.pairing_store.clone();
@@ -2023,8 +2116,16 @@ impl WasmChannel {
                 }
             }
 
+            let (resolved_user_id, is_owner_sender) = resolve_message_scope(
+                &self.owner_scope_id,
+                self.owner_actor_id.as_deref(),
+                &emitted.user_id,
+            );
+
             // Convert to IncomingMessage
-            let mut msg = IncomingMessage::new(&self.name, &emitted.user_id, &emitted.content);
+            let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)
+                .with_owner_id(&self.owner_scope_id)
+                .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
                 msg = msg.with_user_name(name);
@@ -2056,9 +2157,9 @@ impl WasmChannel {
             }
 
             // Parse metadata JSON
-            if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
-                msg = msg.with_metadata(metadata);
-                // Store for broadcast routing (chat_id etc.)
+            msg = apply_emitted_metadata(msg, &emitted.metadata_json);
+            if is_owner_sender {
+                // Store for owner-target routing (chat_id etc.).
                 self.update_broadcast_metadata(&emitted.metadata_json).await;
             }
 
@@ -2108,6 +2209,8 @@ impl WasmChannel {
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
         let poll_secrets_store = self.secrets_store.clone();
+        let owner_scope_id = self.owner_scope_id.clone();
+        let owner_actor_id = self.owner_actor_id.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -2125,6 +2228,7 @@ impl WasmChannel {
                         let host_credentials = resolve_channel_host_credentials(
                             &poll_capabilities,
                             poll_secrets_store.as_deref(),
+                            &owner_scope_id,
                         )
                         .await;
 
@@ -2147,6 +2251,8 @@ impl WasmChannel {
                                 if !emitted_messages.is_empty()
                                     && let Err(e) = Self::dispatch_emitted_messages(
                                         &channel_name,
+                                        &owner_scope_id,
+                                        owner_actor_id.as_deref(),
                                         emitted_messages,
                                         &message_tx,
                                         &rate_limiter,
@@ -2274,6 +2380,8 @@ impl WasmChannel {
     /// access to `&self`.
     async fn dispatch_emitted_messages(
         channel_name: &str,
+        owner_scope_id: &str,
+        owner_actor_id: Option<&str>,
         messages: Vec<EmittedMessage>,
         message_tx: &RwLock<Option<mpsc::Sender<IncomingMessage>>>,
         rate_limiter: &RwLock<ChannelEmitRateLimiter>,
@@ -2315,8 +2423,13 @@ impl WasmChannel {
                 }
             }
 
+            let (resolved_user_id, is_owner_sender) =
+                resolve_message_scope(owner_scope_id, owner_actor_id, &emitted.user_id);
+
             // Convert to IncomingMessage
-            let mut msg = IncomingMessage::new(channel_name, &emitted.user_id, &emitted.content);
+            let mut msg = IncomingMessage::new(channel_name, &resolved_user_id, &emitted.content)
+                .with_owner_id(owner_scope_id)
+                .with_sender_id(&emitted.user_id);
 
             if let Some(name) = emitted.user_name {
                 msg = msg.with_user_name(name);
@@ -2347,12 +2460,12 @@ impl WasmChannel {
                 msg = msg.with_attachments(incoming_attachments);
             }
 
-            // Parse metadata JSON
-            if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
-                msg = msg.with_metadata(metadata);
-                // Store for broadcast routing (chat_id etc.)
+            msg = apply_emitted_metadata(msg, &emitted.metadata_json);
+            if is_owner_sender {
+                // Store for owner-target routing (chat_id etc.)
                 do_update_broadcast_metadata(
                     channel_name,
+                    owner_scope_id,
                     &emitted.metadata_json,
                     last_broadcast_metadata,
                     settings_store,
@@ -2486,8 +2599,11 @@ impl Channel for WasmChannel {
         // The original metadata contains channel-specific routing info (e.g., Telegram chat_id)
         // that the WASM channel needs to send the reply to the correct destination.
         let metadata_json = serde_json::to_string(&msg.metadata).unwrap_or_default();
-        // Store for broadcast routing (chat_id etc.)
-        self.update_broadcast_metadata(&metadata_json).await;
+        // Store for owner-target routing (chat_id etc.) only when the configured
+        // owner is the actor in this conversation.
+        if msg.user_id == self.owner_scope_id {
+            self.update_broadcast_metadata(&metadata_json).await;
+        }
         self.call_on_respond(
             msg.id,
             &response.content,
@@ -2510,8 +2626,39 @@ impl Channel for WasmChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         self.cancel_typing_task().await;
+        let resolved_target = if user_id == self.owner_scope_id || user_id == "default" {
+            let metadata = self.last_broadcast_metadata.read().await.clone().ok_or_else(|| {
+                ChannelError::SendFailed {
+                    name: self.name.clone(),
+                    reason: format!(
+                        "No stored owner routing target for channel '{}'. Send a message from the owner on this channel first.",
+                        self.name
+                    ),
+                }
+            })?;
+
+            let metadata: serde_json::Value = serde_json::from_str(&metadata).map_err(|e| {
+                ChannelError::SendFailed {
+                    name: self.name.clone(),
+                    reason: format!("Invalid stored owner routing metadata: {e}"),
+                }
+            })?;
+
+            crate::channels::routing_target_from_metadata(&metadata).ok_or_else(|| {
+                ChannelError::SendFailed {
+                    name: self.name.clone(),
+                    reason: format!(
+                        "Stored owner routing metadata for channel '{}' is missing a delivery target.",
+                        self.name
+                    ),
+                }
+            })?
+        } else {
+            user_id.to_string()
+        };
+
         self.call_on_broadcast(
-            user_id,
+            &resolved_target,
             &response.content,
             response.thread_id.as_deref(),
             &response.attachments,
@@ -2922,6 +3069,7 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 async fn resolve_channel_host_credentials(
     capabilities: &ChannelCapabilities,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
+    owner_scope_id: &str,
 ) -> Vec<ResolvedHostCredential> {
     let store = match store {
         Some(s) => s,
@@ -2948,7 +3096,7 @@ async fn resolve_channel_host_credentials(
             continue;
         }
 
-        let secret = match store.get_decrypted("default", &mapping.secret_name).await {
+        let secret = match store.get_decrypted(owner_scope_id, &mapping.secret_name).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!(
@@ -3201,6 +3349,8 @@ mod tests {
         let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
             "test-channel",
+            "default",
+            None,
             messages,
             &message_tx,
             &rate_limiter,
@@ -3242,6 +3392,8 @@ mod tests {
         let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
             "test-channel",
+            "default",
+            None,
             messages,
             &message_tx,
             &rate_limiter,
@@ -4228,6 +4380,8 @@ mod tests {
         let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
             "test-channel",
+            "default",
+            None,
             messages,
             &message_tx,
             &rate_limiter,
@@ -4266,6 +4420,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_dispatch_emitted_messages_owner_binding_sets_owner_scope() {
+        use crate::channels::wasm::host::EmittedMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+
+        let messages = vec![EmittedMessage::new("telegram-owner", "Hello from owner")
+            .with_metadata(r#"{"chat_id":12345}"#)];
+
+        let result = WasmChannel::dispatch_emitted_messages(
+            "telegram",
+            "owner-scope",
+            Some("telegram-owner"),
+            messages,
+            &message_tx,
+            &rate_limiter,
+            &last_broadcast_metadata,
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+
+        let msg = rx.try_recv().expect("Should receive message");
+        assert_eq!(msg.user_id, "owner-scope");
+        assert_eq!(msg.owner_id, "owner-scope");
+        assert_eq!(msg.sender_id, "telegram-owner");
+        assert_eq!(msg.conversation_scope(), Some("12345"));
+        assert_eq!(
+            last_broadcast_metadata.read().await.as_deref(),
+            Some(r#"{"chat_id":12345}"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_emitted_messages_guest_sender_stays_isolated() {
+        use crate::channels::wasm::host::EmittedMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+
+        let messages = vec![
+            EmittedMessage::new("guest-42", "Hello from guest").with_metadata(r#"{"chat_id":999}"#),
+        ];
+
+        let result = WasmChannel::dispatch_emitted_messages(
+            "telegram",
+            "owner-scope",
+            Some("telegram-owner"),
+            messages,
+            &message_tx,
+            &rate_limiter,
+            &last_broadcast_metadata,
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+
+        let msg = rx.try_recv().expect("Should receive message");
+        assert_eq!(msg.user_id, "guest-42");
+        assert_eq!(msg.owner_id, "owner-scope");
+        assert_eq!(msg.sender_id, "guest-42");
+        assert_eq!(msg.conversation_scope(), Some("999"));
+        assert!(last_broadcast_metadata.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_owner_scope_uses_stored_owner_metadata() {
+        let channel =
+            create_test_channel().with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
+
+        *channel.last_broadcast_metadata.write().await = Some(r#"{"chat_id":12345}"#.to_string());
+
+        let result = channel
+            .broadcast(
+                "owner-scope",
+                crate::channels::OutgoingResponse::text("hello owner"),
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_legacy_default_uses_owner_metadata() {
+        let channel =
+            create_test_channel().with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
+
+        *channel.last_broadcast_metadata.write().await = Some(r#"{"chat_id":12345}"#.to_string());
+
+        let result = channel
+            .broadcast("default", crate::channels::OutgoingResponse::text("legacy hello"))
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_owner_scope_requires_stored_metadata() {
+        let channel =
+            create_test_channel().with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
+
+        let result = channel
+            .broadcast(
+                "owner-scope",
+                crate::channels::OutgoingResponse::text("hello owner"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Send a message from the owner on this channel first"),
+            "expected missing owner routing metadata error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
     async fn test_dispatch_emitted_messages_no_attachments_backward_compat() {
         use crate::channels::wasm::host::EmittedMessage;
 
@@ -4283,6 +4569,8 @@ mod tests {
         let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
             "test-channel",
+            "default",
+            None,
             messages,
             &message_tx,
             &rate_limiter,

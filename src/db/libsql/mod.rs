@@ -247,6 +247,17 @@ pub(crate) fn opt_text_owned(s: Option<String>) -> libsql::Value {
     }
 }
 
+pub(crate) fn normalize_notify_user(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed == "default" {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 /// Extract an i64 column, defaulting to 0.
 pub(crate) fn get_i64(row: &libsql::Row, idx: i32) -> i64 {
     row.get::<i64>(idx).unwrap_or(0)
@@ -378,7 +389,7 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
         },
         notify: NotifyConfig {
             channel: get_opt_text(row, 12),
-            user: get_text(row, 13),
+            user: normalize_notify_user(get_opt_text(row, 13)),
             on_success: get_i64(row, 14) != 0,
             on_failure: get_i64(row, 15) != 0,
             on_attention: get_i64(row, 16) != 0,
@@ -419,7 +430,19 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use crate::db::Database;
-    use crate::db::libsql::{LibSqlBackend, parse_timestamp};
+    use crate::db::libsql::{LibSqlBackend, normalize_notify_user, parse_timestamp};
+
+    #[test]
+    fn test_normalize_notify_user_treats_legacy_default_as_missing() {
+        assert_eq!(normalize_notify_user(None), None);
+        assert_eq!(normalize_notify_user(Some(String::new())), None);
+        assert_eq!(normalize_notify_user(Some("   ".to_string())), None);
+        assert_eq!(normalize_notify_user(Some("default".to_string())), None);
+        assert_eq!(
+            normalize_notify_user(Some("123456789".to_string())),
+            Some("123456789".to_string())
+        );
+    }
 
     #[test]
     fn test_parse_timestamp_accepts_rfc3339_and_legacy_naive_formats() {

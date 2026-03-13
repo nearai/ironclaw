@@ -139,8 +139,8 @@ impl Agent {
         }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let mut job_ctx =
-            JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        let mut job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+            .with_requester_id(&message.sender_id);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
 

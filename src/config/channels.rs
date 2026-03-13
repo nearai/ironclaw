@@ -91,13 +91,13 @@ pub struct SignalConfig {
 }
 
 impl ChannelsConfig {
-    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &Settings, owner_id: &str) -> Result<Self, ConfigError> {
         let http = if optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some() {
             Some(HttpConfig {
                 host: optional_env("HTTP_HOST")?.unwrap_or_else(|| "0.0.0.0".to_string()),
                 port: parse_optional_env("HTTP_PORT", 8080)?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
-                user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
+                user_id: owner_id.to_string(),
             })
         } else {
             None
@@ -109,7 +109,7 @@ impl ChannelsConfig {
                 host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
                 port: parse_optional_env("GATEWAY_PORT", 3000)?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?,
-                user_id: optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string()),
+                user_id: owner_id.to_string(),
             })
         } else {
             None

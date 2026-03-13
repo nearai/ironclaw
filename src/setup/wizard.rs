@@ -98,6 +98,10 @@ pub struct SetupWizard {
 }
 
 impl SetupWizard {
+    fn owner_id(&self) -> &str {
+        self.settings.owner_id.as_deref().unwrap_or("default")
+    }
+
     /// Create a new setup wizard.
     pub fn new() -> Self {
         Self {
@@ -295,7 +299,7 @@ impl SetupWizard {
         // may not be persisted in the settings map.
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());
-            if let Ok(map) = store.get_all_settings("default").await {
+            if let Ok(map) = store.get_all_settings(self.owner_id()).await {
                 self.settings = Settings::from_db_map(&map);
                 self.settings.database_backend = Some("postgres".to_string());
                 self.settings.database_url = Some(url);
@@ -329,7 +333,7 @@ impl SetupWizard {
         // may not be persisted in the settings map.
         if let Some(ref db) = self.db_backend {
             use crate::db::SettingsStore as _;
-            if let Ok(map) = db.get_all_settings("default").await {
+            if let Ok(map) = db.get_all_settings(self.owner_id()).await {
                 self.settings = Settings::from_db_map(&map);
                 self.settings.database_backend = Some("libsql".to_string());
                 self.settings.libsql_path = Some(path);
@@ -1883,23 +1887,23 @@ impl SetupWizard {
             #[cfg(feature = "libsql")]
             "libsql" | "turso" | "sqlite" => {
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
                 // Fallback to postgres if libsql store creation returned None
                 #[cfg(feature = "postgres")]
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
             }
             #[cfg(feature = "postgres")]
             _ => {
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
                 // Fallback to libsql if postgres store creation returned None
                 #[cfg(feature = "libsql")]
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
             }
             #[cfg(not(feature = "postgres"))]
@@ -2491,7 +2495,7 @@ impl SetupWizard {
             if let Some(ref pool) = self.db_pool {
                 let store = crate::history::Store::from_pool(pool.clone());
                 store
-                    .set_all_settings("default", &db_map)
+                    .set_all_settings(self.owner_id(), &db_map)
                     .await
                     .map_err(|e| {
                         SetupError::Database(format!("Failed to save settings to database: {}", e))
@@ -2509,7 +2513,7 @@ impl SetupWizard {
             if let Some(ref backend) = self.db_backend {
                 use crate::db::SettingsStore as _;
                 backend
-                    .set_all_settings("default", &db_map)
+                    .set_all_settings(self.owner_id(), &db_map)
                     .await
                     .map_err(|e| {
                         SetupError::Database(format!("Failed to save settings to database: {}", e))
@@ -2702,7 +2706,7 @@ impl SetupWizard {
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());
             if let Err(e) = store
-                .set_setting("default", "nearai.session_token", &value)
+                .set_setting(self.owner_id(), "nearai.session_token", &value)
                 .await
             {
                 tracing::debug!("Could not persist session token to postgres: {}", e);
@@ -2716,7 +2720,7 @@ impl SetupWizard {
         if let Some(ref backend) = self.db_backend {
             use crate::db::SettingsStore as _;
             if let Err(e) = backend
-                .set_setting("default", "nearai.session_token", &value)
+                .set_setting(self.owner_id(), "nearai.session_token", &value)
                 .await
             {
                 tracing::debug!("Could not persist session token to libsql: {}", e);
@@ -2762,7 +2766,7 @@ impl SetupWizard {
         let loaded = if !loaded {
             if let Some(ref pool) = self.db_pool {
                 let store = crate::history::Store::from_pool(pool.clone());
-                match store.get_all_settings("default").await {
+                match store.get_all_settings(self.owner_id()).await {
                     Ok(db_map) if !db_map.is_empty() => {
                         let existing = Settings::from_db_map(&db_map);
                         self.settings.merge_from(&existing);
@@ -2786,7 +2790,7 @@ impl SetupWizard {
         let loaded = if !loaded {
             if let Some(ref backend) = self.db_backend {
                 use crate::db::SettingsStore as _;
-                match backend.get_all_settings("default").await {
+                match backend.get_all_settings(self.owner_id()).await {
                     Ok(db_map) if !db_map.is_empty() => {
                         let existing = Settings::from_db_map(&db_map);
                         self.settings.merge_from(&existing);

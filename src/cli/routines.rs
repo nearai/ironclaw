@@ -340,7 +340,7 @@ async fn create(
         },
         notify: NotifyConfig {
             channel: notify_channel,
-            user: user_id.to_string(),
+            user: Some(user_id.to_string()),
             on_attention: true,
             on_failure: true,
             on_success: false,

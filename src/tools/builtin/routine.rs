@@ -127,7 +127,7 @@ impl Tool for RoutineCreateTool {
                 },
                 "notify_user": {
                     "type": "string",
-                    "description": "User/target to notify (e.g. username, chat ID). Defaults to 'default'."
+                    "description": "Optional explicit user/target to notify (e.g. username, chat ID). If omitted, IronClaw resolves the configured owner's last-seen target for that channel."
                 },
                 "timezone": {
                     "type": "string",
@@ -342,8 +342,7 @@ impl Tool for RoutineCreateTool {
                 user: params
                     .get("notify_user")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("default")
-                    .to_string(),
+                    .map(String::from),
                 ..NotifyConfig::default()
             },
             last_run_at: None,

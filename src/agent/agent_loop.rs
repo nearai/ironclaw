@@ -102,6 +102,14 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub(super) fn owner_id(&self) -> &str {
+        self.deps
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.user_id())
+            .unwrap_or("default")
+    }
+
     /// Create a new agent.
     ///
     /// Optionally accepts pre-created `ContextManager` and `SessionManager` for sharing
@@ -264,6 +272,7 @@ impl Agent {
         ));
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();
+        let repair_owner_id = self.owner_id().to_string();
         let repair_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(repair_interval).await;
@@ -311,7 +320,9 @@ impl Agent {
 
                     if let Some(msg) = notification {
                         let response = OutgoingResponse::text(format!("Self-Repair: {}", msg));
-                        let _ = repair_channels.broadcast_all("default", response).await;
+                        let _ = repair_channels
+                            .broadcast_all(&repair_owner_id, response)
+                            .await;
                     }
                 }
 
@@ -325,7 +336,9 @@ impl Agent {
                                 "Self-Repair: Tool '{}' repaired: {}",
                                 tool.name, message
                             ));
-                            let _ = repair_channels.broadcast_all("default", response).await;
+                            let _ = repair_channels
+                                .broadcast_all(&repair_owner_id, response)
+                                .await;
                         }
                         Ok(result) => {
                             tracing::info!("Tool repair result: {:?}", result);
@@ -362,9 +375,11 @@ impl Agent {
                         .timezone
                         .clone()
                         .or_else(|| Some(self.config.default_timezone.clone()));
-                    if let (Some(user), Some(channel)) =
-                        (&hb_config.notify_user, &hb_config.notify_channel)
-                    {
+                    if let Some(channel) = &hb_config.notify_channel {
+                        let user = hb_config
+                            .notify_user
+                            .clone()
+                            .unwrap_or_else(|| self.owner_id().to_string());
                         config = config.with_notify(user, channel);
                     }
 
@@ -374,17 +389,18 @@ impl Agent {
 
                     // Spawn notification forwarder that routes through channel manager
                     let notify_channel = hb_config.notify_channel.clone();
-                    let notify_user = hb_config.notify_user.clone();
+                    let notify_user = hb_config
+                        .notify_user
+                        .clone()
+                        .unwrap_or_else(|| self.owner_id().to_string());
                     let channels = self.channels.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
-                            let user = notify_user.as_deref().unwrap_or("default");
-
                             // Try the configured channel first, fall back to
                             // broadcasting on all channels.
                             let targeted_ok = if let Some(ref channel) = notify_channel {
                                 channels
-                                    .broadcast(channel, user, response.clone())
+                                    .broadcast(channel, &notify_user, response.clone())
                                     .await
                                     .is_ok()
                             } else {
@@ -392,7 +408,7 @@ impl Agent {
                             };
 
                             if !targeted_ok {
-                                let results = channels.broadcast_all(user, response).await;
+                                let results = channels.broadcast_all(&notify_user, response).await;
                                 for (ch, result) in results {
                                     if let Err(e) = result {
                                         tracing::warn!(
@@ -466,6 +482,7 @@ impl Agent {
                                 .metadata
                                 .get("notify_user")
                                 .and_then(|v| v.as_str())
+                                .or_else(|| response.metadata.get("owner_id").and_then(|v| v.as_str()))
                                 .unwrap_or("default")
                                 .to_string();
                             let notify_channel = response
@@ -754,10 +771,7 @@ impl Agent {
         // For Signal, use signal_target from metadata (group:ID or phone number),
         // otherwise fall back to user_id
         let target = message
-            .metadata
-            .get("signal_target")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .routing_target()
             .unwrap_or_else(|| message.user_id.clone());
         self.tools()
             .set_message_tool_context(Some(message.channel.clone()), Some(target))
@@ -797,7 +811,7 @@ impl Agent {
         }
 
         // Hydrate thread from DB if it's a historical thread not in memory
-        if let Some(ref external_thread_id) = message.thread_id {
+        if let Some(external_thread_id) = message.conversation_scope() {
             tracing::trace!(
                 message_id = %message.id,
                 thread_id = %external_thread_id,
@@ -818,7 +832,7 @@ impl Agent {
             .resolve_thread(
                 &message.user_id,
                 &message.channel,
-                message.thread_id.as_deref(),
+                message.conversation_scope(),
             )
             .await;
         tracing::debug!(

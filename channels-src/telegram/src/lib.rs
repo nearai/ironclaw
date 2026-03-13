@@ -1689,25 +1689,14 @@ fn handle_message(message: TelegramMessage) {
 
     let is_private = message.chat.chat_type == "private";
 
-    // Owner validation: when owner_id is set, only that user can message
-    let owner_id_str = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
+    let owner_id = channel_host::workspace_read(OWNER_ID_PATH)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<i64>().ok());
+    let is_owner = owner_id == Some(from.id);
 
-    if let Some(ref id_str) = owner_id_str {
-        if let Ok(owner_id) = id_str.parse::<i64>() {
-            if from.id != owner_id {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Dropping message from non-owner user {} (owner: {})",
-                        from.id, owner_id
-                    ),
-                );
-                return;
-            }
-        }
-    } else {
-        // No owner_id: apply authorization based on dm_policy and allow_from
-        // This applies to both private and group chats when owner_id is null
+    if !is_owner {
+        // Non-owner senders remain guests. Apply authorization based on
+        // dm_policy / allow_from before letting them chat in their own scope.
         let dm_policy =
             channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
 
@@ -1838,7 +1827,7 @@ fn handle_message(message: TelegramMessage) {
         user_id: from.id.to_string(),
         user_name: Some(user_name),
         content: content_to_emit,
-        thread_id: None, // Telegram doesn't have threads in the same way
+        thread_id: Some(message.chat.id.to_string()),
         metadata_json,
         attachments,
     });

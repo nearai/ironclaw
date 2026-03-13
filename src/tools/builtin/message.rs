@@ -129,21 +129,28 @@ impl Tool for MessageTool {
                     .map(|c| c.to_string())
             };
 
-        // Get target: use param → conversation default → job metadata
+        // Get target: use param → conversation default → job metadata → owner scope
+        // fallback when a specific channel is known.
         let target = if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
-            t.to_string()
+            Some(t.to_string())
         } else if let Some(t) = self
             .default_target
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
         {
-            t
+            Some(t)
         } else if let Some(t) = ctx.metadata.get("notify_user").and_then(|v| v.as_str()) {
-            t.to_string()
+            Some(t.to_string())
+        } else if channel.is_some() {
+            Some(ctx.user_id.clone())
         } else {
+            None
+        };
+
+        let Some(target) = target else {
             return Err(ToolError::ExecutionFailed(
-                "No target specified and no active conversation. Provide target parameter."
+                "No target specified and no channel-scoped routing target could be resolved. Provide target parameter."
                     .to_string(),
             ));
         };
@@ -650,6 +657,37 @@ mod tests {
         assert!(
             !err.contains("No target specified"),
             "Should not get 'No target specified' when metadata has notify_user, got: {}",
+            err
+        );
+        assert!(
+            !err.contains("No channel specified"),
+            "Should not get 'No channel specified' when metadata has notify_channel, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn message_tool_falls_back_to_ctx_user_when_channel_known() {
+        // Regression for owner-scoped notifications: a channel can be known
+        // even when the concrete delivery target is omitted, so the message
+        // tool should pass ctx.user_id through to the channel layer.
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+
+        let mut ctx =
+            crate::context::JobContext::with_user("owner-scope", "routine-job", "price alert");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "telegram",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "NEAR price is $5"}), &ctx)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            !err.contains("No target specified"),
+            "Should not get 'No target specified' when ctx.user_id can be used, got: {}",
             err
         );
         assert!(

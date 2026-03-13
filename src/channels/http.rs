@@ -511,11 +511,13 @@ async fn process_authenticated_request(
         Vec::new()
     };
 
-    let mut msg = IncomingMessage::new("http", &state.user_id, &req.content).with_metadata(
-        serde_json::json!({
+    let sender_id = req.user_id.clone().unwrap_or_else(|| state.user_id.clone());
+    let mut msg = IncomingMessage::new("http", &state.user_id, &req.content)
+        .with_owner_id(&state.user_id)
+        .with_sender_id(sender_id)
+        .with_metadata(serde_json::json!({
             "wait_for_response": wait_for_response,
-        }),
-    );
+        }));
 
     if !attachments.is_empty() {
         msg = msg.with_attachments(attachments);

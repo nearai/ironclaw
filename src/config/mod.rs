@@ -76,6 +76,7 @@ static INJECTED_VARS: LazyLock<Mutex<HashMap<String, String>>> =
 /// Main configuration for the agent.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub owner_id: String,
     pub database: DatabaseConfig,
     pub llm: LlmConfig,
     pub embeddings: EmbeddingsConfig,
@@ -116,6 +117,7 @@ impl Config {
         installed_skills_dir: std::path::PathBuf,
     ) -> Self {
         Self {
+            owner_id: "default".to_string(),
             database: DatabaseConfig {
                 backend: DatabaseBackend::LibSql,
                 url: secrecy::SecretString::from("unused://test".to_string()),
@@ -304,12 +306,15 @@ impl Config {
 
     /// Build config from settings (shared by from_env and from_db).
     async fn build(settings: &Settings) -> Result<Self, ConfigError> {
+        let owner_id = resolve_owner_id(settings)?;
+
         Ok(Self {
+            owner_id: owner_id.clone(),
             database: DatabaseConfig::resolve()?,
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,
-            channels: ChannelsConfig::resolve(settings)?,
+            channels: ChannelsConfig::resolve(settings, &owner_id)?,
             agent: AgentConfig::resolve(settings)?,
             safety: resolve_safety_config()?,
             wasm: WasmConfig::resolve()?,
@@ -329,6 +334,13 @@ impl Config {
             relay: RelayConfig::from_env(),
         })
     }
+}
+
+fn resolve_owner_id(settings: &Settings) -> Result<String, ConfigError> {
+    Ok(self::helpers::optional_env("IRONCLAW_OWNER_ID")?
+        .or_else(|| settings.owner_id.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "default".to_string()))
 }
 
 /// Load API keys from the encrypted secrets store into a thread-safe overlay.
