@@ -153,7 +153,8 @@ async fn async_main() -> anyhow::Result<()> {
                     provider_only: *provider_only,
                     quick: *quick,
                 };
-                let mut wizard = SetupWizard::with_config(config);
+                let mut wizard =
+                    SetupWizard::try_with_config_and_toml(config, cli.config.as_deref())?;
                 wizard.run().await?;
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
@@ -195,10 +196,13 @@ async fn async_main() -> anyhow::Result<()> {
     {
         println!("Onboarding needed: {}", reason);
         println!();
-        let mut wizard = SetupWizard::with_config(SetupConfig {
-            quick: true,
-            ..Default::default()
-        });
+        let mut wizard = SetupWizard::try_with_config_and_toml(
+            SetupConfig {
+                quick: true,
+                ..Default::default()
+            },
+            cli.config.as_deref(),
+        )?;
         wizard.run().await?;
     }
 
