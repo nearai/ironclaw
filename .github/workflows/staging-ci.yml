@@ -25,9 +25,34 @@ concurrency:
   cancel-in-progress: false        # Let running suites finish
 
 jobs:
+  # ── Resolve promotion base branch ───────────────────────────────
+  resolve-promotion-base:
+    name: Resolve promotion base
+    runs-on: ubuntu-latest
+    outputs:
+      promotion_base: ${{ steps.resolve.outputs.promotion_base }}
+    steps:
+      - name: Resolve promotion base
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FALLBACK_BRANCH: main
+        run: |
+          LATEST=$(gh pr list --label staging-promotion --state open \
+            --json headRefName,createdAt \
+            --jq '[.[] | select(.headRefName | startswith("staging-promote/"))] | sort_by(.createdAt) | last | .headRefName // empty')
+          if [ -n "$LATEST" ]; then
+            echo "promotion_base=${LATEST}" >> "$GITHUB_OUTPUT"
+            echo "Using open promotion branch as base: ${LATEST}"
+          else
+            echo "promotion_base=${FALLBACK_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "No open promotion branch found. Using ${FALLBACK_BRANCH}."
+          fi
+
   # ── Check for new commits ──────────────────────────────────────
   check-changes:
     name: Check for new commits
+    needs: resolve-promotion-base
     runs-on: ubuntu-latest
     outputs:
       has_changes: ${{ steps.check.outputs.has_changes }}
@@ -44,7 +69,7 @@ jobs:
         id: check
         env:
           FORCE_RUN: ${{ inputs.force }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROMOTION_BASE: ${{ needs.resolve-promotion-base.outputs.promotion_base }}
         run: |
           CURRENT_HEAD=$(git rev-parse HEAD)
           echo "current_head=${CURRENT_HEAD}" >> "$GITHUB_OUTPUT"
@@ -66,9 +91,9 @@ jobs:
               echo "Found ${COMMIT_COUNT} new commit(s) since last tested"
               DIFF_RANGE="${LAST_TESTED}..${CURRENT_HEAD}"
             else
-              git fetch origin "${DEFAULT_BRANCH}"
-              MERGE_BASE=$(git merge-base "origin/${DEFAULT_BRANCH}" HEAD)
-              echo "First run -- reviewing from merge-base ${MERGE_BASE}"
+              git fetch origin "${PROMOTION_BASE}"
+              MERGE_BASE=$(git merge-base "origin/${PROMOTION_BASE}" HEAD)
+              echo "First run -- reviewing from merge-base ${MERGE_BASE} against ${PROMOTION_BASE}"
               DIFF_RANGE="${MERGE_BASE}..${CURRENT_HEAD}"
             fi
           fi
@@ -102,7 +127,7 @@ jobs:
   # ── Create promotion PR (triggers claude-review.yml on the PR) ──
   create-promotion-pr:
     name: Create Promotion PR
-    needs: check-changes
+    needs: [resolve-promotion-base, check-changes]
     if: needs.check-changes.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     outputs:
@@ -135,15 +160,15 @@ jobs:
         id: ahead-check
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROMOTION_BASE: ${{ needs.resolve-promotion-base.outputs.promotion_base }}
         run: |
-          git fetch origin "${DEFAULT_BRANCH}"
-          AHEAD=$(git rev-list --count "origin/${DEFAULT_BRANCH}..origin/staging")
+          git fetch origin "${PROMOTION_BASE}"
+          AHEAD=$(git rev-list --count "origin/${PROMOTION_BASE}..origin/staging")
           echo "commits_ahead=${AHEAD}" >> "$GITHUB_OUTPUT"
           if [ "$AHEAD" -eq 0 ]; then
-            echo "Staging is not ahead of ${DEFAULT_BRANCH}. Nothing to promote."
+            echo "Staging is not ahead of ${PROMOTION_BASE}. Nothing to promote."
           else
-            echo "Staging is ${AHEAD} commits ahead of ${DEFAULT_BRANCH}."
+            echo "Staging is ${AHEAD} commits ahead of ${PROMOTION_BASE}."
           fi
 
       - name: Create promotion branch
@@ -157,25 +182,6 @@ jobs:
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "Created promotion branch: ${BRANCH}"
 
-      - name: Find base branch
-        id: find-base
-        if: steps.ahead-check.outputs.commits_ahead != '0'
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          # Find the newest open promotion PR with a staging-promote/* head branch
-          LATEST=$(gh pr list --label staging-promotion --state open \
-            --json headRefName,createdAt \
-            --jq '[.[] | select(.headRefName | startswith("staging-promote/"))] | sort_by(.createdAt) | last | .headRefName // empty')
-          if [ -n "$LATEST" ]; then
-            echo "base=${LATEST}" >> "$GITHUB_OUTPUT"
-            echo "Chaining onto existing promotion branch: ${LATEST}"
-          else
-            echo "base=${DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
-            echo "No existing promotion PR — targeting ${DEFAULT_BRANCH}"
-          fi
-
       - name: Create promotion PR
         id: create-pr
         if: steps.ahead-check.outputs.commits_ahead != '0'
@@ -185,7 +191,7 @@ jobs:
           RANGE="${{ needs.check-changes.outputs.diff_range }}"
           TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
           BRANCH="${{ steps.branch.outputs.branch }}"
-          BASE="${{ steps.find-base.outputs.base }}"
+          BASE="${{ needs.resolve-promotion-base.outputs.promotion_base }}"
 
           # Enumerate commits in this batch (exclude merge commits, cap at 50)
           MAX_COMMITS=50
