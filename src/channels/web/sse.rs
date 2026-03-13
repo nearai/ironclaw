@@ -24,8 +24,8 @@ const MAX_CONNECTIONS: u64 = 100;
 /// to subscribers that match that user_id.
 #[derive(Debug, Clone)]
 pub(crate) struct ScopedEvent {
-    user_id: Option<String>,
-    event: SseEvent,
+    pub(crate) user_id: Option<String>,
+    pub(crate) event: SseEvent,
 }
 
 /// Manages SSE broadcast to all connected browser tabs.

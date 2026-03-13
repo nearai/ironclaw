@@ -681,8 +681,8 @@ async fn oauth_callback_handler(
             "OAuth flow expired"
         );
         // Notify UI so auth card can show error instead of staying stuck
-        if let Some(ref sender) = flow.sse_sender {
-            let _ = sender.send(SseEvent::AuthCompleted {
+        if let Some(ref sse) = flow.sse_manager {
+            sse.broadcast(SseEvent::AuthCompleted {
                 extension_name: flow.extension_name.clone(),
                 success: false,
                 message: "OAuth flow expired. Please try again.".to_string(),
@@ -3339,7 +3339,8 @@ mod tests {
             )));
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
 
-        let (sender, mut receiver) = tokio::sync::broadcast::channel(4);
+        let sse_mgr = Arc::new(SseManager::new());
+        let mut receiver = sse_mgr.sender().subscribe();
         let Some(created_at) = expired_flow_created_at() else {
             eprintln!("Skipping expired OAuth flow SSE test: monotonic uptime below expiry window");
             return;
@@ -3359,7 +3360,7 @@ mod tests {
             scopes: vec![],
             user_id: "test".to_string(),
             secrets,
-            sse_sender: Some(sender),
+            sse_manager: Some(sse_mgr),
             gateway_token: None,
             resource: None,
             client_id_secret_name: None,
@@ -3385,7 +3386,7 @@ mod tests {
             .expect("response");
         assert_eq!(resp.status(), StatusCode::OK);
 
-        match receiver.recv().await.expect("auth_completed event") {
+        match receiver.recv().await.expect("auth_completed event").event {
             crate::channels::web::types::SseEvent::AuthCompleted {
                 extension_name,
                 success,
