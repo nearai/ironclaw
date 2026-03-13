@@ -74,3 +74,43 @@ async def test_empty_message_not_sent(page):
     await page.wait_for_timeout(2000)
     final_count = await page.locator(f"{SEL['message_user']}, {SEL['message_assistant']}").count()
     assert final_count == initial_count, "Empty message should not create new messages"
+
+
+async def test_copy_from_chat_forces_plain_text(page):
+    """Copying selected chat text should populate plain text clipboard data only."""
+    await page.evaluate("addMessage('assistant', 'Copy me into Sheets')")
+
+    copied = await page.evaluate(
+        """
+        () => {
+          const content = document.querySelector('#chat-messages .message.assistant .message-content');
+          if (!content) return {ok: false, reason: 'no content'};
+          const range = document.createRange();
+          range.selectNodeContents(content);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+
+          const store = {};
+          const evt = new Event('copy', { bubbles: true, cancelable: true });
+          evt.clipboardData = {
+            clearData: () => { Object.keys(store).forEach((k) => delete store[k]); },
+            setData: (t, v) => { store[t] = v; },
+            getData: (t) => store[t] || '',
+          };
+
+          content.dispatchEvent(evt);
+          return {
+            ok: true,
+            defaultPrevented: evt.defaultPrevented,
+            text: store['text/plain'] || '',
+            html: store['text/html'] || '',
+          };
+        }
+        """
+    )
+
+    assert copied["ok"], copied.get("reason", "copy setup failed")
+    assert copied["defaultPrevented"] is True
+    assert "Copy me into Sheets" in copied["text"]
+    assert copied["html"] == ""
