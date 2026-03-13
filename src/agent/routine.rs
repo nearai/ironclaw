@@ -890,13 +890,15 @@ mod tests {
         assert_eq!(describe_cron("", None), "cron: (empty)"); // safety: test-only assertion in #[cfg(test)] module
         assert_eq!(describe_cron("not a cron", None), "cron: not a cron"); // safety: test-only assertion in #[cfg(test)] module
         assert_eq!(
+            // safety: test-only assertion in #[cfg(test)] module
             describe_cron("0 9 * * MON-FRI", None),
             "Weekdays at 9:00 AM"
-        ); // safety: test-only assertion in #[cfg(test)] module
+        );
         assert_eq!(
+            // safety: test-only assertion in #[cfg(test)] module
             describe_cron("0 0 9 * * MON-FRI *", None),
             "Weekdays at 9:00 AM"
-        ); // safety: test-only assertion in #[cfg(test)] module
+        );
     }
 
     #[test]
