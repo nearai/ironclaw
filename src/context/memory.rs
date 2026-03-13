@@ -60,7 +60,8 @@ impl ActionRecord {
     /// Mark the action as successful.
     ///
     /// `output_sanitized` is the tool output after safety processing (string).
-    /// `output_raw` is the original tool result (JSON value).
+    /// `output_raw` is the original tool result (JSON value, stored as a
+    /// pretty-printed JSON string in `ActionRecord.output_raw`).
     pub fn succeed(
         mut self,
         output_sanitized: Option<String>,
