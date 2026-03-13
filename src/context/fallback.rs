@@ -129,15 +129,15 @@ mod tests {
 
         let fb = FallbackDeliverable::build(&ctx, &memory, "timed out");
 
-        assert!(!fb.partial);
-        assert_eq!(fb.failure_reason, "timed out");
-        assert!(fb.last_action.is_none());
-        assert_eq!(fb.action_stats.total, 0);
-        assert_eq!(fb.action_stats.successful, 0);
-        assert_eq!(fb.action_stats.failed, 0);
-        assert_eq!(fb.tokens_used, 0);
-        assert_eq!(fb.cost, "0");
-        assert_eq!(fb.repair_attempts, 0);
+        assert!(!fb.partial); // safety: test
+        assert_eq!(fb.failure_reason, "timed out"); // safety: test
+        assert!(fb.last_action.is_none()); // safety: test
+        assert_eq!(fb.action_stats.total, 0); // safety: test
+        assert_eq!(fb.action_stats.successful, 0); // safety: test
+        assert_eq!(fb.action_stats.failed, 0); // safety: test
+        assert_eq!(fb.tokens_used, 0); // safety: test
+        assert_eq!(fb.cost, "0"); // safety: test
+        assert_eq!(fb.repair_attempts, 0); // safety: test
     }
 
     #[test]
@@ -170,19 +170,19 @@ mod tests {
 
         let fb = FallbackDeliverable::build(&ctx, &memory, "max iterations");
 
-        assert!(fb.partial);
-        assert_eq!(fb.action_stats.total, 5);
-        assert_eq!(fb.action_stats.successful, 3);
-        assert_eq!(fb.action_stats.failed, 2);
-        assert_eq!(fb.tokens_used, 5000);
-        assert_eq!(fb.cost, "0.42");
-        assert_eq!(fb.repair_attempts, 1);
-        assert!(fb.last_action.is_some());
-        let la = fb.last_action.unwrap();
-        assert_eq!(la.tool_name, "tool_b");
-        assert!(!la.success);
+        assert!(fb.partial); // safety: test
+        assert_eq!(fb.action_stats.total, 5); // safety: test
+        assert_eq!(fb.action_stats.successful, 3); // safety: test
+        assert_eq!(fb.action_stats.failed, 2); // safety: test
+        assert_eq!(fb.tokens_used, 5000); // safety: test
+        assert_eq!(fb.cost, "0.42"); // safety: test
+        assert_eq!(fb.repair_attempts, 1); // safety: test
+        assert!(fb.last_action.is_some()); // safety: test
+        let la = fb.last_action.unwrap(); // safety: test
+        assert_eq!(la.tool_name, "tool_b"); // safety: test
+        assert!(!la.success); // safety: test
         // Failed actions should surface the error message as the output preview
-        assert_eq!(la.output_preview, "broke");
+        assert_eq!(la.output_preview, "broke"); // safety: test
     }
 
     #[test]
@@ -196,9 +196,9 @@ mod tests {
         memory.record_action(action);
 
         let fb = FallbackDeliverable::build(&ctx, &memory, "tool failure");
-        let la = fb.last_action.unwrap();
-        assert!(!la.success);
-        assert_eq!(la.output_preview, "connection timed out after 30s");
+        let la = fb.last_action.unwrap(); // safety: test
+        assert!(!la.success); // safety: test
+        assert_eq!(la.output_preview, "connection timed out after 30s"); // safety: test
     }
 
     #[test]
@@ -217,9 +217,9 @@ mod tests {
         memory.record_action(action);
 
         let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
-        let la = fb.last_action.unwrap();
-        assert!(la.output_preview.len() <= 200);
-        assert!(!la.output_preview.is_empty());
+        let la = fb.last_action.unwrap(); // safety: test
+        assert!(la.output_preview.len() <= 200); // safety: test
+        assert!(!la.output_preview.is_empty()); // safety: test
     }
 
     #[test]
@@ -237,10 +237,10 @@ mod tests {
         memory.record_action(action);
 
         let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
-        let la = fb.last_action.unwrap();
+        let la = fb.last_action.unwrap(); // safety: test
         // Must use sanitized output, not raw
-        assert!(!la.output_preview.contains("sk-secret"));
-        assert!(la.output_preview.contains("REDACTED"));
+        assert!(!la.output_preview.contains("sk-secret")); // safety: test
+        assert!(la.output_preview.contains("REDACTED")); // safety: test
     }
 
     #[test]
@@ -254,7 +254,7 @@ mod tests {
         let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
 
         // Should be approximately 10 seconds
-        assert!((fb.elapsed_secs - 10.0).abs() < 0.1);
+        assert!((fb.elapsed_secs - 10.0).abs() < 0.1); // safety: test
     }
 
     #[test]
@@ -263,7 +263,7 @@ mod tests {
         let memory = Memory::new(ctx.job_id);
 
         let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
-        assert!((fb.elapsed_secs - 0.0).abs() < 0.001);
+        assert!((fb.elapsed_secs - 0.0).abs() < 0.001); // safety: test
     }
 
     #[test]
@@ -276,7 +276,7 @@ mod tests {
         let fb = FallbackDeliverable::build(&ctx, &memory, "stuck");
 
         // Should be approximately 5 seconds (using now as end time)
-        assert!(fb.elapsed_secs >= 4.0 && fb.elapsed_secs <= 7.0);
+        assert!(fb.elapsed_secs >= 4.0 && fb.elapsed_secs <= 7.0); // safety: test
     }
 
     #[test]
@@ -287,23 +287,23 @@ mod tests {
         let long_reason = "x".repeat(5000);
         let fb = FallbackDeliverable::build(&ctx, &memory, &long_reason);
 
-        assert!(fb.failure_reason.len() <= 1000);
-        assert!(!fb.failure_reason.is_empty());
+        assert!(fb.failure_reason.len() <= 1000); // safety: test
+        assert!(!fb.failure_reason.is_empty()); // safety: test
     }
 
     #[test]
     fn test_truncate_str_ascii() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-        assert_eq!(truncate_str("hello world", 5), "hello");
+        assert_eq!(truncate_str("hello", 10), "hello"); // safety: test
+        assert_eq!(truncate_str("hello world", 5), "hello"); // safety: test
     }
 
     #[test]
     fn test_truncate_str_unicode() {
         // "é" is 2 bytes in UTF-8
         let s = "café";
-        assert_eq!(truncate_str(s, 10), "café");
+        assert_eq!(truncate_str(s, 10), "café"); // safety: test
         // Truncating at 4 would split "é", should back up to 3
-        assert_eq!(truncate_str(s, 4), "caf");
+        assert_eq!(truncate_str(s, 4), "caf"); // safety: test
     }
 
     #[test]
@@ -313,8 +313,8 @@ mod tests {
         let fb = FallbackDeliverable::build(&ctx, &memory, "test error");
 
         // Should serialize to JSON and back without error
-        let json = serde_json::to_value(&fb).unwrap();
-        let deserialized: FallbackDeliverable = serde_json::from_value(json).unwrap();
-        assert_eq!(deserialized.failure_reason, "test error");
+        let json = serde_json::to_value(&fb).unwrap(); // safety: test
+        let deserialized: FallbackDeliverable = serde_json::from_value(json).unwrap(); // safety: test
+        assert_eq!(deserialized.failure_reason, "test error"); // safety: test
     }
 }
