@@ -281,9 +281,7 @@ async fn webhook_handler(
                     Json(WebhookResponse {
                         message_id: Uuid::nil(),
                         status: "error".to_string(),
-                        response: Some(
-                            "Webhook authentication not configured".to_string(),
-                        ),
+                        response: Some("Webhook authentication not configured".to_string()),
                     }),
                 )
                     .into_response();
@@ -1090,7 +1088,7 @@ mod tests {
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE); // safety: test assertion
     }
 
     #[tokio::test]
