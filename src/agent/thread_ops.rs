@@ -1512,7 +1512,8 @@ impl Agent {
             .configure_token(&pending.extension_name, token)
             .await
         {
-            Ok(result) if result.activated => { // Ensure extension is actually activated
+            Ok(result) if result.activated => {
+                // Ensure extension is actually activated
                 tracing::info!(
                     "Extension '{}' configured via auth mode: {}",
                     pending.extension_name,
