@@ -38,6 +38,7 @@ workspace/
 ## Using the Workspace
 
 ```rust
+use std::sync::Arc;
 use crate::workspace::{Workspace, OpenAiEmbeddings, paths};
 
 // Create workspace for a user (wraps embeddings in a default LRU cache)
