@@ -83,7 +83,8 @@ async def test_copy_from_chat_forces_plain_text(page):
     copied = await page.evaluate(
         """
         () => {
-          const content = document.querySelector('#chat-messages .message.assistant .message-content');
+          const content = Array.from(document.querySelectorAll('#chat-messages .message.assistant .message-content'))
+            .find((el) => (el.textContent || '').includes('Copy me into Sheets'));
           if (!content) return {ok: false, reason: 'no content'};
           const range = document.createRange();
           range.selectNodeContents(content);
