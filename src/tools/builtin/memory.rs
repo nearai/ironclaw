@@ -341,19 +341,6 @@ impl Tool for MemoryWriteTool {
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 }
-                "heartbeat" => {
-                    if append {
-                        self.workspace
-                            .append(paths::HEARTBEAT, content)
-                            .await
-                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                    } else {
-                        self.workspace
-                            .write(paths::HEARTBEAT, content)
-                            .await
-                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                    }
-                }
                 _ => {
                     if append {
                         self.workspace
