@@ -15,7 +15,7 @@ use ironclaw::channels::web::ws::WsConnectionTracker;
 use ironclaw::error::LlmError;
 use ironclaw::llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
-    ToolCompletionResponse,
+    ToolCompletionResponse, normalize_tool_reasoning,
 };
 
 const AUTH_TOKEN: &str = "test-openai-token";
@@ -92,7 +92,9 @@ impl LlmProvider for MockLlmProvider {
                     id: "call_mock_001".to_string(),
                     name: tool.name.clone(),
                     arguments: serde_json::json!({"test": true}),
-                    reasoning: "tool selected for integration test coverage".to_string(),
+                    reasoning: normalize_tool_reasoning(
+                        "tool selected for integration test coverage",
+                    ),
                 }],
                 input_tokens: 15,
                 output_tokens: 8,
