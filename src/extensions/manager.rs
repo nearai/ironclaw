@@ -786,6 +786,19 @@ impl ExtensionManager {
         Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
 
+        // Clean up any in-progress OAuth flows for this extension.
+        // TCP mode: abort the listener task so port 9876 is freed immediately.
+        // Gateway mode: remove stale pending flow entries.
+        if let Some(pending) = self.pending_auth.write().await.remove(name)
+            && let Some(handle) = pending.task_handle
+        {
+            handle.abort();
+        }
+        self.pending_oauth_flows
+            .write()
+            .await
+            .retain(|_, flow| flow.extension_name != name);
+
         match kind {
             ExtensionKind::McpServer => {
                 // Unregister tools with this server's prefix
@@ -818,6 +831,14 @@ impl ExtensionManager {
             ExtensionKind::WasmTool => {
                 // Unregister from tool registry
                 self.tool_registry.unregister(name).await;
+
+                // Evict compiled module from runtime cache so reinstall uses fresh binary
+                if let Some(ref rt) = self.wasm_tool_runtime {
+                    rt.remove(name).await;
+                }
+
+                // Clear stale activation errors so reinstall starts clean
+                self.activation_errors.write().await.remove(name);
 
                 // Revoke credential mappings from the shared registry
                 let cap_path = self
@@ -858,6 +879,9 @@ impl ExtensionManager {
                 // Remove from active set and persist
                 self.active_channel_names.write().await.remove(name);
                 self.persist_active_channels().await;
+
+                // Clear stale activation errors so reinstall starts clean
+                self.activation_errors.write().await.remove(name);
 
                 // Delete channel files
                 let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
@@ -2860,6 +2884,17 @@ impl ExtensionManager {
             });
         }
 
+        // Check auth status — block activation if required secrets are missing.
+        // NeedsAuth (OAuth not yet completed) is allowed because configure() loads
+        // the tool first, then starts the OAuth flow to obtain the token.
+        let auth_state = self.check_tool_auth_status(name).await;
+        if auth_state == ToolAuthState::NeedsSetup {
+            return Err(ExtensionError::ActivationFailed(format!(
+                "Tool '{}' requires configuration. Use the setup form to provide credentials.",
+                name
+            )));
+        }
+
         let runtime = self.wasm_tool_runtime.as_ref().ok_or_else(|| {
             ExtensionError::ActivationFailed("WASM runtime not available".to_string())
         })?;
@@ -4495,13 +4530,17 @@ mod tests {
     // available" because the ExtensionManager had `wasm_tool_runtime: None`.
 
     /// Build a minimal ExtensionManager suitable for unit tests.
-    fn make_test_manager(
+    fn make_test_manager_with_dirs(
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
+        channels_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::mcp::process::McpProcessManager;
         use crate::tools::mcp::session::McpSessionManager;
+
+        std::fs::create_dir_all(&tools_dir).ok();
+        std::fs::create_dir_all(&channels_dir).ok();
 
         let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
         let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
@@ -4517,13 +4556,20 @@ mod tests {
             tools,
             None, // hooks
             wasm_runtime,
-            tools_dir.clone(),
-            tools_dir, // channels dir (unused here)
-            None,      // tunnel_url
+            tools_dir,
+            channels_dir,
+            None, // tunnel_url
             "test".to_string(),
             None, // db
             vec![],
         )
+    }
+
+    fn make_test_manager(
+        wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
+        tools_dir: std::path::PathBuf,
+    ) -> crate::extensions::manager::ExtensionManager {
+        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir)
     }
 
     #[tokio::test]
@@ -4878,6 +4924,145 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_remove_wasm_tool_clears_pending_oauth_state_and_activation_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        std::fs::write(dir.path().join("gmail.wasm"), b"fake-tool").expect("write tool");
+
+        let listener = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        let abort_handle = listener.abort_handle();
+        mgr.pending_auth.write().await.insert(
+            "gmail".to_string(),
+            super::PendingAuth {
+                _name: "gmail".to_string(),
+                _kind: ExtensionKind::WasmTool,
+                created_at: std::time::Instant::now(),
+                task_handle: Some(listener),
+            },
+        );
+
+        mgr.activation_errors
+            .write()
+            .await
+            .insert("gmail".to_string(), "cached failure".to_string());
+
+        let secrets = Arc::clone(&mgr.secrets);
+        mgr.pending_oauth_flows().write().await.insert(
+            "gmail-state".to_string(),
+            crate::cli::oauth_defaults::PendingOAuthFlow {
+                extension_name: "gmail".to_string(),
+                display_name: "Gmail".to_string(),
+                token_url: "https://example.com/token".to_string(),
+                client_id: "client123".to_string(),
+                client_secret: None,
+                redirect_uri: "https://example.com/oauth/callback".to_string(),
+                code_verifier: None,
+                access_token_field: "access_token".to_string(),
+                secret_name: "google_oauth_token".to_string(),
+                provider: None,
+                validation_endpoint: None,
+                scopes: vec![],
+                user_id: "test".to_string(),
+                secrets: Arc::clone(&secrets),
+                sse_sender: None,
+                gateway_token: None,
+                resource: None,
+                client_id_secret_name: None,
+                created_at: std::time::Instant::now(),
+            },
+        );
+        mgr.pending_oauth_flows().write().await.insert(
+            "other-state".to_string(),
+            crate::cli::oauth_defaults::PendingOAuthFlow {
+                extension_name: "web-search".to_string(),
+                display_name: "Web Search".to_string(),
+                token_url: "https://example.com/token".to_string(),
+                client_id: "client456".to_string(),
+                client_secret: None,
+                redirect_uri: "https://example.com/oauth/callback".to_string(),
+                code_verifier: None,
+                access_token_field: "access_token".to_string(),
+                secret_name: "other_token".to_string(),
+                provider: None,
+                validation_endpoint: None,
+                scopes: vec![],
+                user_id: "test".to_string(),
+                secrets,
+                sse_sender: None,
+                gateway_token: None,
+                resource: None,
+                client_id_secret_name: None,
+                created_at: std::time::Instant::now(),
+            },
+        );
+
+        let result = mgr.remove("gmail").await;
+        assert!(result.is_ok(), "remove should succeed: {:?}", result.err());
+
+        tokio::task::yield_now().await;
+
+        assert!(
+            mgr.pending_auth.read().await.get("gmail").is_none(),
+            "pending auth entry should be removed"
+        );
+        assert!(
+            abort_handle.is_finished(),
+            "pending auth listener should be aborted"
+        );
+        assert!(
+            !mgr.activation_errors.read().await.contains_key("gmail"),
+            "stale activation error should be cleared"
+        );
+
+        let flows = mgr.pending_oauth_flows().read().await;
+        assert!(
+            !flows.contains_key("gmail-state"),
+            "gateway OAuth flow for removed extension should be cleared"
+        );
+        assert!(
+            flows.contains_key("other-state"),
+            "unrelated pending OAuth flows should be retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_wasm_channel_clears_activation_error_and_deletes_files() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone());
+
+        let wasm_path = channels_dir.join("telegram.wasm");
+        let cap_path = channels_dir.join("telegram.capabilities.json");
+        std::fs::write(&wasm_path, b"fake-channel").expect("write channel");
+        std::fs::write(&cap_path, b"{}").expect("write capabilities");
+
+        mgr.activation_errors
+            .write()
+            .await
+            .insert("telegram".to_string(), "channel failed".to_string());
+
+        let result = mgr.remove("telegram").await;
+        assert!(result.is_ok(), "remove should succeed: {:?}", result.err());
+
+        assert!(
+            !mgr.activation_errors.read().await.contains_key("telegram"),
+            "channel activation error should be cleared on remove"
+        );
+        assert!(
+            !wasm_path.exists(),
+            "channel wasm file should be deleted on remove"
+        );
+        assert!(
+            !cap_path.exists(),
+            "channel capabilities file should be deleted on remove"
+        );
+    }
+
     #[test]
     fn test_sanitize_url_with_query_params() {
         let url = "https://api.example.com/path?api_key=secret123&token=abc";
@@ -5153,7 +5338,6 @@ mod tests {
             Some("https://my-gateway.example.com/oauth/callback".to_string()),
         );
     }
-
     // ── Regression tests for PR #677 (unify-extension-lifecycle) ─────────
 
     #[tokio::test]
@@ -5303,7 +5487,6 @@ mod tests {
             "configure should have stored the relay stream token"
         );
     }
-
     #[test]
     fn test_validation_failed_is_distinct_error_variant() {
         // Regression: ValidationFailed must be a distinct error variant so

@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::agent::SessionManager as AgentSessionManager;
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::config::Config;
 use crate::context::ContextManager;
@@ -46,6 +47,8 @@ pub struct AppComponents {
     pub log_broadcaster: Arc<LogBroadcaster>,
     pub context_manager: Arc<ContextManager>,
     pub hooks: Arc<HookRegistry>,
+    /// Shared thread/session manager used by the standard agent runtime.
+    pub agent_session_manager: Arc<AgentSessionManager>,
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
@@ -287,6 +290,7 @@ impl AppBuilder {
             Arc::new(ToolRegistry::new())
         };
         tools.register_builtin_tools();
+        tools.register_tool_info();
 
         if let Some(ref ss) = self.secrets_store {
             tools.register_secrets_tools(Arc::clone(ss));
@@ -300,7 +304,8 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db("default", db.clone());
+            let mut ws = Workspace::new_with_db("default", db.clone())
+                .with_search_config(&self.config.search);
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings(emb.clone());
             }
@@ -689,6 +694,8 @@ impl AppBuilder {
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
+        let agent_session_manager =
+            Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
 
         let (
             mcp_session_manager,
@@ -795,6 +802,7 @@ impl AppBuilder {
             log_broadcaster: self.log_broadcaster,
             context_manager,
             hooks,
+            agent_session_manager,
             skill_registry,
             skill_catalog,
             cost_guard,
@@ -803,5 +811,71 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+
+    use crate::agent::SessionManager as AgentSessionManager;
+    use crate::hooks::{
+        Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint, HookRegistry,
+    };
+
+    struct SessionStartHook {
+        tx: mpsc::UnboundedSender<(String, String)>,
+    }
+
+    #[async_trait]
+    impl Hook for SessionStartHook {
+        fn name(&self) -> &str {
+            "session-start-test"
+        }
+
+        fn hook_points(&self) -> &[HookPoint] {
+            &[HookPoint::OnSessionStart]
+        }
+
+        async fn execute(
+            &self,
+            event: &HookEvent,
+            _ctx: &HookContext,
+        ) -> Result<HookOutcome, HookError> {
+            if let HookEvent::SessionStart {
+                user_id,
+                session_id,
+            } = event
+            {
+                self.tx
+                    .send((user_id.clone(), session_id.clone()))
+                    .expect("test channel receiver should be alive");
+            } else {
+                panic!("SessionStartHook received an unexpected event: {event:?}");
+            }
+            Ok(HookOutcome::ok())
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_session_manager_runs_session_start_hooks() {
+        let hooks = Arc::new(HookRegistry::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hooks.register(Arc::new(SessionStartHook { tx })).await;
+
+        let manager = AgentSessionManager::new().with_hooks(Arc::clone(&hooks));
+        manager.get_or_create_session("user-123").await;
+
+        let (user_id, session_id) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("session start hook should fire")
+                .expect("session start payload should be present");
+
+        assert_eq!(user_id, "user-123");
+        assert!(!session_id.is_empty());
     }
 }

@@ -457,4 +457,90 @@ mod tests {
 
         rig.shutdown();
     }
+
+    // -----------------------------------------------------------------------
+    // Test: tool_info_discovery (two-level detail)
+    // -----------------------------------------------------------------------
+    // Verifies the tool_info built-in returns:
+    // - Default (no include_schema): name, description, parameter names array
+    // - With include_schema: true: adds full typed JSON Schema
+
+    #[tokio::test]
+    async fn tool_info_discovery() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/tool_info_discovery.json"
+        ))
+        .expect("failed to load tool_info_discovery.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("What is the schema for the echo and time tools?")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        // tool_info should have been called twice (echo + time), both succeeding.
+        let completed = rig.tool_calls_completed();
+        let tool_info_calls: Vec<_> = completed.iter().filter(|(n, _)| n == "tool_info").collect();
+        assert_eq!(
+            tool_info_calls.len(),
+            2,
+            "Expected 2 tool_info calls, got {tool_info_calls:?}"
+        );
+        assert!(
+            tool_info_calls.iter().all(|(_, ok)| *ok),
+            "All tool_info calls should succeed: {tool_info_calls:?}"
+        );
+
+        // Verify the results contain expected fields.
+        let results = rig.tool_results();
+        let info_results: Vec<_> = results.iter().filter(|(n, _)| n == "tool_info").collect();
+
+        // First call was for "echo" (default, no include_schema) — result should
+        // contain "echo" and "parameters" as an array of names (not full schema).
+        let echo_result = info_results
+            .iter()
+            .find(|(_, preview)| preview.contains("echo"))
+            .expect("tool_info result should contain 'echo'");
+        assert!(
+            echo_result.1.contains("message"),
+            "echo default result should list 'message' parameter name: {:?}",
+            echo_result.1
+        );
+        // Default mode should NOT include the full "schema" key
+        let echo_json: serde_json::Value = serde_json::from_str(&echo_result.1)
+            .expect("echo tool_info result should be valid JSON");
+        assert!(
+            echo_json.get("schema").is_none(),
+            "Default tool_info should not include schema field: {:?}",
+            echo_result.1
+        );
+
+        // Second call was for "time" with include_schema: true — result should
+        // contain "time", "schema" field with full object.
+        let time_result = info_results
+            .iter()
+            .find(|(_, preview)| preview.contains("time"))
+            .expect("tool_info result should contain 'time'");
+        let time_json: serde_json::Value = serde_json::from_str(&time_result.1)
+            .expect("time tool_info result should be valid JSON");
+        assert!(
+            time_json.get("schema").is_some(),
+            "include_schema: true should include schema field: {:?}",
+            time_result.1
+        );
+        assert!(
+            time_json["schema"]["properties"].is_object(),
+            "schema should have properties: {:?}",
+            time_result.1
+        );
+
+        rig.shutdown();
+    }
 }

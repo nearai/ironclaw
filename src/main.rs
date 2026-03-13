@@ -67,6 +67,10 @@ async fn async_main() -> anyhow::Result<()> {
             )
             .await;
         }
+        Some(Command::Routines(routines_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_routines_cli(routines_cmd, cli.config.as_deref()).await;
+        }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
             return run_mcp_command(*mcp_cmd.clone()).await;
@@ -429,9 +433,8 @@ async fn async_main() -> anyhow::Result<()> {
         "Lifecycle hooks initialized"
     );
 
-    // Create session manager (shared between agent and web gateway)
-    let session_manager =
-        Arc::new(ironclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
+    // Reuse the shared agent session manager prepared by AppBuilder.
+    let session_manager = Arc::clone(&components.agent_session_manager);
 
     // Lazy scheduler slot — filled after Agent::new creates the Scheduler.
     // Allows CreateJobTool to dispatch local jobs via the Scheduler even though
