@@ -509,17 +509,24 @@ async fn webhook_handler(
         }
     }
 
-    // HMAC-SHA256 signature verification (Slack-style)
+    // HMAC-SHA256 signature verification (Slack-style or WhatsApp-style)
     if let Some(hmac_secret) = state.router.get_hmac_secret(channel_name).await {
-        let timestamp = headers
+        // Try Slack-style headers first
+        let slack_timestamp = headers
             .get("x-slack-request-timestamp")
             .and_then(|v| v.to_str().ok());
-        let sig_header = headers
+        let slack_sig = headers
             .get("x-slack-signature")
             .and_then(|v| v.to_str().ok());
 
-        match (timestamp, sig_header) {
-            (Some(ts), Some(sig)) => {
+        // Try WhatsApp-style header
+        let whatsapp_sig = headers
+            .get("x-hub-signature-256")
+            .and_then(|v| v.to_str().ok());
+
+        match (slack_timestamp, slack_sig, whatsapp_sig) {
+            // Slack-style verification
+            (Some(ts), Some(sig), _) => {
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -534,7 +541,7 @@ async fn webhook_handler(
                 ) {
                     tracing::warn!(
                         channel = %channel_name,
-                        "HMAC-SHA256 signature verification failed"
+                        "HMAC-SHA256 signature verification failed (Slack-style)"
                     );
                     return (
                         StatusCode::UNAUTHORIZED,
@@ -543,17 +550,38 @@ async fn webhook_handler(
                         })),
                     );
                 }
-                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified");
+                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified (Slack-style)");
             }
+            // WhatsApp-style verification
+            (_, _, Some(sig)) => {
+                if !crate::channels::wasm::signature::verify_hmac_sha256(
+                    &hmac_secret,
+                    sig,
+                    &body,
+                ) {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        "HMAC-SHA256 signature verification failed (WhatsApp-style)"
+                    );
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "error": "Invalid signature"
+                        })),
+                    );
+                }
+                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified (WhatsApp-style)");
+            }
+            // No recognized signature headers
             _ => {
                 tracing::warn!(
                     channel = %channel_name,
-                    "Slack signature headers missing but secret is registered"
+                    "HMAC signature headers missing but secret is registered"
                 );
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
-                        "error": "Missing Slack signature headers"
+                        "error": "Missing signature headers"
                     })),
                 );
             }
@@ -854,6 +882,8 @@ mod tests {
                 vec![],
                 Some("secret123".to_string()),
                 Some("X-Telegram-Bot-Api-Secret-Token".to_string()),
+                None,
+                None,
             )
             .await;
 

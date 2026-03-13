@@ -461,3 +461,147 @@ mod message_emission_tests {
         assert_eq!(state.emits_dropped(), 1);
     }
 }
+
+mod hmac_signature_tests {
+    use super::*;
+
+    /// Test HMAC-SHA256 signature verification (WhatsApp-style)
+    #[test]
+    fn test_verify_hmac_sha256_valid_signature() {
+        let secret = "my_app_secret";
+        let body = br#"{"entry":[{"changes":[{"value":{"messages":[{"id":"wamid.123","from":"15551234567","type":"text","text":{"body":"Hello"}}]}}]}]}"#;
+
+        // Compute expected signature
+        let expected_sig = {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            type HmacSha256 = Hmac<Sha256>;
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+            mac.update(body);
+            let result = mac.finalize();
+            format!("sha256={}", hex::encode(result.into_bytes()))
+        };
+
+        // Verify using the signature module
+        let result = ironclaw::channels::wasm::signature::verify_hmac_sha256(
+            secret,
+            &expected_sig,
+            body,
+        );
+        assert!(result, "Valid signature should verify");
+    }
+
+    #[test]
+    fn test_verify_hmac_sha256_wrong_secret() {
+        let secret = "my_app_secret";
+        let wrong_secret = "wrong_secret";
+        let body = br#"{"test": "data"}"#;
+
+        // Compute signature with correct secret
+        let sig = {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            type HmacSha256 = Hmac<Sha256>;
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+            mac.update(body);
+            let result = mac.finalize();
+            format!("sha256={}", hex::encode(result.into_bytes()))
+        };
+
+        // Verify with wrong secret should fail
+        let result = ironclaw::channels::wasm::signature::verify_hmac_sha256(
+            wrong_secret,
+            &sig,
+            body,
+        );
+        assert!(!result, "Wrong secret should fail verification");
+    }
+
+    #[test]
+    fn test_verify_hmac_sha256_tampered_body() {
+        let secret = "my_app_secret";
+        let body = br#"{"test": "data"}"#;
+        let tampered = br#"{"test": "tampered"}"#;
+
+        // Compute signature for original body
+        let sig = {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            type HmacSha256 = Hmac<Sha256>;
+            let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+            mac.update(body);
+            let result = mac.finalize();
+            format!("sha256={}", hex::encode(result.into_bytes()))
+        };
+
+        // Verify with tampered body should fail
+        let result = ironclaw::channels::wasm::signature::verify_hmac_sha256(
+            secret,
+            &sig,
+            tampered,
+        );
+        assert!(!result, "Tampered body should fail verification");
+    }
+
+    #[test]
+    fn test_verify_hmac_sha256_invalid_header_format() {
+        let secret = "my_app_secret";
+        let body = br#"{"test": "data"}"#;
+
+        // Invalid formats
+        assert!(!ironclaw::channels::wasm::signature::verify_hmac_sha256(
+            secret, "invalid", body
+        ));
+        assert!(!ironclaw::channels::wasm::signature::verify_hmac_sha256(
+            secret, "sha256=not_hex!", body
+        ));
+        assert!(!ironclaw::channels::wasm::signature::verify_hmac_sha256(
+            secret, "", body
+        ));
+    }
+
+    /// Test that router properly registers and retrieves HMAC secrets
+    #[tokio::test]
+    async fn test_router_hmac_secret_registration() {
+        let router = WasmChannelRouter::new();
+        let runtime = create_test_runtime();
+        let channel = Arc::new(create_test_channel(
+            runtime,
+            "whatsapp",
+            vec!["/webhook/whatsapp"],
+        ));
+
+        // Register channel with HMAC secret
+        router
+            .register(
+                channel,
+                vec![],
+                Some("verify_token_123".to_string()),
+                Some("X-Hub-Signature-256".to_string()),
+                Some("query_param".to_string()),
+                Some("/metadata/message_id".to_string()),
+            )
+            .await;
+
+        // Register HMAC secret separately (simulating setup.rs behavior)
+        router.register_hmac_secret("whatsapp", "my_app_secret").await;
+
+        // Verify HMAC secret is registered
+        assert_eq!(
+            router.get_hmac_secret("whatsapp").await,
+            Some("my_app_secret".to_string())
+        );
+
+        // Verify verification mode is stored
+        assert_eq!(
+            router.get_verification_mode("whatsapp").await,
+            Some("query_param".to_string())
+        );
+
+        // Verify message ID pointer is stored
+        assert_eq!(
+            router.get_message_id_json_pointer("whatsapp").await,
+            Some("/metadata/message_id".to_string())
+        );
+    }
+}
