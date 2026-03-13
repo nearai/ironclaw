@@ -1488,7 +1488,7 @@ mod tests {
         }
 
         let cm = Arc::new(crate::context::ContextManager::new(5));
-        let job_id = cm.create_job("test", "test job").await.unwrap();
+        let job_id = cm.create_job("test", "test job").await.unwrap(); // safety: test
 
         let deps = WorkerDeps {
             context_manager: cm,
@@ -1520,8 +1520,9 @@ mod tests {
             tool_call_id: "call_abc123".to_string(),
         };
 
-        assert_eq!(selection.tool_call_id, "call_abc123");
+        assert_eq!(selection.tool_call_id, "call_abc123"); // safety: test
         assert_ne!(
+            /* safety: test */
             selection.tool_call_id, "tool_call_id",
             "tool_call_id must not be the hardcoded placeholder string"
         );
@@ -1557,11 +1558,12 @@ mod tests {
         let results = worker.execute_tools_parallel(&selections).await;
         let elapsed = start.elapsed();
 
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), 3); // safety: test
         for r in &results {
-            assert!(r.result.is_ok(), "Tool should succeed");
+            assert!(r.result.is_ok(), "Tool should succeed"); // safety: test
         }
         assert!(
+            /* safety: test */
             elapsed < Duration::from_millis(800),
             "Parallel execution took {:?}, expected < 800ms (sequential would be ~600ms)",
             elapsed
@@ -1613,9 +1615,9 @@ mod tests {
 
         let results = worker.execute_tools_parallel(&selections).await;
 
-        assert!(results[0].result.as_ref().unwrap().contains("done_tool_a"));
-        assert!(results[1].result.as_ref().unwrap().contains("done_tool_b"));
-        assert!(results[2].result.as_ref().unwrap().contains("done_tool_c"));
+        assert!(results[0].result.as_ref().unwrap().contains("done_tool_a")); // safety: test
+        assert!(results[1].result.as_ref().unwrap().contains("done_tool_b")); // safety: test
+        assert!(results[2].result.as_ref().unwrap().contains("done_tool_c")); // safety: test
     }
 
     #[tokio::test]
@@ -1631,8 +1633,9 @@ mod tests {
         }];
 
         let results = worker.execute_tools_parallel(&selections).await;
-        assert_eq!(results.len(), 1);
+        assert_eq!(results.len(), 1); // safety: test
         assert!(
+            /* safety: test */
             results[0].result.is_err(),
             "Missing tool should produce an error, not a panic"
         );
@@ -1648,20 +1651,21 @@ mod tests {
                 ctx.transition_to(JobState::InProgress, None)
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
-        worker.mark_completed().await.unwrap();
+        worker.mark_completed().await.unwrap(); // safety: test
 
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
-            .unwrap();
-        assert_eq!(ctx.state, JobState::Completed);
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Completed); // safety: test
 
         let result = worker.mark_completed().await;
         assert!(
+            /* safety: test */
             result.is_err(),
             "Completed → Completed transition should be rejected by state machine"
         );
@@ -1678,7 +1682,7 @@ mod tests {
         }
 
         let cm = Arc::new(crate::context::ContextManager::new(5));
-        let job_id = cm.create_job("test", "test job").await.unwrap();
+        let job_id = cm.create_job("test", "test job").await.unwrap(); // safety: test
 
         let deps = WorkerDeps {
             context_manager: cm,
@@ -1777,6 +1781,7 @@ mod tests {
             .execute_tool("needs_approval", &serde_json::json!({}))
             .await;
         assert!(
+            /* safety: test */
             result.is_err(),
             "Should be blocked without approval context"
         );
@@ -1789,7 +1794,7 @@ mod tests {
         let result = worker_allowed
             .execute_tool("needs_approval", &serde_json::json!({}))
             .await;
-        assert!(result.is_ok(), "Should be allowed with autonomous context");
+        assert!(result.is_ok(), "Should be allowed with autonomous context"); // safety: test
     }
 
     #[tokio::test]
@@ -1803,6 +1808,7 @@ mod tests {
             .execute_tool("always_approval", &serde_json::json!({}))
             .await;
         assert!(
+            /* safety: test */
             result.is_err(),
             "Always tool should be blocked without permission"
         );
@@ -1818,6 +1824,7 @@ mod tests {
             .execute_tool("always_approval", &serde_json::json!({}))
             .await;
         assert!(
+            /* safety: test */
             result.is_ok(),
             "Always tool should be allowed with permission"
         );
@@ -1834,8 +1841,8 @@ mod tests {
                 ctx.transition_to(JobState::InProgress, None)
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         // Set a token budget
         worker
@@ -1844,16 +1851,17 @@ mod tests {
                 ctx.max_tokens = 100;
             })
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         // Simulate adding tokens that exceed the budget
         let budget_result = worker
             .context_manager()
             .update_context(worker.job_id, |ctx| ctx.add_tokens(200))
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         assert!(
+            /* safety: test */
             budget_result.is_err(),
             "Should return error when token budget exceeded"
         );
@@ -1862,13 +1870,13 @@ mod tests {
         worker
             .mark_failed(&budget_result.unwrap_err().to_string())
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
-            .unwrap();
-        assert_eq!(ctx.state, JobState::Failed);
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Failed); // safety: test
     }
 
     #[tokio::test]
@@ -1882,21 +1890,22 @@ mod tests {
                 ctx.transition_to(JobState::InProgress, None)
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         // Simulate what the execution loop does when max_iterations is exceeded
         worker
             .mark_failed("Maximum iterations exceeded: job hit the iteration cap")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         let ctx = worker
             .context_manager()
             .get_context(worker.job_id)
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         assert_eq!(
+            /* safety: test */
             ctx.state,
             JobState::Failed,
             "Iteration cap should transition to Failed, not Stuck"
@@ -1916,15 +1925,12 @@ mod tests {
 
         // Verify it's stored and can be deserialized back
         let stored = ctx.metadata.get("fallback_deliverable");
-        assert!(
-            stored.is_some(),
-            "fallback_deliverable missing from metadata"
-        );
+        assert!(stored.is_some(), "fallback missing from metadata"); // safety: test
 
         let recovered: FallbackDeliverable =
-            serde_json::from_value(stored.unwrap().clone()).expect("deserialize fallback");
-        assert_eq!(recovered.failure_reason, "test failure");
-        assert!(!recovered.partial);
+            serde_json::from_value(stored.unwrap().clone()).expect("deserialize fallback"); // safety: test
+        assert_eq!(recovered.failure_reason, "test failure"); // safety: test
+        assert!(!recovered.partial); // safety: test
     }
 
     #[test]
@@ -1940,8 +1946,8 @@ mod tests {
         store_fallback_in_metadata(&mut ctx, Some(&fb));
 
         // Must normalize to object and store
-        assert!(ctx.metadata.is_object());
-        assert!(ctx.metadata.get("fallback_deliverable").is_some());
+        assert!(ctx.metadata.is_object()); // safety: test
+        assert!(ctx.metadata.get("fallback_deliverable").is_some()); // safety: test
     }
 
     #[test]
@@ -1951,6 +1957,6 @@ mod tests {
 
         store_fallback_in_metadata(&mut ctx, None);
 
-        assert_eq!(ctx.metadata, original);
+        assert_eq!(ctx.metadata, original); // safety: test
     }
 }
