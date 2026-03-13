@@ -1,0 +1,59 @@
+name: Staging Promotion Metadata
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  refresh-single-pr:
+    if: github.event_name == 'pull_request_target' && startsWith(github.event.pull_request.head.ref, 'staging-promote/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Refresh staging promotion PR body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: bash .github/scripts/update-staging-promotion-body.sh
+
+  refresh-open-prs-after-main-push:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Refresh all open staging promotion PR bodies
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          mapfile -t prs < <(gh pr list --repo "${REPO}" --label staging-promotion --state open \
+            --json number,headRefName \
+            --jq '.[] | select(.headRefName | startswith("staging-promote/")) | .number')
+          if [ "${#prs[@]}" -eq 0 ]; then
+            echo "No open staging promotion PRs to refresh."
+            exit 0
+          fi
+          for pr in "${prs[@]}"; do
+            echo "Refreshing staging promotion PR #${pr}"
+            PR_NUMBER="${pr}" bash .github/scripts/update-staging-promotion-body.sh
+          done

@@ -133,7 +133,6 @@ jobs:
     outputs:
       pr_number: ${{ steps.create-pr.outputs.pr_number }}
       promotion_branch: ${{ steps.branch.outputs.branch }}
-      commit_summary: ${{ steps.create-pr.outputs.commit_summary }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -218,6 +217,17 @@ jobs:
           PR_BODY+=$'\n'"**Triggered by:** Staging CI batch at ${TIMESTAMP}"
           PR_BODY+=$'\n\n'"### Commits in this batch (${COMMIT_COUNT}):"
           PR_BODY+=$'\n'"${COMMIT_MD}"
+          PR_BODY+=$'\n\n'"<!-- staging-ci-current:start -->"
+          PR_BODY+=$'\n'"### Current commits in this promotion (${COMMIT_COUNT})"
+          PR_BODY+=$'\n'
+          PR_BODY+=$'\n'"**Current base:** \`${BASE}\`"
+          PR_BODY+=$'\n'"**Current head:** \`${BRANCH}\`"
+          PR_BODY+=$'\n'"**Current range:** \`origin/${BASE}..origin/${BRANCH}\`"
+          PR_BODY+=$'\n'
+          PR_BODY+=$'\n'"${COMMIT_MD}"
+          PR_BODY+=$'\n'
+          PR_BODY+=$'\n'"*Auto-updated by staging promotion metadata workflow*"
+          PR_BODY+=$'\n'"<!-- staging-ci-current:end -->"
           PR_BODY+=$'\n\n'"Waiting for gates:"
           PR_BODY+=$'\n'"- Tests: pending"
           PR_BODY+=$'\n'"- E2E: pending"
@@ -235,15 +245,6 @@ jobs:
           PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
           echo "pr_number=${PR_NUM}" >> "$GITHUB_OUTPUT"
           echo "Created promotion PR #${PR_NUM}"
-
-          # Output commit summary for use in merge commit message
-          DELIM="COMMIT_SUMMARY_EOF_$(date +%s)"
-          {
-            echo "commit_summary<<${DELIM}"
-            echo "Commits in this batch (${COMMIT_COUNT}):"
-            echo "${COMMIT_MD}"
-            echo "${DELIM}"
-          } >> "$GITHUB_OUTPUT"
 
   # ── Gate: wait for review, process findings, merge or block ─────
   gate:
@@ -454,18 +455,41 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           PR_NUMBER: ${{ needs.create-promotion-pr.outputs.pr_number }}
-          COMMIT_SUMMARY: ${{ needs.create-promotion-pr.outputs.commit_summary }}
         run: |
           if [ -n "$PR_NUMBER" ]; then
             BASE=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName')
             if [ "$BASE" = "main" ]; then
               echo "Merging promotion PR #${PR_NUMBER} (targets main)"
               TITLE=$(gh pr view "$PR_NUMBER" --json title --jq '.title')
-              if [ -n "$COMMIT_SUMMARY" ]; then
-                gh pr merge "$PR_NUMBER" --merge --subject "#${PR_NUMBER} $TITLE" --body-file <(printf '%s' "$COMMIT_SUMMARY")
+              HEAD_BRANCH=$(gh pr view "$PR_NUMBER" --json headRefName --jq '.headRefName')
+              git fetch origin "${BASE}" "${HEAD_BRANCH}"
+              CURRENT_RANGE="origin/${BASE}..origin/${HEAD_BRANCH}"
+              MAX_COMMITS=50
+              COMMIT_LIST=$(git log --oneline --no-merges --reverse "${CURRENT_RANGE}" 2>/dev/null || echo "")
+              if [ -n "$COMMIT_LIST" ]; then
+                COMMIT_COUNT=$(echo "$COMMIT_LIST" | wc -l | tr -d ' ')
+                if [ "$COMMIT_COUNT" -gt "$MAX_COMMITS" ]; then
+                  COMMIT_MD=$(echo "$COMMIT_LIST" | head -n "$MAX_COMMITS" | sed 's/^/- /')
+                  COMMIT_MD+=$'\n'"- ... and $((COMMIT_COUNT - MAX_COMMITS)) more (see compare view)"
+                else
+                  COMMIT_MD=$(echo "$COMMIT_LIST" | sed 's/^/- /')
+                fi
               else
-                gh pr merge "$PR_NUMBER" --merge
+                COMMIT_COUNT=0
+                COMMIT_MD="- (no non-merge commits in range)"
               fi
+              {
+                echo "staging-promotion-summary-v1"
+                echo "promotion-pr: #${PR_NUMBER}"
+                echo "base: ${BASE}"
+                echo "head: ${HEAD_BRANCH}"
+                echo "current-range: ${CURRENT_RANGE}"
+                echo "current-commit-count: ${COMMIT_COUNT}"
+                echo ""
+                echo "Current commits in this promotion (${COMMIT_COUNT}):"
+                echo "${COMMIT_MD}"
+              } > /tmp/staging-promotion-merge-body.md
+              gh pr merge "$PR_NUMBER" --merge --subject "#${PR_NUMBER} $TITLE" --body-file /tmp/staging-promotion-merge-body.md
               echo "merged=true" >> "$GITHUB_OUTPUT"
             else
               echo "PR #${PR_NUMBER} targets '${BASE}' (not main) — leaving open for chain resolution"
