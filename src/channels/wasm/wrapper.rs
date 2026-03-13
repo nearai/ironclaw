@@ -760,6 +760,39 @@ fn resolve_message_scope(
     }
 }
 
+fn uses_owner_broadcast_target(user_id: &str, owner_scope_id: &str) -> bool {
+    user_id == owner_scope_id
+}
+
+fn missing_routing_target_error(name: &str, reason: String) -> ChannelError {
+    ChannelError::MissingRoutingTarget {
+        name: name.to_string(),
+        reason,
+    }
+}
+
+fn resolve_owner_broadcast_target(
+    channel_name: &str,
+    metadata: &str,
+) -> Result<String, ChannelError> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata).map_err(|e| {
+        missing_routing_target_error(
+            channel_name,
+            format!("Invalid stored owner routing metadata: {e}"),
+        )
+    })?;
+
+    crate::channels::routing_target_from_metadata(&metadata).ok_or_else(|| {
+        missing_routing_target_error(
+            channel_name,
+            format!(
+                "Stored owner routing metadata for channel '{}' is missing a delivery target.",
+                channel_name
+            ),
+        )
+    })
+}
+
 fn apply_emitted_metadata(mut msg: IncomingMessage, metadata_json: &str) -> IncomingMessage {
     if let Ok(metadata) = serde_json::from_str(metadata_json) {
         msg = msg.with_metadata(metadata);
@@ -2634,32 +2667,18 @@ impl Channel for WasmChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         self.cancel_typing_task().await;
-        let resolved_target = if user_id == self.owner_scope_id || user_id == "default" {
+        let resolved_target = if uses_owner_broadcast_target(user_id, &self.owner_scope_id) {
             let metadata = self.last_broadcast_metadata.read().await.clone().ok_or_else(|| {
-                ChannelError::SendFailed {
-                    name: self.name.clone(),
-                    reason: format!(
+                missing_routing_target_error(
+                    &self.name,
+                    format!(
                         "No stored owner routing target for channel '{}'. Send a message from the owner on this channel first.",
                         self.name
                     ),
-                }
+                )
             })?;
 
-            let metadata: serde_json::Value =
-                serde_json::from_str(&metadata).map_err(|e| ChannelError::SendFailed {
-                    name: self.name.clone(),
-                    reason: format!("Invalid stored owner routing metadata: {e}"),
-                })?;
-
-            crate::channels::routing_target_from_metadata(&metadata).ok_or_else(|| {
-                ChannelError::SendFailed {
-                    name: self.name.clone(),
-                    reason: format!(
-                        "Stored owner routing metadata for channel '{}' is missing a delivery target.",
-                        self.name
-                    ),
-                }
-            })?
+            resolve_owner_broadcast_target(&self.name, &metadata)?
         } else {
             user_id.to_string()
         };
@@ -3230,7 +3249,9 @@ mod tests {
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
-    use crate::channels::wasm::wrapper::{EmitDispatchContext, HttpResponse, WasmChannel};
+    use crate::channels::wasm::wrapper::{
+        EmitDispatchContext, HttpResponse, WasmChannel, uses_owner_broadcast_target,
+    };
     use crate::pairing::PairingStore;
     use crate::testing::credentials::TEST_TELEGRAM_BOT_TOKEN;
     use crate::tools::wasm::ResourceLimits;
@@ -4560,21 +4581,10 @@ mod tests {
         assert!(result.is_ok()); // safety: test-only assertion
     }
 
-    #[tokio::test]
-    async fn test_broadcast_legacy_default_uses_owner_metadata() {
-        let channel = create_test_channel()
-            .with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
-
-        *channel.last_broadcast_metadata.write().await = Some(r#"{"chat_id":12345}"#.to_string());
-
-        let result = channel
-            .broadcast(
-                "default",
-                crate::channels::OutgoingResponse::text("legacy hello"),
-            )
-            .await;
-
-        assert!(result.is_ok()); // safety: test-only assertion
+    #[test]
+    fn test_default_target_is_not_treated_as_owner_scope() {
+        assert!(!uses_owner_broadcast_target("default", "owner-scope")); // safety: test-only assertion
+        assert!(uses_owner_broadcast_target("default", "default")); // safety: test-only assertion
     }
 
     #[tokio::test]

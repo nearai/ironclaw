@@ -99,6 +99,14 @@ async fn create_telegram_channel(
     runtime: Arc<WasmChannelRuntime>,
     config_json: &str,
 ) -> WasmChannel {
+    create_telegram_channel_with_store(runtime, config_json, Arc::new(PairingStore::new())).await
+}
+
+async fn create_telegram_channel_with_store(
+    runtime: Arc<WasmChannelRuntime>,
+    config_json: &str,
+    pairing_store: Arc<PairingStore>,
+) -> WasmChannel {
     let module = load_telegram_module(&runtime)
         .await
         .expect("Failed to load Telegram WASM module");
@@ -108,7 +116,7 @@ async fn create_telegram_channel(
         module,
         ChannelCapabilities::for_channel("telegram").with_path("/webhook/telegram"),
         config_json.to_string(),
-        Arc::new(PairingStore::new()),
+        pairing_store,
         None,
     )
 }
@@ -246,33 +254,29 @@ async fn test_group_message_authorized_user_allowed() {
 }
 
 #[tokio::test]
-async fn test_group_message_with_owner_id_set() {
+async fn test_private_message_with_owner_id_set_uses_guest_pairing_flow() {
     require_telegram_wasm!();
     let runtime = create_test_runtime();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pairing_store = Arc::new(PairingStore::with_base_dir(dir.path().to_path_buf()));
 
-    // Config: owner_id=123 (only this user can interact)
+    // Config: owner_id=123, non-owner private DMs should enter the guest
+    // pairing flow instead of being rejected solely for not being the owner.
     let config = serde_json::json!({
-        "bot_username": "test_bot",
+        "bot_username": null,
         "owner_id": 123,
-        "dm_policy": "allowlist",
-        "allow_from": ["anyone"],  // ignored when owner_id is set
+        "dm_policy": "pairing",
+        "allow_from": [],
         "respond_to_all_group_messages": false
     })
     .to_string();
 
-    let channel = create_telegram_channel(runtime, &config).await;
+    let channel = create_telegram_channel_with_store(runtime, &config, pairing_store.clone()).await;
 
-    // Message from different user. In the owner-scope model this sender stays a
-    // guest, so the webhook still accepts the update and leaves authorization
-    // decisions to the guest flow rather than hard-dropping on owner mismatch.
+    // Non-owner private message should produce a pairing request.
     let update = build_telegram_update(
-        3,
-        102,
-        -123456789,
-        "group",
-        999, // Not the owner
-        "Other",
-        "Hey @test_bot hello",
+        3, 102, 999, "private", 999, // Not the owner
+        "Other", "hello",
     );
 
     let response = channel
@@ -289,9 +293,11 @@ async fn test_group_message_with_owner_id_set() {
 
     assert_eq!(response.status, 200);
 
-    // Regression: with owner_id set, non-owner senders should not be hard-
-    // dropped solely because they are not the owner. Guest isolation happens
-    // later in the host/runtime layer.
+    let pending = pairing_store
+        .list_pending("telegram")
+        .expect("pairing store should be readable");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, "999");
 }
 
 #[tokio::test]

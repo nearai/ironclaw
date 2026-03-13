@@ -65,12 +65,7 @@ fn resolve_routine_notification_user(metadata: &serde_json::Value) -> Option<Str
 }
 
 fn should_fallback_routine_notification(error: &ChannelError) -> bool {
-    match error {
-        ChannelError::SendFailed { reason, .. } => {
-            !reason.contains("owner routing target") && !reason.contains("delivery target")
-        }
-        _ => true,
-    }
+    !matches!(error, ChannelError::MissingRoutingTarget { .. })
 }
 
 /// Core dependencies for the agent.
@@ -1136,7 +1131,7 @@ mod tests {
 
     #[test]
     fn targeted_routine_notifications_do_not_fallback_without_owner_route() {
-        let error = ChannelError::SendFailed {
+        let error = ChannelError::MissingRoutingTarget {
             name: "telegram".to_string(),
             reason: "No stored owner routing target for channel 'telegram'.".to_string(),
         };
