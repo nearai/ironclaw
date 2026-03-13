@@ -406,13 +406,13 @@ pub fn check_approval_in_context(
     tool_name: &str,
     requirement: ApprovalRequirement,
 ) -> Result<(), ToolError> {
-    if let Some(ref approval_ctx) = ctx.approval_context {
-        if approval_ctx.is_blocked(tool_name, requirement) {
-            return Err(ToolError::NotAuthorized(format!(
-                "Tool '{}' requires approval in this context",
-                tool_name
-            )));
-        }
+    if let Some(ref approval_ctx) = ctx.approval_context
+        && approval_ctx.is_blocked(tool_name, requirement)
+    {
+        return Err(ToolError::NotAuthorized(format!(
+            "Tool '{}' requires approval in this context",
+            tool_name
+        )));
     }
     // If no approval_context in job, this is a legacy path - assume allowed
     // (the worker-level check would have caught it if called through worker)

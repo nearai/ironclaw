@@ -24,7 +24,7 @@ use crate::skills::catalog::SkillCatalog;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
-use crate::tools::wasm::{WasmToolRuntime, WasmToolStore};
+use crate::tools::wasm::{WasmToolRuntime, create_wasm_tool_store};
 use crate::workspace::{EmbeddingProvider, Workspace};
 
 /// Fully initialized application components, ready for channel wiring
@@ -377,32 +377,7 @@ impl AppBuilder {
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
             // Create WASM tool store for auto-registration if we have database handles
-            let wasm_store = if let Some(ref handles) = self.handles {
-                #[cfg(feature = "postgres")]
-                {
-                    if let Some(ref pool) = handles.pg_pool {
-                        use crate::tools::wasm::PostgresWasmToolStore;
-                        Some(Arc::new(PostgresWasmToolStore::new(pool.clone())) as Arc<dyn WasmToolStore>)
-                    } else {
-                        None
-                    }
-                }
-                #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-                {
-                    if let Some(ref libsql_db) = handles.libsql_db {
-                        use crate::tools::wasm::LibSqlWasmToolStore;
-                        Some(Arc::new(LibSqlWasmToolStore::new(Arc::clone(libsql_db))) as Arc<dyn WasmToolStore>)
-                    } else {
-                        None
-                    }
-                }
-                #[cfg(not(any(feature = "postgres", feature = "libsql")))]
-                {
-                    None
-                }
-            } else {
-                None
-            };
+            let wasm_store = create_wasm_tool_store(self.handles.as_ref());
 
             tools
                 .register_builder_tool(
