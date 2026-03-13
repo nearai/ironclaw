@@ -425,6 +425,44 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
     })
 }
 
+// ==================== WebhookDedupStore ====================
+
+#[async_trait]
+impl crate::db::WebhookDedupStore for LibSqlBackend {
+    async fn record_webhook_message_processed(
+        &self,
+        channel_name: &str,
+        message_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let key = format!("{}:{}", channel_name, message_id);
+        let conn = self.connect().await?;
+
+        let rows_affected = conn
+            .execute(
+                "INSERT OR IGNORE INTO webhook_message_dedup (key) VALUES (?1)",
+                [libsql::Value::from(key)],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows_affected == 1)
+    }
+
+    async fn cleanup_old_webhook_dedup_records(&self) -> Result<u64, DatabaseError> {
+        let conn = self.connect().await?;
+
+        let rows_affected = conn
+            .execute(
+                "DELETE FROM webhook_message_dedup WHERE created_at < datetime('now', '-30 days')",
+                (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(rows_affected)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};

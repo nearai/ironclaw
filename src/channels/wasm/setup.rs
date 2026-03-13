@@ -140,6 +140,10 @@ async fn register_channel(
 
     let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
 
+    // Extract verification mode and message ID JSON pointer before moving loaded.channel
+    let verification_mode = loaded.webhook_verification_mode();
+    let message_id_json_pointer = loaded.webhook_message_id_json_pointer();
+
     let webhook_path = format!("/webhook/{}", channel_name);
     let endpoints = vec![RegisteredEndpoint {
         channel_name: channel_name.clone(),
@@ -216,6 +220,8 @@ async fn register_channel(
             endpoints,
             webhook_secret.clone(),
             secret_header,
+            verification_mode,
+            message_id_json_pointer,
         )
         .await;
 
