@@ -5,6 +5,7 @@ set -euo pipefail
 : "${REPO:?REPO is required}"
 
 MAX_COMMITS="${MAX_COMMITS:-50}"
+DRY_RUN="${DRY_RUN:-false}"
 SECTION_START="<!-- staging-ci-current:start -->"
 SECTION_END="<!-- staging-ci-current:end -->"
 TMP_DIR="$(mktemp -d)"
@@ -75,4 +76,9 @@ else
   cat "${TMP_DIR}/section.md" >> "${TMP_DIR}/new-body.md"
 fi
 
-gh pr edit "${PR_NUMBER}" --repo "${REPO}" --body-file "${TMP_DIR}/new-body.md"
+if [ "${DRY_RUN}" = "true" ]; then
+  echo "Dry run enabled. Computed PR body for #${PR_NUMBER}:"
+  cat "${TMP_DIR}/new-body.md"
+else
+  gh pr edit "${PR_NUMBER}" --repo "${REPO}" --body-file "${TMP_DIR}/new-body.md"
+fi

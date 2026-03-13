@@ -1,6 +1,17 @@
 name: Staging Promotion Metadata
 
 on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Staging promotion PR number to refresh"
+        required: true
+        type: string
+      dry_run:
+        description: "Compute the body update without editing the PR"
+        required: false
+        type: boolean
+        default: true
   pull_request_target:
     types: [opened, synchronize, reopened]
   push:
@@ -13,21 +24,24 @@ permissions:
 
 jobs:
   refresh-single-pr:
-    if: github.event_name == 'pull_request_target' && startsWith(github.event.pull_request.head.ref, 'staging-promote/')
+    if: >
+      (github.event_name == 'pull_request_target' && startsWith(github.event.pull_request.head.ref, 'staging-promote/')) ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout base branch
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.event.pull_request.base.ref }}
           fetch-depth: 0
           fetch-tags: true
 
       - name: Refresh staging promotion PR body
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
         run: bash .github/scripts/update-staging-promotion-body.sh
 
   refresh-open-prs-after-main-push:
