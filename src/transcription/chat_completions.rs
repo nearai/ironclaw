@@ -48,11 +48,7 @@ impl ChatCompletionsTranscriptionProvider {
 
     /// Override the base URL.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        let mut url = base_url.into();
-        while url.ends_with('/') {
-            url.pop();
-        }
-        self.base_url = url;
+        self.base_url = base_url.into().trim_end_matches('/').to_string();
         self
     }
 

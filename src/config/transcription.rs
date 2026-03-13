@@ -75,14 +75,12 @@ impl TranscriptionConfig {
     ///
     /// Priority: `TRANSCRIPTION_API_KEY` > provider-specific key.
     fn resolve_api_key(&self) -> Option<&SecretString> {
-        // Explicit transcription key always wins
-        if self.api_key.is_some() {
-            return self.api_key.as_ref();
-        }
-        match self.provider.as_str() {
-            "chat_completions" => self.llm_api_key.as_ref().or(self.openai_api_key.as_ref()),
-            _ => self.openai_api_key.as_ref(),
-        }
+        self.api_key
+            .as_ref()
+            .or_else(|| match self.provider.as_str() {
+                "chat_completions" => self.llm_api_key.as_ref().or(self.openai_api_key.as_ref()),
+                _ => self.openai_api_key.as_ref(),
+            })
     }
 
     /// Create the transcription provider if enabled and configured.
@@ -100,11 +98,10 @@ impl TranscriptionConfig {
                     "Audio transcription enabled via Chat Completions API"
                 );
 
-                let mut provider =
-                    crate::transcription::ChatCompletionsTranscriptionProvider::new(
-                        api_key.clone(),
-                    )
-                    .with_model(&self.model);
+                let mut provider = crate::transcription::ChatCompletionsTranscriptionProvider::new(
+                    api_key.clone(),
+                )
+                .with_model(&self.model);
 
                 if let Some(ref base_url) = self.base_url {
                     provider = provider.with_base_url(base_url);
