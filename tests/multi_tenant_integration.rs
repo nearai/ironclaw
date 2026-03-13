@@ -26,6 +26,8 @@ use ironclaw::channels::web::server::{GatewayState, PerUserRateLimiter, RateLimi
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::test_helpers::TestGatewayBuilder;
 use ironclaw::channels::web::ws::WsConnectionTracker;
+use ironclaw::context::JobContext;
+use ironclaw::db::Database;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -847,4 +849,205 @@ async fn full_server_ws_multi_user_event_isolation() {
 
     alice_ws.close(None).await.ok();
     bob_ws.close(None).await.ok();
+}
+
+// ===========================================================================
+// DB-backed job ownership tests (libSQL in-memory)
+// ===========================================================================
+
+/// Start a multi-user server with a real (in-memory) database.
+#[cfg(feature = "libsql")]
+async fn start_multi_user_server_with_db() -> (
+    SocketAddr,
+    Arc<GatewayState>,
+    Arc<dyn Database>,
+    tempfile::TempDir,
+) {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = temp_dir.path().join("test.db");
+    let backend = ironclaw::db::libsql::LibSqlBackend::new_local(&path)
+        .await
+        .expect("failed to create test DB");
+    backend.run_migrations().await.expect("failed to run migrations");
+    let db: Arc<dyn Database> = Arc::new(backend);
+    let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(64);
+    let auth = two_user_auth();
+
+    // Build state manually so we can inject the DB
+    let state = Arc::new(GatewayState {
+        msg_tx: tokio::sync::RwLock::new(Some(agent_tx)),
+        sse: Arc::new(SseManager::new()),
+        workspace: None,
+        workspace_pool: None,
+        session_manager: None,
+        log_broadcaster: None,
+        log_level_handle: None,
+        extension_manager: None,
+        tool_registry: None,
+        store: Some(Arc::clone(&db)),
+        job_manager: None,
+        prompt_queue: None,
+        scheduler: None,
+        default_user_id: ALICE_USER_ID.to_string(),
+        shutdown_tx: tokio::sync::RwLock::new(None),
+        ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+        llm_provider: None,
+        skill_registry: None,
+        skill_catalog: None,
+        chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+        oauth_rate_limiter: RateLimiter::new(10, 60),
+        registry_entries: Vec::new(),
+        cost_guard: None,
+        routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+        startup_time: std::time::Instant::now(),
+    });
+
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let bound = ironclaw::channels::web::server::start_server(addr, state.clone(), auth)
+        .await
+        .expect("Failed to start server with DB");
+
+    (bound, state, db, temp_dir)
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn full_server_alice_sees_own_jobs_only() {
+    let (addr, _state, db, _tmp) = start_multi_user_server_with_db().await;
+
+    // Create jobs owned by Alice and Bob
+    let alice_job = JobContext::with_user(ALICE_USER_ID, "Alice's job", "Alice's work");
+    let bob_job = JobContext::with_user(BOB_USER_ID, "Bob's job", "Bob's work");
+    let alice_job_id = alice_job.job_id;
+
+    db.save_job(&alice_job).await.unwrap();
+    db.save_job(&bob_job).await.unwrap();
+
+    let client = reqwest::Client::new();
+
+    // Alice lists jobs — should only see her own
+    let resp = client
+        .get(format!("http://{}/api/jobs", addr))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let jobs = body["jobs"].as_array().unwrap();
+
+    // Alice should see exactly 1 job
+    assert_eq!(jobs.len(), 1, "Alice should see only her own job");
+    assert_eq!(jobs[0]["id"], alice_job_id.to_string());
+    assert_eq!(jobs[0]["title"], "Alice's job");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn full_server_bob_cannot_see_alice_job_detail() {
+    let (addr, _state, db, _tmp) = start_multi_user_server_with_db().await;
+
+    // Create a job owned by Alice
+    let alice_job = JobContext::with_user(ALICE_USER_ID, "Alice's secret job", "Private");
+    let alice_job_id = alice_job.job_id;
+    db.save_job(&alice_job).await.unwrap();
+
+    let client = reqwest::Client::new();
+
+    // Bob tries to access Alice's job by ID — should get 404 (not 403, to prevent enumeration)
+    let resp = client
+        .get(format!("http://{}/api/jobs/{}", addr, alice_job_id))
+        .header("Authorization", format!("Bearer {}", BOB_TOKEN))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        404,
+        "Bob should not be able to see Alice's job"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn full_server_alice_can_see_own_job_detail() {
+    let (addr, _state, db, _tmp) = start_multi_user_server_with_db().await;
+
+    let alice_job = JobContext::with_user(ALICE_USER_ID, "Alice's visible job", "Details here");
+    let alice_job_id = alice_job.job_id;
+    db.save_job(&alice_job).await.unwrap();
+
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/api/jobs/{}", addr, alice_job_id))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["id"], alice_job_id.to_string());
+    assert_eq!(body["title"], "Alice's visible job");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn full_server_bob_sees_own_jobs_only() {
+    let (addr, _state, db, _tmp) = start_multi_user_server_with_db().await;
+
+    // Create multiple jobs for each user
+    for i in 0..3 {
+        let aj = JobContext::with_user(ALICE_USER_ID, format!("Alice job {}", i), "");
+        db.save_job(&aj).await.unwrap();
+    }
+    for i in 0..2 {
+        let bj = JobContext::with_user(BOB_USER_ID, format!("Bob job {}", i), "");
+        db.save_job(&bj).await.unwrap();
+    }
+
+    let client = reqwest::Client::new();
+
+    // Bob lists jobs
+    let resp = client
+        .get(format!("http://{}/api/jobs", addr))
+        .header("Authorization", format!("Bearer {}", BOB_TOKEN))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let jobs = body["jobs"].as_array().unwrap();
+
+    assert_eq!(jobs.len(), 2, "Bob should see only his 2 jobs, not Alice's 3");
+    for job in jobs {
+        let title = job["title"].as_str().unwrap();
+        assert!(
+            title.starts_with("Bob job"),
+            "Bob should only see his own jobs, got: {}",
+            title
+        );
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn full_server_nonexistent_job_returns_404() {
+    let (addr, _state, _db, _tmp) = start_multi_user_server_with_db().await;
+
+    let client = reqwest::Client::new();
+    let fake_id = uuid::Uuid::new_v4();
+
+    let resp = client
+        .get(format!("http://{}/api/jobs/{}", addr, fake_id))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
 }
