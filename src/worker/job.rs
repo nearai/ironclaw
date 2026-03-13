@@ -545,18 +545,20 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
                 Ok(HookOutcome::Continue {
                     modified: Some(new_params),
-                }) => serde_json::from_str(&new_params).unwrap_or_else(|e| {
-                    tracing::warn!(
-                        tool = %tool_name,
-                        "Hook returned non-JSON modification for ToolCall, ignoring: {}",
-                        e
-                    );
-                    params.clone()
-                }),
-                _ => params.clone(),
+                }) => match serde_json::from_str(&new_params) {
+                    Ok(parsed) => prepare_tool_params(tool.as_ref(), &parsed),
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                            e
+                        );
+                        params
+                    }
+                },
+                _ => params,
             }
         };
-        let params = prepare_tool_params(tool.as_ref(), &params);
         if job_ctx.state == JobState::Cancelled {
             return Err(crate::error::ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
