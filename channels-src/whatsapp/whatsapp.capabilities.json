@@ -12,6 +12,11 @@
         "validation": "^[A-Za-z0-9_-]+$"
       },
       {
+        "name": "whatsapp_app_secret",
+        "prompt": "Enter your WhatsApp App Secret (from the Meta Developer Portal under your app's WhatsApp > Configuration). Used for webhook signature verification.",
+        "validation": "^[a-fA-F0-9]{32}$"
+      },
+      {
         "name": "whatsapp_verify_token",
         "prompt": "Webhook verify token (leave empty to auto-generate)",
         "optional": true,
@@ -45,7 +50,10 @@
       "webhook": {
         "secret_header": "X-Hub-Signature-256",
         "secret_name": "whatsapp_verify_token",
-        "verify_token_param": "hub.verify_token"
+        "verify_token_param": "hub.verify_token",
+        "verification_mode": "query_param",
+        "hmac_secret_name": "whatsapp_app_secret",
+        "message_id_json_pointer": "/metadata/message_id"
       }
     }
   },
@@ -54,6 +62,7 @@
     "reply_to_message": true,
     "owner_id": null,
     "dm_policy": "pairing",
-    "allow_from": []
+    "allow_from": [],
+    "mark_as_read": true
   }
 }
