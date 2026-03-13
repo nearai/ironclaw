@@ -19,6 +19,7 @@ let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
+let authFlowPending = false;
 
 // --- Slash Commands ---
 
@@ -427,6 +428,12 @@ function isCurrentThread(threadId) {
 
 function sendMessage() {
   const input = document.getElementById('chat-input');
+  if (authFlowPending) {
+    showToast('Complete the auth step before sending chat messages.', 'info');
+    const tokenField = document.querySelector('.auth-card .auth-token-input input');
+    if (tokenField) tokenField.focus();
+    return;
+  }
   if (!currentThreadId) {
     console.warn('sendMessage: no thread selected, ignoring');
     return;
@@ -455,7 +462,7 @@ function sendMessage() {
 }
 
 function enableChatInput() {
-  if (currentThreadIsReadOnly) return;
+  if (currentThreadIsReadOnly || authFlowPending) return;
   const input = document.getElementById('chat-input');
   const btn = document.getElementById('send-btn');
   if (input) {
@@ -1122,6 +1129,7 @@ function showJobCard(data) {
 // --- Auth card ---
 
 function handleAuthRequired(data) {
+  setAuthFlowPending(true, data.instructions);
   if (data.auth_url) {
     // OAuth flow: show the global auth prompt with an OAuth button + optional token paste field.
     showAuthCard(data);
@@ -1133,10 +1141,15 @@ function handleAuthRequired(data) {
 }
 
 function handleAuthCompleted(data) {
+  showToast(data.message, data.success ? 'success' : 'error');
+  if (!data.success) {
+    setAuthFlowPending(true, data.message);
+    return;
+  }
   // Dismiss only the matching extension's UI so unrelated setup work is not interrupted.
   removeAuthCard(data.extension_name);
   closeConfigureModal(data.extension_name);
-  showToast(data.message, data.success ? 'success' : 'error');
+  setAuthFlowPending(false);
   if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
     addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
   }
@@ -1316,6 +1329,7 @@ function cancelAuth(extensionName) {
     body: { extension_name: extensionName },
   }).catch(() => {});
   removeAuthCard(extensionName);
+  setAuthFlowPending(false);
   enableChatInput();
 }
 
@@ -1330,6 +1344,24 @@ function showAuthCardError(extensionName, message) {
   if (errorEl) {
     errorEl.textContent = message;
     errorEl.style.display = 'block';
+  }
+}
+
+function setAuthFlowPending(pending, instructions) {
+  authFlowPending = !!pending;
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('send-btn');
+  if (!input || !btn) return;
+  if (authFlowPending) {
+    input.disabled = true;
+    btn.disabled = true;
+    input.placeholder = instructions || 'Complete extension auth to continue chatting';
+    return;
+  }
+  if (!currentThreadIsReadOnly) {
+    input.disabled = false;
+    btn.disabled = false;
+    input.placeholder = I18n.t('chat.inputPlaceholder');
   }
 }
 

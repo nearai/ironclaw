@@ -1147,7 +1147,7 @@ async fn chat_auth_token_handler(
         .configure_token(&req.extension_name, &req.token)
         .await
     {
-        Ok(result) => {
+        Ok(result) if result.activated => {
             // Clear auth mode on the active thread
             clear_auth_mode(&state).await;
 
@@ -1159,6 +1159,7 @@ async fn chat_auth_token_handler(
 
             Ok(Json(ActionResponse::ok(result.message)))
         }
+        Ok(result) => Ok(Json(ActionResponse::fail(result.message))),
         Err(e) => {
             let msg = e.to_string();
             // Re-emit auth_required for retry on validation errors
@@ -2184,14 +2185,18 @@ async fn extensions_setup_submit_handler(
 
     match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
-            // Broadcast auth_completed so the chat UI can dismiss any in-progress
-            // auth card or setup modal that was triggered by tool_auth/tool_activate.
+            // Broadcast completion status so chat UI can dismiss success cases while
+            // leaving failed auth/configuration flows visible for correction.
             state.sse.broadcast(SseEvent::AuthCompleted {
                 extension_name: name.clone(),
-                success: true,
+                success: result.activated,
                 message: result.message.clone(),
             });
-            let mut resp = ActionResponse::ok(result.message);
+            let mut resp = if result.activated {
+                ActionResponse::ok(result.message)
+            } else {
+                ActionResponse::fail(result.message)
+            };
             resp.activated = Some(result.activated);
             resp.auth_url = result.auth_url;
             Ok(Json(resp))
