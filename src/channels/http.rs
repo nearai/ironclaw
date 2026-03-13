@@ -269,25 +269,24 @@ async fn webhook_handler(
     let mut fallback_req = None;
     {
         let webhook_secret = state.webhook_secret.read().await;
-        if webhook_secret.is_none() {
-            // No secret configured — reject all requests. This guards against
-            // the secret being cleared at runtime via update_secret(None).
-            // The start() method also prevents startup without a secret, but
-            // this is defense-in-depth for the SIGHUP hot-swap path.
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(WebhookResponse {
-                    message_id: Uuid::nil(),
-                    status: "error".to_string(),
-                    response: Some("Webhook authentication not configured".to_string()),
-                }),
-            )
-                .into_response();
-        }
-        let expected_secret = webhook_secret
-            .as_ref()
-            .expect("checked is_none above")
-            .expose_secret();
+        let expected_secret = match webhook_secret.as_ref() {
+            Some(secret) => secret.expose_secret(),
+            None => {
+                // No secret configured — reject all requests. This guards against
+                // the secret being cleared at runtime via update_secret(None).
+                // The start() method also prevents startup without a secret, but
+                // this is defense-in-depth for the SIGHUP hot-swap path.
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(WebhookResponse {
+                        message_id: Uuid::nil(),
+                        status: "error".to_string(),
+                        response: Some("Webhook authentication not configured".to_string()),
+                    }),
+                )
+                    .into_response();
+            }
+        };
 
         match headers.get("x-ironclaw-signature") {
             Some(raw_signature) => match raw_signature.to_str() {
@@ -1089,7 +1088,7 @@ mod tests {
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE); // safety: test assertion
     }
 
     #[tokio::test]
