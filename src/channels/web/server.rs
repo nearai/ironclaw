@@ -157,7 +157,10 @@ impl PerUserRateLimiter {
         {
             let map = match self.limiters.read() {
                 Ok(m) => m,
-                Err(e) => e.into_inner(),
+                Err(e) => {
+                    tracing::warn!("PerUserRateLimiter read lock poisoned; recovering");
+                    e.into_inner()
+                }
             };
             if let Some(limiter) = map.get(user_id) {
                 return limiter.check();
@@ -166,7 +169,10 @@ impl PerUserRateLimiter {
         // Slow path: create limiter under write lock.
         let mut map = match self.limiters.write() {
             Ok(m) => m,
-            Err(e) => e.into_inner(),
+            Err(e) => {
+                tracing::warn!("PerUserRateLimiter write lock poisoned; recovering");
+                e.into_inner()
+            }
         };
         let limiter = map
             .entry(user_id.to_string())
