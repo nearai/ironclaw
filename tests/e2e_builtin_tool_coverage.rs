@@ -142,16 +142,18 @@ mod tests {
 
         match &routine.action {
             RoutineAction::Lightweight {
+                prompt,
                 context_paths,
                 use_tools,
                 max_tool_rounds,
                 ..
             } => {
+                assert!(prompt.contains("Check system status"));
                 assert_eq!(context_paths, &vec!["context/priorities.md".to_string()]);
                 assert!(*use_tools, "lightweight routine should keep use_tools=true");
                 assert_eq!(*max_tool_rounds, 2);
             }
-            other => panic!("expected lightweight action, got {other:?}"),
+            other => panic!("expected lightweight routine action, got {other:?}"),
         }
 
         assert_eq!(routine.notify.channel.as_deref(), Some("telegram"));
@@ -369,7 +371,132 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 8: skill_install_routine_webhook_sim
+    // Test 8: routine_create_grouped
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_create_grouped() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_create_grouped.json"
+        ))
+        .expect("failed to load routine_create_grouped.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a grouped cron routine with delivery settings")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "weekday-digest")
+            .await
+            .expect("get_routine_by_name")
+            .expect("weekday-digest should exist");
+
+        match &routine.trigger {
+            Trigger::Cron { schedule, timezone } => {
+                assert_eq!(schedule, "0 0 9 * * MON-FRI");
+                assert_eq!(timezone.as_deref(), Some("UTC"));
+            }
+            other => panic!("expected cron trigger, got {other:?}"),
+        }
+
+        match &routine.action {
+            RoutineAction::FullJob {
+                description,
+                tool_permissions,
+                ..
+            } => {
+                assert!(description.contains("Prepare the morning digest"));
+                assert_eq!(
+                    tool_permissions,
+                    &vec!["message".to_string(), "http".to_string()]
+                );
+            }
+            other => panic!("expected full_job action, got {other:?}"),
+        }
+
+        assert_eq!(routine.notify.channel.as_deref(), Some("telegram"));
+        assert_eq!(routine.notify.user, "ops-team");
+        assert_eq!(routine.guardrails.cooldown.as_secs(), 30);
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: routine_system_event_emit_grouped
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_system_event_emit_grouped() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_system_event_emit_grouped.json"
+        ))
+        .expect("failed to load routine_system_event_emit_grouped.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Create a grouped system-event routine and emit a matching event")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "grouped-gh-issue-watch")
+            .await
+            .expect("get_routine_by_name")
+            .expect("grouped-gh-issue-watch should exist");
+
+        match &routine.trigger {
+            Trigger::SystemEvent {
+                source,
+                event_type,
+                filters,
+            } => {
+                assert_eq!(source, "github");
+                assert_eq!(event_type, "issue.opened");
+                assert_eq!(
+                    filters.get("repository").map(String::as_str),
+                    Some("nearai/ironclaw")
+                );
+                assert_eq!(filters.get("priority").map(String::as_str), Some("p1"));
+            }
+            other => panic!("expected system_event trigger, got {other:?}"),
+        }
+
+        let results = rig.tool_results();
+        let emit_result = results
+            .iter()
+            .find(|(n, _)| n == "event_emit")
+            .expect("event_emit result missing");
+        let emit_json: serde_json::Value =
+            serde_json::from_str(&emit_result.1).expect("event_emit result should be valid JSON");
+        assert!(
+            emit_json["fired_routines"].as_u64().unwrap_or(0) > 0,
+            "event_emit should have fired at least one grouped routine: {:?}",
+            emit_result.1
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: skill_install_routine_webhook_sim
     // -----------------------------------------------------------------------
 
     #[tokio::test]
