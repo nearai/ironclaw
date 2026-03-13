@@ -247,7 +247,11 @@ fn resolve_timezone_for_output(
     params: &serde_json::Value,
     ctx: &JobContext,
 ) -> Result<Option<(Tz, String)>, ToolError> {
-    if let Some(name) = params.get("timezone").and_then(|v| v.as_str()) {
+    if let Some(name) = params
+        .get("timezone")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         let tz = parse_timezone(name)?;
         return Ok(Some((tz, tz.to_string())));
     }
@@ -286,7 +290,11 @@ fn context_timezone(ctx: &JobContext) -> Result<Option<(Tz, String)>, ToolError>
 
 fn optional_timezone(params: &serde_json::Value, keys: &[&str]) -> Result<Option<Tz>, ToolError> {
     for key in keys {
-        if let Some(value) = params.get(*key).and_then(|v| v.as_str()) {
+        if let Some(value) = params
+            .get(*key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             return parse_timezone(value).map(Some);
         }
     }
@@ -533,5 +541,49 @@ mod tests {
             .expect("parse timestamp");
 
         assert_eq!(dt.to_rfc3339(), "2026-03-08T07:30:00+00:00");
+    }
+
+    #[tokio::test]
+    async fn test_now_with_empty_timezone_string_does_not_error() {
+        // LLMs sometimes pass "" for optional fields instead of omitting them.
+        // Empty timezone should be treated as absent and fall back to UTC.
+        let tool = TimeTool;
+        let ctx = JobContext::with_user("test", "chat", "test");
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "operation": "now",
+                    "timezone": ""
+                }),
+                &ctx,
+            )
+            .await
+            .expect("empty timezone string should not error");
+
+        assert!(output.result.get("iso").is_some(), "should have iso");
+    }
+
+    #[tokio::test]
+    async fn test_convert_with_empty_from_timezone_string_does_not_error() {
+        // LLMs sometimes pass "" for optional fields instead of omitting them.
+        // Empty from_timezone should be treated as absent.
+        let tool = TimeTool;
+        let ctx = JobContext::with_user("test", "chat", "test");
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "operation": "convert",
+                    "timestamp": "2026-03-08T12:00:00Z",
+                    "to_timezone": "America/New_York",
+                    "from_timezone": ""
+                }),
+                &ctx,
+            )
+            .await
+            .expect("empty from_timezone string should not error");
+
+        assert!(output.result.get("output").is_some(), "should have output");
     }
 }
