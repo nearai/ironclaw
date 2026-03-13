@@ -464,6 +464,7 @@ pub struct WasmToolWrapper {
     /// Capabilities to grant to this tool.
     capabilities: Capabilities,
     /// Cached description (from PreparedModule or override).
+    /// Stored without any tool_info hints — hints are composed at display time.
     description: String,
     /// Compact and discovery schemas for this tool.
     schemas: WasmToolSchemas,
@@ -533,20 +534,25 @@ impl WasmToolSchemas {
         self.discovery.clone()
     }
 
-    fn effective_for_coercion(
-        &self,
-        tool_iface: &wit_tool::Guest,
-        store: &mut Store<StoreData>,
-    ) -> serde_json::Value {
+    /// Return the best schema available for type coercion.
+    ///
+    /// Prefers the discovery schema when it has typed properties. Falls back
+    /// to the `PreparedModule` schema extracted at load time rather than
+    /// re-calling the WASM `schema()` export mid-execution, which could
+    /// interact with mutable linear memory state.
+    fn effective_for_coercion(&self, prepared_schema: &serde_json::Value) -> serde_json::Value {
         if !Self::is_permissive_schema(&self.discovery) {
             return self.discovery.clone();
         }
 
-        tool_iface
-            .call_schema(store)
-            .ok()
-            .and_then(|schema_str| serde_json::from_str::<serde_json::Value>(&schema_str).ok())
-            .unwrap_or_else(|| self.discovery.clone())
+        // Fall back to the load-time extracted schema from PreparedModule.
+        // This avoids calling schema() on the already-running WASM instance
+        // where mutable state could produce inconsistent results.
+        if !Self::is_permissive_schema(prepared_schema) {
+            return prepared_schema.clone();
+        }
+
+        self.discovery.clone()
     }
 }
 
@@ -557,7 +563,7 @@ impl WasmToolWrapper {
         prepared: Arc<PreparedModule>,
         capabilities: Capabilities,
     ) -> Self {
-        let mut wrapper = Self {
+        Self {
             description: prepared.description.clone(),
             schemas: WasmToolSchemas::new(prepared.schema.clone()),
             runtime,
@@ -566,43 +572,19 @@ impl WasmToolWrapper {
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
-        };
-        wrapper.append_schema_hint_if_permissive();
-        wrapper
+        }
     }
 
     /// Override the tool description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = description.into();
-        self.append_schema_hint_if_permissive();
         self
     }
 
     /// Override the parameter schema.
     pub fn with_schema(mut self, schema: serde_json::Value) -> Self {
         self.schemas = self.schemas.with_override(schema);
-        self.strip_schema_hint();
-        self.append_schema_hint_if_permissive();
         self
-    }
-
-    /// Append a tool_info hint to the description when the schema is permissive
-    /// (no typed properties), so the LLM knows to call tool_info for the full schema.
-    fn append_schema_hint_if_permissive(&mut self) {
-        if self.schemas.is_advertised_permissive() && !self.description.contains("tool_info") {
-            self.description
-                .push_str(" (call tool_info for parameter schema)");
-        }
-    }
-
-    /// Remove the tool_info hint from the description (e.g. after with_schema adds real types).
-    fn strip_schema_hint(&mut self) {
-        if let Some(pos) = self
-            .description
-            .find(" (call tool_info for parameter schema)")
-        {
-            self.description.truncate(pos);
-        }
     }
 
     /// Set credentials for HTTP request placeholder injection.
@@ -712,13 +694,14 @@ impl WasmToolWrapper {
                 }
             })?;
 
-        // Get typed interface — used for execute and error hints.
+        // Get typed interface — used for execute.
         let tool_iface = instance.near_agent_tool();
 
         // Determine effective schema for type coercion.
-        // Prefer the registration-time discovery schema when typed; otherwise
-        // try the WASM export transiently for this invocation only.
-        let effective_schema = self.schemas.effective_for_coercion(tool_iface, &mut store);
+        // Prefer the discovery schema when typed; fall back to the load-time
+        // extracted schema from PreparedModule rather than re-calling the WASM
+        // export on the already-running instance.
+        let effective_schema = self.schemas.effective_for_coercion(&self.prepared.schema);
 
         // Coerce string-encoded values to their schema-declared types.
         // LLMs frequently pass numeric values as strings (e.g. "5" instead of 5).
@@ -830,6 +813,28 @@ impl Tool for WasmToolWrapper {
 
     fn discovery_schema(&self) -> serde_json::Value {
         self.schemas.discovery()
+    }
+
+    /// Compose the tool schema for LLM function calling.
+    ///
+    /// When the advertised schema is permissive (no typed properties), appends
+    /// a hint to the description directing the LLM to call `tool_info` for the
+    /// full parameter schema. This keeps the raw description clean while still
+    /// guiding the LLM.
+    fn schema(&self) -> crate::tools::tool::ToolSchema {
+        let description = if self.schemas.is_advertised_permissive() {
+            format!(
+                "{} (call tool_info(name: \"{}\", include_schema: true) for parameter schema)",
+                self.description, self.prepared.name
+            )
+        } else {
+            self.description.clone()
+        };
+        crate::tools::tool::ToolSchema {
+            name: self.prepared.name.clone(),
+            description,
+            parameters: self.schemas.advertised(),
+        }
     }
 
     async fn execute(
@@ -1384,8 +1389,8 @@ mod tests {
             super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default());
         wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
         wrapper.description = "Search documents".to_string();
-        wrapper.append_schema_hint_if_permissive();
 
+        // Advertised schema stays permissive; discovery holds the typed schema
         assert_eq!(
             wrapper.parameters_schema(),
             serde_json::json!({
@@ -1395,8 +1400,24 @@ mod tests {
             })
         );
         assert_eq!(wrapper.discovery_schema(), discovery_schema);
-        assert!(wrapper.description().contains("tool_info"));
 
+        // Raw description is clean — no tool_info hint baked in
+        assert!(!wrapper.description().contains("tool_info"));
+
+        // But schema() composes the hint at display time when advertised is permissive
+        let schema = wrapper.schema();
+        assert!(
+            schema.description.contains("tool_info"),
+            "schema().description should contain tool_info hint: {}",
+            schema.description
+        );
+        assert!(
+            schema.description.contains("include_schema: true"),
+            "hint should mention include_schema: true: {}",
+            schema.description
+        );
+
+        // After sidecar override, both schemas match and hint disappears
         let wrapper = wrapper.with_schema(serde_json::json!({
             "type": "object",
             "properties": {
@@ -1416,7 +1437,14 @@ mod tests {
             })
         );
         assert_eq!(wrapper.discovery_schema(), wrapper.parameters_schema());
-        assert!(!wrapper.description().contains("tool_info"));
+
+        // With typed schema, schema() should NOT include tool_info hint
+        let schema = wrapper.schema();
+        assert!(
+            !schema.description.contains("tool_info"),
+            "schema().description should not contain tool_info hint when typed: {}",
+            schema.description
+        );
     }
 
     #[test]
