@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::channels::wasm::bundled::locate_bundled_channel_capabilities;
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::runtime::WasmChannelRuntime;
@@ -20,6 +21,22 @@ use crate::channels::wasm::wrapper::WasmChannel;
 use crate::db::SettingsStore;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
+
+fn resolve_capabilities_path(name: &str, wasm_path: &Path) -> Option<PathBuf> {
+    let local_cap_path = wasm_path.with_extension("capabilities.json");
+    if local_cap_path.exists() {
+        return Some(local_cap_path);
+    }
+
+    let bundled_cap_path = locate_bundled_channel_capabilities(name)?;
+    tracing::warn!(
+        channel = name,
+        local_wasm = %wasm_path.display(),
+        fallback_capabilities = %bundled_cap_path.display(),
+        "Installed channel is missing local capabilities sidecar; falling back to bundled capabilities"
+    );
+    Some(bundled_cap_path)
+}
 
 /// Loads WASM channels from the filesystem.
 pub struct WasmChannelLoader {
@@ -233,9 +250,8 @@ impl WasmChannelLoader {
                 }
             };
 
-            let cap_path = path.with_extension("capabilities.json");
-            let has_cap = cap_path.exists();
-            channel_entries.push((name, path, if has_cap { Some(cap_path) } else { None }));
+            let cap_path = resolve_capabilities_path(&name, &path);
+            channel_entries.push((name, path, cap_path));
         }
 
         // Load all channels in parallel (file I/O + WASM compilation)
@@ -417,13 +433,14 @@ pub fn default_channels_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     use tempfile::TempDir;
 
     use crate::channels::wasm::loader::{WasmChannelLoader, discover_channels};
     use crate::channels::wasm::runtime::{WasmChannelRuntime, WasmChannelRuntimeConfig};
     use crate::pairing::PairingStore;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_discover_channels_empty_dir() {
@@ -522,5 +539,52 @@ mod tests {
         let results = results.expect("missing dir should return Ok, not Err");
         assert!(results.loaded.is_empty());
         assert!(results.errors.is_empty());
+    }
+
+    #[test]
+    fn resolve_capabilities_path_prefers_local_sidecar() {
+        let dir = TempDir::new().unwrap();
+        let wasm_path = dir.path().join("telegram.wasm");
+        let cap_path = dir.path().join("telegram.capabilities.json");
+        std::fs::File::create(&wasm_path).unwrap();
+        std::fs::File::create(&cap_path).unwrap();
+
+        let resolved = super::resolve_capabilities_path("telegram", &wasm_path);
+        assert_eq!(resolved, Some(cap_path));
+    }
+
+    #[test]
+    fn resolve_capabilities_path_falls_back_to_bundled_sidecar() {
+        let install_dir = TempDir::new().unwrap();
+        let bundled_root = TempDir::new().unwrap();
+        let channel_dir = bundled_root.path().join("telegram");
+        let target_dir = channel_dir.join(PathBuf::from("target/wasm32-wasip2/release"));
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        let installed_wasm = install_dir.path().join("telegram.wasm");
+        std::fs::File::create(&installed_wasm).unwrap();
+
+        let bundled_wasm = target_dir.join("telegram_channel.wasm");
+        let bundled_cap = channel_dir.join("telegram.capabilities.json");
+        std::fs::File::create(&bundled_wasm).unwrap();
+        std::fs::File::create(&bundled_cap).unwrap();
+
+        let previous = std::env::var_os("IRONCLAW_CHANNELS_SRC");
+        unsafe {
+            std::env::set_var("IRONCLAW_CHANNELS_SRC", bundled_root.path());
+        }
+
+        let resolved = super::resolve_capabilities_path("telegram", &installed_wasm);
+
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("IRONCLAW_CHANNELS_SRC", value);
+            },
+            None => unsafe {
+                std::env::remove_var("IRONCLAW_CHANNELS_SRC");
+            },
+        }
+
+        assert_eq!(resolved, Some(bundled_cap));
     }
 }
