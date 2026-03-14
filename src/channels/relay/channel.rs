@@ -294,6 +294,8 @@ impl Channel for RelayChannel {
                 match client.connect_stream(&token, stream_timeout_secs).await {
                     Ok((new_stream, new_parser)) => {
                         tracing::info!("Relay SSE stream reconnected");
+                        consecutive_failures = 0;
+                        backoff_ms = backoff_initial_ms;
                         current_stream = new_stream;
                         // Abort old parser before replacing
                         if let Some(old) = parser_handle.write().await.take() {
@@ -312,6 +314,8 @@ impl Channel for RelayChannel {
                                         tracing::info!(
                                             "Relay SSE stream reconnected with new token"
                                         );
+                                        consecutive_failures = 0;
+                                        backoff_ms = backoff_initial_ms;
                                         current_stream = new_stream;
                                         if let Some(old) = parser_handle.write().await.take() {
                                             old.abort();
