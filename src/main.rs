@@ -672,6 +672,70 @@ async fn async_main() -> anyhow::Result<()> {
         .as_ref()
         .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
 
+    // Wire up learning system (before moving components into AgentDeps)
+    let learning_tx = if config.learning.enabled {
+        components.learning_store.as_ref().map(|ls| {
+            let synth_llm = components
+                .cheap_llm
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&components.llm));
+            let synthesizer = Arc::new(ironclaw::learning::synthesizer::LlmSkillSynthesizer::new(
+                synth_llm,
+            ));
+            ironclaw::learning::worker::spawn_learning_worker(
+                config.learning.clone(),
+                synthesizer,
+                Arc::clone(ls),
+            )
+        })
+    } else {
+        None
+    };
+
+    let profile_engine: Option<Arc<dyn ironclaw::user_profile::engine::UserProfileEngine>> =
+        if config.user_profile.enabled {
+            match (&components.user_profile_store, config.secrets.master_key()) {
+                (Some(ups), Some(master_key)) => {
+                    match ironclaw::secrets::SecretsCrypto::new(master_key.clone()) {
+                        Ok(crypto) => Some(Arc::new(
+                            ironclaw::user_profile::engine::EncryptedProfileEngine::new(
+                                Arc::clone(ups),
+                                Arc::new(crypto),
+                            )
+                            .with_max_facts(config.user_profile.max_facts_per_user),
+                        )),
+                        Err(e) => {
+                            tracing::warn!("Failed to init profile crypto: {e}");
+                            None
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!(
+                        "USER_PROFILE_ENABLED=true but database or master key unavailable — \
+                         profile engine disabled"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    // Register learning tools (session search, skill approval)
+    if let (Some(ss_store), Some(l_store)) =
+        (&components.session_search_store, &components.learning_store)
+    {
+        components
+            .tools
+            .register_learning_tools(Arc::clone(ss_store), Arc::clone(l_store));
+    }
+
+    // Register profile tools (view, edit, clear)
+    if let Some(ref engine) = profile_engine {
+        components.tools.register_profile_tools(Arc::clone(engine));
+    }
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -694,6 +758,9 @@ async fn async_main() -> anyhow::Result<()> {
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
+        learning_tx,
+        profile_engine,
+        user_profile_config: config.user_profile.clone(),
     };
 
     let mut agent = Agent::new(

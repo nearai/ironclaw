@@ -29,3 +29,8 @@ trace_*.json
 # Local Claude Code settings (machine-specific, should not be committed)
 .claude/settings.local.json
 .worktrees/
+.DS_Store
+
+# Local architecture docs and plans (not for upstream)
+docs/architecture/adaptive-learning/
+docs/plans/

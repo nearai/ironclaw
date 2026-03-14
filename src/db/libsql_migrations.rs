@@ -656,6 +656,79 @@ ALTER TABLE agent_jobs ADD COLUMN max_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE agent_jobs ADD COLUMN total_tokens_used INTEGER NOT NULL DEFAULT 0;
 "#,
     ),
+    (
+        13,
+        "learning_system",
+        // Learning system tables: session summaries (FTS + vector), user profile facts
+        // (encrypted), synthesized skills (audit log). Mirrors PostgreSQL V13 migration.
+        r#"
+    CREATE TABLE IF NOT EXISTS session_summaries (
+        _rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL DEFAULT 'default',
+        summary TEXT NOT NULL,
+        topics TEXT NOT NULL DEFAULT '[]',
+        tool_names TEXT NOT NULL DEFAULT '[]',
+        message_count INTEGER NOT NULL DEFAULT 0,
+        embedding BLOB,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_summaries_user ON session_summaries(user_id, agent_id);
+    CREATE INDEX IF NOT EXISTS idx_session_summaries_created ON session_summaries(created_at DESC);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS session_summaries_fts
+        USING fts5(summary, content=session_summaries, content_rowid='_rowid');
+    CREATE TRIGGER IF NOT EXISTS session_summaries_ai AFTER INSERT ON session_summaries BEGIN
+        INSERT INTO session_summaries_fts(rowid, summary) VALUES (new._rowid, new.summary);
+    END;
+    CREATE TRIGGER IF NOT EXISTS session_summaries_ad AFTER DELETE ON session_summaries BEGIN
+        INSERT INTO session_summaries_fts(session_summaries_fts, rowid, summary)
+            VALUES('delete', old._rowid, old.summary);
+    END;
+    CREATE TRIGGER IF NOT EXISTS session_summaries_au AFTER UPDATE ON session_summaries BEGIN
+        INSERT INTO session_summaries_fts(session_summaries_fts, rowid, summary)
+            VALUES('delete', old._rowid, old.summary);
+        INSERT INTO session_summaries_fts(rowid, summary) VALUES (new._rowid, new.summary);
+    END;
+
+    CREATE TABLE IF NOT EXISTS user_profile_facts (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL DEFAULT 'default',
+        category TEXT NOT NULL,
+        fact_key TEXT NOT NULL,
+        fact_value_encrypted BLOB NOT NULL,
+        key_salt BLOB NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        source TEXT NOT NULL DEFAULT 'inferred',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE(user_id, agent_id, category, fact_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_profile_user ON user_profile_facts(user_id, agent_id);
+
+    CREATE TABLE IF NOT EXISTS synthesized_skills (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL DEFAULT 'default',
+        skill_name TEXT NOT NULL,
+        skill_content TEXT,
+        skill_content_hash TEXT NOT NULL,
+        source_conversation_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'accepted', 'rejected')),
+        safety_scan_passed INTEGER NOT NULL DEFAULT 0,
+        quality_score INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        reviewed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_synthesized_skills_user ON synthesized_skills(user_id, agent_id);
+    CREATE INDEX IF NOT EXISTS idx_synthesized_skills_status ON synthesized_skills(status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_synthesized_skills_dedup ON synthesized_skills(user_id, skill_content_hash);
+"#,
+    ),
 ];
 
 /// Run incremental migrations that haven't been applied yet.

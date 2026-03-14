@@ -17,10 +17,11 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    ToolUpgradeTool, WriteFileTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, ProfileClearTool,
+    ProfileEditTool, ProfileViewTool, PromptQueue, ReadFileTool, SessionSearchTool, ShellTool,
+    SkillApproveTool, SkillInstallTool, SkillListPendingTool, SkillListTool, SkillRemoveTool,
+    SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
@@ -69,6 +70,12 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_search",
     "skill_install",
     "skill_remove",
+    "session_search",
+    "skill_list_pending",
+    "skill_approve",
+    "profile_view",
+    "profile_edit",
+    "profile_clear",
     "message",
     "web_fetch",
     "restart",
@@ -348,6 +355,37 @@ impl ToolRegistry {
         self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
 
         tracing::debug!("Registered 4 memory tools");
+    }
+
+    /// Register learning system tools (session search, skill approval).
+    ///
+    /// Requires the learning store handles from `DatabaseHandles`.
+    pub fn register_learning_tools(
+        &self,
+        session_search_store: Arc<dyn crate::db::SessionSearchStore>,
+        learning_store: Arc<dyn crate::db::LearningStore>,
+    ) {
+        self.register_sync(Arc::new(SessionSearchTool::new(session_search_store)));
+        self.register_sync(Arc::new(SkillListPendingTool::new(Arc::clone(
+            &learning_store,
+        ))));
+        self.register_sync(Arc::new(SkillApproveTool::new(learning_store)));
+
+        tracing::debug!("Registered 3 learning tools");
+    }
+
+    /// Register user profile tools (view, edit, clear).
+    ///
+    /// Requires a `UserProfileEngine` instance.
+    pub fn register_profile_tools(
+        &self,
+        engine: Arc<dyn crate::user_profile::engine::UserProfileEngine>,
+    ) {
+        self.register_sync(Arc::new(ProfileViewTool::new(Arc::clone(&engine))));
+        self.register_sync(Arc::new(ProfileEditTool::new(Arc::clone(&engine))));
+        self.register_sync(Arc::new(ProfileClearTool::new(engine)));
+
+        tracing::debug!("Registered 3 profile tools");
     }
 
     /// Register job management tools.

@@ -13,6 +13,7 @@ mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
+mod learning;
 pub(crate) mod llm;
 pub mod relay;
 mod routines;
@@ -23,6 +24,7 @@ mod secrets;
 mod skills;
 mod transcription;
 mod tunnel;
+mod user_profile;
 mod wasm;
 
 use std::collections::HashMap;
@@ -39,6 +41,7 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsq
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
+pub use self::learning::LearningConfig;
 pub use self::llm::default_session_path;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
@@ -50,6 +53,7 @@ pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
+pub use self::user_profile::UserProfileConfig;
 pub use self::wasm::WasmConfig;
 pub use crate::llm::config::{
     BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
@@ -95,6 +99,10 @@ pub struct Config {
     pub transcription: TranscriptionConfig,
     pub search: WorkspaceSearchConfig,
     pub observability: crate::observability::ObservabilityConfig,
+    /// Adaptive learning subsystem (skill synthesis, pattern detection).
+    pub learning: LearningConfig,
+    /// User profile engine (encrypted fact storage, prompt injection).
+    pub user_profile: UserProfileConfig,
     /// Channel-relay integration (Slack via external relay service).
     /// Present only when both `CHANNEL_RELAY_URL` and `CHANNEL_RELAY_API_KEY` are set.
     pub relay: Option<RelayConfig>,
@@ -170,6 +178,8 @@ impl Config {
             },
             transcription: TranscriptionConfig::default(),
             search: WorkspaceSearchConfig::default(),
+            learning: LearningConfig::default(),
+            user_profile: UserProfileConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
             relay: None,
         }
@@ -323,6 +333,8 @@ impl Config {
             skills: SkillsConfig::resolve()?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve()?,
+            learning: LearningConfig::resolve()?,
+            user_profile: UserProfileConfig::resolve()?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },

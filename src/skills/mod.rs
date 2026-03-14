@@ -89,6 +89,9 @@ pub enum SkillSource {
     User(PathBuf),
     /// Bundled with the application.
     Bundled(PathBuf),
+    /// Auto-synthesized by the learning system (~/.ironclaw/installed_skills/auto/).
+    /// Always loaded with `Installed` trust (read-only tool access).
+    Synthesized(PathBuf),
 }
 
 /// Activation criteria parsed from SKILL.md frontmatter `activation` section.

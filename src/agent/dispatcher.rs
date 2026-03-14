@@ -134,6 +134,34 @@ impl Agent {
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
+
+        // Inject user profile into system prompt (if profile engine is available and enabled).
+        // Profile is appended to the existing system prompt before skill context.
+        if self.deps.user_profile_config.enabled
+            && let Some(ref engine) = self.deps.profile_engine
+        {
+            match engine.load_profile(&message.user_id, "default").await {
+                Ok(profile) if !profile.facts.is_empty() => {
+                    let max_chars = self.deps.user_profile_config.max_prompt_chars;
+                    let profile_text = profile.format_for_prompt(max_chars);
+                    // Safety scan the composed profile text before injection
+                    let sanitized = self
+                        .safety()
+                        .sanitize_tool_output("user_profile", &profile_text);
+                    // Also run threat scan on the composed text (defense in depth)
+                    if ironclaw_safety::scan_content_for_threats(&sanitized.content).is_none() {
+                        reasoning = reasoning.append_system_context(&sanitized.content);
+                    } else {
+                        tracing::warn!("User profile blocked by threat scan, skipping injection");
+                    }
+                }
+                Ok(_) => {} // empty profile, nothing to inject
+                Err(e) => {
+                    tracing::warn!("Failed to load user profile: {e}");
+                }
+            }
+        }
+
         if let Some(ctx) = skill_context {
             reasoning = reasoning.with_skill_context(ctx);
         }
@@ -197,6 +225,99 @@ impl Agent {
             &loop_config,
         )
         .await?;
+
+        // Send learning event after successful turn completion.
+        // Tool names are extracted from assistant messages' tool_calls in the context.
+        if let LoopOutcome::Response(_) = &outcome {
+            if let Some(ref tx) = self.deps.learning_tx {
+                let tools_used: Vec<String> = reason_ctx
+                    .messages
+                    .iter()
+                    .filter_map(|m| m.tool_calls.as_ref())
+                    .flatten()
+                    .map(|tc| tc.name.clone())
+                    .collect();
+                let turn_count = reason_ctx
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == crate::llm::Role::User)
+                    .count()
+                    .max(1);
+                let quality_score = crate::learning::worker::heuristic_quality_score(
+                    &tools_used,
+                    turn_count,
+                    false,
+                );
+                let event = crate::learning::LearningEvent {
+                    user_id: message.user_id.clone(),
+                    agent_id: "default".to_string(),
+                    conversation_id: thread_id,
+                    tools_used,
+                    turn_count,
+                    quality_score,
+                    user_messages: reason_ctx
+                        .messages
+                        .iter()
+                        .filter(|m| m.role == crate::llm::Role::User)
+                        .map(|m| m.content.clone())
+                        .collect(),
+                    user_requested_synthesis: false,
+                };
+                let _ = tx.try_send(event); // non-blocking, drop if full
+            }
+
+            // Auto-distill user profile facts every N turns (non-blocking)
+            let distill_interval = self.deps.user_profile_config.distill_interval_turns.max(1);
+            let user_turn_count = reason_ctx
+                .messages
+                .iter()
+                .filter(|m| m.role == crate::llm::Role::User)
+                .count();
+            let should_distill = user_turn_count > 0 && user_turn_count % distill_interval == 0;
+
+            if should_distill
+                && self.deps.user_profile_config.enabled
+                && let Some(ref engine) = self.deps.profile_engine
+            {
+                let llm = self.llm().clone();
+                let engine = Arc::clone(engine);
+                let user_id = message.user_id.clone();
+                let user_msgs: Vec<String> = reason_ctx
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == crate::llm::Role::User)
+                    .map(|m| m.content.clone())
+                    .collect();
+                tokio::spawn(async move {
+                    let distiller = crate::user_profile::distiller::ProfileDistiller::new(llm);
+                    let existing = match engine.load_profile(&user_id, "default").await {
+                        Ok(profile) => profile,
+                        Err(e) => {
+                            tracing::warn!("Profile distill: failed to load profile: {e}");
+                            return;
+                        }
+                    };
+                    match distiller.extract_facts(&user_msgs, &existing.facts).await {
+                        Ok(facts) => {
+                            for fact in &facts {
+                                if let Err(e) = engine.store_fact(&user_id, "default", fact).await {
+                                    tracing::debug!("Profile distill: failed to store fact: {e}");
+                                }
+                            }
+                            if !facts.is_empty() {
+                                tracing::debug!(
+                                    "Profile distill: extracted {} fact(s)",
+                                    facts.len()
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Profile distill: extraction failed: {e}");
+                        }
+                    }
+                });
+            }
+        }
 
         match outcome {
             LoopOutcome::Response(text) => Ok(AgenticLoopResult::Response(text)),
@@ -1141,6 +1262,9 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            learning_tx: None,
+            profile_engine: None,
+            user_profile_config: crate::config::UserProfileConfig::default(),
         };
 
         Agent::new(
@@ -1980,6 +2104,9 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            learning_tx: None,
+            profile_engine: None,
+            user_profile_config: crate::config::UserProfileConfig::default(),
         };
 
         Agent::new(
@@ -2097,6 +2224,9 @@ mod tests {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                learning_tx: None,
+                profile_engine: None,
+                user_profile_config: crate::config::UserProfileConfig::default(),
             };
 
             Agent::new(
