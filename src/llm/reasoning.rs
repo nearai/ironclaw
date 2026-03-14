@@ -154,7 +154,6 @@ pub fn is_silent_reply(text: &str) -> bool {
 }
 
 /// Quick-check: bail early if no reasoning/final tags are present at all.
-/// SAFETY: all four regex statics below are hardcoded literals — expect cannot fail.
 static QUICK_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)<\s*/?\s*(?:think(?:ing)?|thought|thoughts|antthinking|reasoning|reflection|scratchpad|inner_monologue|final)\b").expect("QUICK_TAG_RE") // safety: hardcoded literal
 });

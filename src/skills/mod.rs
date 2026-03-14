@@ -47,7 +47,6 @@ const MIN_KEYWORD_TAG_LENGTH: usize = 3;
 pub const MAX_PROMPT_FILE_SIZE: u64 = 64 * 1024;
 
 /// Regex for validating skill names: alphanumeric, hyphens, underscores, dots.
-/// SAFETY: hardcoded regex literal — unwrap cannot fail.
 static SKILL_NAME_PATTERN: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$").unwrap()); // safety: hardcoded literal
 
@@ -269,14 +268,12 @@ pub fn escape_skill_content(content: &str) -> String {
         // Match `<` followed by optional `/`, optional whitespace/control chars,
         // then `skill` (case-insensitive). Catches both opening and closing tags:
         // `<skill`, `</skill`, `< skill`, `</\0skill`, `<SKILL`, etc.
-        // SAFETY: hardcoded regex literal — unwrap cannot fail.
         Regex::new(r"(?i)</?[\s\x00]*skill").unwrap() // safety: hardcoded literal
     });
 
     SKILL_TAG_RE
         .replace_all(content, |caps: &regex::Captures| {
             // Replace leading `<` with `&lt;` to neutralize the tag.
-            // SAFETY: capture group 0 (full match) always exists when callback fires.
             let matched = caps.get(0).unwrap().as_str(); // safety: group 0 always exists
             format!("&lt;{}", &matched[1..])
         })

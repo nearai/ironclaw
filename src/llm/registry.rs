@@ -217,8 +217,6 @@ impl ProviderRegistry {
     /// User providers from `~/.ironclaw/providers.json` are appended,
     /// with later entries overriding earlier ones by ID/alias.
     pub fn load() -> Self {
-        // SAFETY: providers.json is embedded at compile time via include_str! —
-        // a malformed file would be caught by CI, not at runtime.
         let builtins: Vec<ProviderDefinition> =
             serde_json::from_str(include_str!("../../providers.json"))
                 .expect("built-in providers.json must be valid JSON"); // safety: compile-time embedded file
