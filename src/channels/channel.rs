@@ -238,6 +238,8 @@ pub enum StatusUpdate {
         /// Optional workspace path where the image was saved.
         path: Option<String>,
     },
+    /// Suggested follow-up messages for the user.
+    Suggestions { suggestions: Vec<String> },
 }
 
 impl StatusUpdate {
