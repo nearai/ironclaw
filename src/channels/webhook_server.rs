@@ -278,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_begin_shutdown_takes_handles_for_lock_free_shutdown() {
-        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
         let mut server = WebhookServer::new(WebhookServerConfig { addr });
 
         let test_router = axum::Router::new().route(
@@ -286,16 +286,16 @@ mod tests {
             axum::routing::get(|| async { Json(json!({"status": "ok"})) }),
         );
         server.add_routes(test_router);
-        server.start().await.expect("Failed to start server");
+        server.start().await.expect("Failed to start server"); // safety: test assertion for setup precondition
 
         let (shutdown_tx, handle) = server.begin_shutdown();
-        assert!(shutdown_tx.is_some(), "shutdown sender should be available");
-        assert!(handle.is_some(), "server handle should be available");
+        assert!(shutdown_tx.is_some(), "shutdown sender should be available"); // safety: test assertion for expected server state
+        assert!(handle.is_some(), "server handle should be available"); // safety: test assertion for expected server state
 
         // begin_shutdown() should leave no handles behind on the server.
         let (shutdown_tx2, handle2) = server.begin_shutdown();
-        assert!(shutdown_tx2.is_none(), "shutdown sender should be consumed");
-        assert!(handle2.is_none(), "server handle should be consumed");
+        assert!(shutdown_tx2.is_none(), "shutdown sender should be consumed"); // safety: test assertion for postcondition
+        assert!(handle2.is_none(), "server handle should be consumed"); // safety: test assertion for postcondition
 
         if let Some(tx) = shutdown_tx {
             let _ = tx.send(());
