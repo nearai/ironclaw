@@ -24,7 +24,7 @@ use crate::skills::catalog::SkillCatalog;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
-use crate::tools::wasm::WasmToolRuntime;
+use crate::tools::wasm::{WasmToolRuntime, create_wasm_tool_store};
 use crate::workspace::{EmbeddingProvider, Workspace};
 
 /// Fully initialized application components, ready for channel wiring
@@ -273,6 +273,7 @@ impl AppBuilder {
             Arc<ToolRegistry>,
             Option<Arc<dyn EmbeddingProvider>>,
             Option<Arc<Workspace>>,
+            Option<Arc<WasmToolRuntime>>,
         ),
         anyhow::Error,
     > {
@@ -295,6 +296,18 @@ impl AppBuilder {
         if let Some(ref ss) = self.secrets_store {
             tools.register_secrets_tools(Arc::clone(ss));
         }
+
+        // Create WASM tool runtime early so it can be used for auto-registration
+        // by the builder tool. The tools directory is only needed when loading
+        // modules, not for engine initialisation.
+        let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> = if self.config.wasm.enabled {
+            WasmToolRuntime::new(self.config.wasm.to_runtime_config())
+                .map(Arc::new)
+                .map_err(|e| tracing::warn!("Failed to initialize WASM runtime: {}", e))
+                .ok()
+        } else {
+            None
+        };
 
         // Create embeddings provider using the unified method
         let embeddings = self
@@ -363,13 +376,21 @@ impl AppBuilder {
         if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
         {
+            // Create WASM tool store for auto-registration if we have database handles
+            let wasm_store = create_wasm_tool_store(self.handles.as_ref());
+
             tools
-                .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
+                .register_builder_tool(
+                    llm.clone(),
+                    Some(self.config.builder.to_builder_config()),
+                    wasm_tool_runtime.clone(),
+                    wasm_store,
+                )
                 .await;
             tracing::debug!("Builder mode enabled");
         }
 
-        Ok((safety, tools, embeddings, workspace))
+        Ok((safety, tools, embeddings, workspace, wasm_tool_runtime))
     }
 
     /// Phase 5: Load WASM tools, MCP servers, and create extension manager.
@@ -377,11 +398,11 @@ impl AppBuilder {
         &self,
         tools: &Arc<ToolRegistry>,
         hooks: &Arc<HookRegistry>,
+        wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
     ) -> Result<
         (
             Arc<McpSessionManager>,
             Arc<McpProcessManager>,
-            Option<Arc<WasmToolRuntime>>,
             Option<Arc<ExtensionManager>>,
             Vec<crate::extensions::RegistryEntry>,
             Vec<String>,
@@ -393,18 +414,6 @@ impl AppBuilder {
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
         let mcp_process_manager = Arc::new(McpProcessManager::new());
-
-        // Create WASM tool runtime eagerly so extensions installed after startup
-        // (e.g. via the web UI) can still be activated. The tools directory is only
-        // needed when loading modules, not for engine initialisation.
-        let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> = if self.config.wasm.enabled {
-            WasmToolRuntime::new(self.config.wasm.to_runtime_config())
-                .map(Arc::new)
-                .map_err(|e| tracing::warn!("Failed to initialize WASM runtime: {}", e))
-                .ok()
-        } else {
-            None
-        };
 
         // Load WASM tools and MCP servers concurrently
         let wasm_tools_future = {
@@ -662,7 +671,6 @@ impl AppBuilder {
         Ok((
             mcp_session_manager,
             mcp_process_manager,
-            wasm_tool_runtime,
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
@@ -690,7 +698,7 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
+        let (safety, tools, embeddings, workspace, wasm_tool_runtime) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -700,11 +708,10 @@ impl AppBuilder {
         let (
             mcp_session_manager,
             mcp_process_manager,
-            wasm_tool_runtime,
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
-        ) = self.init_extensions(&tools, &hooks).await?;
+        ) = self.init_extensions(&tools, &hooks, wasm_tool_runtime.clone()).await?;
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {

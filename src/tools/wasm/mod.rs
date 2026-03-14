@@ -141,3 +141,48 @@ pub use capabilities_schema::{
     AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema, RateLimitSchema,
     ValidationEndpointSchema,
 };
+
+// Database handles for WasmToolStore creation
+use crate::db::DatabaseHandles;
+use std::sync::Arc;
+
+/// Create a WasmToolStore based on available database features and handles.
+///
+/// This is a module-owned factory that encapsulates the feature-gated branching
+/// for creating the appropriate store implementation. Returns `None` if no
+/// database backend is available or the required feature is not enabled.
+///
+/// # Arguments
+///
+/// * `handles` - Optional database handles (PostgreSQL pool and/or libSQL DB)
+///
+/// # Returns
+///
+/// * `Some(Arc<dyn WasmToolStore>)` - If a database backend is available
+/// * `None` - If no database backend is configured
+pub fn create_wasm_tool_store(
+    handles: Option<&DatabaseHandles>,
+) -> Option<Arc<dyn WasmToolStore>> {
+    let handles = handles?;
+
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(ref pool) = handles.pg_pool {
+            return Some(Arc::new(PostgresWasmToolStore::new(pool.clone())) as Arc<dyn WasmToolStore>);
+        }
+    }
+
+    #[cfg(all(feature = "libsql", not(feature = "postgres")))]
+    {
+        if let Some(ref libsql_db) = handles.libsql_db {
+            return Some(Arc::new(LibSqlWasmToolStore::new(Arc::clone(libsql_db))) as Arc<dyn WasmToolStore>);
+        }
+    }
+
+    #[cfg(not(any(feature = "postgres", feature = "libsql")))]
+    {
+        let _ = handles;
+    }
+
+    None
+}

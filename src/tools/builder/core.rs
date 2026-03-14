@@ -44,7 +44,10 @@ use crate::llm::{
     ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolDefinition,
 };
 use crate::tools::ToolRegistry;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+use crate::tools::tool::{
+    check_approval_in_context, ApprovalContext, ApprovalRequirement, Tool, ToolError, ToolOutput,
+};
+use crate::tools::wasm::{StoreToolParams, TrustLevel, WasmStorageError, WasmToolRuntime, WasmToolStore};
 
 /// Requirement specification for building software.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +254,10 @@ pub struct LlmSoftwareBuilder {
     config: BuilderConfig,
     llm: Arc<dyn LlmProvider>,
     tools: Arc<ToolRegistry>,
+    /// Optional WASM runtime for auto-registering built tools.
+    wasm_runtime: Option<Arc<WasmToolRuntime>>,
+    /// Optional WASM tool store for storing built tools.
+    wasm_store: Option<Arc<dyn WasmToolStore>>,
 }
 
 impl LlmSoftwareBuilder {
@@ -261,7 +268,25 @@ impl LlmSoftwareBuilder {
             tracing::warn!("Failed to create build directory: {}", e);
         }
 
-        Self { config, llm, tools }
+        Self {
+            config,
+            llm,
+            tools,
+            wasm_runtime: None,
+            wasm_store: None,
+        }
+    }
+
+    /// Set the WASM runtime for auto-registering built tools.
+    pub fn with_wasm_runtime(mut self, runtime: Arc<WasmToolRuntime>) -> Self {
+        self.wasm_runtime = Some(runtime);
+        self
+    }
+
+    /// Set the WASM tool store for storing built tools.
+    pub fn with_wasm_store(mut self, store: Arc<dyn WasmToolStore>) -> Self {
+        self.wasm_store = Some(store);
+        self
     }
 
     /// Get the build tools available for the build loop.
@@ -656,6 +681,14 @@ Create alongside the .wasm file to grant capabilities:
                         // Determine artifact path
                         let artifact_path = self.find_artifact(requirement, project_dir).await;
 
+                        // Auto-register WASM tools if enabled
+                        let registered = if requirement.software_type == SoftwareType::WasmTool {
+                            self.auto_register_wasm_tool(requirement, &artifact_path, &mut logs)
+                                .await
+                        } else {
+                            false
+                        };
+
                         return Ok(BuildResult {
                             build_id,
                             requirement: requirement.clone(),
@@ -669,7 +702,7 @@ Create alongside the .wasm file to grant capabilities:
                             validation_warnings: Vec::new(),
                             tests_passed: 0,
                             tests_failed: 0,
-                            registered: false,
+                            registered,
                         });
                     }
 
@@ -777,8 +810,22 @@ Create alongside the .wasm file to grant capabilities:
                 ToolError::ExecutionFailed(format!("Tool not found: {}", tool_name))
             })?;
 
-        // Execute with a dummy context (build tools don't need job context)
-        let ctx = JobContext::default();
+        // Create context with build-specific approval permissions
+        let ctx = JobContext::default().with_approval_context(
+            ApprovalContext::autonomous_with_tools([
+                "shell".into(),
+                "read_file".into(),
+                "write_file".into(),
+                "list_dir".into(),
+                "apply_patch".into(),
+                "http".into(),
+            ])
+        );
+
+        // Check approval before executing (bypasses worker check, so we do it here)
+        let requirement = tool.requires_approval(params);
+        check_approval_in_context(&ctx, tool_name, requirement)?;
+
         tool.execute(params.clone(), &ctx).await
     }
 
@@ -804,6 +851,125 @@ Create alongside the .wasm file to grant capabilities:
             }
             _ => project_dir.to_path_buf(),
         }
+    }
+
+    /// Auto-register a successfully built WASM tool.
+    ///
+    /// This reads the WASM binary, stores it in the database, and registers it
+    /// with the tool registry. Returns `true` if registration succeeded.
+    async fn auto_register_wasm_tool(
+        &self,
+        requirement: &BuildRequirement,
+        artifact_path: &Path,
+        logs: &mut Vec<BuildLog>,
+    ) -> bool {
+        // Only auto-register if enabled
+        if !self.config.auto_register {
+            return false;
+        }
+
+        // Check we have the required dependencies
+        let (Some(runtime), Some(store)) = (&self.wasm_runtime, &self.wasm_store) else {
+            tracing::debug!("WASM auto-registration skipped: runtime or store not available");
+            return false;
+        };
+
+        logs.push(BuildLog {
+            timestamp: Utc::now(),
+            phase: BuildPhase::Registering,
+            message: "Auto-registering WASM tool".into(),
+            details: Some(format!("Tool: {}, Artifact: {:?}", requirement.name, artifact_path)),
+        });
+
+        // Read the WASM binary
+        let wasm_bytes = match std::fs::read(artifact_path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                logs.push(BuildLog {
+                    timestamp: Utc::now(),
+                    phase: BuildPhase::Registering,
+                    message: "Failed to read WASM binary".into(),
+                    details: Some(format!("Error: {}", e)),
+                });
+                tracing::warn!("Failed to read WASM artifact {:?}: {}", artifact_path, e);
+                return false;
+            }
+        };
+
+        // Store in database and register
+        let result = self
+            .store_and_register_wasm(requirement, &wasm_bytes, runtime, store)
+            .await;
+
+        match result {
+            Ok(_) => {
+                logs.push(BuildLog {
+                    timestamp: Utc::now(),
+                    phase: BuildPhase::Registering,
+                    message: "Successfully registered WASM tool".into(),
+                    details: Some(format!("Tool: {}", requirement.name)),
+                });
+                tracing::info!("Auto-registered WASM tool: {}", requirement.name);
+                true
+            }
+            Err(e) => {
+                logs.push(BuildLog {
+                    timestamp: Utc::now(),
+                    phase: BuildPhase::Registering,
+                    message: "Failed to register WASM tool".into(),
+                    details: Some(format!("Error: {}", e)),
+                });
+                tracing::warn!("Failed to auto-register WASM tool {}: {}", requirement.name, e);
+                false
+            }
+        }
+    }
+
+    /// Store a WASM tool in the database and register it with the tool registry.
+    pub async fn store_and_register_wasm(
+        &self,
+        requirement: &BuildRequirement,
+        wasm_bytes: &[u8],
+        runtime: &Arc<WasmToolRuntime>,
+        store: &Arc<dyn WasmToolStore>,
+    ) -> Result<(), AgentToolError> {
+        // Create default parameter schema (will be extracted from WIT in the future)
+        let parameters_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "input": {"type": "string", "description": "Input for the tool"}
+            },
+            "required": ["input"]
+        });
+
+        // Store the tool in the database
+        let _stored = store
+            .store(StoreToolParams {
+                user_id: "default".into(),
+                name: requirement.name.clone(),
+                version: "0.1.0".into(),
+                wit_version: "0.1.0".into(),
+                description: requirement.description.clone(),
+                wasm_binary: wasm_bytes.to_vec(),
+                parameters_schema,
+                source_url: None,
+                trust_level: TrustLevel::User,
+            })
+            .await
+            .map_err(|e| match e {
+                WasmStorageError::Database(msg) => {
+                    AgentToolError::BuilderFailed(format!("Failed to store WASM tool: {}", msg))
+                }
+                _ => AgentToolError::BuilderFailed(format!("Failed to store WASM tool: {}", e)),
+            })?;
+
+        // Register the tool from storage
+        self.tools
+            .register_wasm_from_storage(&**store, runtime, "default", &requirement.name)
+            .await
+            .map_err(|e| AgentToolError::BuilderFailed(format!("Failed to register WASM tool: {}", e)))?;
+
+        Ok(())
     }
 }
 
@@ -1395,5 +1561,14 @@ mod tests {
         let deserialized: BuildLog = serde_json::from_str(&json).unwrap();
         assert!(deserialized.details.is_none());
         assert_eq!(deserialized.phase, BuildPhase::Complete);
+    }
+
+    #[test]
+    fn test_builder_config_auto_register_can_be_disabled() {
+        let config = BuilderConfig {
+            auto_register: false,
+            ..Default::default()
+        };
+        assert!(!config.auto_register, "auto_register should be false when set");
     }
 }

@@ -483,19 +483,35 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     name: tool_name.to_string(),
                 })?;
 
-        // Check approval: use context-aware check if available, else block all non-Never tools
-        let requirement = tool.requires_approval(params);
-        let blocked =
-            ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
-        if blocked {
-            return Err(crate::error::ToolError::AuthRequired {
-                name: tool_name.to_string(),
-            }
-            .into());
-        }
-
-        // Fetch job context early so we have the real user_id for hooks and rate limiting
+        // Fetch job context early for approval checking and other needs
         let mut job_ctx = deps.context_manager.get_context(job_id).await?;
+
+        // Check approval: job-level context takes precedence over worker-level
+        let requirement = tool.requires_approval(params);
+
+        // Check job-level approval context first (most specific, e.g., builder's allowed tools)
+        if let Some(ref job_approval) = job_ctx.approval_context {
+            if job_approval.is_blocked(tool_name, requirement) {
+                return Err(crate::error::ToolError::AuthRequired {
+                    name: tool_name.to_string(),
+                }
+                .into());
+            }
+            // Job-level context exists and approved - no need to check worker-level
+        } else {
+            // No job-level context, fall back to worker-level approval check
+            let worker_level_blocked = ApprovalContext::is_blocked_or_default(
+                &deps.approval_context,
+                tool_name,
+                requirement,
+            );
+            if worker_level_blocked {
+                return Err(crate::error::ToolError::AuthRequired {
+                    name: tool_name.to_string(),
+                }
+                .into());
+            }
+        }
         // Propagate http_interceptor for trace recording/replay
         if job_ctx.http_interceptor.is_none() {
             job_ctx.http_interceptor = deps.http_interceptor.clone();
