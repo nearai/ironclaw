@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::sync::Arc;
 
 use secrecy::{ExposeSecret, SecretString};
@@ -196,6 +196,9 @@ fn validate_embedding_base_url(base_url: &str) -> Result<(), ConfigError> {
         key: "EMBEDDING_BASE_URL".to_string(),
         message: "must include a host".to_string(),
     })?;
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or_else(|| if scheme == "https" { 443 } else { 80 });
 
     if is_forbidden_embedding_host(host) {
         return Err(ConfigError::InvalidValue {
@@ -205,6 +208,13 @@ fn validate_embedding_base_url(base_url: &str) -> Result<(), ConfigError> {
     }
 
     if let Ok(ip) = host.parse::<IpAddr>() {
+        if scheme == "http" && !ip.is_loopback() {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_BASE_URL".to_string(),
+                message: "http:// is only allowed for localhost/loopback embedding servers"
+                    .to_string(),
+            });
+        }
         if is_forbidden_embedding_ip(ip) {
             return Err(ConfigError::InvalidValue {
                 key: "EMBEDDING_BASE_URL".to_string(),
@@ -216,6 +226,37 @@ fn validate_embedding_base_url(base_url: &str) -> Result<(), ConfigError> {
             key: "EMBEDDING_BASE_URL".to_string(),
             message: "http:// is only allowed for localhost/loopback embedding servers".to_string(),
         });
+    } else {
+        let addrs: Vec<IpAddr> = (host, port)
+            .to_socket_addrs()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "EMBEDDING_BASE_URL".to_string(),
+                message: format!("host '{host}' could not be resolved: {e}"),
+            })?
+            .map(|addr| addr.ip())
+            .collect();
+
+        if addrs.is_empty() {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_BASE_URL".to_string(),
+                message: format!("host '{host}' could not be resolved"),
+            });
+        }
+
+        if scheme == "http" {
+            if addrs.iter().any(|ip| !ip.is_loopback()) {
+                return Err(ConfigError::InvalidValue {
+                    key: "EMBEDDING_BASE_URL".to_string(),
+                    message: "http:// is only allowed for localhost/loopback embedding servers"
+                        .to_string(),
+                });
+            }
+        } else if let Some(bad_ip) = addrs.into_iter().find(|ip| is_forbidden_embedding_ip(*ip)) {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_BASE_URL".to_string(),
+                message: format!("host '{host}' resolves to disallowed IP '{bad_ip}'"),
+            });
+        }
     }
 
     Ok(())
@@ -223,9 +264,7 @@ fn validate_embedding_base_url(base_url: &str) -> Result<(), ConfigError> {
 
 fn is_forbidden_embedding_host(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
-    lower == "host.docker.internal"
-        || lower == "metadata.google.internal"
-        || lower == "metadata.aws.internal"
+    lower == "host.docker.internal" || lower == "metadata.google.internal"
 }
 
 fn is_forbidden_embedding_ip(ip: IpAddr) -> bool {
@@ -407,14 +446,14 @@ mod tests {
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
-            std::env::set_var("EMBEDDING_BASE_URL", "https://custom.example.com");
+            std::env::set_var("EMBEDDING_BASE_URL", "https://8.8.8.8");
         }
 
         let settings = Settings::default();
         let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
             config.openai_base_url.as_deref(),
-            Some("https://custom.example.com"),
+            Some("https://8.8.8.8"),
             "EMBEDDING_BASE_URL env var should be parsed into openai_base_url"
         );
 
@@ -468,6 +507,23 @@ mod tests {
             config.openai_base_url.as_deref(),
             Some("http://localhost:11434/v1")
         );
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn embedding_base_url_rejects_unresolvable_host() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_BASE_URL", "https://no-such-host.invalid/v1");
+        }
+        let settings = Settings::default();
+        let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
+        assert!(err.to_string().contains("could not be resolved"));
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");
