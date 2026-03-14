@@ -1688,8 +1688,9 @@ chatInput.addEventListener('keydown', (e) => {
     }
   }
 
-  // keyCode 229 (VK_PROCESS) filters out IME-handled Enter on Safari, where
-  // compositionend fires before keydown leaving e.isComposing already false.
+  // Safari fires compositionend before keydown, so e.isComposing is already false
+  // when Enter confirms IME input. keyCode 229 (VK_PROCESS) catches this case.
+  // See https://bugs.webkit.org/show_bug.cgi?id=165004
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     hideSlashAutocomplete();
