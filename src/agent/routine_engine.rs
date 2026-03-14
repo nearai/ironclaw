@@ -25,7 +25,7 @@ use crate::agent::routine::{
 };
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
-use crate::context::JobContext;
+use crate::context::{JobContext, JobState};
 use crate::db::Database;
 use crate::error::RoutineError;
 use crate::llm::{
@@ -58,6 +58,8 @@ pub struct RoutineEngine {
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
     safety: Arc<SafetyLayer>,
+    /// Whether Docker sandbox is available for full-job dispatch.
+    sandbox_available: bool,
 }
 
 impl RoutineEngine {
@@ -71,6 +73,7 @@ impl RoutineEngine {
         scheduler: Option<Arc<Scheduler>>,
         tools: Arc<ToolRegistry>,
         safety: Arc<SafetyLayer>,
+        sandbox_available: bool,
     ) -> Self {
         Self {
             config,
@@ -83,6 +86,7 @@ impl RoutineEngine {
             scheduler,
             tools,
             safety,
+            sandbox_available,
         }
     }
 
@@ -300,6 +304,133 @@ impl RoutineEngine {
         }
     }
 
+    /// Sync dispatched routine runs with their linked background job status.
+    ///
+    /// Full-job routines are fire-and-forget: the routine run is created with
+    /// `Running` status when the job is dispatched, but the run record is never
+    /// updated when the background job completes or fails. This method checks
+    /// all `Running` routine runs that have a linked job, queries the job's
+    /// current state, and updates the routine run accordingly.
+    pub async fn sync_dispatched_runs(&self) {
+        let runs = match self.store.list_dispatched_routine_runs().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("Failed to list dispatched routine runs: {}", e);
+                return;
+            }
+        };
+
+        for run in runs {
+            let Some(job_id) = run.job_id else {
+                continue;
+            };
+
+            let job = match self.store.get_job(job_id).await {
+                Ok(Some(j)) => j,
+                Ok(None) => {
+                    tracing::warn!(
+                        run_id = %run.id,
+                        job_id = %job_id,
+                        "Linked job not found, marking routine run as failed"
+                    );
+                    self.complete_dispatched_run(
+                        &run,
+                        RunStatus::Failed,
+                        "Linked job not found (may have been deleted)",
+                    )
+                    .await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        run_id = %run.id,
+                        job_id = %job_id,
+                        "Failed to query linked job: {}", e
+                    );
+                    continue;
+                }
+            };
+
+            // Sanitize the last transition reason: truncate to prevent oversized
+            // notifications and strip control characters to prevent injection.
+            let last_reason = job
+                .transitions
+                .last()
+                .and_then(|t| t.reason.clone())
+                .map(|r| sanitize_summary(&r));
+
+            let (new_status, summary) = match job.state {
+                JobState::Completed | JobState::Accepted => {
+                    let summary =
+                        last_reason.unwrap_or_else(|| "Job completed successfully".to_string());
+                    (RunStatus::Ok, summary)
+                }
+                JobState::Failed => {
+                    let summary = last_reason
+                        .unwrap_or_else(|| "Job failed (no error message recorded)".to_string());
+                    (RunStatus::Failed, summary)
+                }
+                JobState::Cancelled => (RunStatus::Failed, "Job was cancelled".to_string()),
+                // Still in progress — skip (Submitted can still transition to Failed)
+                JobState::Pending
+                | JobState::InProgress
+                | JobState::Stuck
+                | JobState::Submitted => continue,
+            };
+
+            tracing::info!(
+                run_id = %run.id,
+                job_id = %job_id,
+                status = %new_status,
+                "Syncing dispatched routine run with completed job"
+            );
+
+            self.complete_dispatched_run(&run, new_status, &summary)
+                .await;
+        }
+    }
+
+    /// Complete a dispatched routine run and send the appropriate notification.
+    async fn complete_dispatched_run(&self, run: &RoutineRun, status: RunStatus, summary: &str) {
+        if let Err(e) = self
+            .store
+            .complete_routine_run(run.id, status, Some(summary), None)
+            .await
+        {
+            tracing::error!(
+                run_id = %run.id,
+                "Failed to update dispatched routine run: {}", e
+            );
+            return;
+        }
+
+        match self.store.get_routine(run.routine_id).await {
+            Ok(Some(routine)) => {
+                send_notification(
+                    &self.notify_tx,
+                    &routine.notify,
+                    &routine.name,
+                    status,
+                    Some(summary),
+                    None,
+                )
+                .await;
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    routine_id = %run.routine_id,
+                    "Routine not found for notification (may have been deleted)"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(
+                    routine_id = %run.routine_id,
+                    "Failed to look up routine for notification: {}", e
+                );
+            }
+        }
+    }
+
     /// Fire a routine manually (from tool call or CLI).
     ///
     /// Bypasses cooldown checks (those only apply to cron/event triggers).
@@ -369,6 +500,7 @@ impl RoutineEngine {
             scheduler: self.scheduler.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
+            sandbox_available: self.sandbox_available,
         };
 
         tokio::spawn(async move {
@@ -404,6 +536,7 @@ impl RoutineEngine {
             scheduler: self.scheduler.clone(),
             tools: self.tools.clone(),
             safety: self.safety.clone(),
+            sandbox_available: self.sandbox_available,
         };
 
         // Record the run in DB, then spawn execution
@@ -454,6 +587,7 @@ struct EngineContext {
     scheduler: Option<Arc<Scheduler>>,
     tools: Arc<ToolRegistry>,
     safety: Arc<SafetyLayer>,
+    sandbox_available: bool,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -627,6 +761,14 @@ async fn execute_full_job(
     max_iterations: u32,
     tool_permissions: &[String],
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    if !ctx.sandbox_available {
+        return Err(RoutineError::JobDispatchFailed {
+            reason: "Sandbox is enabled but Docker is not available. \
+                     Install Docker or set SANDBOX_ENABLED=false to run full_job routines."
+                .to_string(),
+        });
+    }
+
     let scheduler = ctx
         .scheduler
         .as_ref()
@@ -675,9 +817,9 @@ async fn execute_full_job(
     );
 
     let summary = format!(
-        "Dispatched job {job_id} for full execution with tool access (max_iterations: {max_iterations})"
+        "Dispatched job {job_id} for full execution with tool access (max_iterations: {max_iterations}). Status will be updated when the job completes."
     );
-    Ok((RunStatus::Ok, Some(summary), None))
+    Ok((RunStatus::Running, Some(summary), None))
 }
 
 /// Execute a lightweight routine with optional tool support.
@@ -1178,6 +1320,7 @@ pub fn spawn_cron_ticker(
         loop {
             ticker.tick().await;
             engine.check_cron_triggers().await;
+            engine.sync_dispatched_runs().await;
         }
     })
 }
@@ -1189,6 +1332,16 @@ fn truncate(s: &str, max: usize) -> String {
         let end = crate::util::floor_char_boundary(s, max);
         format!("{}...", &s[..end])
     }
+}
+
+/// Sanitize a summary string from job transitions before using in notifications.
+/// Truncates to 500 chars and strips control characters to prevent injection.
+fn sanitize_summary(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect();
+    truncate(&cleaned, 500)
 }
 
 #[cfg(test)]
@@ -1385,5 +1538,113 @@ mod tests {
         let input = "abcdefghijk";
         let out = super::truncate(input, 5);
         assert_eq!(out, "abcde...");
+    }
+
+    #[test]
+    fn test_running_status_does_not_notify() {
+        let config = NotifyConfig {
+            on_success: true,
+            on_failure: true,
+            on_attention: true,
+            ..Default::default()
+        };
+        let should_notify = match RunStatus::Running {
+            RunStatus::Ok => config.on_success,
+            RunStatus::Attention => config.on_attention,
+            RunStatus::Failed => config.on_failure,
+            RunStatus::Running => false,
+        };
+        assert!(!should_notify);
+    }
+
+    #[test]
+    fn test_full_job_dispatch_returns_running_status() {
+        assert_eq!(RunStatus::Running.to_string(), "running");
+    }
+
+    #[test]
+    fn test_sandbox_unavailable_error_message() {
+        let err = crate::error::RoutineError::JobDispatchFailed {
+            reason: "Sandbox is enabled but Docker is not available. \
+                     Install Docker or set SANDBOX_ENABLED=false to run full_job routines."
+                .to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Docker is not available"));
+        assert!(msg.contains("SANDBOX_ENABLED"));
+    }
+
+    /// Regression test for #697: full_job routines were immediately marked Ok
+    /// on dispatch, so failures/completions were never synced back.
+    #[test]
+    fn test_job_state_to_run_status_mapping() {
+        use crate::context::JobState;
+
+        let map_state = |state: JobState, reason: Option<&str>| -> Option<(RunStatus, String)> {
+            let last_reason = reason.map(|s| s.to_string());
+            match state {
+                JobState::Completed | JobState::Accepted => {
+                    let summary =
+                        last_reason.unwrap_or_else(|| "Job completed successfully".to_string());
+                    Some((RunStatus::Ok, summary))
+                }
+                JobState::Failed => {
+                    let summary = last_reason
+                        .unwrap_or_else(|| "Job failed (no error message recorded)".to_string());
+                    Some((RunStatus::Failed, summary))
+                }
+                JobState::Cancelled => Some((RunStatus::Failed, "Job was cancelled".to_string())),
+                // Submitted can still transition to Failed, so treat as in-progress
+                JobState::Pending
+                | JobState::InProgress
+                | JobState::Stuck
+                | JobState::Submitted => None,
+            }
+        };
+
+        // Terminal success states
+        let (status, _) = map_state(JobState::Completed, None).unwrap();
+        assert_eq!(status, RunStatus::Ok);
+
+        let (status, _) = map_state(JobState::Accepted, None).unwrap();
+        assert_eq!(status, RunStatus::Ok);
+
+        // Terminal failure states
+        let (status, summary) = map_state(JobState::Failed, Some("OOM killed")).unwrap();
+        assert_eq!(status, RunStatus::Failed);
+        assert_eq!(summary, "OOM killed");
+
+        let (status, summary) = map_state(JobState::Failed, None).unwrap();
+        assert_eq!(status, RunStatus::Failed);
+        assert!(summary.contains("no error message"));
+
+        let (status, _) = map_state(JobState::Cancelled, None).unwrap();
+        assert_eq!(status, RunStatus::Failed);
+
+        // In-progress states (including Submitted which can still fail)
+        assert!(map_state(JobState::Pending, None).is_none());
+        assert!(map_state(JobState::InProgress, None).is_none());
+        assert!(map_state(JobState::Stuck, None).is_none());
+        assert!(map_state(JobState::Submitted, None).is_none());
+    }
+
+    #[test]
+    fn test_sanitize_summary_strips_control_chars() {
+        use super::sanitize_summary;
+
+        // Preserves normal text
+        assert_eq!(sanitize_summary("Job completed"), "Job completed");
+
+        // Strips control characters but preserves newlines
+        assert_eq!(
+            sanitize_summary("line1\nline2\x00\x1b[31mred"),
+            "line1\nline2[31mred"
+        );
+
+        // Truncates long strings
+        let long = "x".repeat(600);
+        let result = sanitize_summary(&long);
+        assert!(result.len() <= 503); // 500 + "..."
+        assert!(result.ends_with("..."));
     }
 }

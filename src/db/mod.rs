@@ -392,6 +392,11 @@ pub trait RoutineStore: Send + Sync {
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError>;
+
+    /// List routine runs that were dispatched as full_job (status = 'running'
+    /// with a linked job_id). Used by the routine engine to sync completion
+    /// status from the background job.
+    async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError>;
 }
 
 #[async_trait]
