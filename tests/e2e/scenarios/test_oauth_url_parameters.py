@@ -13,7 +13,6 @@ The test verifies:
 """
 
 from urllib.parse import parse_qs, urlparse
-import httpx
 import pytest
 
 from helpers import api_post, api_get
@@ -42,201 +41,182 @@ async def _extract_oauth_params(auth_url: str) -> dict:
     return params
 
 
-class TestGoogleSheetsOAuthURL:
-    """Test Gmail/Google OAuth URL generation and parameter naming.
+async def _get_extension(ironclaw_server, name):
+    """Get a specific extension from the extensions list, or None."""
+    r = await api_get(ironclaw_server, "/api/extensions")
+    for ext in r.json().get("extensions", []):
+        if ext["name"] == name:
+            return ext
+    return None
 
-    Uses Gmail since it's available in the test registry and uses Google OAuth.
-    The bug #992 applies to all Google tools (Gmail, Google Drive, Sheets, etc.)
+
+@pytest.fixture
+async def installed_gmail(ironclaw_server):
+    """Installs the 'gmail' extension before a test and removes it after.
+
+    This fixture handles the setup and teardown of the Gmail extension,
+    ensuring a clean state for each test.
     """
-
-    _gmail_installed = False
-    _auth_url = None
-    _oauth_params = None
-    EXT_NAME = "gmail"
-
-    @pytest.fixture(autouse=True)
-    async def setup(self, ironclaw_server):
-        """Setup: ensure Gmail is removed before test."""
-        self.ironclaw_server = ironclaw_server
-        ext = await self._get_extension(self.EXT_NAME)
-        if ext:
-            await api_post(ironclaw_server, f"/api/extensions/{self.EXT_NAME}/remove", timeout=30)
-
-    async def _get_extension(self, name):
-        """Get a specific extension from the extensions list, or None."""
-        r = await api_get(self.ironclaw_server, "/api/extensions")
-        for ext in r.json().get("extensions", []):
-            if ext["name"] == name:
-                return ext
-        return None
-
-    async def test_install_gmail(self):
-        """Step 1: Install Gmail from registry."""
-        r = await api_post(
-            self.ironclaw_server,
-            "/api/extensions/install",
-            json={"name": self.EXT_NAME},
-            timeout=180,
-        )
+    # Ensure Gmail is not installed before test
+    ext = await _get_extension(ironclaw_server, "gmail")
+    if ext:
+        r = await api_post(ironclaw_server, "/api/extensions/gmail/remove", timeout=30)
         assert r.status_code == 200
-        data = r.json()
-        assert data.get("success") is True, f"Install failed: {data.get('message', '')}"
-        TestGoogleSheetsOAuthURL._gmail_installed = True
 
-    async def test_oauth_url_generated(self):
-        """Step 2: Configure Gmail (no secrets) returns OAuth auth_url."""
-        if not TestGoogleSheetsOAuthURL._gmail_installed:
-            pytest.skip("Gmail not installed")
+    # Install Gmail
+    r = await api_post(
+        ironclaw_server,
+        "/api/extensions/install",
+        json={"name": "gmail"},
+        timeout=180,
+    )
+    assert r.status_code == 200, f"Gmail install failed: {r.text}"
+    assert r.json().get("success") is True, f"Install failed: {r.json().get('message', '')}"
 
-        r = await api_post(
-            self.ironclaw_server,
-            f"/api/extensions/{self.EXT_NAME}/setup",
-            json={"secrets": {}},
-            timeout=30,
+    yield
+
+    # Teardown: remove gmail
+    r = await api_post(ironclaw_server, "/api/extensions/gmail/remove", timeout=30)
+    assert r.status_code == 200, f"Gmail removal failed: {r.text}"
+
+
+@pytest.fixture
+async def auth_url(ironclaw_server, installed_gmail):
+    """Generate and return an OAuth auth URL.
+
+    Requires Gmail to be installed (depends on installed_gmail fixture).
+    """
+    r = await api_post(
+        ironclaw_server,
+        "/api/extensions/gmail/setup",
+        json={"secrets": {}},
+        timeout=30,
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("success") is True, f"Setup failed: {data.get('message', '')}"
+
+    url = data.get("auth_url")
+    assert url is not None, f"Expected auth_url in response: {data}"
+    assert "accounts.google.com" in url, f"auth_url should point to Google: {url}"
+
+    return url
+
+
+@pytest.fixture
+async def oauth_params(auth_url):
+    """Extract and return OAuth parameters from auth_url.
+
+    Depends on auth_url fixture.
+    """
+    return await _extract_oauth_params(auth_url)
+
+
+# ─ OAuth URL parameter validation tests ────────────────────────────────
+
+async def test_oauth_url_has_client_id_not_clientid(oauth_params, auth_url):
+    """Verify OAuth URL has 'client_id' (with underscore), NOT 'clientid'.
+
+    Bug #992: Ensure the parameter name is correct across all channels.
+    """
+    params = oauth_params
+
+    # The bug: "clientid" appears instead of "client_id"
+    # Verify the CORRECT parameter name exists
+    assert "client_id" in params, (
+        f"OAuth URL missing 'client_id' parameter. "
+        f"URL: {auth_url}\nParams: {params}"
+    )
+    assert params["client_id"], "client_id should have a value"
+
+    # Verify the INCORRECT parameter name does NOT exist
+    assert "clientid" not in params, (
+        f"OAuth URL should NOT have 'clientid' (without underscore). "
+        f"Bug #992: URL: {auth_url}\nParams: {params}"
+    )
+
+
+async def test_oauth_url_has_required_parameters(oauth_params):
+    """Verify all required OAuth 2.0 parameters are present."""
+    params = oauth_params
+
+    # Required OAuth 2.0 parameters
+    required = ["client_id", "response_type", "redirect_uri", "scope", "state"]
+    for param in required:
+        assert param in params, (
+            f"Missing required OAuth parameter: {param}. "
+            f"Params: {params}"
         )
-        assert r.status_code == 200
-        data = r.json()
-        assert data.get("success") is True, f"Setup failed: {data.get('message', '')}"
+        assert params[param], f"Parameter '{param}' should have a non-empty value"
 
-        auth_url = data.get("auth_url")
-        assert auth_url is not None, f"Expected auth_url in response: {data}"
-        assert "accounts.google.com" in auth_url, f"auth_url should point to Google: {auth_url}"
+    # Validate specific values
+    assert params["response_type"] == "code", "Should use authorization_code flow"
+    assert "oauth" in params["redirect_uri"], "Redirect URI should be an OAuth callback"
 
-        TestGoogleSheetsOAuthURL._auth_url = auth_url
 
-    async def test_oauth_url_has_client_id_not_clientid(self):
-        """Step 3: Verify OAuth URL has 'client_id' (with underscore), NOT 'clientid'."""
-        if not TestGoogleSheetsOAuthURL._auth_url:
-            pytest.skip("No OAuth URL from setup step")
+async def test_oauth_url_has_extra_params(oauth_params):
+    """Verify extra_params from capabilities.json are included."""
+    params = oauth_params
 
-        auth_url = TestGoogleSheetsOAuthURL._auth_url
-        params = await _extract_oauth_params(auth_url)
-        TestGoogleSheetsOAuthURL._oauth_params = params
+    # Google-specific extra_params from gmail-tool.capabilities.json
+    assert "access_type" in params, (
+        "Should include 'access_type' from extra_params"
+    )
+    assert params["access_type"] == "offline", (
+        "access_type should be 'offline' for Gmail"
+    )
 
-        # The bug: "clientid" appears instead of "client_id"
-        # Verify the CORRECT parameter name exists
-        assert "client_id" in params, (
-            f"OAuth URL missing 'client_id' parameter. "
-            f"URL: {auth_url}\nParams: {params}"
-        )
-        assert params["client_id"], "client_id should have a value"
+    assert "prompt" in params, (
+        "Should include 'prompt' from extra_params"
+    )
+    assert params["prompt"] == "consent", (
+        "prompt should be 'consent' for Gmail"
+    )
 
-        # Verify the INCORRECT parameter name does NOT exist
-        assert "clientid" not in params, (
-            f"OAuth URL should NOT have 'clientid' (without underscore). "
-            f"Bug #992: URL: {auth_url}\nParams: {params}"
-        )
 
-    async def test_oauth_url_has_required_parameters(self):
-        """Step 4: Verify all required OAuth 2.0 parameters are present."""
-        if not TestGoogleSheetsOAuthURL._oauth_params:
-            pytest.skip("No OAuth params from parameter validation step")
+async def test_oauth_url_is_valid_google_oauth(auth_url):
+    """Verify the URL is a valid Google OAuth 2.0 authorization URL."""
+    # Verify scheme and host
+    parsed = urlparse(auth_url)
+    assert parsed.scheme == "https", "OAuth URL must use HTTPS"
+    assert "accounts.google.com" in parsed.netloc, "Must be Google's OAuth endpoint"
+    assert parsed.path == "/o/oauth2/v2/auth", "Must use Google OAuth 2.0 endpoint"
 
-        params = TestGoogleSheetsOAuthURL._oauth_params
 
-        # Required OAuth 2.0 parameters
-        required = ["client_id", "response_type", "redirect_uri", "scope", "state"]
-        for param in required:
-            assert param in params, (
-                f"Missing required OAuth parameter: {param}. "
-                f"Params: {params}"
-            )
-            assert params[param], f"Parameter '{param}' should have a non-empty value"
+async def test_oauth_url_state_is_unique(ironclaw_server, installed_gmail, oauth_params, auth_url):
+    """Verify CSRF state is present and unique per request."""
+    # Get a new OAuth URL
+    r = await api_post(
+        ironclaw_server,
+        "/api/extensions/gmail/setup",
+        json={"secrets": {}},
+        timeout=30,
+    )
+    assert r.status_code == 200
+    new_auth_url = r.json().get("auth_url")
+    assert new_auth_url is not None
 
-        # Validate specific values
-        assert params["response_type"] == "code", "Should use authorization_code flow"
-        assert "oauth" in params["redirect_uri"], "Redirect URI should be an OAuth callback"
+    # Extract state from both URLs
+    original_params = oauth_params
+    new_params = await _extract_oauth_params(new_auth_url)
 
-    async def test_oauth_url_has_extra_params(self):
-        """Step 5: Verify extra_params from capabilities.json are included."""
-        if not TestGoogleSheetsOAuthURL._oauth_params:
-            pytest.skip("No OAuth params")
+    original_state = original_params.get("state")
+    new_state = new_params.get("state")
 
-        params = TestGoogleSheetsOAuthURL._oauth_params
+    assert original_state is not None, "Should have state parameter"
+    assert new_state is not None, "New request should have state parameter"
+    assert original_state != new_state, (
+        "CSRF state should be unique per request (for security)"
+    )
 
-        # Google-specific extra_params from google-sheets-tool.capabilities.json
-        assert "access_type" in params, (
-            "Should include 'access_type' from extra_params"
-        )
-        assert params["access_type"] == "offline", (
-            "access_type should be 'offline' for Google Sheets"
-        )
 
-        assert "prompt" in params, (
-            "Should include 'prompt' from extra_params"
-        )
-        assert params["prompt"] == "consent", (
-            "prompt should be 'consent' for Google Sheets"
-        )
-
-    async def test_oauth_url_is_valid_google_oauth(self):
-        """Step 6: Verify the URL is a valid Google OAuth 2.0 authorization URL."""
-        if not TestGoogleSheetsOAuthURL._auth_url:
-            pytest.skip("No OAuth URL")
-
-        auth_url = TestGoogleSheetsOAuthURL._auth_url
-
-        # Verify scheme and host
-        parsed = urlparse(auth_url)
-        assert parsed.scheme == "https", "OAuth URL must use HTTPS"
-        assert "accounts.google.com" in parsed.netloc, "Must be Google's OAuth endpoint"
-        assert parsed.path == "/o/oauth2/v2/auth", "Must use Google OAuth 2.0 endpoint"
-
-    async def test_oauth_url_state_is_unique(self):
-        """Step 7: Verify CSRF state is present and unique per request."""
-        if not TestGoogleSheetsOAuthURL._gmail_installed:
-            pytest.skip("Gmail not installed")
-
-        # Get a new OAuth URL
-        r = await api_post(
-            self.ironclaw_server,
-            f"/api/extensions/{self.EXT_NAME}/setup",
-            json={"secrets": {}},
-            timeout=30,
-        )
-        assert r.status_code == 200
-        new_auth_url = r.json().get("auth_url")
-        assert new_auth_url is not None
-
-        # Extract state from both URLs
-        original_params = TestGoogleSheetsOAuthURL._oauth_params
-        new_params = await _extract_oauth_params(new_auth_url)
-
-        original_state = original_params.get("state")
-        new_state = new_params.get("state")
-
-        assert original_state is not None, "Should have state parameter"
-        assert new_state is not None, "New request should have state parameter"
-        assert original_state != new_state, (
-            "CSRF state should be unique per request (for security)"
-        )
-
-    async def test_oauth_url_escaping(self):
-        """Step 8: Verify URL query parameters are properly escaped."""
-        if not TestGoogleSheetsOAuthURL._auth_url:
-            pytest.skip("No OAuth URL")
-
-        auth_url = TestGoogleSheetsOAuthURL._auth_url
-
-        # Verify special characters in values are URL-encoded
-        # For example, scopes contain spaces which should be %20
-        assert "%20" in auth_url or "+" in auth_url or "%2B" in auth_url or " " not in auth_url, (
-            "OAuth URL should properly encode special characters in parameters"
-        )
-
-    async def test_cleanup_gmail(self):
-        """Cleanup: Remove Gmail (cleanup for other test files)."""
-        ext = await self._get_extension(self.EXT_NAME)
-        if ext:
-            r = await api_post(
-                self.ironclaw_server,
-                f"/api/extensions/{self.EXT_NAME}/remove",
-                timeout=30,
-            )
-            assert r.status_code == 200
-
-        ext = await self._get_extension(self.EXT_NAME)
-        assert ext is None, "Gmail should be removed"
+async def test_oauth_url_escaping(auth_url):
+    """Verify URL query parameters are properly escaped."""
+    # Verify special characters in values are URL-encoded
+    # For example, scopes contain spaces which should be %20
+    assert "%20" in auth_url or "+" in auth_url or "%2B" in auth_url or " " not in auth_url, (
+        "OAuth URL should properly encode special characters in parameters"
+    )
 
 
 # ─ Telegram-specific tests (when Telegram channel is available) ──────────
