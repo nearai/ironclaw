@@ -92,6 +92,11 @@ async fn async_main() -> anyhow::Result<()> {
             return ironclaw::cli::run_skills_command(skills_cmd.clone(), cli.config.as_deref())
                 .await;
         }
+        Some(Command::Models(models_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_models_command(models_cmd.clone(), cli.config.as_deref())
+                .await;
+        }
         Some(Command::Doctor) => {
             init_cli_tracing();
             return ironclaw::cli::run_doctor_command().await;

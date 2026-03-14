@@ -22,6 +22,7 @@ Commands:
   pairing     Manage DM pairing
   service     Manage OS service
   skills      Manage skills
+  models      Manage LLM providers and models
   doctor      Run diagnostics
   status      Show system status
   completion  Generate completions

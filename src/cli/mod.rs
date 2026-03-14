@@ -21,6 +21,7 @@ mod doctor;
 pub mod import;
 mod mcp;
 pub mod memory;
+mod models;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
@@ -39,6 +40,7 @@ pub use import::{ImportCommand, run_import_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 pub use memory::run_memory_command_with_db;
+pub use models::{ModelsCommand, run_models_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use routines::{RoutinesCommand, run_routines_command};
@@ -198,6 +200,14 @@ pub enum Command {
         long_about = "List, search, and inspect SKILL.md-based skills.\nExamples:\n  ironclaw skills list\n  ironclaw skills search 'writing'\n  ironclaw skills info my-skill"
     )]
     Skills(SkillsCommand),
+
+    /// Manage LLM providers and models
+    #[command(
+        subcommand,
+        about = "Manage LLM providers and models",
+        long_about = "List providers, view current configuration, and set active provider/model.\nExamples:\n  ironclaw models list\n  ironclaw models list openai --verbose\n  ironclaw models status\n  ironclaw models set gpt-4o\n  ironclaw models set-provider anthropic --model claude-sonnet-4-6-20250514"
+    )]
+    Models(ModelsCommand),
 
     /// Probe external dependencies and validate configuration
     #[command(
