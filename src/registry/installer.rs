@@ -234,6 +234,15 @@ impl RegistryInstaller {
         force: bool,
     ) -> Result<InstallOutcome, RegistryError> {
         validate_manifest_install_inputs(manifest)?;
+
+        if manifest.kind == ManifestKind::McpServer {
+            return Err(RegistryError::InvalidManifest {
+                name: manifest.name.clone(),
+                field: "kind",
+                reason: "MCP servers cannot be installed from source".to_string(),
+            });
+        }
+
         let source = require_source(manifest)?;
 
         let source_dir = self.repo_root.join(&source.dir);
@@ -247,13 +256,7 @@ impl RegistryInstaller {
         let target_dir = match manifest.kind {
             ManifestKind::Tool => &self.tools_dir,
             ManifestKind::Channel => &self.channels_dir,
-            ManifestKind::McpServer => {
-                return Err(RegistryError::InvalidManifest {
-                    name: manifest.name.clone(),
-                    field: "kind",
-                    reason: "MCP servers cannot be installed from source".to_string(),
-                });
-            }
+            ManifestKind::McpServer => unreachable!(),
         };
 
         fs::create_dir_all(target_dir)
@@ -332,6 +335,15 @@ impl RegistryInstaller {
         // which install path runs, without relying on inner methods to
         // catch it first.
         validate_manifest_install_inputs(manifest)?;
+
+        if manifest.kind == ManifestKind::McpServer {
+            return Err(RegistryError::InvalidManifest {
+                name: manifest.name.clone(),
+                field: "kind",
+                reason: "MCP servers cannot be installed via the WASM installer".to_string(),
+            });
+        }
+
         let source = require_source(manifest)?;
 
         let has_artifact = manifest

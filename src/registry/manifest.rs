@@ -167,21 +167,26 @@ pub struct BundlesFile {
 impl ExtensionManifest {
     /// Convert this manifest into a [`RegistryEntry`] for use with the in-chat
     /// extension discovery system.
-    pub fn to_registry_entry(&self) -> RegistryEntry {
+    ///
+    /// Returns `None` for MCP server manifests missing a `url` field.
+    pub fn to_registry_entry(&self) -> Option<RegistryEntry> {
         if self.kind == ManifestKind::McpServer {
             return self.to_mcp_registry_entry();
         }
 
-        self.to_wasm_registry_entry()
+        Some(self.to_wasm_registry_entry())
     }
 
     /// Build a [`RegistryEntry`] for an MCP server manifest.
-    fn to_mcp_registry_entry(&self) -> RegistryEntry {
+    fn to_mcp_registry_entry(&self) -> Option<RegistryEntry> {
         let url = match &self.url {
             Some(u) => u.clone(),
             None => {
-                tracing::warn!("MCP server manifest '{}' is missing 'url' field", self.name);
-                String::new()
+                tracing::warn!(
+                    "MCP server manifest '{}' is missing 'url' field, skipping",
+                    self.name
+                );
+                return None;
             }
         };
         let auth_hint = match self.auth.as_deref() {
@@ -198,7 +203,7 @@ impl ExtensionManifest {
             _ => AuthHint::Dcr,
         };
 
-        RegistryEntry {
+        Some(RegistryEntry {
             name: self.name.clone(),
             display_name: self.display_name.clone(),
             kind: ExtensionKind::McpServer,
@@ -208,7 +213,7 @@ impl ExtensionManifest {
             fallback_source: None,
             auth_hint,
             version: self.version.clone(),
-        }
+        })
     }
 
     /// Build a [`RegistryEntry`] for a WASM tool or channel manifest.
@@ -317,7 +322,7 @@ mod tests {
         assert_eq!(manifest.version.as_deref(), Some("0.1.0"));
         assert!(manifest.tags.contains(&"default".to_string()));
 
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
         assert_eq!(entry.kind, ExtensionKind::WasmTool);
     }
 
@@ -342,7 +347,7 @@ mod tests {
         assert!(manifest.auth_summary.is_none());
         assert!(manifest.artifacts.is_empty());
 
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
         assert_eq!(entry.kind, ExtensionKind::WasmChannel);
     }
 
@@ -405,7 +410,7 @@ mod tests {
         }"#;
 
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
 
         // Primary source should be WasmDownload
         assert!(
@@ -455,7 +460,7 @@ mod tests {
         }"#;
 
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
 
         assert!(
             matches!(&entry.source, ExtensionSource::WasmBuildable { .. }),
@@ -486,7 +491,7 @@ mod tests {
         }"#;
 
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
 
         assert!(
             matches!(&entry.source, ExtensionSource::WasmBuildable { .. }),
@@ -518,7 +523,7 @@ mod tests {
         assert_eq!(manifest.url.as_deref(), Some("https://mcp.notion.com/mcp"));
         assert_eq!(manifest.auth.as_deref(), Some("dcr"));
 
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
         assert_eq!(entry.kind, ExtensionKind::McpServer);
         assert!(
             matches!(&entry.source, ExtensionSource::McpUrl { url } if url == "https://mcp.notion.com/mcp")
@@ -540,7 +545,7 @@ mod tests {
         }"#;
 
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
 
         assert!(matches!(
             &entry.auth_hint,
@@ -561,8 +566,25 @@ mod tests {
         }"#;
 
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
 
         assert!(matches!(&entry.auth_hint, AuthHint::None));
+    }
+
+    #[test]
+    fn test_mcp_server_missing_url_returns_none() {
+        let json = r#"{
+            "name": "broken-mcp",
+            "display_name": "Broken MCP",
+            "kind": "mcp_server",
+            "description": "MCP server with no URL",
+            "keywords": []
+        }"#;
+
+        let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
+        assert!(
+            manifest.to_registry_entry().is_none(),
+            "MCP manifest without url should return None"
+        );
     }
 }

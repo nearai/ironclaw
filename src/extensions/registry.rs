@@ -365,7 +365,7 @@ mod tests {
         let catalog_entries: Vec<RegistryEntry> = catalog
             .all()
             .iter()
-            .map(|m| m.to_registry_entry())
+            .filter_map(|m| m.to_registry_entry())
             .collect();
         ExtensionRegistry::new_with_catalog(catalog_entries)
     }
