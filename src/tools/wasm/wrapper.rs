@@ -2109,7 +2109,7 @@ mod tests {
                 crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token_value"),
             )
             .await
-            .expect("Failed to store global token");
+            .expect("Failed to store global token"); // safety: test code only
 
         // Create capabilities requiring this credential
         let mut creds = std::collections::HashMap::new();
@@ -2137,11 +2137,11 @@ mod tests {
         // Should fallback to "default" and find the token
         let result = resolve_host_credentials(&caps, Some(&store), "routine_user_123", None).await;
 
-        assert!(
+        assert!( // safety: test code only
             !result.is_empty(),
             "Should fallback to default user and find credentials"
         );
-        assert_eq!(result[0].secret_value, "global_token_value");
+        assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
     }
 
     fn test_capabilities_with_google_oauth() -> Capabilities {
@@ -2184,7 +2184,7 @@ mod tests {
                 crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token"),
             )
             .await
-            .expect("Failed to store global token");
+            .expect("Failed to store global token"); // safety: test code only
 
         // Store token under user_123 (user-specific)
         store
@@ -2196,7 +2196,7 @@ mod tests {
                 ),
             )
             .await
-            .expect("Failed to store user token");
+            .expect("Failed to store user token"); // safety: test code only
 
         // Create capabilities
         let caps = test_capabilities_with_google_oauth();
@@ -2205,8 +2205,8 @@ mod tests {
         // Should prefer user_123's token over default
         let result = resolve_host_credentials(&caps, Some(&store), "user_123", None).await;
 
-        assert!(!result.is_empty(), "Should find user-specific credentials");
-        assert_eq!(
+        assert!(!result.is_empty(), "Should find user-specific credentials"); // safety: test code only
+        assert_eq!( // safety: test code only
             result[0].secret_value, "user_specific_token",
             "Should prefer user-specific token over default"
         );
@@ -2226,7 +2226,7 @@ mod tests {
                 crate::secrets::CreateSecretParams::new("google_oauth_token", "default_token"),
             )
             .await
-            .expect("Failed to store default token");
+            .expect("Failed to store default token"); // safety: test code only
 
         // Create capabilities
         let caps = test_capabilities_with_google_oauth();
@@ -2235,8 +2235,8 @@ mod tests {
         // Should NOT attempt fallback (already looking up default)
         let result = resolve_host_credentials(&caps, Some(&store), "default", None).await;
 
-        assert!(!result.is_empty(), "Should find default token");
-        assert_eq!(result[0].secret_value, "default_token");
+        assert!(!result.is_empty(), "Should find default token"); // safety: test code only
+        assert_eq!(result[0].secret_value, "default_token"); // safety: test code only
     }
 
     #[tokio::test]
@@ -2254,7 +2254,7 @@ mod tests {
         let result = resolve_host_credentials(&caps, Some(&store), "user_456", None).await;
 
         // Should return empty since credential can't be found anywhere
-        assert!(
+        assert!( // safety: test code only
             result.is_empty(),
             "Should return empty when credential not found in user or default"
         );
