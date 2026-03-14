@@ -9,6 +9,7 @@ pub mod detector;
 pub mod error;
 pub mod synthesizer;
 pub mod validator;
+pub mod worker;
 
 pub use candidate::{DetectionReason, SynthesisCandidate};
 pub use error::LearningError;

@@ -163,20 +163,8 @@ impl Tool for SkillApproveTool {
             }
         };
 
-        let updated = self
-            .store
-            .update_synthesized_skill_status(skill_id, &ctx.user_id, status)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to update skill: {e}")))?;
-
-        if !updated {
-            return Ok(ToolOutput::text(
-                format!("Skill {skill_id} not found or not owned by you."),
-                start.elapsed(),
-            ));
-        }
-
-        // If accepted, write SKILL.md to auto-skills directory
+        // For "accept": validate and write to disk BEFORE updating status.
+        // This prevents TOCTOU: if disk write fails, status stays "pending".
         if status == "accepted" {
             let skill = self
                 .store
@@ -184,46 +172,86 @@ impl Tool for SkillApproveTool {
                 .await
                 .map_err(|e| ToolError::ExecutionFailed(format!("Failed to fetch skill: {e}")))?;
 
-            if let Some(skill) = skill
-                && let Some(content) = &skill.skill_content
-            {
-                // Validate skill_name to prevent path traversal
-                if !is_safe_skill_name(&skill.skill_name) {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "Skill name '{}' contains unsafe characters",
-                        skill.skill_name
-                    )));
-                }
+            let Some(skill) = skill else {
+                return Ok(ToolOutput::text(
+                    format!("Skill {skill_id} not found or not owned by you."),
+                    start.elapsed(),
+                ));
+            };
 
-                let auto_dir = crate::bootstrap::ironclaw_base_dir().join("installed_skills/auto");
-                let skill_dir = auto_dir.join(&skill.skill_name);
+            let Some(content) = &skill.skill_content else {
+                return Err(ToolError::ExecutionFailed(
+                    "Skill has no content to install".to_string(),
+                ));
+            };
 
-                // Verify the resolved path is still under auto_dir (defense in depth)
-                if !skill_dir.starts_with(&auto_dir) {
-                    return Err(ToolError::ExecutionFailed(
-                        "Skill path escapes auto-skills directory".to_string(),
-                    ));
-                }
+            // Block skills that failed safety scan
+            if !skill.safety_scan_passed {
+                return Err(ToolError::ExecutionFailed(
+                    "Cannot accept skill that failed safety scan".to_string(),
+                ));
+            }
 
-                // Use tokio::fs for non-blocking I/O
-                tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
-                    ToolError::ExecutionFailed(format!("Failed to create auto-skill dir: {e}"))
+            // Re-validate content before writing to disk (defense in depth)
+            let validator = crate::learning::validator::SkillValidator::new();
+            if let Err(e) = validator.validate(content) {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill re-validation failed: {e}"
+                )));
+            }
+
+            // Validate skill_name to prevent path traversal
+            if !is_safe_skill_name(&skill.skill_name) {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill name '{}' contains unsafe characters",
+                    skill.skill_name
+                )));
+            }
+
+            let auto_dir = crate::bootstrap::ironclaw_base_dir().join("installed_skills/auto");
+            let skill_dir = auto_dir.join(&skill.skill_name);
+
+            // Verify the resolved path is still under auto_dir (defense in depth)
+            if !skill_dir.starts_with(&auto_dir) {
+                return Err(ToolError::ExecutionFailed(
+                    "Skill path escapes auto-skills directory".to_string(),
+                ));
+            }
+
+            // Write to disk first, update status only on success
+            tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to create auto-skill dir: {e}"))
+            })?;
+
+            tokio::fs::write(skill_dir.join("SKILL.md"), content.as_bytes())
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Failed to write SKILL.md: {e}"))
                 })?;
 
-                tokio::fs::write(skill_dir.join("SKILL.md"), content.as_bytes())
-                    .await
-                    .map_err(|e| {
-                        ToolError::ExecutionFailed(format!(
-                            "Skill accepted in DB but failed to write SKILL.md: {e}"
-                        ))
-                    })?;
+            tracing::info!(
+                "Wrote auto-skill '{}' to {}",
+                skill.skill_name,
+                skill_dir.display()
+            );
+        }
 
-                tracing::info!(
-                    "Wrote auto-skill '{}' to {}",
-                    skill.skill_name,
-                    skill_dir.display()
-                );
-            }
+        // Update status in DB — after successful disk write for accept,
+        // or immediately for reject. This prevents TOCTOU: if disk write
+        // fails above, status stays "pending" and user can retry.
+        let updated = self
+            .store
+            .update_synthesized_skill_status(skill_id, &ctx.user_id, status)
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to update skill status: {e}"))
+            })?;
+
+        if !updated {
+            return Ok(ToolOutput::text(
+                format!("Skill {skill_id} not found or not owned by you."),
+                start.elapsed(),
+            ));
         }
 
         Ok(ToolOutput::text(

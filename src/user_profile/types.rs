@@ -97,7 +97,13 @@ impl UserProfile {
             sections
                 .entry(fact.category.as_str().to_string())
                 .or_default()
-                .push(format!("- {}: {}", fact.key, fact.value));
+                // Strip newlines from value to prevent prompt injection via
+                // line breaks that could exit the bullet-point structure.
+                .push(format!(
+                    "- {}: {}",
+                    fact.key,
+                    fact.value.replace(['\n', '\r'], " ")
+                ));
         }
 
         let mut output = String::from("## User Profile\n\n");

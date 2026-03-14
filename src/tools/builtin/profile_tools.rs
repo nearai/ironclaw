@@ -193,8 +193,13 @@ impl Tool for ProfileEditTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to store fact: {e}")))?;
 
+        // Don't include the value in the output — it may contain sensitive data
+        // and ToolOutput is broadcast via SSE/logged.
         Ok(ToolOutput::text(
-            format!("Profile updated: {}/{} = {}", fact.category, key, value),
+            format!(
+                "Profile updated: {}/{} (value stored encrypted)",
+                fact.category, key
+            ),
             start.elapsed(),
         ))
     }

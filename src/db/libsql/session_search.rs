@@ -20,6 +20,12 @@ fn sanitize_fts_query(query: &str) -> Result<String, DatabaseError> {
             "search query must not be empty".to_string(),
         ));
     }
+    // Limit query length to prevent DoS via large FTS MATCH operations
+    if trimmed.len() > 512 {
+        return Err(DatabaseError::Query(
+            "search query too long (max 512 chars)".to_string(),
+        ));
+    }
     // Escape internal double quotes and wrap as phrase query
     let escaped = trimmed.replace('"', "\"\"");
     Ok(format!("\"{escaped}\""))
