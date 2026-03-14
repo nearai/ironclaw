@@ -442,6 +442,8 @@ function showSuggestionChips(suggestions) {
   container.innerHTML = '';
   const ghost = document.getElementById('ghost-text');
   ghost.style.display = 'none';
+  const wrapper = document.querySelector('.chat-input-wrapper');
+  if (wrapper) wrapper.classList.remove('has-ghost');
 
   _ghostSuggestion = suggestions[0] || '';
   const input = document.getElementById('chat-input');
@@ -1721,8 +1723,8 @@ chatInput.addEventListener('keydown', (e) => {
   const acEl = document.getElementById('slash-autocomplete');
   const acVisible = acEl && acEl.style.display !== 'none';
 
-  // Accept first suggestion with Tab
-  if (e.key === 'Tab' && !acVisible && _ghostSuggestion && chatInput.value === '') {
+  // Accept first suggestion with Tab (plain Tab only, not Shift+Tab)
+  if (e.key === 'Tab' && !e.shiftKey && !acVisible && _ghostSuggestion && chatInput.value === '') {
     e.preventDefault();
     chatInput.value = _ghostSuggestion;
     clearSuggestionChips();

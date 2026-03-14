@@ -1350,6 +1350,8 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
+                    let (response, suggestions) =
+                        crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
                     let (turn_number, tool_calls) = thread
                         .turns
@@ -1380,6 +1382,16 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
+                    if !suggestions.is_empty() {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Suggestions { suggestions },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {

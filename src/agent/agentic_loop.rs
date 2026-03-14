@@ -162,7 +162,10 @@ pub async fn run_agentic_loop(
                     "LLM text response"
                 );
             }
-            RespondResult::ToolCalls { tool_calls, content } => {
+            RespondResult::ToolCalls {
+                tool_calls,
+                content,
+            } => {
                 let names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
                 tracing::debug!(
                     iteration,

@@ -1664,7 +1664,9 @@ impl WasmChannel {
                 .await;
         let pairing_store = self.pairing_store.clone();
 
-        let wit_update = status_to_wit(status, metadata);
+        let Some(wit_update) = status_to_wit(status, metadata) else {
+            return Ok(());
+        };
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -1833,7 +1835,9 @@ impl WasmChannel {
                 .await;
                 let pairing_store = self.pairing_store.clone();
                 let callback_timeout = self.runtime.config().callback_timeout;
-                let wit_update = status_to_wit(&status, metadata);
+                let Some(wit_update) = status_to_wit(&status, metadata) else {
+                    return Ok(());
+                };
 
                 let handle = tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_secs(4));
@@ -2704,10 +2708,13 @@ fn truncate_status_text(input: &str, max_chars: usize) -> String {
     }
 }
 
-fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_channel::StatusUpdate {
+fn status_to_wit(
+    status: &StatusUpdate,
+    metadata: &serde_json::Value,
+) -> Option<wit_channel::StatusUpdate> {
     let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
 
-    match status {
+    Some(match status {
         StatusUpdate::Thinking(msg) => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::Thinking,
             message: msg.clone(),
@@ -2827,12 +2834,9 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             },
             metadata_json,
         },
-        StatusUpdate::Suggestions { .. } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Status,
-            message: String::new(),
-            metadata_json,
-        },
-    }
+        // Suggestions are web-gateway-only; skip for WASM channels
+        StatusUpdate::Suggestions { .. } => return None,
+    })
 }
 
 /// Clone a WIT StatusUpdate (the generated type doesn't derive Clone).
@@ -3561,7 +3565,8 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::Thinking("Processing...".into()),
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3579,7 +3584,8 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::Status("Done".into()),
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(wit.status, super::wit_channel::StatusType::Done));
     }
@@ -3594,14 +3600,16 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::Status("done".into()),
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
         assert!(matches!(wit.status, super::wit_channel::StatusType::Done));
 
         // with whitespace
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::Status(" Done ".into()),
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
         assert!(matches!(wit.status, super::wit_channel::StatusType::Done));
     }
 
@@ -3613,7 +3621,8 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::Status("Interrupted".into()),
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3631,7 +3640,8 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::Status("interrupted".into()),
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
         assert!(matches!(
             wit.status,
             super::wit_channel::StatusType::Interrupted
@@ -3641,7 +3651,8 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::Status(" Interrupted ".into()),
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
         assert!(matches!(
             wit.status,
             super::wit_channel::StatusType::Interrupted
@@ -3656,7 +3667,8 @@ mod tests {
         let wit = status_to_wit(
             &crate::channels::StatusUpdate::Status("Awaiting approval".into()),
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(wit.status, super::wit_channel::StatusType::Status));
         assert_eq!(wit.message, "Awaiting approval");
@@ -3675,7 +3687,8 @@ mod tests {
                 setup_url: None,
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3695,7 +3708,8 @@ mod tests {
                 name: "http_request".to_string(),
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3717,7 +3731,8 @@ mod tests {
                 parameters: None,
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3739,7 +3754,8 @@ mod tests {
                 parameters: None,
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3759,7 +3775,8 @@ mod tests {
                 preview: "{".to_string() + "\"temperature\": 22}",
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3780,7 +3797,8 @@ mod tests {
                 preview: long_preview,
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3801,7 +3819,8 @@ mod tests {
                 browse_url: "https://example.com/jobs/job-1".to_string(),
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3823,7 +3842,8 @@ mod tests {
                 message: "Token saved".to_string(),
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3845,7 +3865,8 @@ mod tests {
                 message: "Invalid token".to_string(),
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3868,7 +3889,8 @@ mod tests {
                 parameters: serde_json::json!({"url": "https://api.weather.test"}),
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,
@@ -3892,7 +3914,8 @@ mod tests {
                 parameters: serde_json::json!({"url": "https://api.weather.test"}),
             },
             &metadata,
-        );
+        )
+        .unwrap(); // safety: test
 
         assert!(matches!(
             wit.status,

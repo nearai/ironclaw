@@ -1092,7 +1092,8 @@ pub(crate) fn extract_suggestions(text: &str) -> (String, Vec<String>) {
         .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
         .unwrap_or_default()
         .into_iter()
-        .filter(|s| !s.is_empty() && s.len() <= 80)
+        .filter(|s| !s.trim().is_empty() && s.len() <= 80)
+        .take(3)
         .collect();
 
     (cleaned, suggestions)
