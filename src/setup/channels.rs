@@ -1017,7 +1017,7 @@ fn validation_placeholder_regex() -> &'static regex::Regex {
     PLACEHOLDER_RE.get_or_init(|| {
         // SAFETY: hardcoded regex literal — expect cannot fail.
         regex::Regex::new(r"\{([A-Za-z0-9_]+)\}")
-            .expect("validation placeholder regex must compile")
+            .expect("validation placeholder regex must compile") // safety: hardcoded literal
     })
 }
 

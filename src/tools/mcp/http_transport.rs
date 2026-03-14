@@ -39,7 +39,7 @@ impl HttpMcpTransport {
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .expect("Failed to create HTTP client"),
+                .expect("Failed to create HTTP client"), // safety: TLS init with default rustls cannot fail
             session_manager: None,
             custom_headers: HashMap::new(),
         }

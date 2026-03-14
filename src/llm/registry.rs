@@ -221,7 +221,7 @@ impl ProviderRegistry {
         // a malformed file would be caught by CI, not at runtime.
         let builtins: Vec<ProviderDefinition> =
             serde_json::from_str(include_str!("../../providers.json"))
-                .expect("built-in providers.json must be valid JSON");
+                .expect("built-in providers.json must be valid JSON"); // safety: compile-time embedded file
 
         let mut all = builtins;
 

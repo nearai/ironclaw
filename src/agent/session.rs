@@ -96,7 +96,7 @@ impl Session {
                     // get_mut borrows self.threads mutably, so we can't
                     // combine the check and access into if-let without
                     // conflicting with the self.create_thread() fallback.
-                    self.threads.get_mut(&id).unwrap()
+                    self.threads.get_mut(&id).unwrap() // safety: contains_key guard above
                 } else {
                     // Stale active_thread ID: create a new thread, which
                     // updates self.active_thread to the new thread's ID.
