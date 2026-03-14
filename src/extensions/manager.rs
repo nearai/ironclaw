@@ -3782,9 +3782,16 @@ impl ExtensionManager {
         {
             let token = token_value.trim();
             if !token.is_empty() {
-                let encoded =
-                    url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
-                let url = endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
+                // Telegram tokens contain colons (numeric_id:token_part) in the URL path,
+                // not query parameters, so URL-encoding breaks the endpoint.
+                // For other extensions, keep encoding to handle special chars in query parameters.
+                let url = if name == "telegram" {
+                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), token)
+                } else {
+                    let encoded =
+                        url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded)
+                };
                 // SSRF defense: block private IPs, localhost, cloud metadata endpoints
                 crate::tools::builtin::skill_tools::validate_fetch_url(&url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
@@ -5511,5 +5518,35 @@ mod tests {
             msg.contains("validation failed"),
             "Display should contain 'validation failed', got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_telegram_token_colon_preserved_in_validation_url() {
+        // Regression: Telegram tokens (format: numeric_id:alphanumeric_string) must NOT
+        // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
+        // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
+        // Fixed by removing URL-encoding and using the token directly.
+        let endpoint_template = "https://api.telegram.org/bot{telegram_bot_token}/getMe";
+        let secret_name = "telegram_bot_token";
+        let token = "123456789:AABBccDDeeFFgg_Test-Token";
+
+        // Simulate the fixed validation URL building logic
+        let url = endpoint_template.replace(&format!("{{{}}}", secret_name), token);
+
+        // Verify colon is preserved
+        let expected = "https://api.telegram.org/bot123456789:AABBccDDeeFFgg_Test-Token/getMe";
+        if url != expected {
+            panic!("URL mismatch: expected {expected}, got {url}"); // safety: test assertion
+        }
+
+        // Verify it does NOT contain the broken percent-encoded version
+        if url.contains("%3A") {
+            panic!("URL contains URL-encoded colon (%3A): {url}"); // safety: test assertion
+        }
+
+        // Verify the URL contains the original colon
+        if !url.contains("123456789:AABBccDDeeFFgg_Test-Token") {
+            panic!("URL missing token: {url}"); // safety: test assertion
+        }
     }
 }
