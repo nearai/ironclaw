@@ -5036,17 +5036,18 @@ fn archive_filename_candidates(
 ) -> Vec<String> {
     let mut candidates = Vec::new();
 
-    for base in [Some(extension_name), archive_crate_name] {
-        if let Some(base) = base {
-            let raw = format!("{}{}", base, suffix);
-            if !candidates.contains(&raw) {
-                candidates.push(raw);
-            }
+    for base in [Some(extension_name), archive_crate_name]
+        .into_iter()
+        .flatten()
+    {
+        let raw = format!("{}{}", base, suffix);
+        if !candidates.contains(&raw) {
+            candidates.push(raw);
+        }
 
-            let snake = format!("{}{}", base.replace('-', "_"), suffix);
-            if !candidates.contains(&snake) {
-                candidates.push(snake);
-            }
+        let snake = format!("{}{}", base.replace('-', "_"), suffix);
+        if !candidates.contains(&snake) {
+            candidates.push(snake);
         }
     }
 
