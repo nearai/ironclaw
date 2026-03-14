@@ -1,5 +1,7 @@
 //! PostgreSQL store for persisting agent data.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool};
@@ -1292,6 +1294,41 @@ impl Store {
             )
             .await?;
         Ok(row.get("cnt"))
+    }
+
+    /// Batch-load concurrent run counts for multiple routines in a single query.
+    /// Returns a map where missing routine IDs default to 0.
+    pub async fn count_running_routine_runs_batch(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, i64>, DatabaseError> {
+        if routine_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT routine_id, COUNT(*) as cnt FROM routine_runs
+                 WHERE routine_id = ANY($1) AND status = 'running'
+                 GROUP BY routine_id",
+                &[&routine_ids],
+            )
+            .await?;
+
+        let mut counts = HashMap::new();
+        for row in rows {
+            let id: Uuid = row.get("routine_id");
+            let cnt: i64 = row.get("cnt");
+            counts.insert(id, cnt);
+        }
+
+        // Ensure all requested IDs are in the map (defaults to 0 for no running runs)
+        for id in routine_ids {
+            counts.entry(*id).or_insert(0);
+        }
+
+        Ok(counts)
     }
 
     /// Link a routine run to a dispatched job.

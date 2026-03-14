@@ -139,6 +139,32 @@ impl RoutineEngine {
         let cache = self.event_cache.read().await;
         let mut fired = 0;
 
+        // Collect routine IDs for batch query
+        let routine_ids: Vec<Uuid> = cache
+            .iter()
+            .filter_map(|matcher| match matcher {
+                EventMatcher::Message { routine, .. } => Some(routine.id),
+                EventMatcher::System { .. } => None,
+            })
+            .collect();
+
+        if routine_ids.is_empty() {
+            return 0;
+        }
+
+        // Single batch query instead of N queries
+        let concurrent_counts = match self
+            .store
+            .count_running_routine_runs_batch(&routine_ids)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(e) => {
+                tracing::error!("Failed to batch-load concurrent counts: {}", e);
+                return 0;
+            }
+        };
+
         for matcher in cache.iter() {
             let (routine, re) = match matcher {
                 EventMatcher::Message { routine, regex } => (routine, regex),
@@ -164,8 +190,9 @@ impl RoutineEngine {
                 continue;
             }
 
-            // Concurrent run check
-            if !self.check_concurrent(routine).await {
+            // Concurrent run check (using batch-loaded counts)
+            let running_count = concurrent_counts.get(&routine.id).copied().unwrap_or(0);
+            if running_count >= routine.guardrails.max_concurrent as i64 {
                 tracing::trace!(routine = %routine.name, "Skipped: max concurrent reached");
                 continue;
             }
@@ -196,6 +223,35 @@ impl RoutineEngine {
     ) -> usize {
         let cache = self.event_cache.read().await;
         let mut fired = 0;
+
+        // Collect routine IDs for batch query
+        let routine_ids: Vec<Uuid> = cache
+            .iter()
+            .filter_map(|matcher| match matcher {
+                EventMatcher::System { routine } => Some(routine.id),
+                EventMatcher::Message { .. } => None,
+            })
+            .collect();
+
+        if routine_ids.is_empty() {
+            return 0;
+        }
+
+        // Single batch query instead of N queries
+        let concurrent_counts = match self
+            .store
+            .count_running_routine_runs_batch(&routine_ids)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to batch-load concurrent counts for system events: {}",
+                    e
+                );
+                return 0;
+            }
+        };
 
         for matcher in cache.iter() {
             let routine = match matcher {
@@ -248,7 +304,9 @@ impl RoutineEngine {
                 continue;
             }
 
-            if !self.check_concurrent(routine).await {
+            // Concurrent run check (using batch-loaded counts)
+            let running_count = concurrent_counts.get(&routine.id).copied().unwrap_or(0);
+            if running_count >= routine.guardrails.max_concurrent as i64 {
                 tracing::debug!(routine = %routine.name, "Skipped: max concurrent reached");
                 continue;
             }
