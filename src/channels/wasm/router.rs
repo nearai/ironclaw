@@ -393,7 +393,17 @@ async fn webhook_handler(
 
     let channel_name = channel.channel_name();
 
-    // Check if secret is required
+    // Check verification mode for GET requests (WhatsApp-style query param verification)
+    // In query_param mode, the WASM channel validates via hub.verify_token query param
+    let verification_mode = state.router.get_verification_mode(channel_name).await;
+    if method == Method::GET && verification_mode.as_deref() == Some("query_param") {
+        tracing::debug!(
+            channel = %channel_name,
+            "Skipping host-level secret validation for GET request (query_param verification mode)"
+        );
+        // Skip directly to WASM call - the channel validates via query param
+    } else {
+        // Check if secret is required
     if state.router.requires_secret(channel_name).await {
         // Get the secret header name for this channel (from capabilities or default)
         let secret_header_name = state.router.get_secret_header(channel_name).await;
@@ -457,6 +467,7 @@ async fn webhook_handler(
             }
         }
     }
+    } // end of verification_mode else block
 
     // Ed25519 signature verification (Discord-style)
     if let Some(pub_key_hex) = state.router.get_signature_key(channel_name).await {
@@ -1602,6 +1613,84 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "Signature with mismatched timestamp should return 401"
+        );
+    }
+
+    // ── Verification Mode Tests ─────────────────────────────────────────
+
+    /// Helper to create a router with a WhatsApp-style channel using query_param verification.
+    async fn setup_whatsapp_router() -> (Arc<WasmChannelRouter>, AxumRouter) {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("whatsapp");
+
+        // Register with verification_mode = "query_param" for GET webhook verification
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["GET".to_string(), "POST".to_string()],
+            require_secret: true,
+        }];
+
+        wasm_router
+            .register(
+                channel,
+                endpoints,
+                Some("verify_token_123".to_string()),
+                Some("X-Hub-Signature-256".to_string()),
+                Some("query_param".to_string()),
+                Some("/metadata/message_id".to_string()),
+            )
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None);
+        (wasm_router, app)
+    }
+
+    #[tokio::test]
+    async fn test_get_request_with_query_param_mode_skips_secret_check() {
+        let (_wasm_router, app) = setup_whatsapp_router().await;
+
+        // GET request without secret header but with query param
+        // In query_param mode, the WASM channel validates the hub.verify_token
+        let req = Request::builder()
+            .method("GET")
+            .uri("/webhook/whatsapp?hub.mode=subscribe&hub.challenge=test&hub.verify_token=verify_token_123")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Should NOT be 401 - query_param mode skips host-level secret validation
+        // (may be 500 since no real WASM module, but not auth failure)
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET request with query_param mode should skip host-level secret validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_post_request_with_query_param_mode_still_requires_hmac() {
+        let (wasm_router, app) = setup_whatsapp_router().await;
+
+        // Register HMAC secret for POST verification
+        wasm_router
+            .register_hmac_secret("whatsapp", "app_secret_123")
+            .await;
+
+        // POST request without HMAC signature should fail
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"entry":[]}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Should be 401 - HMAC is required for POST even in query_param mode
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "POST request without HMAC signature should return 401"
         );
     }
 }
