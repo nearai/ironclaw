@@ -297,6 +297,18 @@ pub enum WorkspaceError {
 
     #[error("I/O error: {reason}")]
     IoError { reason: String },
+
+    #[error("Not found: {path}")]
+    NotFound { path: String },
+
+    #[error("Layer not found: {name}")]
+    LayerNotFound { name: String },
+
+    #[error("Layer '{name}' is read-only")]
+    LayerReadOnly { name: String },
+
+    #[error("Cannot write sensitive content: no private layer available for redirect")]
+    PrivacyRedirectFailed,
 }
 
 /// Orchestrator errors (internal API, container management).
