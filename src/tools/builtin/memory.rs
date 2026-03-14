@@ -558,7 +558,7 @@ mod tests {
 
     #[cfg(feature = "postgres")]
     mod postgres_schema_tests {
-        use super::*;
+        use super::super::*;
 
         fn make_test_workspace() -> Arc<Workspace> {
             Arc::new(Workspace::new(
