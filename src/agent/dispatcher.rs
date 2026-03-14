@@ -134,6 +134,34 @@ impl Agent {
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
+
+        // Inject user profile into system prompt (if profile engine is available and enabled).
+        // Profile is appended to the existing system prompt before skill context.
+        if self.deps.user_profile_config.enabled
+            && let Some(ref engine) = self.deps.profile_engine
+        {
+            match engine.load_profile(&message.user_id, "default").await {
+                Ok(profile) if !profile.facts.is_empty() => {
+                    let max_chars = self.deps.user_profile_config.max_prompt_chars;
+                    let profile_text = profile.format_for_prompt(max_chars);
+                    // Safety scan the composed profile text before injection
+                    let sanitized = self
+                        .safety()
+                        .sanitize_tool_output("user_profile", &profile_text);
+                    // Also run threat scan on the composed text (defense in depth)
+                    if ironclaw_safety::scan_content_for_threats(&sanitized.content).is_none() {
+                        reasoning = reasoning.append_system_context(&sanitized.content);
+                    } else {
+                        tracing::warn!("User profile blocked by threat scan, skipping injection");
+                    }
+                }
+                Ok(_) => {} // empty profile, nothing to inject
+                Err(e) => {
+                    tracing::warn!("Failed to load user profile: {e}");
+                }
+            }
+        }
+
         if let Some(ctx) = skill_context {
             reasoning = reasoning.with_skill_context(ctx);
         }
@@ -1198,6 +1226,9 @@ mod tests {
             transcription: None,
             document_extraction: None,
             builder: None,
+            learning_tx: None,
+            profile_engine: None,
+            user_profile_config: crate::config::UserProfileConfig::default(),
         };
 
         Agent::new(
@@ -2039,6 +2070,9 @@ mod tests {
             transcription: None,
             document_extraction: None,
             builder: None,
+            learning_tx: None,
+            profile_engine: None,
+            user_profile_config: crate::config::UserProfileConfig::default(),
         };
 
         Agent::new(
@@ -2158,6 +2192,9 @@ mod tests {
                 transcription: None,
                 document_extraction: None,
                 builder: None,
+                learning_tx: None,
+                profile_engine: None,
+                user_profile_config: crate::config::UserProfileConfig::default(),
             };
 
             Agent::new(

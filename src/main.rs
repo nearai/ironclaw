@@ -749,6 +749,9 @@ async fn async_main() -> anyhow::Result<()> {
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
         builder: components.builder,
+        learning_tx: None, // TODO: create bounded mpsc channel when learning is enabled
+        profile_engine: None, // TODO: create EncryptedProfileEngine when profile is enabled
+        user_profile_config: config.user_profile.clone(),
     };
 
     let mut agent = Agent::new(

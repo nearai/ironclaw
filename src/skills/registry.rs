@@ -165,6 +165,26 @@ impl SkillRegistry {
                 loaded_names.push(name);
                 self.skills.push(skill);
             }
+
+            // 4. Auto-synthesized skills (learning system, lowest priority, Installed trust)
+            let auto_dir = inst_dir.join("auto");
+            if auto_dir.is_dir() {
+                let auto_skills = self
+                    .discover_from_dir(&auto_dir, SkillTrust::Installed, SkillSource::Synthesized)
+                    .await;
+                for (name, skill) in auto_skills {
+                    if seen.contains(&name) {
+                        tracing::debug!(
+                            "Skipping synthesized skill '{}' (overridden by higher-priority source)",
+                            name
+                        );
+                        continue;
+                    }
+                    seen.insert(name.clone());
+                    loaded_names.push(name);
+                    self.skills.push(skill);
+                }
+            }
         }
 
         loaded_names
@@ -408,7 +428,7 @@ impl SkillRegistry {
         let skill = &self.skills[idx];
 
         match &skill.source {
-            SkillSource::User(path) => Ok(path.clone()),
+            SkillSource::User(path) | SkillSource::Synthesized(path) => Ok(path.clone()),
             SkillSource::Workspace(_) => Err(SkillRegistryError::CannotRemove {
                 name: name.to_string(),
                 reason: "workspace skills cannot be removed via this interface".to_string(),

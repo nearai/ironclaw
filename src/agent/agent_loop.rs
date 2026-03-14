@@ -148,6 +148,12 @@ pub struct AgentDeps {
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// Channel for sending learning events to the background worker.
+    pub learning_tx: Option<tokio::sync::mpsc::Sender<crate::learning::LearningEvent>>,
+    /// User profile engine for system prompt injection.
+    pub profile_engine: Option<Arc<dyn crate::user_profile::engine::UserProfileEngine>>,
+    /// User profile config (max_prompt_chars, enabled flag).
+    pub user_profile_config: crate::config::UserProfileConfig,
 }
 
 /// The main agent that coordinates all components.

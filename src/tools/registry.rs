@@ -19,10 +19,11 @@ use crate::tools::builder::{
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    SessionSearchTool, ShellTool, SkillApproveTool, SkillInstallTool, SkillListPendingTool,
-    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, ProfileClearTool,
+    ProfileEditTool, ProfileViewTool, PromptQueue, ReadFileTool, SessionSearchTool, ShellTool,
+    SkillApproveTool, SkillInstallTool, SkillListPendingTool, SkillListTool, SkillRemoveTool,
+    SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
@@ -74,6 +75,9 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "session_search",
     "skill_list_pending",
     "skill_approve",
+    "profile_view",
+    "profile_edit",
+    "profile_clear",
     "message",
     "web_fetch",
     "restart",
@@ -361,6 +365,20 @@ impl ToolRegistry {
         self.register_sync(Arc::new(SkillApproveTool::new(learning_store)));
 
         tracing::debug!("Registered 3 learning tools");
+    }
+
+    /// Register user profile tools (view, edit, clear).
+    ///
+    /// Requires a `UserProfileEngine` instance.
+    pub fn register_profile_tools(
+        &self,
+        engine: Arc<dyn crate::user_profile::engine::UserProfileEngine>,
+    ) {
+        self.register_sync(Arc::new(ProfileViewTool::new(Arc::clone(&engine))));
+        self.register_sync(Arc::new(ProfileEditTool::new(Arc::clone(&engine))));
+        self.register_sync(Arc::new(ProfileClearTool::new(engine)));
+
+        tracing::debug!("Registered 3 profile tools");
     }
 
     /// Register job management tools.
