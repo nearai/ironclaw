@@ -46,6 +46,9 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Parameter names that this provider does not support (e.g., `"temperature"`).
     /// These are stripped from requests before sending to avoid 400 errors.
     unsupported_params: HashSet<String>,
+    /// Ollama base URL for model listing (e.g., http://localhost:11434).
+    /// When set, list_models() will fetch available models from /api/tags.
+    ollama_base_url: Option<String>,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -61,6 +64,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             output_cost,
             cache_retention: CacheRetention::None,
             unsupported_params: HashSet::new(),
+            ollama_base_url: None,
         }
     }
 
@@ -97,6 +101,23 @@ impl<M: CompletionModel> RigAdapter<M> {
     pub fn with_unsupported_params(mut self, params: Vec<String>) -> Self {
         self.unsupported_params = params.into_iter().collect();
         self
+    }
+
+    /// Set the Ollama base URL for model listing.
+    ///
+    /// When set, `list_models()` will fetch available models from the Ollama
+    /// `/api/tags` endpoint.
+    pub fn with_ollama_base_url(mut self, url: impl Into<Option<String>>) -> Self {
+        self.ollama_base_url = url.into();
+        self
+    }
+
+    fn ollama_model_list_fallback(&self) -> Vec<String> {
+        if self.model_name.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.model_name.clone()]
+        }
     }
 
     /// Strip unsupported fields from a `CompletionRequest` in place.
@@ -560,6 +581,80 @@ where
             dec!(10) // Anthropic: 90% discount (cost = input_rate / 10)
         } else {
             Decimal::ONE
+        }
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        // Only Ollama currently supports model listing via HTTP API
+        let base_url = match &self.ollama_base_url {
+            Some(url) => url,
+            None => return Ok(vec![]), // Other providers: no model listing support
+        };
+
+        // Fetch /api/tags from Ollama
+        let client = reqwest::Client::new();
+        let tags_url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+
+        let response = match client
+            .get(&tags_url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(
+                    model = %self.model_name,
+                    base_url,
+                    error = %error,
+                    "Failed to fetch Ollama model tags; falling back to configured model"
+                );
+                return Ok(self.ollama_model_list_fallback());
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                model = %self.model_name,
+                base_url,
+                %status,
+                body,
+                "Ollama /api/tags returned an error; falling back to configured model"
+            );
+            return Ok(self.ollama_model_list_fallback());
+        }
+
+        let body = match response.json::<serde_json::Value>().await {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::warn!(
+                    model = %self.model_name,
+                    base_url,
+                    error = %error,
+                    "Failed to parse Ollama model tags; falling back to configured model"
+                );
+                return Ok(self.ollama_model_list_fallback());
+            }
+        };
+
+        // Extract model names from models array
+        let models: Vec<String> = body
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if models.is_empty() {
+            tracing::debug!("Ollama /api/tags returned no models; falling back to configured model");
+            Ok(self.ollama_model_list_fallback())
+        } else {
+            Ok(models)
         }
     }
 
@@ -1279,5 +1374,25 @@ mod tests {
         let adapter = RigAdapter::new(model, "test-model");
 
         assert!(adapter.unsupported_params.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_models_falls_back_to_configured_model_on_request_failure() {
+        use rig::client::CompletionClient;
+        use rig::providers::openai;
+
+        let client: openai::Client = openai::Client::builder()
+            .api_key("test-key")
+            .base_url("http://localhost:0")
+            .build()
+            .unwrap();
+        let client = client.completions_api();
+        let model = client.completion_model("qwen3.5:9b-q8_0");
+        let adapter = RigAdapter::new(model, "qwen3.5:9b-q8_0")
+            .with_ollama_base_url(Some("http://127.0.0.1:0".to_string()));
+
+        let models = adapter.list_models().await.unwrap();
+
+        assert_eq!(models, vec!["qwen3.5:9b-q8_0".to_string()]);
     }
 }
