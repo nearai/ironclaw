@@ -1422,10 +1422,11 @@ mod tests {
         }
 
         let snapshot = super::snapshot_messages_for_tool_iteration(&messages);
-        assert_eq!(snapshot.len(), super::MAX_TOOL_LOOP_MESSAGES);
-        assert_eq!(snapshot[0].role, crate::llm::Role::System);
-        assert_eq!(snapshot[0].content, "sys");
+        assert_eq!(snapshot.len(), super::MAX_TOOL_LOOP_MESSAGES); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[0].role, crate::llm::Role::System); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[0].content, "sys"); // safety: test-only no-panics CI false positive
         assert_eq!(
+            // safety: test-only no-panics CI false positive
             snapshot.last().map(|m| m.content.as_str()),
             Some("u79"),
             "latest message should be preserved"
@@ -1440,9 +1441,9 @@ mod tests {
             crate::llm::ChatMessage::assistant("b"),
         ];
         let snapshot = super::snapshot_messages_for_tool_iteration(&messages);
-        assert_eq!(snapshot.len(), messages.len());
-        assert_eq!(snapshot[0].role, crate::llm::Role::System);
-        assert_eq!(snapshot[1].content, "a");
-        assert_eq!(snapshot[2].content, "b");
+        assert_eq!(snapshot.len(), messages.len()); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[0].role, crate::llm::Role::System); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[1].content, "a"); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[2].content, "b"); // safety: test-only no-panics CI false positive
     }
 }
