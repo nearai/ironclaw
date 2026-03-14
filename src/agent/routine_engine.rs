@@ -925,7 +925,8 @@ async fn execute_lightweight_with_tools(
                 .tool_definitions_excluding(ROUTINE_TOOL_DENYLIST)
                 .await;
 
-            let request = ToolCompletionRequest::new(messages.clone(), tool_defs)
+            let request_messages = snapshot_messages_for_tool_iteration(&messages);
+            let request = ToolCompletionRequest::new(request_messages, tool_defs)
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);
 
@@ -999,6 +1000,32 @@ async fn execute_lightweight_with_tools(
             // Continue loop to next LLM call
         }
     }
+}
+
+// Bound per-iteration context copy cost for lightweight tool loops.
+const MAX_TOOL_LOOP_MESSAGES: usize = 32;
+
+fn snapshot_messages_for_tool_iteration(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    if messages.len() <= MAX_TOOL_LOOP_MESSAGES {
+        return messages.to_vec();
+    }
+
+    let mut snapshot = Vec::with_capacity(MAX_TOOL_LOOP_MESSAGES);
+    let mut start = messages.len().saturating_sub(MAX_TOOL_LOOP_MESSAGES);
+
+    if messages
+        .first()
+        .map(|m| matches!(m.role, crate::llm::Role::System))
+        .unwrap_or(false)
+    {
+        snapshot.push(messages[0].clone());
+        start = start.max(1);
+    }
+
+    let remaining = MAX_TOOL_LOOP_MESSAGES.saturating_sub(snapshot.len());
+    let tail_start = messages.len().saturating_sub(remaining).max(start);
+    snapshot.extend_from_slice(&messages[tail_start..]);
+    snapshot
 }
 
 /// Tools that must never be callable from lightweight routines.
@@ -1385,5 +1412,37 @@ mod tests {
         let input = "abcdefghijk";
         let out = super::truncate(input, 5);
         assert_eq!(out, "abcde...");
+    }
+
+    #[test]
+    fn test_snapshot_messages_keeps_system_and_recent_tail() {
+        let mut messages = vec![crate::llm::ChatMessage::system("sys")];
+        for i in 0..80 {
+            messages.push(crate::llm::ChatMessage::user(format!("u{i}")));
+        }
+
+        let snapshot = super::snapshot_messages_for_tool_iteration(&messages);
+        assert_eq!(snapshot.len(), super::MAX_TOOL_LOOP_MESSAGES);
+        assert_eq!(snapshot[0].role, crate::llm::Role::System);
+        assert_eq!(snapshot[0].content, "sys");
+        assert_eq!(
+            snapshot.last().map(|m| m.content.as_str()),
+            Some("u79"),
+            "latest message should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_messages_unchanged_when_within_limit() {
+        let messages = vec![
+            crate::llm::ChatMessage::system("sys"),
+            crate::llm::ChatMessage::user("a"),
+            crate::llm::ChatMessage::assistant("b"),
+        ];
+        let snapshot = super::snapshot_messages_for_tool_iteration(&messages);
+        assert_eq!(snapshot.len(), messages.len());
+        assert_eq!(snapshot[0].role, crate::llm::Role::System);
+        assert_eq!(snapshot[1].content, "a");
+        assert_eq!(snapshot[2].content, "b");
     }
 }
