@@ -876,7 +876,8 @@ async fn substitute_validation_placeholders(
     for secret_name in placeholder_names {
         let secret_value = secrets.get_secret(&secret_name).await?;
         let placeholder = format!("{{{}}}", secret_name);
-        resolved = resolved.replace(&placeholder, secret_value.expose_secret());
+        let encoded_value = urlencoding::encode(secret_value.expose_secret());
+        resolved = resolved.replace(&placeholder, encoded_value.as_ref());
     }
 
     Ok(resolved)
@@ -1236,28 +1237,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_substitute_validation_placeholders_telegram_token() {
+    async fn test_substitute_validation_placeholders_url_encodes_secrets() {
         let secrets = test_secrets_context();
-        // Telegram tokens have format: numeric_id:alphanumeric_string
         secrets
             .save_secret(
                 "telegram_bot_token",
-                &secrecy::SecretString::from("123456789:AABBccDDeeFFgg_Test-Token".to_string()),
+                &secrecy::SecretString::from("abc123?foo=1&bar=#baz/slash".to_string()),
             )
             .await
             .unwrap();
 
         let resolved = substitute_validation_placeholders(
             &secrets,
-            "https://api.telegram.org/bot{telegram_bot_token}/getMe",
+            "https://api.example.com/verify?token={telegram_bot_token}",
         )
         .await
         .unwrap();
 
-        // Colon must be preserved in the token (not encoded to %3A)
         assert_eq!(
             resolved,
-            "https://api.telegram.org/bot123456789:AABBccDDeeFFgg_Test-Token/getMe"
+            "https://api.example.com/verify?token=abc123%3Ffoo%3D1%26bar%3D%23baz%2Fslash"
         );
     }
 

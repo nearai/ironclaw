@@ -3782,7 +3782,16 @@ impl ExtensionManager {
         {
             let token = token_value.trim();
             if !token.is_empty() {
-                let url = endpoint_template.replace(&format!("{{{}}}", secret_def.name), token);
+                // Telegram tokens contain colons (numeric_id:token_part) in the URL path,
+                // not query parameters, so URL-encoding breaks the endpoint.
+                // For other extensions, keep encoding to handle special chars in query parameters.
+                let url = if name == "telegram" {
+                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), token)
+                } else {
+                    let encoded =
+                        url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded)
+                };
                 // SSRF defense: block private IPs, localhost, cloud metadata endpoints
                 crate::tools::builtin::skill_tools::validate_fetch_url(&url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
@@ -5525,18 +5534,21 @@ mod tests {
         let url = endpoint_template.replace(&format!("{{{}}}", secret_name), token);
 
         // Verify colon is preserved
+        // safety: test assertion, panic expected
         assert_eq!(
             url,
             "https://api.telegram.org/bot123456789:AABBccDDeeFFgg_Test-Token/getMe"
         );
 
         // Verify it does NOT contain the broken percent-encoded version
+        // safety: test assertion, panic expected
         assert!(
             !url.contains("%3A"),
             "Token should not contain URL-encoded colon (%3A)"
         );
 
         // Verify the URL contains the original colon
+        // safety: test assertion, panic expected
         assert!(
             url.contains("123456789:AABBccDDeeFFgg_Test-Token"),
             "Token should be present with colon preserved"
