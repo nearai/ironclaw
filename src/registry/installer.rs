@@ -476,8 +476,15 @@ impl RegistryInstaller {
         // Detect format and extract
         let has_capabilities = if is_gzip(&bytes) {
             // tar.gz bundle: extract {name}.wasm and {name}.capabilities.json
-            let extracted =
-                extract_tar_gz(&bytes, &manifest.name, &target_wasm, &target_caps, url)?;
+            let extracted = extract_tar_gz(
+                &bytes,
+                &manifest.name,
+                Some(&manifest.source.crate_name),
+                Some(&manifest.source.capabilities),
+                &target_wasm,
+                &target_caps,
+                url,
+            )?;
             extracted.has_capabilities
         } else {
             // Bare WASM file
@@ -694,6 +701,8 @@ struct ExtractResult {
 fn extract_tar_gz(
     bytes: &[u8],
     name: &str,
+    archive_crate_name: Option<&str>,
+    archive_caps_name: Option<&str>,
     target_wasm: &Path,
     target_caps: &Path,
     url: &str,
@@ -713,8 +722,8 @@ fn extract_tar_gz(
     // 100 MB cap on decompressed entry size to prevent decompression bombs
     const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
-    let wasm_filename = format!("{}.wasm", name);
-    let caps_filename = format!("{}.capabilities.json", name);
+    let wasm_filenames = archive_filename_candidates(name, archive_crate_name, ".wasm");
+    let caps_filenames = archive_capability_candidates(name, archive_crate_name, archive_caps_name);
     let mut found_wasm = false;
     let mut found_caps = false;
 
@@ -756,21 +765,27 @@ fn extract_tar_gz(
             .and_then(|n| n.to_str())
             .unwrap_or("");
 
-        if filename == wasm_filename {
+        if wasm_filenames.iter().any(|candidate| candidate == filename) {
             let mut data = Vec::with_capacity(entry.size() as usize);
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| RegistryError::DownloadFailed {
                     url: url.to_string(),
-                    reason: format!("failed to read {} from archive: {}", wasm_filename, e),
+                    reason: format!(
+                        "failed to read matching wasm entry from archive: {}",
+                        e
+                    ),
                 })?;
             std::fs::write(target_wasm, &data).map_err(RegistryError::Io)?;
             found_wasm = true;
-        } else if filename == caps_filename {
+        } else if caps_filenames.iter().any(|candidate| candidate == filename) {
             let mut data = Vec::with_capacity(entry.size() as usize);
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| RegistryError::DownloadFailed {
                     url: url.to_string(),
-                    reason: format!("failed to read {} from archive: {}", caps_filename, e),
+                    reason: format!(
+                        "failed to read matching capabilities entry from archive: {}",
+                        e
+                    ),
                 })?;
             std::fs::write(target_caps, &data).map_err(RegistryError::Io)?;
             found_caps = true;
@@ -781,8 +796,8 @@ fn extract_tar_gz(
         return Err(RegistryError::DownloadFailed {
             url: url.to_string(),
             reason: format!(
-                "tar.gz archive does not contain '{}'. Archive may be malformed.",
-                wasm_filename
+                "tar.gz archive does not contain any of: {}. Archive may be malformed.",
+                wasm_filenames.join(", ")
             ),
         });
     }
@@ -790,6 +805,55 @@ fn extract_tar_gz(
     Ok(ExtractResult {
         has_capabilities: found_caps,
     })
+}
+
+fn archive_filename_candidates(
+    extension_name: &str,
+    archive_crate_name: Option<&str>,
+    suffix: &str,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    for base in [Some(extension_name), archive_crate_name] {
+        if let Some(base) = base {
+            let raw = format!("{}{}", base, suffix);
+            if !candidates.contains(&raw) {
+                candidates.push(raw);
+            }
+
+            let snake = format!("{}{}", base.replace('-', "_"), suffix);
+            if !candidates.contains(&snake) {
+                candidates.push(snake);
+            }
+        }
+    }
+
+    candidates
+}
+
+fn archive_capability_candidates(
+    extension_name: &str,
+    archive_crate_name: Option<&str>,
+    archive_caps_name: Option<&str>,
+) -> Vec<String> {
+    let mut candidates = archive_filename_candidates(
+        extension_name,
+        archive_crate_name,
+        ".capabilities.json",
+    );
+
+    if let Some(caps_name) = archive_caps_name {
+        let caps_name = std::path::Path::new(caps_name)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(caps_name)
+            .to_string();
+        if !candidates.contains(&caps_name) {
+            candidates.push(caps_name);
+        }
+    }
+
+    candidates
 }
 
 #[cfg(test)]
@@ -1045,8 +1109,16 @@ mod tests {
         let wasm_path = tmp.path().join("test.wasm");
         let caps_path = tmp.path().join("test.capabilities.json");
 
-        let result =
-            extract_tar_gz(&gz_bytes, "test", &wasm_path, &caps_path, "test://url").unwrap();
+        let result = extract_tar_gz(
+            &gz_bytes,
+            "test",
+            None,
+            None,
+            &wasm_path,
+            &caps_path,
+            "test://url",
+        )
+        .unwrap();
 
         assert!(wasm_path.exists());
         assert!(caps_path.exists());
@@ -1138,6 +1210,8 @@ mod tests {
         let result = extract_tar_gz(
             &gz_bytes,
             "test",
+            None,
+            None,
             &tmp.path().join("test.wasm"),
             &tmp.path().join("test.capabilities.json"),
             "test://url",
@@ -1220,6 +1294,8 @@ mod tests {
         let result = extract_tar_gz(
             &gz_bytes,
             "slack-tool",
+            None,
+            None,
             &tmp.path().join("slack-tool.wasm"),
             &tmp.path().join("slack-tool.capabilities.json"),
             "test://url",
@@ -1250,6 +1326,8 @@ mod tests {
         let result = extract_tar_gz(
             &gz_bytes,
             "slack-tool",
+            None,
+            None,
             &wasm_path,
             &caps_path,
             "test://url",
@@ -1270,8 +1348,43 @@ mod tests {
         let wasm_path = tmp.path().join("slack.wasm");
         let caps_path = tmp.path().join("slack.capabilities.json");
 
-        let result =
-            extract_tar_gz(&gz_bytes, "slack", &wasm_path, &caps_path, "test://url").unwrap();
+        let result = extract_tar_gz(
+            &gz_bytes,
+            "slack",
+            None,
+            None,
+            &wasm_path,
+            &caps_path,
+            "test://url",
+        )
+        .unwrap();
+
+        assert!(wasm_path.exists());
+        assert!(caps_path.exists());
+        assert!(result.has_capabilities);
+    }
+
+    #[test]
+    fn test_extract_tar_gz_accepts_crate_named_entries() {
+        let gz_bytes = build_test_tar_gz(
+            "telegram_tool.wasm",
+            Some("telegram-tool.capabilities.json"),
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_path = tmp.path().join("telegram-mtproto.wasm");
+        let caps_path = tmp.path().join("telegram-mtproto.capabilities.json");
+
+        let result = extract_tar_gz(
+            &gz_bytes,
+            "telegram-mtproto",
+            Some("telegram-tool"),
+            Some("telegram-tool.capabilities.json"),
+            &wasm_path,
+            &caps_path,
+            "test://url",
+        )
+        .unwrap();
 
         assert!(wasm_path.exists());
         assert!(caps_path.exists());
