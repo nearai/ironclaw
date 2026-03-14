@@ -133,7 +133,6 @@ impl Default for Policy {
         let mut policy = Self::new();
 
         // All regex patterns below are hardcoded literals validated by tests.
-        // SAFETY: unwrap is safe — these are compile-time constant patterns.
 
         // Block attempts to access system files
         policy.add_rule(
@@ -144,7 +143,7 @@ impl Default for Policy {
                 Severity::Critical,
                 PolicyAction::Block,
             )
-            .unwrap(),
+            .unwrap(), // safety: hardcoded regex literal
         );
 
         // Block cryptocurrency private key patterns
@@ -156,7 +155,7 @@ impl Default for Policy {
                 Severity::Critical,
                 PolicyAction::Block,
             )
-            .unwrap(),
+            .unwrap(), // safety: hardcoded regex literal
         );
 
         // Warn on SQL-like patterns
@@ -168,7 +167,7 @@ impl Default for Policy {
                 Severity::Medium,
                 PolicyAction::Warn,
             )
-            .unwrap(),
+            .unwrap(), // safety: hardcoded regex literal
         );
 
         // Block shell command injection patterns.
@@ -182,7 +181,7 @@ impl Default for Policy {
                 Severity::Critical,
                 PolicyAction::Block,
             )
-            .unwrap(),
+            .unwrap(), // safety: hardcoded regex literal
         );
 
         // Warn on excessive URLs
@@ -194,7 +193,7 @@ impl Default for Policy {
                 Severity::Low,
                 PolicyAction::Warn,
             )
-            .unwrap(),
+            .unwrap(), // safety: hardcoded regex literal
         );
 
         // Block encoded payloads that look like exploits
@@ -206,7 +205,7 @@ impl Default for Policy {
                 Severity::High,
                 PolicyAction::Sanitize,
             )
-            .unwrap(),
+            .unwrap(), // safety: hardcoded regex literal
         );
 
         // Warn on very long strings without spaces (potential obfuscation)
@@ -218,7 +217,7 @@ impl Default for Policy {
                 Severity::Medium,
                 PolicyAction::Warn,
             )
-            .unwrap(),
+            .unwrap(), // safety: hardcoded regex literal
         );
 
         policy
