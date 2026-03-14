@@ -7,6 +7,7 @@
 //! - Delegate tasks to other services
 //! - Build new software and tools
 
+pub(crate) mod approval;
 pub mod builder;
 pub mod builtin;
 pub mod execute;
@@ -15,7 +16,6 @@ pub mod rate_limiter;
 pub mod redaction;
 pub mod schema_validator;
 pub mod wasm;
-pub(crate) mod approval;
 
 mod registry;
 mod tool;

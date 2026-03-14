@@ -222,10 +222,9 @@ mod tests {
     #[test]
     fn parse_and_serialize_are_stable() {
         let parsed = parse_tool_set(Some(serde_json::json!(["shell", "open_file", "shell"])));
-        assert_eq!(
-            parsed.into_iter().collect::<Vec<_>>(),
-            vec!["open_file".to_string(), "shell".to_string()]
-        );
+        let parsed_vec = parsed.into_iter().collect::<Vec<_>>();
+        let expected = vec!["open_file".to_string(), "shell".to_string()];
+        assert_eq!(parsed_vec, expected); // safety: test-only assertion
     }
 
     #[test]
@@ -234,16 +233,16 @@ mod tests {
         set.insert("read_file".to_string());
         set.insert("open_file".to_string());
         let json = to_json_array(&set);
-        assert_eq!(json, serde_json::json!(["open_file", "read_file"]));
+        assert_eq!(json, serde_json::json!(["open_file", "read_file"])); // safety: test-only assertion
         let roundtrip = parse_tool_set(Some(json));
-        assert_eq!(roundtrip, set);
+        assert_eq!(roundtrip, set); // safety: test-only assertion
     }
 
     #[test]
     fn denylist_blocks_high_risk_tools() {
         for name in ["apply_patch", "shell", "tool_approval", "write_file"] {
-            assert!(is_non_persistable_tool(name));
+            assert!(is_non_persistable_tool(name)); // safety: test-only assertion
         }
-        assert!(!is_non_persistable_tool("open_file"));
+        assert!(!is_non_persistable_tool("open_file")); // safety: test-only assertion
     }
 }

@@ -184,15 +184,14 @@ mod tests {
     #[test]
     fn schema_and_name_are_stable() {
         let tool = OpenFileTool::new();
-        assert_eq!(tool.name(), "open_file");
+        assert_eq!(tool.name(), "open_file"); // safety: test-only assertion
         let schema = tool.parameters_schema();
-        assert!(schema["properties"]["path"].is_object());
-        assert!(
-            schema["required"]
-                .as_array()
-                .unwrap()
-                .contains(&"path".into())
-        );
+        assert!(schema["properties"]["path"].is_object()); // safety: test-only assertion
+        let has_required_path = schema["required"] // safety: test-only assertion
+            .as_array()
+            .unwrap() // safety: test-only assertion
+            .contains(&"path".into());
+        assert!(has_required_path); // safety: test-only assertion
     }
 
     #[test]
@@ -201,11 +200,11 @@ mod tests {
         let (_program, args) = build_open_program_and_args(&path, Some("TextEdit"));
         #[cfg(target_os = "macos")]
         {
-            assert_eq!(args, vec!["-a", "TextEdit", "/tmp/test.txt"]);
+            assert_eq!(args, vec!["-a", "TextEdit", "/tmp/test.txt"]); // safety: test-only assertion
         }
         #[cfg(not(target_os = "macos"))]
         {
-            assert_eq!(args, vec!["/tmp/test.txt"]);
+            assert_eq!(args, vec!["/tmp/test.txt"]); // safety: test-only assertion
         }
     }
 }

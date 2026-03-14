@@ -32,11 +32,7 @@ fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     matches!(channel, "gateway" | "test")
 }
 impl Agent {
-    async fn sync_persistent_tool_approvals(
-        &self,
-        user_id: &str,
-        session: Arc<Mutex<Session>>,
-    ) {
+    async fn sync_persistent_tool_approvals(&self, user_id: &str, session: Arc<Mutex<Session>>) {
         let Some(store) = self.store() else {
             return;
         };

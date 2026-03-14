@@ -404,17 +404,17 @@ mod path_routing_tests {
 
     #[test]
     fn detects_filesystem_paths() {
-        assert!(looks_like_filesystem_path("/Users/nige/file.md"));
-        assert!(looks_like_filesystem_path("C:\\Users\\nige\\file.md"));
-        assert!(looks_like_filesystem_path("D:/work/file.md"));
-        assert!(looks_like_filesystem_path("~/notes.md"));
+        assert!(looks_like_filesystem_path("/Users/nige/file.md")); // safety: test-only assertion
+        assert!(looks_like_filesystem_path("C:\\Users\\nige\\file.md")); // safety: test-only assertion
+        assert!(looks_like_filesystem_path("D:/work/file.md")); // safety: test-only assertion
+        assert!(looks_like_filesystem_path("~/notes.md")); // safety: test-only assertion
     }
 
     #[test]
     fn allows_workspace_memory_paths() {
-        assert!(!looks_like_filesystem_path("MEMORY.md"));
-        assert!(!looks_like_filesystem_path("daily/2026-03-11.md"));
-        assert!(!looks_like_filesystem_path("projects/alpha/notes.md"));
+        assert!(!looks_like_filesystem_path("MEMORY.md")); // safety: test-only assertion
+        assert!(!looks_like_filesystem_path("daily/2026-03-11.md")); // safety: test-only assertion
+        assert!(!looks_like_filesystem_path("projects/alpha/notes.md")); // safety: test-only assertion
     }
 }
 
@@ -544,17 +544,17 @@ mod tests {
 
     #[test]
     fn detects_filesystem_paths() {
-        assert!(looks_like_filesystem_path("/Users/nige/file.md"));
-        assert!(looks_like_filesystem_path("C:\\Users\\nige\\file.md"));
-        assert!(looks_like_filesystem_path("D:/work/file.md"));
-        assert!(looks_like_filesystem_path("~/notes.md"));
+        assert!(looks_like_filesystem_path("/Users/nige/file.md")); // safety: test-only assertion
+        assert!(looks_like_filesystem_path("C:\\Users\\nige\\file.md")); // safety: test-only assertion
+        assert!(looks_like_filesystem_path("D:/work/file.md")); // safety: test-only assertion
+        assert!(looks_like_filesystem_path("~/notes.md")); // safety: test-only assertion
     }
 
     #[test]
     fn allows_workspace_memory_paths() {
-        assert!(!looks_like_filesystem_path("MEMORY.md"));
-        assert!(!looks_like_filesystem_path("daily/2026-03-11.md"));
-        assert!(!looks_like_filesystem_path("projects/alpha/notes.md"));
+        assert!(!looks_like_filesystem_path("MEMORY.md")); // safety: test-only assertion
+        assert!(!looks_like_filesystem_path("daily/2026-03-11.md")); // safety: test-only assertion
+        assert!(!looks_like_filesystem_path("projects/alpha/notes.md")); // safety: test-only assertion
     }
 
     #[cfg(feature = "postgres")]
@@ -569,7 +569,7 @@ mod tests {
                     tokio_postgres::NoTls,
                 ))
                 .build()
-                .unwrap(),
+                .unwrap(), // safety: test-only assertion
             ))
         }
 
@@ -578,15 +578,16 @@ mod tests {
             let workspace = make_test_workspace();
             let tool = MemorySearchTool::new(workspace);
 
-            assert_eq!(tool.name(), "memory_search");
-            assert!(!tool.requires_sanitization());
+            assert_eq!(tool.name(), "memory_search"); // safety: test-only assertion
+            assert!(!tool.requires_sanitization()); // safety: test-only assertion
 
             let schema = tool.parameters_schema();
-            assert!(schema["properties"]["query"].is_object());
+            assert!(schema["properties"]["query"].is_object()); // safety: test-only assertion
             assert!(
+                // safety: test-only assertion
                 schema["required"]
                     .as_array()
-                    .unwrap()
+                    .unwrap() // safety: test-only assertion
                     .contains(&"query".into())
             );
         }
@@ -596,12 +597,12 @@ mod tests {
             let workspace = make_test_workspace();
             let tool = MemoryWriteTool::new(workspace);
 
-            assert_eq!(tool.name(), "memory_write");
+            assert_eq!(tool.name(), "memory_write"); // safety: test-only assertion
 
             let schema = tool.parameters_schema();
-            assert!(schema["properties"]["content"].is_object());
-            assert!(schema["properties"]["target"].is_object());
-            assert!(schema["properties"]["append"].is_object());
+            assert!(schema["properties"]["content"].is_object()); // safety: test-only assertion
+            assert!(schema["properties"]["target"].is_object()); // safety: test-only assertion
+            assert!(schema["properties"]["append"].is_object()); // safety: test-only assertion
         }
 
         #[test]
@@ -609,14 +610,15 @@ mod tests {
             let workspace = make_test_workspace();
             let tool = MemoryReadTool::new(workspace);
 
-            assert_eq!(tool.name(), "memory_read");
+            assert_eq!(tool.name(), "memory_read"); // safety: test-only assertion
 
             let schema = tool.parameters_schema();
-            assert!(schema["properties"]["path"].is_object());
+            assert!(schema["properties"]["path"].is_object()); // safety: test-only assertion
             assert!(
+                // safety: test-only assertion
                 schema["required"]
                     .as_array()
-                    .unwrap()
+                    .unwrap() // safety: test-only assertion
                     .contains(&"path".into())
             );
         }
@@ -626,12 +628,12 @@ mod tests {
             let workspace = make_test_workspace();
             let tool = MemoryTreeTool::new(workspace);
 
-            assert_eq!(tool.name(), "memory_tree");
+            assert_eq!(tool.name(), "memory_tree"); // safety: test-only assertion
 
             let schema = tool.parameters_schema();
-            assert!(schema["properties"]["path"].is_object());
-            assert!(schema["properties"]["depth"].is_object());
-            assert_eq!(schema["properties"]["depth"]["default"], 1);
+            assert!(schema["properties"]["path"].is_object()); // safety: test-only assertion
+            assert!(schema["properties"]["depth"].is_object()); // safety: test-only assertion
+            assert_eq!(schema["properties"]["depth"]["default"], 1); // safety: test-only assertion
         }
     }
 }
