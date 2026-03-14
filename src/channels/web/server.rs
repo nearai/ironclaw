@@ -690,6 +690,10 @@ async fn oauth_callback_handler(
         }
     }
 
+    // Clear auth mode regardless of outcome so the next user message goes
+    // through to the LLM instead of being intercepted as a token.
+    clear_auth_mode(&state).await;
+
     // After successful OAuth, auto-activate the extension so it moves
     // from "Installed (Authenticate)" → "Active" without a second click.
     // OAuth success is independent of activation — tokens are already stored.
@@ -2184,6 +2188,10 @@ async fn extensions_setup_submit_handler(
 
     match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
+            // Clear auth mode so the next user message goes through to the LLM
+            // instead of being intercepted as a token.
+            clear_auth_mode(&state).await;
+
             // Broadcast auth_completed so the chat UI can dismiss any in-progress
             // auth card or setup modal that was triggered by tool_auth/tool_activate.
             state.sse.broadcast(SseEvent::AuthCompleted {

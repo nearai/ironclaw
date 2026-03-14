@@ -443,6 +443,11 @@ async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata,
 }
 
 /// Try to discover OAuth metadata via 401 challenge response.
+///
+/// Also accepts 400 responses, since some servers return 400 for
+/// unauthenticated requests.  In practice the 400 path rarely yields a
+/// `WWW-Authenticate` header (GitHub's MCP does not), so discovery
+/// typically falls through to strategy 2 (RFC 9728) or 3 (direct).
 async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadata, AuthError> {
     validate_url_safe(server_url).await?;
 
@@ -459,9 +464,13 @@ async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadat
 
     log_redirect_if_applicable(server_url, &response);
 
-    if response.status().as_u16() != 401 {
+    let status = response.status().as_u16();
+
+    // Accept 401 (standard) and 400 (some servers like GitHub MCP use this).
+    // In both cases, look for WWW-Authenticate header with discovery metadata.
+    if status != 401 && status != 400 {
         return Err(AuthError::DiscoveryFailed(format!(
-            "Expected 401, got {}",
+            "Expected 401 or 400, got {}",
             response.status()
         )));
     }
@@ -471,7 +480,7 @@ async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadat
         .get("WWW-Authenticate")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| {
-            AuthError::DiscoveryFailed("No WWW-Authenticate header in 401 response".to_string())
+            AuthError::DiscoveryFailed(format!("No WWW-Authenticate header in {} response", status))
         })?;
 
     let resource_metadata_url = parse_resource_metadata_url(www_auth).ok_or_else(|| {

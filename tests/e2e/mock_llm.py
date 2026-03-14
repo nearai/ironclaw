@@ -225,6 +225,128 @@ async def models(_request: web.Request) -> web.Response:
     })
 
 
+# ── Mock MCP Server ──────────────────────────────────────────────────────────
+#
+# Simulates an MCP server that requires OAuth.  Unauthenticated requests get
+# 401 + WWW-Authenticate (standard MCP flow) or 400 "Authorization header is
+# badly formatted" (GitHub-style).  Authenticated requests return valid
+# JSON-RPC responses for initialize and tools/list.
+
+
+async def mcp_endpoint(request: web.Request) -> web.Response:
+    """Handle POST /mcp — JSON-RPC MCP endpoint requiring Bearer auth."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or len(auth.split(" ", 1)[1].strip()) == 0:
+        # Return 401 with WWW-Authenticate header for OAuth discovery
+        resource_meta_url = f"http://127.0.0.1:{request.app['port']}/.well-known/oauth-protected-resource"
+        return web.Response(
+            status=401,
+            headers={"WWW-Authenticate": f'Bearer resource_metadata="{resource_meta_url}"'},
+            text="Unauthorized",
+        )
+    return await _mcp_handle_authed(request)
+
+
+async def mcp_endpoint_400(request: web.Request) -> web.Response:
+    """Handle POST /mcp-400 — MCP endpoint that returns 400 (GitHub-style).
+
+    Simulates GitHub's MCP server which returns 400 "Authorization header
+    is badly formatted" instead of 401 when auth is missing or invalid.
+    """
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or len(auth.split(" ", 1)[1].strip()) == 0:
+        return web.Response(
+            status=400,
+            text="bad request: Authorization header is badly formatted",
+        )
+    return await _mcp_handle_authed(request)
+
+
+async def _mcp_handle_authed(request: web.Request) -> web.Response:
+    """Handle an authenticated MCP JSON-RPC request."""
+    body = await request.json()
+    method = body.get("method", "")
+    req_id = body.get("id")
+
+    if method == "initialize":
+        return web.json_response({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "mock-mcp", "version": "1.0.0"},
+            },
+        })
+    if method == "notifications/initialized":
+        return web.json_response({"jsonrpc": "2.0", "id": req_id, "result": {}})
+    if method == "tools/list":
+        return web.json_response({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {"tools": [{
+                "name": "mock_search",
+                "description": "A mock search tool for testing",
+                "inputSchema": {"type": "object", "properties": {
+                    "query": {"type": "string"},
+                }},
+            }]},
+        })
+    return web.json_response({"jsonrpc": "2.0", "id": req_id, "error": {
+        "code": -32601, "message": f"Method not found: {method}",
+    }})
+
+
+async def mcp_protected_resource(request: web.Request) -> web.Response:
+    """GET /.well-known/oauth-protected-resource[/{path}] — RFC 9728 discovery.
+
+    Production code appends the MCP server path after the well-known suffix
+    (e.g. /.well-known/oauth-protected-resource/mcp-400), so this handler
+    accepts an optional tail and returns a resource matching the request.
+    """
+    port = request.app["port"]
+    tail = request.match_info.get("tail", "mcp")
+    return web.json_response({
+        "resource": f"http://127.0.0.1:{port}/{tail}",
+        "authorization_servers": [f"http://127.0.0.1:{port}"],
+    })
+
+
+async def mcp_auth_server_metadata(request: web.Request) -> web.Response:
+    """GET /.well-known/oauth-authorization-server[/{path}] — OAuth metadata."""
+    port = request.app["port"]
+    base = f"http://127.0.0.1:{port}"
+    return web.json_response({
+        "issuer": base,
+        "authorization_endpoint": f"{base}/oauth/authorize",
+        "token_endpoint": f"{base}/oauth/token",
+        "registration_endpoint": f"{base}/oauth/register",
+        "scopes_supported": ["read", "write"],
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+    })
+
+
+async def mcp_oauth_register(request: web.Request) -> web.Response:
+    """POST /oauth/register — Dynamic Client Registration."""
+    body = await request.json()
+    return web.json_response({
+        "client_id": "mock-mcp-client-id",
+        "client_name": body.get("client_name", "IronClaw"),
+        "redirect_uris": body.get("redirect_uris", []),
+    })
+
+
+async def mcp_oauth_token(request: web.Request) -> web.Response:
+    """POST /oauth/token — Token endpoint for MCP OAuth."""
+    data = await request.post()
+    code = data.get("code", "")
+    return web.json_response({
+        "access_token": f"mcp-token-{code}",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    })
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=0)
@@ -236,6 +358,15 @@ def main():
     app.router.add_get("/v1/models", models)
     app.router.add_get("/models", models)
     app.router.add_post("/oauth/exchange", oauth_exchange)
+    # Mock MCP server endpoints
+    app.router.add_post("/mcp", mcp_endpoint)
+    app.router.add_post("/mcp-400", mcp_endpoint_400)
+    app.router.add_get("/.well-known/oauth-protected-resource", mcp_protected_resource)
+    app.router.add_get("/.well-known/oauth-protected-resource/{tail:.*}", mcp_protected_resource)
+    app.router.add_get("/.well-known/oauth-authorization-server", mcp_auth_server_metadata)
+    app.router.add_get("/.well-known/oauth-authorization-server/{tail:.*}", mcp_auth_server_metadata)
+    app.router.add_post("/oauth/register", mcp_oauth_register)
+    app.router.add_post("/oauth/token", mcp_oauth_token)
 
     async def start():
         runner = web.AppRunner(app)
@@ -243,6 +374,7 @@ def main():
         site = web.TCPSite(runner, "127.0.0.1", args.port)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
+        app["port"] = port  # used by MCP handlers
         print(f"MOCK_LLM_PORT={port}", flush=True)
         await asyncio.Event().wait()
 
