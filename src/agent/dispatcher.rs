@@ -226,6 +226,99 @@ impl Agent {
         )
         .await?;
 
+        // Send learning event after successful turn completion.
+        // Tool names are extracted from assistant messages' tool_calls in the context.
+        if let LoopOutcome::Response(_) = &outcome {
+            if let Some(ref tx) = self.deps.learning_tx {
+                let tools_used: Vec<String> = reason_ctx
+                    .messages
+                    .iter()
+                    .filter_map(|m| m.tool_calls.as_ref())
+                    .flatten()
+                    .map(|tc| tc.name.clone())
+                    .collect();
+                let turn_count = reason_ctx
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == crate::llm::Role::User)
+                    .count()
+                    .max(1);
+                let quality_score = crate::learning::worker::heuristic_quality_score(
+                    &tools_used,
+                    turn_count,
+                    false,
+                );
+                let event = crate::learning::LearningEvent {
+                    user_id: message.user_id.clone(),
+                    agent_id: "default".to_string(),
+                    conversation_id: thread_id,
+                    tools_used,
+                    turn_count,
+                    quality_score,
+                    user_messages: reason_ctx
+                        .messages
+                        .iter()
+                        .filter(|m| m.role == crate::llm::Role::User)
+                        .map(|m| m.content.clone())
+                        .collect(),
+                    user_requested_synthesis: false,
+                };
+                let _ = tx.try_send(event); // non-blocking, drop if full
+            }
+
+            // Auto-distill user profile facts every N turns (non-blocking)
+            let distill_interval = self.deps.user_profile_config.distill_interval_turns.max(1);
+            let user_turn_count = reason_ctx
+                .messages
+                .iter()
+                .filter(|m| m.role == crate::llm::Role::User)
+                .count();
+            let should_distill = user_turn_count > 0 && user_turn_count % distill_interval == 0;
+
+            if should_distill
+                && self.deps.user_profile_config.enabled
+                && let Some(ref engine) = self.deps.profile_engine
+            {
+                let llm = self.llm().clone();
+                let engine = Arc::clone(engine);
+                let user_id = message.user_id.clone();
+                let user_msgs: Vec<String> = reason_ctx
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == crate::llm::Role::User)
+                    .map(|m| m.content.clone())
+                    .collect();
+                tokio::spawn(async move {
+                    let distiller = crate::user_profile::distiller::ProfileDistiller::new(llm);
+                    let existing = match engine.load_profile(&user_id, "default").await {
+                        Ok(profile) => profile,
+                        Err(e) => {
+                            tracing::warn!("Profile distill: failed to load profile: {e}");
+                            return;
+                        }
+                    };
+                    match distiller.extract_facts(&user_msgs, &existing.facts).await {
+                        Ok(facts) => {
+                            for fact in &facts {
+                                if let Err(e) = engine.store_fact(&user_id, "default", fact).await {
+                                    tracing::debug!("Profile distill: failed to store fact: {e}");
+                                }
+                            }
+                            if !facts.is_empty() {
+                                tracing::debug!(
+                                    "Profile distill: extracted {} fact(s)",
+                                    facts.len()
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Profile distill: extraction failed: {e}");
+                        }
+                    }
+                });
+            }
+        }
+
         match outcome {
             LoopOutcome::Response(text) => Ok(AgenticLoopResult::Response(text)),
             LoopOutcome::Stopped => Err(crate::error::JobError::ContextError {

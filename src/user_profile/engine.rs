@@ -43,11 +43,21 @@ pub trait UserProfileEngine: Send + Sync {
 pub struct EncryptedProfileEngine {
     db: Arc<dyn UserProfileStore>,
     crypto: Arc<crate::secrets::SecretsCrypto>,
+    max_facts: usize,
 }
 
 impl EncryptedProfileEngine {
     pub fn new(db: Arc<dyn UserProfileStore>, crypto: Arc<crate::secrets::SecretsCrypto>) -> Self {
-        Self { db, crypto }
+        Self {
+            db,
+            crypto,
+            max_facts: 100,
+        }
+    }
+
+    pub fn with_max_facts(mut self, max_facts: usize) -> Self {
+        self.max_facts = max_facts;
+        self
     }
 
     fn encrypt_value(&self, plaintext: &str) -> Result<(Vec<u8>, Vec<u8>), UserProfileError> {
@@ -96,7 +106,15 @@ impl UserProfileEngine for EncryptedProfileEngine {
                 source: match row.source.as_str() {
                     "explicit" => FactSource::Explicit,
                     "corrected" => FactSource::Corrected,
-                    _ => FactSource::Inferred,
+                    other => {
+                        if other != "inferred" {
+                            tracing::warn!(
+                                "Unknown fact source '{}', defaulting to Inferred",
+                                other
+                            );
+                        }
+                        FactSource::Inferred
+                    }
                 },
                 updated_at: row.updated_at,
             });
@@ -111,6 +129,21 @@ impl UserProfileEngine for EncryptedProfileEngine {
         agent_id: &str,
         fact: &ProfileFact,
     ) -> Result<(), UserProfileError> {
+        // Check fact count limit before writing (allow UPDATE of existing facts)
+        let existing = self.db.get_profile_facts(user_id, agent_id).await?;
+        let is_update = existing
+            .iter()
+            .any(|r| r.category == fact.category.as_str() && r.fact_key == fact.key);
+        if !is_update && existing.len() >= self.max_facts {
+            return Err(UserProfileError::SafetyRejected {
+                reason: format!(
+                    "Profile fact limit reached ({}/{})",
+                    existing.len(),
+                    self.max_facts
+                ),
+            });
+        }
+
         // Safety scan before storage
         if let Some(threat) = ironclaw_safety::scan_content_for_threats(&fact.value) {
             return Err(UserProfileError::SafetyRejected {

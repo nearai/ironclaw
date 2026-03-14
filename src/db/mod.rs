@@ -646,6 +646,39 @@ pub struct ProfileFactRow {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Status of a synthesized skill in the approval workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillStatus {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+impl SkillStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "accepted" => Some(Self::Accepted),
+            "rejected" => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SkillStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Persistence for the synthesized skill audit log.
 #[async_trait]
 #[allow(clippy::too_many_arguments)]
@@ -659,7 +692,7 @@ pub trait LearningStore: Send + Sync {
         skill_content: Option<&str>,
         content_hash: &str,
         source_conversation_id: Option<Uuid>,
-        status: &str,
+        status: SkillStatus,
         safety_scan_passed: bool,
         quality_score: i32,
     ) -> Result<Uuid, DatabaseError>;
@@ -670,7 +703,7 @@ pub trait LearningStore: Send + Sync {
         &self,
         id: Uuid,
         user_id: &str,
-        status: &str,
+        status: SkillStatus,
     ) -> Result<bool, DatabaseError>;
 
     /// List synthesized skills by status.
@@ -678,7 +711,7 @@ pub trait LearningStore: Send + Sync {
         &self,
         user_id: &str,
         agent_id: &str,
-        status: Option<&str>,
+        status: Option<SkillStatus>,
     ) -> Result<Vec<SynthesizedSkillRow>, DatabaseError>;
 
     /// Get a single synthesized skill by ID.
@@ -700,7 +733,7 @@ pub struct SynthesizedSkillRow {
     pub skill_content: Option<String>,
     pub skill_content_hash: String,
     pub source_conversation_id: Option<Uuid>,
-    pub status: String,
+    pub status: SkillStatus,
     pub safety_scan_passed: bool,
     pub quality_score: i32,
     pub created_at: DateTime<Utc>,

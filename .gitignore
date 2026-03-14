@@ -30,3 +30,7 @@ trace_*.json
 .claude/settings.local.json
 .worktrees/
 .DS_Store
+
+# Local architecture docs and plans (not for upstream)
+docs/architecture/adaptive-learning/
+docs/plans/

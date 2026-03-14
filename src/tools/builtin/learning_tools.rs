@@ -48,7 +48,11 @@ impl Tool for SkillListPendingTool {
         // TODO: use ctx.agent_id when multi-agent is supported
         let skills = self
             .store
-            .list_synthesized_skills(&ctx.user_id, "default", Some("pending"))
+            .list_synthesized_skills(
+                &ctx.user_id,
+                "default",
+                Some(crate::db::SkillStatus::Pending),
+            )
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to list skills: {e}")))?;
 
@@ -62,7 +66,7 @@ impl Tool for SkillListPendingTool {
         let mut output = format!("{} pending skill(s):\n\n", skills.len());
         for s in &skills {
             output.push_str(&format!(
-                "- **{}** (id: {}, quality: {}, safety: {})\n",
+                "- **{}** (id: {}, quality: {}/100, safety: {})\n",
                 s.skill_name,
                 s.id,
                 s.quality_score,
@@ -102,12 +106,13 @@ impl SkillApproveTool {
 fn is_safe_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains('\0')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
         && name != "."
         && name != ".."
         && !name.starts_with('-')
+        && !name.starts_with('.')
 }
 
 #[async_trait]
@@ -154,8 +159,8 @@ impl Tool for SkillApproveTool {
             .map_err(|e| ToolError::InvalidParameters(format!("Invalid skill_id UUID: {e}")))?;
 
         let status = match action {
-            "accept" => "accepted",
-            "reject" => "rejected",
+            "accept" => crate::db::SkillStatus::Accepted,
+            "reject" => crate::db::SkillStatus::Rejected,
             other => {
                 return Err(ToolError::InvalidParameters(format!(
                     "Invalid action '{other}', must be 'accept' or 'reject'"
@@ -163,16 +168,21 @@ impl Tool for SkillApproveTool {
             }
         };
 
+        // Load skill for display name and (for accept) content validation.
+        let skill_row = self
+            .store
+            .get_synthesized_skill(skill_id, &ctx.user_id)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to fetch skill: {e}")))?;
+
+        let skill_display_name = skill_row.as_ref().map(|s| s.skill_name.clone());
+        let skill_current_status = skill_row.as_ref().map(|s| s.status);
+
         // For "accept": validate and write to disk BEFORE updating status.
         // This prevents TOCTOU: if disk write fails, status stays "pending".
-        if status == "accepted" {
-            let skill = self
-                .store
-                .get_synthesized_skill(skill_id, &ctx.user_id)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed(format!("Failed to fetch skill: {e}")))?;
-
-            let Some(skill) = skill else {
+        // Reuse skill_row from the initial fetch (no redundant DB query).
+        if status == crate::db::SkillStatus::Accepted {
+            let Some(skill) = skill_row else {
                 return Ok(ToolOutput::text(
                     format!("Skill {skill_id} not found or not owned by you."),
                     start.elapsed(),
@@ -248,14 +258,21 @@ impl Tool for SkillApproveTool {
             })?;
 
         if !updated {
-            return Ok(ToolOutput::text(
-                format!("Skill {skill_id} not found or not owned by you."),
-                start.elapsed(),
-            ));
+            // Distinguish "not found" from "already processed" using
+            // data saved from the initial fetch (no redundant DB query).
+            let msg = match (&skill_display_name, skill_current_status) {
+                (Some(name), Some(s)) => {
+                    format!("Skill '{name}' is already {s} and cannot be changed.")
+                }
+                _ => format!("Skill {skill_id} not found or not owned by you."),
+            };
+            return Ok(ToolOutput::text(msg, start.elapsed()));
         }
 
+        let display_name = skill_display_name.unwrap_or_else(|| skill_id_str.to_string());
+
         Ok(ToolOutput::text(
-            format!("Skill '{skill_id_str}' has been {status}."),
+            format!("Skill '{display_name}' has been {status}."),
             start.elapsed(),
         ))
     }

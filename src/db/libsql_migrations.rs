@@ -726,6 +726,7 @@ ALTER TABLE agent_jobs ADD COLUMN total_tokens_used INTEGER NOT NULL DEFAULT 0;
     );
     CREATE INDEX IF NOT EXISTS idx_synthesized_skills_user ON synthesized_skills(user_id, agent_id);
     CREATE INDEX IF NOT EXISTS idx_synthesized_skills_status ON synthesized_skills(status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_synthesized_skills_dedup ON synthesized_skills(user_id, skill_content_hash);
 "#,
     ),
 ];

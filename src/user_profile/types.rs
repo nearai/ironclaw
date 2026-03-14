@@ -101,7 +101,7 @@ impl UserProfile {
                 // line breaks that could exit the bullet-point structure.
                 .push(format!(
                     "- {}: {}",
-                    fact.key,
+                    fact.key.replace(['\n', '\r'], " "),
                     fact.value.replace(['\n', '\r'], " ")
                 ));
         }

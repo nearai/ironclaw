@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::db::{LearningStore, SynthesizedSkillRow};
+use crate::db::{LearningStore, SkillStatus, SynthesizedSkillRow};
 use crate::error::DatabaseError;
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_opt_text, get_opt_ts, get_text, get_ts};
@@ -18,7 +18,7 @@ impl LearningStore for LibSqlBackend {
         skill_content: Option<&str>,
         content_hash: &str,
         source_conversation_id: Option<Uuid>,
-        status: &str,
+        status: SkillStatus,
         safety_scan_passed: bool,
         quality_score: i32,
     ) -> Result<Uuid, DatabaseError> {
@@ -42,7 +42,7 @@ impl LearningStore for LibSqlBackend {
                 skill_content.map(|s| s.to_string()),
                 content_hash,
                 conv_id_str,
-                status,
+                status.as_str(),
                 if safety_scan_passed { 1i64 } else { 0i64 },
                 quality_score as i64,
                 now
@@ -58,7 +58,7 @@ impl LearningStore for LibSqlBackend {
         &self,
         id: Uuid,
         user_id: &str,
-        status: &str,
+        status: SkillStatus,
     ) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&chrono::Utc::now());
@@ -68,9 +68,9 @@ impl LearningStore for LibSqlBackend {
                 r#"
                 UPDATE synthesized_skills
                 SET status = ?3, reviewed_at = ?4
-                WHERE id = ?1 AND user_id = ?2
+                WHERE id = ?1 AND user_id = ?2 AND status = 'pending'
                 "#,
-                libsql::params![id.to_string(), user_id, status, now],
+                libsql::params![id.to_string(), user_id, status.as_str(), now],
             )
             .await
             .map_err(|e| DatabaseError::Query(format!("update_synthesized_skill_status: {e}")))?;
@@ -82,7 +82,7 @@ impl LearningStore for LibSqlBackend {
         &self,
         user_id: &str,
         agent_id: &str,
-        status: Option<&str>,
+        status: Option<SkillStatus>,
     ) -> Result<Vec<SynthesizedSkillRow>, DatabaseError> {
         let conn = self.connect().await?;
 
@@ -96,7 +96,7 @@ impl LearningStore for LibSqlBackend {
                 WHERE user_id = ?1 AND agent_id = ?2 AND status = ?3
                 ORDER BY created_at DESC
                 "#,
-                libsql::params![user_id, agent_id, status],
+                libsql::params![user_id, agent_id, status.as_str()],
             )
             .await
         } else {
@@ -173,7 +173,10 @@ fn parse_skill_row(row: &libsql::Row) -> Result<SynthesizedSkillRow, DatabaseErr
         skill_content: get_opt_text(row, 4),
         skill_content_hash: get_text(row, 5),
         source_conversation_id: conv_str.and_then(|s| Uuid::parse_str(&s).ok()),
-        status: get_text(row, 7),
+        status: SkillStatus::from_str_opt(&get_text(row, 7)).unwrap_or_else(|| {
+            tracing::warn!("Unknown skill status in DB, defaulting to Pending");
+            SkillStatus::Pending
+        }),
         safety_scan_passed: get_i64(row, 8) != 0,
         quality_score: get_i64(row, 9) as i32,
         created_at: get_ts(row, 10),

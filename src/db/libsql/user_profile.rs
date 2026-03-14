@@ -25,7 +25,13 @@ impl UserProfileStore for LibSqlBackend {
         let id = Uuid::new_v4();
         let now = fmt_ts(&chrono::Utc::now());
 
-        conn.execute(
+        // Wrap INSERT + SELECT-back in a transaction for atomicity
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(format!("upsert_profile_fact begin tx: {e}")))?;
+
+        tx.execute(
             r#"
             INSERT INTO user_profile_facts
                 (id, user_id, agent_id, category, fact_key, fact_value_encrypted,
@@ -55,7 +61,7 @@ impl UserProfileStore for LibSqlBackend {
         .map_err(|e| DatabaseError::Query(format!("upsert_profile_fact: {e}")))?;
 
         // SELECT the real id back (ON CONFLICT UPDATE keeps the original id).
-        let mut rows = conn
+        let mut rows = tx
             .query(
                 "SELECT id FROM user_profile_facts WHERE user_id = ?1 AND agent_id = ?2 AND category = ?3 AND fact_key = ?4",
                 libsql::params![user_id, agent_id, category, fact_key],
@@ -74,8 +80,14 @@ impl UserProfileStore for LibSqlBackend {
             })?;
 
         let real_id_str = get_text(&row, 0);
-        Uuid::parse_str(&real_id_str)
-            .map_err(|e| DatabaseError::Query(format!("Invalid UUID after upsert: {e}")))
+        let result = Uuid::parse_str(&real_id_str)
+            .map_err(|e| DatabaseError::Query(format!("Invalid UUID after upsert: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(format!("upsert_profile_fact commit: {e}")))?;
+
+        Ok(result)
     }
 
     async fn get_profile_facts(
