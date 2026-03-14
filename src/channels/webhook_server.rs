@@ -277,6 +277,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_begin_shutdown_takes_handles_for_lock_free_shutdown() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let mut server = WebhookServer::new(WebhookServerConfig { addr });
+
+        let test_router = axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { Json(json!({"status": "ok"})) }),
+        );
+        server.add_routes(test_router);
+        server.start().await.expect("Failed to start server");
+
+        let (shutdown_tx, handle) = server.begin_shutdown();
+        assert!(shutdown_tx.is_some(), "shutdown sender should be available");
+        assert!(handle.is_some(), "server handle should be available");
+
+        // begin_shutdown() should leave no handles behind on the server.
+        let (shutdown_tx2, handle2) = server.begin_shutdown();
+        assert!(shutdown_tx2.is_none(), "shutdown sender should be consumed");
+        assert!(handle2.is_none(), "server handle should be consumed");
+
+        if let Some(tx) = shutdown_tx {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+    }
+
+    #[tokio::test]
     async fn test_restart_with_addr_rollback_on_bind_failure() {
         use std::net::TcpListener as StdTcpListener;
 
