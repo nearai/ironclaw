@@ -6,6 +6,12 @@ rust-version = "1.92"
 description = "Prompt injection defense, input validation, secret leak detection, and safety policy enforcement"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.dist]
+dist = false
 
 [dependencies]
 aho-corasick = "1"
