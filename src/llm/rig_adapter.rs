@@ -651,7 +651,9 @@ where
             .unwrap_or_default();
 
         if models.is_empty() {
-            tracing::debug!("Ollama /api/tags returned no models; falling back to configured model");
+            tracing::debug!(
+                "Ollama /api/tags returned no models; falling back to configured model"
+            );
             Ok(self.ollama_model_list_fallback())
         } else {
             Ok(models)

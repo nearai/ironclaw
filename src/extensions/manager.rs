@@ -1661,11 +1661,8 @@ impl ExtensionManager {
         const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
         let wasm_filenames = archive_filename_candidates(name, archive_crate_name, ".wasm");
-        let caps_filenames = archive_filename_candidates(
-            name,
-            archive_crate_name,
-            ".capabilities.json",
-        );
+        let caps_filenames =
+            archive_filename_candidates(name, archive_crate_name, ".capabilities.json");
         let mut found_wasm = false;
 
         let entries = archive
@@ -4206,13 +4203,15 @@ fn preferred_archive_crate_name<'a>(
 ) -> Option<&'a str> {
     match source {
         ExtensionSource::WasmBuildable { crate_name, .. } => crate_name.as_deref(),
-        ExtensionSource::WasmDownload { .. } => entry
-            .fallback_source
-            .as_deref()
-            .and_then(|fallback| match fallback {
-                ExtensionSource::WasmBuildable { crate_name, .. } => crate_name.as_deref(),
-                _ => None,
-            }),
+        ExtensionSource::WasmDownload { .. } => {
+            entry
+                .fallback_source
+                .as_deref()
+                .and_then(|fallback| match fallback {
+                    ExtensionSource::WasmBuildable { crate_name, .. } => crate_name.as_deref(),
+                    _ => None,
+                })
+        }
         _ => None,
     }
 }

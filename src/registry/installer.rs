@@ -714,10 +714,7 @@ fn extract_tar_gz(
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| RegistryError::DownloadFailed {
                     url: url.to_string(),
-                    reason: format!(
-                        "failed to read matching wasm entry from archive: {}",
-                        e
-                    ),
+                    reason: format!("failed to read matching wasm entry from archive: {}", e),
                 })?;
             std::fs::write(target_wasm, &data).map_err(RegistryError::Io)?;
             found_wasm = true;
@@ -780,11 +777,8 @@ fn archive_capability_candidates(
     archive_crate_name: Option<&str>,
     archive_caps_name: Option<&str>,
 ) -> Vec<String> {
-    let mut candidates = archive_filename_candidates(
-        extension_name,
-        archive_crate_name,
-        ".capabilities.json",
-    );
+    let mut candidates =
+        archive_filename_candidates(extension_name, archive_crate_name, ".capabilities.json");
 
     if let Some(caps_name) = archive_caps_name {
         let caps_name = std::path::Path::new(caps_name)
