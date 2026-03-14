@@ -179,27 +179,33 @@ impl Scheduler {
             })
             .unwrap_or(self.config.max_tokens_per_job);
 
-        // Apply both metadata and token budget in one closure (Issue #813: atomic update)
-        if let Some(meta) = metadata {
+        // Apply both metadata and token budget in one closure (Issue #813: atomic update).
+        // Use update_context_and_get to ensure atomicity: no gap where concurrent workers
+        // can modify the context between update and DB persist (Issue #807).
+        let ctx = if let Some(meta) = metadata {
             self.context_manager
-                .update_context(job_id, |ctx| {
+                .update_context_and_get(job_id, |ctx| {
                     ctx.metadata = meta;
                     if max_tokens > 0 {
                         ctx.max_tokens = max_tokens;
                     }
                 })
-                .await?;
+                .await?
         } else if max_tokens > 0 {
             self.context_manager
-                .update_context(job_id, |ctx| {
+                .update_context_and_get(job_id, |ctx| {
                     ctx.max_tokens = max_tokens;
                 })
-                .await?;
-        }
+                .await?
+        } else {
+            // No metadata or token budget to set; get the initial context
+            self.context_manager.get_context(job_id).await?
+        };
 
-        // Persist to DB before scheduling so the worker's FK references are valid
+        // Persist to DB before scheduling so the worker's FK references are valid.
+        // The context was read under the same lock as the update (atomic), preventing
+        // concurrent worker interference (Issue #807: non-transactional context updates).
         if let Some(ref store) = self.store {
-            let ctx = self.context_manager.get_context(job_id).await?;
             store.save_job(&ctx).await.map_err(|e| JobError::Failed {
                 id: job_id,
                 reason: format!("failed to persist job: {e}"),
@@ -830,6 +836,24 @@ mod tests {
             Some("custom_value"),
             "metadata should be set atomically with token budget"
         );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_job_no_metadata_no_user_tokens_edge_case() {
+        // Edge case coverage: when metadata=None AND max_tokens=0 (config),
+        // the else branch calls get_context() directly (not update_context_and_get).
+        // This test verifies that path works correctly (Issue #807: full branch coverage).
+        let sched = make_test_scheduler(0); // 0 = unlimited, but user provides None
+        let job_id = sched
+            .dispatch_job("user1", "test", "desc", None) // None metadata
+            .await
+            .unwrap();
+
+        let ctx = sched.context_manager.get_context(job_id).await.unwrap();
+        // No metadata was set, should have default empty metadata
+        assert!(ctx.metadata.is_null() || ctx.metadata == serde_json::json!({}));
+        // No user tokens AND unlimited config means max_tokens stays at default
+        assert_eq!(ctx.max_tokens, 0, "unlimited config");
     }
 
     #[test]
