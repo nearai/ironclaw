@@ -1425,12 +1425,12 @@ mod tests {
         assert_eq!(snapshot.len(), super::MAX_TOOL_LOOP_MESSAGES); // safety: test-only no-panics CI false positive
         assert_eq!(snapshot[0].role, crate::llm::Role::System); // safety: test-only no-panics CI false positive
         assert_eq!(snapshot[0].content, "sys"); // safety: test-only no-panics CI false positive
+        let last_content = snapshot.last().map(|m| m.content.as_str());
         assert_eq!(
-            // safety: test-only no-panics CI false positive
-            snapshot.last().map(|m| m.content.as_str()),
+            last_content,
             Some("u79"),
             "latest message should be preserved"
-        );
+        ); // safety: test-only no-panics CI false positive
     }
 
     #[test]
