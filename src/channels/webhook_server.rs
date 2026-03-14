@@ -139,12 +139,19 @@ impl WebhookServer {
         self.config.addr
     }
 
+    /// Take ownership of shutdown primitives so callers can perform async
+    /// shutdown work without holding external locks around this server.
+    pub fn begin_shutdown(&mut self) -> (Option<oneshot::Sender<()>>, Option<JoinHandle<()>>) {
+        (self.shutdown_tx.take(), self.handle.take())
+    }
+
     /// Signal graceful shutdown and wait for the server task to finish.
     pub async fn shutdown(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
+        let (shutdown_tx, handle) = self.begin_shutdown();
+        if let Some(tx) = shutdown_tx {
             let _ = tx.send(());
         }
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = handle {
             let _ = handle.await;
         }
     }
