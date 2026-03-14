@@ -376,7 +376,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
         assert!(
             !config.enabled,
             "embeddings should remain disabled when settings.embeddings.enabled=false, \
@@ -427,7 +427,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
         assert!(
             config.enabled,
             "EMBEDDING_ENABLED=true env var should override settings"
@@ -450,8 +450,8 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
-        assert_eq!(
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
+        debug_assert_eq!(
             config.openai_base_url.as_deref(),
             Some("https://8.8.8.8"),
             "EMBEDDING_BASE_URL env var should be parsed into openai_base_url"
@@ -469,7 +469,7 @@ mod tests {
         clear_embedding_env();
 
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
         assert!(
             config.openai_base_url.is_none(),
             "openai_base_url should be None when EMBEDDING_BASE_URL is not set"
@@ -495,16 +495,15 @@ mod tests {
 
     #[test]
     fn embedding_base_url_allows_http_localhost() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::set_var("EMBEDDING_BASE_URL", "http://localhost:11434/v1");
         }
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
-        assert_eq!(
-            // safety: test assertion in #[cfg(test)] module
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
+        debug_assert_eq!(
             config.openai_base_url.as_deref(),
             Some("http://localhost:11434/v1")
         );
@@ -516,7 +515,7 @@ mod tests {
 
     #[test]
     fn embedding_base_url_rejects_unresolvable_host() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -533,7 +532,7 @@ mod tests {
 
     #[test]
     fn embedding_base_url_rejects_private_ip() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -550,7 +549,7 @@ mod tests {
 
     #[test]
     fn embedding_base_url_rejects_url_credentials() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
@@ -567,7 +566,7 @@ mod tests {
 
     #[test]
     fn embedding_base_url_rejects_metadata_host() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
