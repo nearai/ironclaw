@@ -89,19 +89,34 @@ jobs:
     - name: Check for .unwrap(), .expect(), assert!() in production code
       run: |
         BASE="${{ github.event.pull_request.base.sha }}"
-        # Get added lines in .rs files (production only, exclude tests/)
-        ADDED=$(git diff "$BASE"...HEAD -- 'src/**/*.rs' 'crates/**/*.rs' \
-          | grep -E '^\+[^+]' || true)
+        # Get the full diff for .rs files (production only, exclude tests/ directory)
+        DIFF=$(git diff "$BASE"...HEAD -- 'src/**/*.rs' 'crates/**/*.rs' || true)
 
-        if [ -z "$ADDED" ]; then
+        if [ -z "$DIFF" ]; then
           echo "No production Rust changes detected."
           exit 0
         fi
 
-        # Match panic-inducing patterns, excluding test code and safety suppressions
+        # Extract added lines, skipping those inside test modules.
+        # Track whether we're inside a test module by watching hunk headers
+        # (lines starting with @@) whose context contains "mod tests" or "#[cfg(test)]".
+        ADDED=$(echo "$DIFF" | awk '
+          /^@@/ {
+            # Hunk context (after the second @@) tells us the function/module scope
+            in_test = (tolower($0) ~ /mod tests/ || $0 ~ /#\[cfg\(test\)\]/ || $0 ~ /#\[test\]/)
+          }
+          /^\+[^+]/ && !in_test { print }
+        ' || true)
+
+        if [ -z "$ADDED" ]; then
+          echo "No production Rust changes detected (test-only changes excluded)."
+          exit 0
+        fi
+
+        # Match panic-inducing patterns, excluding safety suppressions
         VIOLATIONS=$(echo "$ADDED" \
           | grep -E '\.(unwrap|expect)\(|[^_]assert(_eq|_ne)?!' \
-          | grep -Ev 'debug_assert|// safety:|#\[cfg\(test\)\]|#\[test\]|mod tests' \
+          | grep -Ev 'debug_assert|// safety:' \
           || true)
 
         if [ -n "$VIOLATIONS" ]; then

@@ -242,6 +242,14 @@ pub enum SseEvent {
         thread_id: Option<String>,
     },
 
+    /// Suggested follow-up messages for the user.
+    #[serde(rename = "suggestions")]
+    Suggestions {
+        suggestions: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
     /// Extension activation status change (WASM channels).
     #[serde(rename = "extension_status")]
     ExtensionStatus {
@@ -707,6 +715,7 @@ impl WsServerMessage {
             SseEvent::JobStatus { .. } => "job_status",
             SseEvent::JobResult { .. } => "job_result",
             SseEvent::ImageGenerated { .. } => "image_generated",
+            SseEvent::Suggestions { .. } => "suggestions",
             SseEvent::ExtensionStatus { .. } => "extension_status",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);

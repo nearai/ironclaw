@@ -1,0 +1,9 @@
+{
+  "name": "linear",
+  "display_name": "Linear",
+  "kind": "mcp_server",
+  "description": "Connect to Linear for issue tracking, project management, and team workflows",
+  "keywords": ["issues", "tickets", "project", "tracking", "bugs"],
+  "url": "https://mcp.linear.app/sse",
+  "auth": "dcr"
+}

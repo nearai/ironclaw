@@ -270,10 +270,6 @@ impl NearAiChatProvider {
             reason: format!("Failed to read response body: {}", e),
         })?;
 
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            tracing::debug!("NEAR AI Chat response status: {}", status);
-        }
-
         // Log response body only at TRACE level to avoid exposing sensitive content
         // (user-generated data, tool outputs, leaked secrets) in DEBUG logs
         if tracing::enabled!(tracing::Level::TRACE) {

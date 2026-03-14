@@ -1104,7 +1104,18 @@ async fn resolve_host_credentials(
 ) -> Vec<ResolvedHostCredential> {
     let store = match store {
         Some(s) => s,
-        None => return Vec::new(),
+        None => {
+            // If tool requires credentials but has no secrets store, this is a configuration error
+            if let Some(http_cap) = &capabilities.http
+                && !http_cap.credentials.is_empty()
+            {
+                tracing::warn!(
+                    user_id = %user_id,
+                    "WASM tool requires credentials but secrets_store is not configured - authentication will fail"
+                );
+            }
+            return Vec::new();
+        }
     };
 
     // Check if the access token needs refreshing before resolving credentials.
@@ -1155,13 +1166,37 @@ async fn resolve_host_credentials(
             continue;
         }
 
+        // Try to get credential under the provided user_id first.
+        // If not found and user_id != "default", fallback to "default" (global credentials).
+        // This handles OAuth tokens stored globally under "default" but accessed from routine contexts.
         let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
-            Ok(s) => s,
+            Ok(s) => Some(s),
             Err(e) => {
-                tracing::debug!(
+                // If lookup fails and we're not already looking up "default", try "default" as fallback
+                if user_id != "default" {
+                    tracing::debug!(
+                        secret_name = %mapping.secret_name,
+                        user_id = %user_id,
+                        error = %e,
+                        "Credential not found for user, trying default global credentials"
+                    );
+                    store
+                        .get_decrypted("default", &mapping.secret_name)
+                        .await
+                        .ok()
+                } else {
+                    None
+                }
+            }
+        };
+
+        let secret = match secret {
+            Some(s) => s,
+            None => {
+                tracing::warn!(
                     secret_name = %mapping.secret_name,
-                    error = %e,
-                    "Could not resolve credential for WASM tool (auth may not be configured)"
+                    user_id = %user_id,
+                    "Could not resolve credential for WASM tool (not found in user context or default)"
                 );
                 continue;
             }
@@ -2057,5 +2092,162 @@ mod tests {
             post_result.is_err(),
             "Leak scan on post-injection headers should block the Slack token"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_fallback_to_default_user() {
+        use crate::secrets::{CredentialLocation, CredentialMapping, SecretsStore};
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Store a token under the "default" global user
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token_value"),
+            )
+            .await
+            .expect("Failed to store global token"); // safety: test code only
+
+        // Create capabilities requiring this credential
+        let mut creds = std::collections::HashMap::new();
+        creds.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["sheets.googleapis.com".to_string()],
+            },
+        );
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                allowlist: vec![],
+                credentials: creds,
+                rate_limit: crate::tools::wasm::capabilities::RateLimitConfig::default(),
+                max_request_bytes: 1024 * 1024,
+                max_response_bytes: 10 * 1024 * 1024,
+                timeout: std::time::Duration::from_secs(30),
+            }),
+            ..Default::default()
+        };
+
+        // Resolve credentials for a different user (routine context)
+        // Should fallback to "default" and find the token
+        let result = resolve_host_credentials(&caps, Some(&store), "routine_user_123", None).await;
+
+        assert!(!result.is_empty(), "fallback to default"); // safety: test code only
+        assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
+    }
+
+    fn test_capabilities_with_google_oauth() -> Capabilities {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::capabilities::HttpCapability;
+
+        let mut creds = std::collections::HashMap::new();
+        creds.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["sheets.googleapis.com".to_string()],
+            },
+        );
+        Capabilities {
+            http: Some(HttpCapability {
+                allowlist: vec![],
+                credentials: creds,
+                rate_limit: crate::tools::wasm::capabilities::RateLimitConfig::default(),
+                max_request_bytes: 1024 * 1024,
+                max_response_bytes: 10 * 1024 * 1024,
+                timeout: std::time::Duration::from_secs(30),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_prefers_user_specific_over_default() {
+        use crate::secrets::SecretsStore;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Store token under "default" (global)
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token"),
+            )
+            .await
+            .expect("Failed to store global token"); // safety: test code only
+
+        // Store token under user_123 (user-specific)
+        store
+            .create(
+                "user_123",
+                crate::secrets::CreateSecretParams::new(
+                    "google_oauth_token",
+                    "user_specific_token",
+                ),
+            )
+            .await
+            .expect("Failed to store user token"); // safety: test code only
+
+        // Create capabilities
+        let caps = test_capabilities_with_google_oauth();
+
+        // Resolve credentials for user_123
+        // Should prefer user_123's token over default
+        let result = resolve_host_credentials(&caps, Some(&store), "user_123", None).await;
+
+        assert!(!result.is_empty(), "has user credentials"); // safety: test code only
+        assert_eq!(result[0].secret_value, "user_specific_token", "user token"); // safety: test code only
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_no_fallback_when_already_default() {
+        use crate::secrets::SecretsStore;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Only store token under "default" (not a duplicate)
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "default_token"),
+            )
+            .await
+            .expect("Failed to store default token"); // safety: test code only
+
+        // Create capabilities
+        let caps = test_capabilities_with_google_oauth();
+
+        // Resolve credentials for "default" user
+        // Should NOT attempt fallback (already looking up default)
+        let result = resolve_host_credentials(&caps, Some(&store), "default", None).await;
+
+        assert!(!result.is_empty(), "Should find default token"); // safety: test code only
+        assert_eq!(result[0].secret_value, "default_token"); // safety: test code only
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_missing_secret_warns() {
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Don't store any token
+
+        // Create capabilities expecting a credential
+        let caps = test_capabilities_with_google_oauth();
+
+        // Resolve credentials when neither user nor default has the token
+        let result = resolve_host_credentials(&caps, Some(&store), "user_456", None).await;
+
+        // Should return empty since credential can't be found anywhere
+        assert!(result.is_empty(), "no credentials found"); // safety: test code only
     }
 }
