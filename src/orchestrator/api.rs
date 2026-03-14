@@ -176,6 +176,7 @@ async fn llm_complete_with_tools(
         model: req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
+        stop_sequences: req.stop_sequences,
         tool_choice: req.tool_choice,
         metadata: std::collections::HashMap::new(),
     };

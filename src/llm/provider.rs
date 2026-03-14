@@ -251,6 +251,7 @@ pub struct ToolCompletionRequest {
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    pub stop_sequences: Option<Vec<String>>,
     /// How to handle tool use: "auto", "required", or "none".
     pub tool_choice: Option<String>,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
@@ -266,6 +267,7 @@ impl ToolCompletionRequest {
             model: None,
             max_tokens: None,
             temperature: None,
+            stop_sequences: None,
             tool_choice: None,
             metadata: std::collections::HashMap::new(),
         }
@@ -286,6 +288,12 @@ impl ToolCompletionRequest {
     /// Set temperature.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set stop sequences.
+    pub fn with_stop_sequences(mut self, stop_sequences: Vec<String>) -> Self {
+        self.stop_sequences = Some(stop_sequences);
         self
     }
 
@@ -504,8 +512,6 @@ pub fn strip_unsupported_completion_params(
 /// This is the single helper function used by all providers to remove
 /// parameters they don't support from tool calls, replacing duplicate stringly-typed logic.
 ///
-/// Note: Only `Temperature` and `MaxTokens` are supported in `ToolCompletionRequest`.
-/// `StopSequences` is only available in `CompletionRequest` and is not applicable to tool calls.
 pub fn strip_unsupported_tool_params(
     unsupported: &std::collections::HashSet<String>,
     req: &mut ToolCompletionRequest,
@@ -519,7 +525,9 @@ pub fn strip_unsupported_tool_params(
     if unsupported.contains(UnsupportedParam::MaxTokens.name()) {
         req.max_tokens = None;
     }
-    // Note: StopSequences is not a field in ToolCompletionRequest, so no action needed
+    if unsupported.contains(UnsupportedParam::StopSequences.name()) {
+        req.stop_sequences = None;
+    }
 }
 
 #[cfg(test)]
@@ -650,5 +658,21 @@ mod tests {
         assert!(messages[2].content.contains("200 OK"));
         assert!(messages[2].tool_call_id.is_none());
         assert!(messages[2].name.is_none());
+    }
+
+    #[test]
+    fn test_strip_unsupported_tool_params_strips_stop_sequences() {
+        let mut unsupported = std::collections::HashSet::new();
+        unsupported.insert(UnsupportedParam::StopSequences.name().to_string());
+
+        let mut req = ToolCompletionRequest::new(vec![ChatMessage::user("hello")], vec![]);
+        req.stop_sequences = Some(vec!["STOP".to_string()]);
+
+        strip_unsupported_tool_params(&unsupported, &mut req);
+
+        assert!(
+            req.stop_sequences.is_none(),
+            "stop_sequences should be stripped for tool requests"
+        ); // safety: test assertion for explicit strip behavior
     }
 }

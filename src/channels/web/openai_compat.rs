@@ -484,6 +484,11 @@ pub async fn chat_completions_handler(
         if let Some(mt) = req.max_tokens {
             tool_req = tool_req.with_max_tokens(mt);
         }
+        if let Some(ref stop_val) = req.stop
+            && let Some(stops) = parse_stop(stop_val)
+        {
+            tool_req = tool_req.with_stop_sequences(stops);
+        }
         if let Some(ref tc) = req.tool_choice
             && let Some(choice) = normalize_tool_choice(tc)
         {
@@ -603,6 +608,11 @@ async fn handle_streaming(
         }
         if let Some(mt) = req.max_tokens {
             tool_req = tool_req.with_max_tokens(mt);
+        }
+        if let Some(ref stop_val) = req.stop
+            && let Some(stops) = parse_stop(stop_val)
+        {
+            tool_req = tool_req.with_stop_sequences(stops);
         }
         if let Some(ref tc) = req.tool_choice
             && let Some(choice) = normalize_tool_choice(tc)
