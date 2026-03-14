@@ -3,7 +3,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     ports:
-      - "127.0.0.1:5432:5432"
+      - "5432:5432"
     environment:
       POSTGRES_DB: ironclaw
       POSTGRES_USER: ironclaw
@@ -15,6 +15,26 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  app:
+    image: ironclaw:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3231:3000"
+      - "8281:8080"
+    env_file:
+      - .env
+    environment:
+      # Override DB connection to use service name (DNS resolution)
+      DATABASE_URL: postgres://ironclaw:ironclaw@postgres:5432/ironclaw
+    volumes:
+      - ./extensions/ironclaw-home:/home/ironclaw/.ironclaw
+      - ./tools-src:/app/tools-src:ro
+      - ./channels-src:/app/channels-src:ro
+    networks:
+      - default
 
 volumes:
   pgdata:

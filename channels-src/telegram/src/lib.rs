@@ -1899,21 +1899,51 @@ fn clean_message_text(text: &str, bot_username: Option<&str>) -> String {
     result
 }
 
+fn slash_command_token(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+
+    let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    Some(&trimmed[..end])
+}
+
+fn is_start_command_token(command: &str, bot_username: Option<&str>) -> bool {
+    if command.eq_ignore_ascii_case("/start") {
+        return true;
+    }
+
+    if let Some(bot) = bot_username {
+        let expected = format!("/start@{}", bot);
+        command.eq_ignore_ascii_case(&expected)
+    } else {
+        command.len() > "/start@".len() && command[..7].eq_ignore_ascii_case("/start@")
+    }
+}
+
 /// Decide which user content should be emitted to the agent loop.
 ///
 /// - `/start` emits a placeholder so the agent can greet the user
-/// - bare slash commands are passed through for Submission parsing
+/// - slash commands are passed through for Submission parsing
+/// - `/start <payload>` keeps legacy behavior and emits only the payload
 /// - empty/mention-only messages are ignored
 /// - otherwise cleaned text is emitted
 fn content_to_emit_for_agent(content: &str, bot_username: Option<&str>) -> Option<String> {
-    let cleaned_text = clean_message_text(content, bot_username);
     let trimmed_content = content.trim();
+    let cleaned_text = clean_message_text(content, bot_username);
 
-    if trimmed_content.eq_ignore_ascii_case("/start") {
-        return Some("[User started the bot]".to_string());
-    }
+    if let Some(command) = slash_command_token(trimmed_content) {
+        if is_start_command_token(command, bot_username) {
+            if trimmed_content.eq_ignore_ascii_case(command) {
+                return Some("[User started the bot]".to_string());
+            }
 
-    if cleaned_text.is_empty() && trimmed_content.starts_with('/') {
+            if !cleaned_text.is_empty() {
+                return Some(cleaned_text);
+            }
+        }
+
         return Some(trimmed_content.to_string());
     }
 
@@ -2007,10 +2037,18 @@ mod tests {
             content_to_emit_for_agent("  /start  ", None),
             Some("[User started the bot]".to_string())
         );
+        assert_eq!(
+            content_to_emit_for_agent("/start@MyBot", Some("MyBot")),
+            Some("[User started the bot]".to_string())
+        );
 
         // /start with args → pass args through
         assert_eq!(
             content_to_emit_for_agent("/start hello", None),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/start@MyBot hello", Some("MyBot")),
             Some("hello".to_string())
         );
 
@@ -2076,10 +2114,18 @@ mod tests {
             Some("/no".to_string())
         );
 
-        // Commands with args → cleaned text (command stripped)
+        // Commands with args must pass through raw so Submission::parse() can match.
         assert_eq!(
             content_to_emit_for_agent("/help me please", None),
-            Some("me please".to_string())
+            Some("/help me please".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/model claude-opus-4-6", None),
+            Some("/model claude-opus-4-6".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/model@MyBot qwen3.5:9b-q8_0", Some("MyBot")),
+            Some("/model@MyBot qwen3.5:9b-q8_0".to_string())
         );
 
         // Plain text → pass through

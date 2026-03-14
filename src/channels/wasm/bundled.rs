@@ -134,6 +134,13 @@ pub fn available_channel_names() -> Vec<&'static str> {
         .collect()
 }
 
+/// Locate the capabilities sidecar for a known bundled channel.
+pub(crate) fn locate_bundled_channel_capabilities(name: &str) -> Option<PathBuf> {
+    locate_channel_artifacts(name)
+        .ok()
+        .map(|(_, caps_path)| caps_path)
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -159,6 +166,11 @@ mod tests {
     #[test]
     fn test_locate_unknown_channel_errors() {
         assert!(locate_channel_artifacts("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_locate_bundled_channel_capabilities_unknown_channel() {
+        assert!(locate_bundled_channel_capabilities("nonexistent").is_none());
     }
 
     #[tokio::test]

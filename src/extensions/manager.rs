@@ -485,7 +485,7 @@ impl ExtensionManager {
                 ExtensionKind::McpServer => self.install_mcp_from_url(name, url).await,
                 ExtensionKind::WasmTool => self.install_wasm_tool_from_url(name, url).await,
                 ExtensionKind::WasmChannel => {
-                    self.install_wasm_channel_from_url(name, url, None).await
+                    self.install_wasm_channel_from_url(name, url, None, None).await
                 }
                 ExtensionKind::ChannelRelay => {
                     // ChannelRelay extensions are installed from registry, not by URL
@@ -1327,10 +1327,12 @@ impl ExtensionManager {
                     wasm_url,
                     capabilities_url,
                 } => {
+                    let archive_crate_name = preferred_archive_crate_name(entry, source);
                     self.install_wasm_tool_from_url_with_caps(
                         &entry.name,
                         wasm_url,
                         capabilities_url.as_deref(),
+                        archive_crate_name,
                     )
                     .await
                 }
@@ -1357,10 +1359,12 @@ impl ExtensionManager {
                     wasm_url,
                     capabilities_url,
                 } => {
+                    let archive_crate_name = preferred_archive_crate_name(entry, source);
                     self.install_wasm_channel_from_url(
                         &entry.name,
                         wasm_url,
                         capabilities_url.as_deref(),
+                        archive_crate_name,
                     )
                     .await
                 }
@@ -1436,7 +1440,7 @@ impl ExtensionManager {
         name: &str,
         url: &str,
     ) -> Result<InstallResult, ExtensionError> {
-        self.install_wasm_tool_from_url_with_caps(name, url, None)
+        self.install_wasm_tool_from_url_with_caps(name, url, None, None)
             .await
     }
 
@@ -1445,9 +1449,16 @@ impl ExtensionManager {
         name: &str,
         url: &str,
         capabilities_url: Option<&str>,
+        archive_crate_name: Option<&str>,
     ) -> Result<InstallResult, ExtensionError> {
-        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_tools_dir)
-            .await?;
+        self.download_and_install_wasm(
+            name,
+            archive_crate_name,
+            url,
+            capabilities_url,
+            &self.wasm_tools_dir,
+        )
+        .await?;
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -1461,9 +1472,16 @@ impl ExtensionManager {
         name: &str,
         url: &str,
         capabilities_url: Option<&str>,
+        archive_crate_name: Option<&str>,
     ) -> Result<InstallResult, ExtensionError> {
-        self.download_and_install_wasm(name, url, capabilities_url, &self.wasm_channels_dir)
-            .await?;
+        self.download_and_install_wasm(
+            name,
+            archive_crate_name,
+            url,
+            capabilities_url,
+            &self.wasm_channels_dir,
+        )
+        .await?;
 
         Ok(InstallResult {
             name: name.to_string(),
@@ -1482,6 +1500,7 @@ impl ExtensionManager {
     async fn download_and_install_wasm(
         &self,
         name: &str,
+        archive_crate_name: Option<&str>,
         url: &str,
         capabilities_url: Option<&str>,
         target_dir: &std::path::Path,
@@ -1557,7 +1576,7 @@ impl ExtensionManager {
         // Detect format: gzip (tar.gz bundle) or bare WASM
         if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
             // tar.gz bundle: extract {name}.wasm and {name}.capabilities.json
-            self.extract_wasm_tar_gz(name, &bytes, &wasm_path, &caps_path)?;
+            self.extract_wasm_tar_gz(name, archive_crate_name, &bytes, &wasm_path, &caps_path)?;
         } else {
             // Bare WASM file: validate magic number
             if bytes.len() < 4 || &bytes[..4] != b"\0asm" {
@@ -1621,6 +1640,7 @@ impl ExtensionManager {
     fn extract_wasm_tar_gz(
         &self,
         name: &str,
+        archive_crate_name: Option<&str>,
         bytes: &[u8],
         target_wasm: &std::path::Path,
         target_caps: &std::path::Path,
@@ -1640,8 +1660,9 @@ impl ExtensionManager {
         // 100 MB cap on decompressed entry size to prevent decompression bombs
         const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
-        let wasm_filename = format!("{}.wasm", name);
-        let caps_filename = format!("{}.capabilities.json", name);
+        let wasm_filenames = archive_filename_candidates(name, archive_crate_name, ".wasm");
+        let caps_filenames =
+            archive_filename_candidates(name, archive_crate_name, ".capabilities.json");
         let mut found_wasm = false;
 
         let entries = archive
@@ -1672,14 +1693,14 @@ impl ExtensionManager {
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
 
-            if filename == wasm_filename {
+            if wasm_filenames.iter().any(|candidate| candidate == filename) {
                 let mut data = Vec::with_capacity(entry.size() as usize);
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
-            } else if filename == caps_filename {
+            } else if caps_filenames.iter().any(|candidate| candidate == filename) {
                 let mut data = Vec::with_capacity(entry.size() as usize);
                 std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
@@ -1690,8 +1711,8 @@ impl ExtensionManager {
 
         if !found_wasm {
             return Err(ExtensionError::InstallFailed(format!(
-                "tar.gz archive does not contain '{}'",
-                wasm_filename
+                "tar.gz archive does not contain any of: {}",
+                wasm_filenames.join(", ")
             )));
         }
 
@@ -4152,6 +4173,50 @@ impl ExtensionManager {
     }
 }
 
+fn archive_filename_candidates(
+    extension_name: &str,
+    archive_crate_name: Option<&str>,
+    suffix: &str,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    for base in [Some(extension_name), archive_crate_name]
+        .into_iter()
+        .flatten()
+    {
+        let raw = format!("{}{}", base, suffix);
+        if !candidates.contains(&raw) {
+            candidates.push(raw);
+        }
+
+        let snake = format!("{}{}", base.replace('-', "_"), suffix);
+        if !candidates.contains(&snake) {
+            candidates.push(snake);
+        }
+    }
+
+    candidates
+}
+
+fn preferred_archive_crate_name<'a>(
+    entry: &'a crate::extensions::RegistryEntry,
+    source: &'a ExtensionSource,
+) -> Option<&'a str> {
+    match source {
+        ExtensionSource::WasmBuildable { crate_name, .. } => crate_name.as_deref(),
+        ExtensionSource::WasmDownload { .. } => {
+            entry
+                .fallback_source
+                .as_deref()
+                .and_then(|fallback| match fallback {
+                    ExtensionSource::WasmBuildable { crate_name, .. } => crate_name.as_deref(),
+                    _ => None,
+                })
+        }
+        _ => None,
+    }
+}
+
 /// Inject credentials for a channel based on naming convention.
 ///
 /// Looks for secrets matching the pattern `{channel_name}_*` and injects them
@@ -4339,6 +4404,10 @@ fn combine_install_errors(
 mod tests {
     use std::sync::Arc;
 
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use tar::Builder;
+
     use crate::extensions::ExtensionManager;
     use crate::extensions::manager::{
         FallbackDecision, combine_install_errors, fallback_decision, infer_kind_from_url,
@@ -4449,6 +4518,59 @@ mod tests {
             matches!(combined, ExtensionError::AlreadyInstalled(ref name) if name == "test"),
             "Expected AlreadyInstalled, got: {combined:?}"
         );
+    }
+
+    fn build_test_archive(wasm_name: &str, caps_name: Option<&str>) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut builder = Builder::new(&mut encoder);
+
+            let wasm_data = b"\0asm\x01\0\0\0";
+            let mut wasm_header = tar::Header::new_gnu();
+            wasm_header.set_size(wasm_data.len() as u64);
+            wasm_header.set_cksum();
+            builder
+                .append_data(&mut wasm_header, wasm_name, &wasm_data[..])
+                .expect("append wasm");
+
+            if let Some(caps_name) = caps_name {
+                let caps_data = br#"{"auth":null}"#;
+                let mut caps_header = tar::Header::new_gnu();
+                caps_header.set_size(caps_data.len() as u64);
+                caps_header.set_cksum();
+                builder
+                    .append_data(&mut caps_header, caps_name, &caps_data[..])
+                    .expect("append caps");
+            }
+
+            builder.finish().expect("finish archive");
+        }
+
+        encoder.finish().expect("finish gzip")
+    }
+
+    #[test]
+    fn test_extract_wasm_tar_gz_accepts_crate_named_bundle() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+        let archive = build_test_archive(
+            "telegram_tool.wasm",
+            Some("telegram-tool.capabilities.json"),
+        );
+        let wasm_path = dir.path().join("telegram-mtproto.wasm");
+        let caps_path = dir.path().join("telegram-mtproto.capabilities.json");
+
+        mgr.extract_wasm_tar_gz(
+            "telegram-mtproto",
+            Some("telegram-tool"),
+            &archive,
+            &wasm_path,
+            &caps_path,
+        )
+        .expect("crate-named archive should install");
+
+        assert!(wasm_path.exists());
+        assert!(caps_path.exists());
     }
 
     // === QA Plan P2 - 2.4: Extension registry collision tests (filesystem) ===

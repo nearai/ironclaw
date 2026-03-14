@@ -22,6 +22,8 @@ pub struct ChannelsConfig {
     /// Per-channel owner user IDs. When set, the channel only responds to this user.
     /// Key: channel name (e.g., "telegram"), Value: owner user ID.
     pub wasm_channel_owner_ids: HashMap<String, i64>,
+    /// Force the Telegram WASM channel to use polling mode even when a tunnel URL is configured.
+    pub telegram_polling_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +198,7 @@ impl ChannelsConfig {
                 }
                 ids
             },
+            telegram_polling_enabled: parse_bool_env("TELEGRAM_POLLING_ENABLED", false)?,
         })
     }
 }
@@ -324,6 +327,7 @@ mod tests {
             wasm_channels_dir: PathBuf::from("/tmp/channels"),
             wasm_channels_enabled: true,
             wasm_channel_owner_ids: HashMap::new(),
+            telegram_polling_enabled: false,
         };
         assert!(cfg.cli.enabled);
         assert!(cfg.http.is_none());
@@ -348,10 +352,26 @@ mod tests {
             wasm_channels_dir: PathBuf::from("/opt/channels"),
             wasm_channels_enabled: false,
             wasm_channel_owner_ids: ids,
+            telegram_polling_enabled: false,
         };
         assert_eq!(cfg.wasm_channel_owner_ids.get("telegram"), Some(&12345));
         assert_eq!(cfg.wasm_channel_owner_ids.get("slack"), Some(&67890));
         assert!(!cfg.wasm_channels_enabled);
+    }
+
+    #[test]
+    fn channels_config_telegram_polling_flag() {
+        let cfg = ChannelsConfig {
+            cli: CliConfig { enabled: true },
+            http: None,
+            gateway: None,
+            signal: None,
+            wasm_channels_dir: PathBuf::from("/tmp/channels"),
+            wasm_channels_enabled: true,
+            wasm_channel_owner_ids: HashMap::new(),
+            telegram_polling_enabled: true,
+        };
+        assert!(cfg.telegram_polling_enabled);
     }
 
     #[test]

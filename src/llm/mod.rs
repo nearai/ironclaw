@@ -330,7 +330,8 @@ fn create_ollama_from_registry(
     );
 
     let adapter = RigAdapter::new(model, &config.model)
-        .with_unsupported_params(config.unsupported_params.clone());
+        .with_unsupported_params(config.unsupported_params.clone())
+        .with_ollama_base_url(Some(config.base_url.clone()));
     Ok(Arc::new(adapter))
 }
 
