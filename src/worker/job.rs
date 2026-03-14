@@ -1123,9 +1123,10 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             return LoopSignal::InjectMessage(content);
         }
 
-        // Check for terminal or non-progressing state. The loop should stop when the
-        // job has been cancelled, failed, stuck, or already completed — not just the
-        // three states that `is_terminal()` covers (Accepted/Failed/Cancelled).
+        // Check for terminal or post-completion state. The loop should stop when the
+        // job has been cancelled, failed, or already completed — but NOT when Stuck,
+        // because Stuck is recoverable (Stuck -> InProgress via self-repair).
+        // Stopping on Stuck would prevent recovery from resuming the worker (issue #892).
         if let Ok(ctx) = self
             .worker
             .context_manager()
@@ -1135,7 +1136,6 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 ctx.state,
                 JobState::Cancelled
                     | JobState::Failed
-                    | JobState::Stuck
                     | JobState::Completed
                     | JobState::Submitted
                     | JobState::Accepted
