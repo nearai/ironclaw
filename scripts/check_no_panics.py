@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Requires Python 3.10+ for PEP 604 union syntax such as `int | None`.
 
 import argparse
 import pathlib
@@ -10,7 +11,15 @@ from dataclasses import dataclass
 
 
 PANIC_PATTERN = re.compile(r"\.(?:unwrap|expect)\(|(?<!_)assert(?:_eq|_ne)?!")
-TEST_ATTR_PATTERN = re.compile(r"^\s*#\s*\[\s*(?:test|cfg\s*\(\s*test\s*\))\s*\]")
+TEST_ATTR_PATTERN = re.compile(
+    r"^\s*#\s*\[\s*(?:"
+    r"test"
+    r"|tokio::test(?:\s*\([^]]*\))?"
+    r"|rstest(?:\s*\([^]]*\))?"
+    r"|test_case(?:\s*\([^]]*\))?"
+    r"|cfg\s*\([^]]*\btest\b[^]]*\)"
+    r")\s*\]"
+)
 ITEM_PATTERN = re.compile(
     r"^\s*"
     r"(?:(?:pub(?:\([^)]*\))?|crate)\s+)?"
@@ -114,6 +123,8 @@ def sanitize_line(line: str, state: LexerState) -> str:
             i += 1
             continue
         if ch == "'":
+            # This can misclassify lifetimes like `'a` as char literals. That only
+            # risks false negatives by masking later code on the same line.
             state.in_char = True
             i += 1
             continue
@@ -302,7 +313,35 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertFalse(contexts[5])
         self.assertFalse(contexts[6])
 
-    def test_named_tests_module_without_cfg_is_ignored(self) -> None:
+    def test_proc_macro_test_attrs_mark_body_only(self) -> None:
+        attrs = [
+            "tokio::test",
+            'tokio::test(flavor = "multi_thread", worker_threads = 4)',
+            "rstest",
+            "test_case(1, 2)",
+            "cfg(all(test, unix))",
+        ]
+
+        for attr in attrs:
+            with self.subTest(attr=attr):
+                lines = [
+                    f"#[{attr}]\n",
+                    "fn it_works() {\n",
+                    '    value.expect("allowed in test");\n',
+                    "}\n",
+                    "fn prod() {\n",
+                    '    value.expect("boom");\n',
+                    "}\n",
+                ]
+
+                contexts = line_test_contexts(lines)
+
+                self.assertTrue(contexts[1])
+                self.assertTrue(contexts[2])
+                self.assertFalse(contexts[4])
+                self.assertFalse(contexts[5])
+
+    def test_named_tests_module_marks_context(self) -> None:
         lines = [
             "mod tests {\n",
             "    fn helper() {\n",
