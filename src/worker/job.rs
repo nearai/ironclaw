@@ -580,10 +580,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Redact sensitive parameter values before they touch any observability or audit path.
         let safe_params = redact_params(&params, tool.sensitive_params());
+        let risk = tool.risk_level_for(&params);
         tracing::debug!(
             tool = %tool_name,
             params = %safe_params,
             job = %job_id,
+            risk = ?risk,
             "Tool call started"
         );
 
