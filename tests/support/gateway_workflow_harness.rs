@@ -227,6 +227,7 @@ impl GatewayWorkflowHarness {
             skill_catalog: components.skill_catalog.clone(),
             chat_rate_limiter: RateLimiter::new(120, 60),
             oauth_rate_limiter: RateLimiter::new(10, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
             registry_entries: Vec::new(),
             cost_guard: Some(Arc::clone(&components.cost_guard)),
             routine_engine: Arc::clone(&routine_slot),

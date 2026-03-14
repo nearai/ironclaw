@@ -754,6 +754,13 @@ impl RoutineInfo {
                 "system_event".to_string(),
                 format!("event: {}.{}", source, event_type),
             ),
+            crate::agent::routine::Trigger::Webhook { path, .. } => {
+                let p = path.as_deref().unwrap_or("default");
+                (
+                    "webhook".to_string(),
+                    format!("webhook: /api/webhooks/{}", p),
+                )
+            }
             crate::agent::routine::Trigger::Manual => {
                 ("manual".to_string(), "manual only".to_string())
             }
