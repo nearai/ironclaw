@@ -539,7 +539,6 @@ impl Tool for MemoryTreeTool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::tools::builtin::path_utils::looks_like_filesystem_path;
 
     #[test]
