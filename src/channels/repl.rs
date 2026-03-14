@@ -607,6 +607,9 @@ impl Channel for ReplChannel {
                     eprintln!("\x1b[36m  [image generated]\x1b[0m");
                 }
             }
+            StatusUpdate::Suggestions { .. } => {
+                // Suggestions are only rendered by the web gateway
+            }
         }
         Ok(())
     }
