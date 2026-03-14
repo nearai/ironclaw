@@ -4,15 +4,20 @@
 //! be audited and reversed.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::db::Database;
+use crate::tools::ToolRegistry;
+use crate::tools::approval::AUTO_APPROVED_TOOLS_SETTING_KEY;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
+const NON_PERSISTABLE_TOOLS: &[&str] = &["apply_patch", "shell", "tool_approval", "write_file"];
 
-const TOOL_APPROVALS_KEY: &str = "auto_approved_tools";
+fn is_non_persistable_tool(tool: &str) -> bool {
+    NON_PERSISTABLE_TOOLS.contains(&tool)
+}
 
 fn parse_tool_set(value: Option<serde_json::Value>) -> BTreeSet<String> {
     value
@@ -36,11 +41,44 @@ fn to_json_array(tools: &BTreeSet<String>) -> serde_json::Value {
 /// Manage persistent "always allow" approvals for tools.
 pub struct ToolApprovalTool {
     store: Arc<dyn Database>,
+    tools: Weak<ToolRegistry>,
 }
 
 impl ToolApprovalTool {
-    pub fn new(store: Arc<dyn Database>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<dyn Database>, tools: Weak<ToolRegistry>) -> Self {
+        Self { store, tools }
+    }
+
+    async fn validate_allow_target(&self, tool: &str) -> Result<(), ToolError> {
+        if is_non_persistable_tool(tool) {
+            return Err(ToolError::InvalidParameters(format!(
+                "Persistent allow is blocked for '{}'",
+                tool
+            )));
+        }
+
+        let Some(registry) = self.tools.upgrade() else {
+            return Err(ToolError::ExecutionFailed(
+                "Tool registry is unavailable".to_string(),
+            ));
+        };
+        let Some(target) = registry.get(tool).await else {
+            return Err(ToolError::InvalidParameters(format!(
+                "Unknown tool '{}'",
+                tool
+            )));
+        };
+        if !matches!(
+            target.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        ) {
+            return Err(ToolError::InvalidParameters(format!(
+                "Only tools with 'UnlessAutoApproved' approval can be persistently allowed: '{}'",
+                tool
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -88,7 +126,7 @@ impl Tool for ToolApprovalTool {
 
         let current = self
             .store
-            .get_setting(user_id, TOOL_APPROVALS_KEY)
+            .get_setting(user_id, AUTO_APPROVED_TOOLS_SETTING_KEY)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to load approvals: {}", e)))?;
         let mut tools = parse_tool_set(current);
@@ -101,6 +139,13 @@ impl Tool for ToolApprovalTool {
                     .get("tool")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| ToolError::InvalidParameters("Missing tool".to_string()))?;
+                let tool = tool.trim();
+                if tool.is_empty() {
+                    return Err(ToolError::InvalidParameters(
+                        "Tool name cannot be empty".to_string(),
+                    ));
+                }
+                self.validate_allow_target(tool).await?;
                 changed = tools.insert(tool.to_string());
                 if changed {
                     format!("Allowed '{}' persistently", tool)
@@ -135,7 +180,11 @@ impl Tool for ToolApprovalTool {
 
         if changed {
             self.store
-                .set_setting(user_id, TOOL_APPROVALS_KEY, &to_json_array(&tools))
+                .set_setting(
+                    user_id,
+                    AUTO_APPROVED_TOOLS_SETTING_KEY,
+                    &to_json_array(&tools),
+                )
                 .await
                 .map_err(|e| {
                     ToolError::ExecutionFailed(format!("Failed to persist approvals: {}", e))
@@ -188,5 +237,13 @@ mod tests {
         assert_eq!(json, serde_json::json!(["open_file", "read_file"]));
         let roundtrip = parse_tool_set(Some(json));
         assert_eq!(roundtrip, set);
+    }
+
+    #[test]
+    fn denylist_blocks_high_risk_tools() {
+        for name in ["apply_patch", "shell", "tool_approval", "write_file"] {
+            assert!(is_non_persistable_tool(name));
+        }
+        assert!(!is_non_persistable_tool("open_file"));
     }
 }

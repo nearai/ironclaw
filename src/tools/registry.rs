@@ -238,7 +238,6 @@ impl ToolRegistry {
         self.register_sync(Arc::new(EchoTool));
         self.register_sync(Arc::new(TimeTool));
         self.register_sync(Arc::new(JsonTool));
-        self.register_sync(Arc::new(OpenFileTool::new()));
 
         let mut http = HttpTool::new();
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
@@ -247,6 +246,12 @@ impl ToolRegistry {
         self.register_sync(Arc::new(http));
 
         tracing::debug!("Registered {} built-in tools", self.count());
+    }
+
+    /// Register host-local file opener (explicitly opt-in local capability).
+    pub fn register_open_file_tool(&self) {
+        self.register_sync(Arc::new(OpenFileTool::new()));
+        tracing::debug!("Registered open_file tool");
     }
 
     /// Register the `tool_info` discovery tool.
@@ -416,8 +421,8 @@ impl ToolRegistry {
     }
 
     /// Register tool-approval management tool (persistent allowlist controls).
-    pub fn register_tool_approval_tool(&self, store: Arc<dyn Database>) {
-        self.register_sync(Arc::new(ToolApprovalTool::new(store)));
+    pub fn register_tool_approval_tool(self: &Arc<Self>, store: Arc<dyn Database>) {
+        self.register_sync(Arc::new(ToolApprovalTool::new(store, Arc::downgrade(self))));
         tracing::debug!("Registered tool approval management tool");
     }
 

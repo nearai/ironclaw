@@ -12,12 +12,12 @@
 //! Use `memory_write` to persist important facts that should be remembered
 //! across sessions.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::context::JobContext;
+use crate::tools::builtin::path_utils::looks_like_filesystem_path;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 
@@ -26,28 +26,6 @@ use crate::workspace::{Workspace, paths};
 /// injection if an attacker tricks the agent into overwriting them.
 const PROTECTED_IDENTITY_FILES: &[&str] =
     &[paths::IDENTITY, paths::SOUL, paths::AGENTS, paths::USER];
-
-/// Detect paths that are clearly local filesystem references, not workspace-memory docs.
-///
-/// Examples:
-/// - `/Users/.../file.md` (Unix absolute)
-/// - `C:\Users\...` or `D:/work/...` (Windows absolute)
-/// - `~/notes.md` (home expansion shorthand)
-fn looks_like_filesystem_path(path: &str) -> bool {
-    if path.is_empty() {
-        return false;
-    }
-
-    if Path::new(path).is_absolute() || path.starts_with("~/") {
-        return true;
-    }
-
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/')
-}
 
 /// Tool for searching workspace memory.
 ///
@@ -422,7 +400,7 @@ impl Tool for MemoryReadTool {
 
 #[cfg(test)]
 mod path_routing_tests {
-    use super::looks_like_filesystem_path;
+    use crate::tools::builtin::path_utils::looks_like_filesystem_path;
 
     #[test]
     fn detects_filesystem_paths() {
@@ -562,6 +540,7 @@ impl Tool for MemoryTreeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::builtin::path_utils::looks_like_filesystem_path;
 
     #[test]
     fn detects_filesystem_paths() {

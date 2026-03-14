@@ -20,6 +20,7 @@ use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext};
+use crate::tools::builtin::path_utils::looks_like_filesystem_path;
 use crate::tools::redact_params;
 
 /// Result of the agentic loop execution.
@@ -480,6 +481,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         for (idx, original_tc) in tool_calls.iter().enumerate() {
             let mut tc = original_tc.clone();
 
+            if tc.name == "memory_read"
+                && let Some(path) = tc.arguments.get("path").and_then(|v| v.as_str())
+                && looks_like_filesystem_path(path)
+            {
+                tc.name = "read_file".to_string();
+                tc.arguments = serde_json::json!({ "path": path });
+            }
+
             let tool_opt = self.agent.tools().get(&tc.name).await;
             let sensitive = tool_opt
                 .as_ref()
@@ -913,30 +922,6 @@ pub(super) async fn execute_chat_tool_standalone(
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
 ) -> Result<String, Error> {
-    // Robust routing: if the model tries memory_read on a clear local filesystem
-    // path, route to read_file automatically.
-    if tool_name == "memory_read"
-        && let Some(path) = params.get("path").and_then(|v| v.as_str())
-    {
-        let path_buf = std::path::Path::new(path);
-        let bytes = path.as_bytes();
-        let looks_windows_abs = bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && (bytes[2] == b'\\' || bytes[2] == b'/');
-        if path_buf.is_absolute() || path.starts_with("~/") || looks_windows_abs {
-            let read_file_params = serde_json::json!({ "path": path });
-            return crate::tools::execute::execute_tool_with_safety(
-                tools,
-                safety,
-                "read_file",
-                &read_file_params,
-                job_ctx,
-            )
-            .await;
-        }
-    }
-
     crate::tools::execute::execute_tool_with_safety(tools, safety, tool_name, params, job_ctx).await
 }
 

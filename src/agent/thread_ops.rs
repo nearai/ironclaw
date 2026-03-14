@@ -21,6 +21,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, ToolCall};
+use crate::tools::approval::AUTO_APPROVED_TOOLS_SETTING_KEY;
 use crate::tools::redact_params;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
@@ -30,8 +31,6 @@ fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
     matches!(channel, "gateway" | "test")
 }
-const TOOL_APPROVALS_KEY: &str = "auto_approved_tools";
-
 impl Agent {
     async fn sync_persistent_tool_approvals(
         &self,
@@ -42,7 +41,10 @@ impl Agent {
             return;
         };
 
-        let value = match store.get_setting(user_id, TOOL_APPROVALS_KEY).await {
+        let value = match store
+            .get_setting(user_id, AUTO_APPROVED_TOOLS_SETTING_KEY)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 tracing::debug!("Failed to load persistent tool approvals: {}", e);
@@ -75,7 +77,10 @@ impl Agent {
                 .map(serde_json::Value::String)
                 .collect(),
         );
-        if let Err(e) = store.set_setting(user_id, TOOL_APPROVALS_KEY, &value).await {
+        if let Err(e) = store
+            .set_setting(user_id, AUTO_APPROVED_TOOLS_SETTING_KEY, &value)
+            .await
+        {
             tracing::warn!("Failed to persist tool approvals: {}", e);
         }
     }

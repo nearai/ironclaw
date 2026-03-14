@@ -15,6 +15,7 @@ pub mod rate_limiter;
 pub mod redaction;
 pub mod schema_validator;
 pub mod wasm;
+pub(crate) mod approval;
 
 mod registry;
 mod tool;
