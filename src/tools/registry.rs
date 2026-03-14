@@ -17,11 +17,12 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    ToolUpgradeTool, WriteFileTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, PtcScriptTool,
+    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
+    ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
+use crate::tools::executor::ToolExecutor;
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
 use crate::tools::wasm::{
@@ -76,6 +77,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "image_edit",
     "image_analyze",
     "tool_info",
+    "ptc_script",
 ];
 
 /// Registry of available tools.
@@ -91,6 +93,14 @@ pub struct ToolRegistry {
     rate_limiter: RateLimiter,
     /// Reference to the message tool for setting context per-turn.
     message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
+    /// Shared slot for the tool executor (enables PTC via tool_invoke).
+    ///
+    /// Uses `std::sync::RwLock` (not tokio) because reads happen inside
+    /// `spawn_blocking` closures in WASM tool execution. The slot is
+    /// populated lazily after `AppBuilder::build_all()` completes, so
+    /// WASM tools registered during startup still get access to the
+    /// executor when they execute later.
+    tool_executor_slot: Arc<std::sync::RwLock<Option<Arc<ToolExecutor>>>>,
 }
 
 impl ToolRegistry {
@@ -103,6 +113,7 @@ impl ToolRegistry {
             secrets_store: None,
             rate_limiter: RateLimiter::new(),
             message_tool: RwLock::new(None),
+            tool_executor_slot: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -125,6 +136,25 @@ impl ToolRegistry {
     /// Get the shared rate limiter for checking built-in tool limits.
     pub fn rate_limiter(&self) -> &RateLimiter {
         &self.rate_limiter
+    }
+
+    /// Set the tool executor for programmatic tool calling (PTC).
+    ///
+    /// Writes the executor into the shared slot so all WASM tools --
+    /// including those registered before this call -- can resolve it
+    /// lazily at execution time.
+    pub fn set_tool_executor(&self, executor: Arc<ToolExecutor>) {
+        if let Ok(mut guard) = self.tool_executor_slot.write() {
+            *guard = Some(executor);
+        }
+    }
+
+    /// Get a clone of the shared tool executor slot.
+    ///
+    /// WASM wrappers hold this slot and read from it at execution time,
+    /// allowing the executor to be set after tool registration.
+    pub fn tool_executor_slot(&self) -> Arc<std::sync::RwLock<Option<Arc<ToolExecutor>>>> {
+        Arc::clone(&self.tool_executor_slot)
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
@@ -333,8 +363,9 @@ impl ToolRegistry {
         self.register_sync(Arc::new(WriteFileTool::new()));
         self.register_sync(Arc::new(ListDirTool::new()));
         self.register_sync(Arc::new(ApplyPatchTool::new()));
+        self.register_sync(Arc::new(PtcScriptTool::new()));
 
-        tracing::debug!("Registered 5 development tools");
+        tracing::debug!("Registered 6 development tools");
     }
 
     /// Register memory tools with a workspace.
@@ -649,6 +680,11 @@ impl ToolRegistry {
             wrapper = wrapper.with_oauth_refresh(oauth);
         }
 
+        // Inject shared tool executor slot for PTC (lazy resolution).
+        // The WASM wrapper reads from this slot at execution time, so the
+        // executor can be set after tool registration.
+        wrapper = wrapper.with_tool_executor_slot(Arc::clone(&self.tool_executor_slot));
+
         // Register the tool
         self.register(Arc::new(wrapper)).await;
 
@@ -811,6 +847,36 @@ mod tests {
         let defs = registry.tool_definitions().await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn test_tool_executor_slot_lazy_resolution() {
+        let registry = ToolRegistry::new();
+
+        // Get the slot BEFORE setting the executor (simulates startup order)
+        let slot = registry.tool_executor_slot();
+
+        // Slot should be empty
+        assert!(slot.read().unwrap().is_none());
+
+        // Set the executor (simulates main.rs wiring after build_all)
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_builtin_tools();
+        let safety = Arc::new(crate::safety::SafetyLayer::new(
+            &crate::config::SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: true,
+            },
+        ));
+        let executor = Arc::new(crate::tools::ToolExecutor::new(
+            tools,
+            safety,
+            std::time::Duration::from_secs(60),
+        ));
+        registry.set_tool_executor(Arc::clone(&executor));
+
+        // Slot should now contain the executor
+        assert!(slot.read().unwrap().is_some());
     }
 
     #[tokio::test]

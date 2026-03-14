@@ -55,6 +55,9 @@ RUN npm install -g @anthropic-ai/claude-code@latest
 # Copy the binary
 COPY --from=builder /build/target/release/ironclaw /usr/local/bin/ironclaw
 
+# Install IronClaw Python SDK for programmatic tool calling (PTC)
+COPY sdk/python/ironclaw_tools.py /usr/lib/python3/dist-packages/ironclaw_tools.py
+
 # Create non-root user (UID 1000 matches the orchestrator's container config)
 RUN useradd -m -u 1000 -s /bin/bash sandbox \
     && mkdir -p /workspace \

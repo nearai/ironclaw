@@ -255,6 +255,8 @@ async fn async_main() -> anyhow::Result<()> {
         &components.llm,
         components.db.as_ref(),
         components.secrets_store.as_ref(),
+        &components.tools,
+        &components.safety,
     )
     .await;
     let container_job_manager = orch.container_job_manager;
