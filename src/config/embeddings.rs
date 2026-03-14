@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn embeddings_disabled_not_overridden_by_openai_key() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
 
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn embeddings_enabled_from_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
 
         let settings = Settings {
@@ -402,7 +402,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
         assert!(
             config.enabled,
             "embeddings should be enabled when settings say so"
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn embeddings_env_override_takes_precedence() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
 
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX.
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn embedding_base_url_parsed_from_env() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn embedding_base_url_defaults_to_none() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
 
         let settings = Settings::default();
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn embedding_base_url_rejects_http_non_localhost() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
