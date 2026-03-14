@@ -150,7 +150,7 @@ async fn register_channel(
 
     let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id.clone()));
 
-    // Inject runtime config (tunnel URL, webhook secret, owner_id).
+    // Inject runtime config (tunnel URL, webhook secret, owner_id, polling override).
     {
         let mut config_updates = std::collections::HashMap::new();
 
@@ -192,12 +192,21 @@ async fn register_channel(
         // for a tenant token need the raw values in their config.
         inject_channel_secrets_into_config(&channel_name, secrets_store, &mut config_updates).await;
 
+        if channel_name == TELEGRAM_CHANNEL_NAME && config.channels.telegram_polling_enabled {
+            config_updates.insert("polling_enabled".to_string(), serde_json::Value::Bool(true));
+        }
+
         if !config_updates.is_empty() {
             channel_arc.update_config(config_updates).await;
             tracing::info!(
                 channel = %channel_name,
                 has_tunnel = config.tunnel.public_url.is_some(),
                 has_webhook_secret = webhook_secret.is_some(),
+                polling_enabled = if channel_name == "telegram" {
+                    Some(config.channels.telegram_polling_enabled)
+                } else {
+                    None
+                },
                 "Injected runtime config into channel"
             );
         }
