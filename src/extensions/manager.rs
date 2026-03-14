@@ -304,6 +304,34 @@ impl ExtensionManager {
         *self.relay_channel_manager.write().await = Some(channel_manager);
     }
 
+    async fn current_channel_owner_id(&self, name: &str) -> Option<i64> {
+        {
+            let rt_guard = self.channel_runtime.read().await;
+            if let Some(owner_id) = rt_guard
+                .as_ref()
+                .and_then(|rt| rt.wasm_channel_owner_ids.get(name).copied())
+            {
+                return Some(owner_id);
+            }
+        }
+
+        let store = self.store.as_ref()?;
+        let key = format!("channels.wasm_channel_owner_ids.{name}");
+        match store.get_setting(&self.user_id, &key).await {
+            Ok(Some(serde_json::Value::Number(n))) => n.as_i64(),
+            Ok(Some(serde_json::Value::String(s))) => s.parse::<i64>().ok(),
+            Ok(Some(_)) | Ok(None) => None,
+            Err(e) => {
+                tracing::debug!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to read persisted wasm channel owner id"
+                );
+                None
+            }
+        }
+    }
+
     /// Check if a channel name corresponds to a relay extension (has stored stream token).
     pub async fn is_relay_channel(&self, name: &str) -> bool {
         self.secrets
@@ -2980,13 +3008,7 @@ impl ExtensionManager {
 
         // Verify runtime infrastructure is available and clone Arcs so we don't
         // hold the RwLock guard across awaits.
-        let (
-            channel_runtime,
-            channel_manager,
-            pairing_store,
-            wasm_channel_router,
-            wasm_channel_owner_ids,
-        ) = {
+        let (channel_runtime, channel_manager, pairing_store, wasm_channel_router) = {
             let rt_guard = self.channel_runtime.read().await;
             let rt = rt_guard.as_ref().ok_or_else(|| {
                 ExtensionError::ActivationFailed("WASM channel runtime not configured".to_string())
@@ -2996,7 +3018,6 @@ impl ExtensionManager {
                 Arc::clone(&rt.channel_manager),
                 Arc::clone(&rt.pairing_store),
                 Arc::clone(&rt.wasm_channel_router),
-                rt.wasm_channel_owner_ids.clone(),
             )
         };
 
@@ -3067,7 +3088,7 @@ impl ExtensionManager {
                 );
             }
 
-            if let Some(&owner_id) = wasm_channel_owner_ids.get(channel_name.as_str()) {
+            if let Some(owner_id) = self.current_channel_owner_id(&channel_name).await {
                 config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
             }
 
@@ -4742,6 +4763,34 @@ mod tests {
             None,
             Vec::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_current_channel_owner_id_uses_runtime_state() {
+        let manager = make_manager_with_temp_dirs();
+        assert_eq!(manager.current_channel_owner_id("telegram").await, None);
+
+        let channels = Arc::new(crate::channels::ChannelManager::new());
+        let runtime = Arc::new(
+            crate::channels::wasm::WasmChannelRuntime::new(
+                crate::channels::wasm::WasmChannelRuntimeConfig::default(),
+            )
+            .expect("runtime"),
+        );
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
+        let mut owner_ids = std::collections::HashMap::new();
+        owner_ids.insert("telegram".to_string(), 12345_i64);
+
+        manager
+            .set_channel_runtime(channels, runtime, pairing_store, router, owner_ids)
+            .await;
+
+        assert_eq!(
+            manager.current_channel_owner_id("telegram").await,
+            Some(12345_i64)
+        );
+        assert_eq!(manager.current_channel_owner_id("slack").await, None);
     }
 
     // ── resolve_env_credentials tests ────────────────────────────────────
