@@ -486,7 +486,7 @@ mod tests {
         }
         let settings = Settings::default();
         let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
-        assert!(err.to_string().contains("EMBEDDING_BASE_URL"));
+        assert!(err.to_string().contains("EMBEDDING_BASE_URL")); // safety: test assertion in #[cfg(test)] module
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");
@@ -504,6 +504,7 @@ mod tests {
         let settings = Settings::default();
         let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(
+            // safety: test assertion in #[cfg(test)] module
             config.openai_base_url.as_deref(),
             Some("http://localhost:11434/v1")
         );
@@ -523,7 +524,7 @@ mod tests {
         }
         let settings = Settings::default();
         let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
-        assert!(err.to_string().contains("could not be resolved"));
+        assert!(err.to_string().contains("could not be resolved")); // safety: test assertion in #[cfg(test)] module
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");
@@ -540,7 +541,7 @@ mod tests {
         }
         let settings = Settings::default();
         let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
-        assert!(err.to_string().contains("not allowed"));
+        assert!(err.to_string().contains("not allowed")); // safety: test assertion in #[cfg(test)] module
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");
@@ -557,7 +558,7 @@ mod tests {
         }
         let settings = Settings::default();
         let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
-        assert!(err.to_string().contains("credentials"));
+        assert!(err.to_string().contains("credentials")); // safety: test assertion in #[cfg(test)] module
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");
@@ -577,7 +578,7 @@ mod tests {
         }
         let settings = Settings::default();
         let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
-        assert!(err.to_string().contains("not allowed"));
+        assert!(err.to_string().contains("not allowed")); // safety: test assertion in #[cfg(test)] module
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_BASE_URL");
