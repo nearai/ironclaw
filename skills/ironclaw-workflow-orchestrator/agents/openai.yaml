@@ -1,0 +1,4 @@
+interface:
+  display_name: "IronClaw Workflow Orchestrator"
+  short_description: "Install and run event-driven GitHub workflow routines"
+  default_prompt: "Set up the full issue-to-merge workflow using routines and event triggers."

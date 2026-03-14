@@ -1,7 +1,5 @@
 //! WASM sandbox error types.
 
-use std::fmt;
-
 use thiserror::Error;
 
 /// Errors that can occur during WASM tool execution.
@@ -68,13 +66,13 @@ pub enum WasmError {
     Timeout(std::time::Duration),
 
     /// Component returned an error response.
-    /// When `hint` is non-empty it carries the tool's description and parameter
-    /// schema so the LLM can retry with correct arguments.
+    /// When `hint` is non-empty it points the LLM to `tool_info` so it can
+    /// fetch the tool's full parameter schema on demand.
     #[error("Tool error: {message}{}", if hint.is_empty() { String::new() } else { format!("\n\nTool usage hint:\n{hint}") })]
     ToolReturnedError {
         /// The error message from the WASM tool.
         message: String,
-        /// Optional description + schema hint (empty when unavailable).
+        /// Optional retry hint (empty when unavailable).
         hint: String,
     },
 
@@ -99,73 +97,9 @@ impl From<WasmError> for crate::tools::ToolError {
     }
 }
 
-/// Details about a trap that occurred during execution.
-#[derive(Debug, Clone)]
-pub struct TrapInfo {
-    /// Human-readable trap message.
-    pub message: String,
-    /// Trap code if available.
-    pub code: Option<TrapCode>,
-}
-
-impl fmt::Display for TrapInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.code {
-            Some(code) => write!(f, "{}: {}", code, self.message),
-            None => write!(f, "{}", self.message),
-        }
-    }
-}
-
-/// Known trap codes from Wasmtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrapCode {
-    /// Out of bounds memory access.
-    MemoryOutOfBounds,
-    /// Out of bounds table access.
-    TableOutOfBounds,
-    /// Indirect call type mismatch.
-    IndirectCallToNull,
-    /// Signature mismatch on indirect call.
-    BadSignature,
-    /// Integer overflow.
-    IntegerOverflow,
-    /// Integer division by zero.
-    IntegerDivisionByZero,
-    /// Invalid conversion to integer.
-    BadConversionToInteger,
-    /// Unreachable instruction executed.
-    UnreachableCodeReached,
-    /// Call stack exhausted.
-    StackOverflow,
-    /// Out of fuel.
-    OutOfFuel,
-    /// Unknown trap code.
-    Unknown,
-}
-
-impl fmt::Display for TrapCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            TrapCode::MemoryOutOfBounds => "memory out of bounds",
-            TrapCode::TableOutOfBounds => "table out of bounds",
-            TrapCode::IndirectCallToNull => "indirect call to null",
-            TrapCode::BadSignature => "bad signature",
-            TrapCode::IntegerOverflow => "integer overflow",
-            TrapCode::IntegerDivisionByZero => "integer division by zero",
-            TrapCode::BadConversionToInteger => "bad conversion to integer",
-            TrapCode::UnreachableCodeReached => "unreachable code reached",
-            TrapCode::StackOverflow => "stack overflow",
-            TrapCode::OutOfFuel => "out of fuel",
-            TrapCode::Unknown => "unknown trap",
-        };
-        write!(f, "{}", s)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::tools::wasm::error::{TrapCode, TrapInfo, WasmError};
+    use crate::tools::wasm::error::WasmError;
 
     #[test]
     fn test_error_display() {
@@ -178,17 +112,6 @@ mod tests {
         };
         assert!(err.to_string().contains("20000000"));
         assert!(err.to_string().contains("10000000"));
-    }
-
-    #[test]
-    fn test_trap_info_display() {
-        let info = TrapInfo {
-            message: "access at offset 0x1000".to_string(),
-            code: Some(TrapCode::MemoryOutOfBounds),
-        };
-        let s = info.to_string();
-        assert!(s.contains("memory out of bounds"));
-        assert!(s.contains("access at offset"));
     }
 
     #[test]
@@ -218,12 +141,11 @@ mod tests {
     fn test_tool_returned_error_with_hint() {
         let err = WasmError::ToolReturnedError {
             message: "unknown action: foobar".to_string(),
-            hint: "Description: Gmail tool\nParameters schema: {\"type\":\"object\"}".to_string(),
+            hint: "Tip: call tool_info(name: \"gmail\", include_schema: true) for the full parameter schema.".to_string(),
         };
         let display = err.to_string();
         assert!(display.contains("unknown action: foobar"));
         assert!(display.contains("Tool usage hint"));
-        assert!(display.contains("Gmail tool"));
-        assert!(display.contains("Parameters schema"));
+        assert!(display.contains("tool_info"));
     }
 }

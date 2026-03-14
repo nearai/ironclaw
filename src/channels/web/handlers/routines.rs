@@ -10,6 +10,7 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::error::RoutineError;
@@ -27,7 +28,7 @@ pub async fn routines_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let items: Vec<RoutineInfo> = routines.iter().map(routine_to_info).collect();
+    let items: Vec<RoutineInfo> = routines.iter().map(RoutineInfo::from_routine).collect();
 
     Ok(Json(RoutineListResponse { routines: items }))
 }
@@ -182,16 +183,40 @@ pub async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    let was_enabled = routine.enabled;
     // If a specific value was provided, use it; otherwise toggle.
     routine.enabled = match body {
         Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
         None => !routine.enabled,
     };
 
+    // When re-enabling a cron routine, recompute next_fire_at so the cron
+    // ticker can pick it up. Mirrors the CLI behavior (issue #1077).
+    if routine.enabled
+        && !was_enabled
+        && let Trigger::Cron {
+            ref schedule,
+            ref timezone,
+        } = routine.trigger
+    {
+        routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to compute next fire: {e}"),
+            )
+        })?;
+    }
+
     store
         .update_routine(&routine)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Refresh the in-memory event trigger cache so event/system_event
+    // routines reflect the new enabled state immediately (issue #1076).
+    if let Some(engine) = state.routine_engine.read().await.as_ref() {
+        engine.refresh_event_cache().await;
+    }
 
     Ok(Json(serde_json::json!({
         "status": if routine.enabled { "enabled" } else { "disabled" },
@@ -217,6 +242,12 @@ pub async fn routines_delete_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if deleted {
+        // Refresh the in-memory event trigger cache so deleted event/system_event
+        // routines stop firing immediately (issue #1076).
+        if let Some(engine) = state.routine_engine.read().await.as_ref() {
+            engine.refresh_event_cache().await;
+        }
+
         Ok(Json(serde_json::json!({
             "status": "deleted",
             "routine_id": routine_id,
@@ -261,54 +292,6 @@ pub async fn routines_runs_handler(
         "routine_id": routine_id,
         "runs": run_infos,
     })))
-}
-
-/// Convert a Routine to the trimmed RoutineInfo for list display.
-fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
-    let (trigger_type, trigger_summary) = match &r.trigger {
-        crate::agent::routine::Trigger::Cron { schedule, .. } => {
-            ("cron".to_string(), format!("cron: {}", schedule))
-        }
-        crate::agent::routine::Trigger::Event {
-            pattern, channel, ..
-        } => {
-            let ch = channel.as_deref().unwrap_or("any");
-            ("event".to_string(), format!("on {} /{}/", ch, pattern))
-        }
-        crate::agent::routine::Trigger::Webhook { path, .. } => {
-            let p = path.as_deref().unwrap_or("/");
-            ("webhook".to_string(), format!("webhook: {}", p))
-        }
-        crate::agent::routine::Trigger::Manual => ("manual".to_string(), "manual only".to_string()),
-    };
-
-    let action_type = match &r.action {
-        crate::agent::routine::RoutineAction::Lightweight { .. } => "lightweight",
-        crate::agent::routine::RoutineAction::FullJob { .. } => "full_job",
-    };
-
-    let status = if !r.enabled {
-        "disabled"
-    } else if r.consecutive_failures > 0 {
-        "failing"
-    } else {
-        "active"
-    };
-
-    RoutineInfo {
-        id: r.id,
-        name: r.name.clone(),
-        description: r.description.clone(),
-        enabled: r.enabled,
-        trigger_type,
-        trigger_summary,
-        action_type: action_type.to_string(),
-        last_run_at: r.last_run_at.map(|dt| dt.to_rfc3339()),
-        next_fire_at: r.next_fire_at.map(|dt| dt.to_rfc3339()),
-        run_count: r.run_count,
-        consecutive_failures: r.consecutive_failures,
-        status: status.to_string(),
-    }
 }
 
 /// Map `RoutineError` variants to appropriate HTTP status codes.

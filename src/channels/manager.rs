@@ -56,6 +56,17 @@ impl ChannelManager {
     /// the agent loop.
     pub async fn hot_add(&self, channel: Box<dyn Channel>) -> Result<(), ChannelError> {
         let name = channel.name().to_string();
+
+        // Shut down any existing channel with the same name to avoid parallel consumers.
+        // The old forwarding task will stop when the channel's stream ends after shutdown.
+        {
+            let channels = self.channels.read().await;
+            if let Some(existing) = channels.get(&name) {
+                tracing::debug!(channel = %name, "Shutting down existing channel before hot-add replacement");
+                let _ = existing.shutdown().await;
+            }
+        }
+
         let stream = channel.start().await?;
 
         // Register for respond/broadcast/send_status
@@ -336,5 +347,31 @@ mod tests {
 
         let msg = stream.next().await.expect("stream ended");
         assert_eq!(msg.content, "background alert");
+    }
+
+    #[tokio::test]
+    async fn test_hot_add_replaces_existing_channel() {
+        // Regression: hot_add must shut down the existing channel before replacing it,
+        // to prevent duplicate SSE consumers from running in parallel.
+        let manager = ChannelManager::new();
+        let (stub1, _tx1) = StubChannel::new("relay");
+        manager.add(Box::new(stub1)).await;
+        let mut stream = manager.start_all().await.expect("start_all");
+
+        // Hot-add a replacement channel with the same name
+        let (stub2, tx2) = StubChannel::new("relay");
+        manager.hot_add(Box::new(stub2)).await.expect("hot_add");
+
+        // Send through the new channel — should arrive in the merged stream
+        tx2.send(IncomingMessage::new("relay", "u1", "from new"))
+            .await
+            .expect("send");
+        let msg = stream.next().await.expect("stream");
+        assert_eq!(msg.content, "from new");
+
+        // Verify only one channel entry exists
+        let channels = manager.channels.read().await;
+        assert_eq!(channels.len(), 1);
+        assert!(channels.contains_key("relay"));
     }
 }

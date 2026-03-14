@@ -132,7 +132,7 @@ fn embed_registry_catalog(root: &Path) {
         // No registry dir: write empty catalog
         fs::write(
             &out_path,
-            r#"{"tools":[],"channels":[],"bundles":{"bundles":{}}}"#,
+            r#"{"tools":[],"channels":[],"mcp_servers":[],"bundles":{"bundles":{}}}"#,
         )
         .unwrap();
         return;
@@ -140,6 +140,7 @@ fn embed_registry_catalog(root: &Path) {
 
     let mut tools = Vec::new();
     let mut channels = Vec::new();
+    let mut mcp_servers = Vec::new();
 
     // Collect tool manifests
     let tools_dir = registry_dir.join("tools");
@@ -153,6 +154,12 @@ fn embed_registry_catalog(root: &Path) {
         collect_json_files(&channels_dir, &mut channels);
     }
 
+    // Collect MCP server manifests
+    let mcp_servers_dir = registry_dir.join("mcp-servers");
+    if mcp_servers_dir.is_dir() {
+        collect_json_files(&mcp_servers_dir, &mut mcp_servers);
+    }
+
     // Read bundles
     let bundles_path = registry_dir.join("_bundles.json");
     let bundles_raw = if bundles_path.is_file() {
@@ -163,9 +170,10 @@ fn embed_registry_catalog(root: &Path) {
 
     // Build the combined JSON
     let catalog = format!(
-        r#"{{"tools":[{}],"channels":[{}],"bundles":{}}}"#,
+        r#"{{"tools":[{}],"channels":[{}],"mcp_servers":[{}],"bundles":{}}}"#,
         tools.join(","),
         channels.join(","),
+        mcp_servers.join(","),
         bundles_raw,
     );
 

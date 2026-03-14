@@ -8,7 +8,7 @@
 //! ┌──────────┐     ┌─────────┐     ┌──────────────────┐
 //! │  Trigger  │────▶│ Engine  │────▶│  Execution Mode  │
 //! │ cron/event│     │guardrail│     │lightweight│full_job│
-//! │ webhook   │     │ check   │     └──────────────────┘
+//! │ system    │     │ check   │     └──────────────────┘
 //! │ manual    │     └─────────┘              │
 //! └──────────┘                               ▼
 //!                                     ┌──────────────┐
@@ -69,12 +69,15 @@ pub enum Trigger {
         /// Regex pattern to match against message content.
         pattern: String,
     },
-    /// Fire on incoming webhook POST to /hooks/routine/{id}.
-    Webhook {
-        /// Optional webhook path suffix (defaults to routine id).
-        path: Option<String>,
-        /// Optional shared secret for HMAC validation.
-        secret: Option<String>,
+    /// Fire when a structured system event is emitted.
+    SystemEvent {
+        /// Event source namespace (e.g. "github", "workflow", "tool").
+        source: String,
+        /// Event type within the source (e.g. "issue.opened").
+        event_type: String,
+        /// Optional exact-match filters against payload top-level fields.
+        #[serde(default)]
+        filters: std::collections::HashMap<String, String>,
     },
     /// Only fires via tool call or CLI.
     Manual,
@@ -86,7 +89,7 @@ impl Trigger {
         match self {
             Trigger::Cron { .. } => "cron",
             Trigger::Event { .. } => "event",
-            Trigger::Webhook { .. } => "webhook",
+            Trigger::SystemEvent { .. } => "system_event",
             Trigger::Manual => "manual",
         }
     }
@@ -134,16 +137,39 @@ impl Trigger {
                     .map(String::from);
                 Ok(Trigger::Event { channel, pattern })
             }
-            "webhook" => {
-                let path = config
-                    .get("path")
+            "system_event" => {
+                let source = config
+                    .get("source")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
-                let secret = config
-                    .get("secret")
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "system_event trigger".into(),
+                        field: "source".into(),
+                    })?
+                    .to_string();
+                let event_type = config
+                    .get("event_type")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
-                Ok(Trigger::Webhook { path, secret })
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "system_event trigger".into(),
+                        field: "event_type".into(),
+                    })?
+                    .to_string();
+                let filters = config
+                    .get("filters")
+                    .and_then(|v| v.as_object())
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| {
+                                json_value_as_filter_string(v).map(|s| (k.clone(), s))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(Trigger::SystemEvent {
+                    source,
+                    event_type,
+                    filters,
+                })
             }
             "manual" => Ok(Trigger::Manual),
             other => Err(RoutineError::UnknownTriggerType {
@@ -163,9 +189,14 @@ impl Trigger {
                 "pattern": pattern,
                 "channel": channel,
             }),
-            Trigger::Webhook { path, secret } => serde_json::json!({
-                "path": path,
-                "secret": secret,
+            Trigger::SystemEvent {
+                source,
+                event_type,
+                filters,
+            } => serde_json::json!({
+                "source": source,
+                "event_type": event_type,
+                "filters": filters,
             }),
             Trigger::Manual => serde_json::json!({}),
         }
@@ -176,7 +207,7 @@ impl Trigger {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RoutineAction {
-    /// Single LLM call, no tools. Cheap and fast.
+    /// Single LLM call (optionally with tools). Cheap and fast.
     Lightweight {
         /// The prompt sent to the LLM.
         prompt: String,
@@ -186,6 +217,14 @@ pub enum RoutineAction {
         /// Max output tokens (default: 4096).
         #[serde(default = "default_max_tokens")]
         max_tokens: u32,
+        /// Enable tool access (default: false for backward compatibility).
+        /// When true, the LLM can call tools during execution.
+        /// Tools requiring approval are automatically filtered out.
+        #[serde(default)]
+        use_tools: bool,
+        /// Max tool call rounds (default: 3). Only used when use_tools is true.
+        #[serde(default = "default_max_tool_rounds")]
+        max_tool_rounds: u32,
     },
     /// Full multi-turn worker job with tool access.
     FullJob {
@@ -210,6 +249,19 @@ fn default_max_tokens() -> u32 {
 
 fn default_max_iterations() -> u32 {
     10
+}
+
+fn default_max_tool_rounds() -> u32 {
+    3
+}
+
+/// Hard upper bound for max_tool_rounds to prevent runaway loops and cost explosion.
+pub(crate) const MAX_TOOL_ROUNDS_LIMIT: u32 = 20;
+
+/// Clamp max_tool_rounds to [1, MAX_TOOL_ROUNDS_LIMIT].
+/// Accepts u64 to avoid truncation before clamping.
+fn clamp_max_tool_rounds(value: u64) -> u32 {
+    value.clamp(1, MAX_TOOL_ROUNDS_LIMIT as u64) as u32
 }
 
 /// Parse a `tool_permissions` JSON array into a `Vec<String>`.
@@ -259,10 +311,22 @@ impl RoutineAction {
                     .get("max_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(default_max_tokens() as u64) as u32;
+                let use_tools = config
+                    .get("use_tools")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let max_tool_rounds = clamp_max_tool_rounds(
+                    config
+                        .get("max_tool_rounds")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(default_max_tool_rounds() as u64),
+                );
                 Ok(RoutineAction::Lightweight {
                     prompt,
                     context_paths,
                     max_tokens,
+                    use_tools,
+                    max_tool_rounds,
                 })
             }
             "full_job" => {
@@ -308,10 +372,14 @@ impl RoutineAction {
                 prompt,
                 context_paths,
                 max_tokens,
+                use_tools,
+                max_tool_rounds,
             } => serde_json::json!({
                 "prompt": prompt,
                 "context_paths": context_paths,
                 "max_tokens": max_tokens,
+                "use_tools": use_tools,
+                "max_tool_rounds": max_tool_rounds,
             }),
             RoutineAction::FullJob {
                 title,
@@ -428,6 +496,19 @@ pub struct RoutineRun {
     pub created_at: DateTime<Utc>,
 }
 
+/// Convert a JSON value to a string for filter storage.
+///
+/// Handles strings, numbers, and booleans — consistent with the matching
+/// logic in `routine_engine::json_value_as_string`.
+pub fn json_value_as_filter_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// Compute a content hash for event dedup.
 pub fn content_hash(content: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -460,7 +541,8 @@ pub fn next_cron_fire(
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{
-        RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash, next_cron_fire,
+        MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash,
+        next_cron_fire,
     };
 
     #[test]
@@ -487,16 +569,36 @@ mod tests {
     }
 
     #[test]
+    fn test_system_event_trigger_roundtrip() {
+        let mut filters = std::collections::HashMap::new();
+        filters.insert("repo".to_string(), "nearai/ironclaw".to_string());
+        filters.insert("action".to_string(), "opened".to_string());
+        let trigger = Trigger::SystemEvent {
+            source: "github".to_string(),
+            event_type: "issue".to_string(),
+            filters: filters.clone(),
+        };
+        let json = trigger.to_config_json();
+        let parsed = Trigger::from_db("system_event", json).expect("parse system_event");
+        assert!(
+            matches!(parsed, Trigger::SystemEvent { source, event_type, filters: f }
+            if source == "github" && event_type == "issue" && f == filters)
+        );
+    }
+
+    #[test]
     fn test_action_lightweight_roundtrip() {
         let action = RoutineAction::Lightweight {
             prompt: "Check PRs".to_string(),
             context_paths: vec!["context/priorities.md".to_string()],
             max_tokens: 2048,
+            use_tools: false,
+            max_tool_rounds: 3,
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("lightweight", json).expect("parse lightweight");
         assert!(
-            matches!(parsed, RoutineAction::Lightweight { prompt, context_paths, max_tokens }
+            matches!(parsed, RoutineAction::Lightweight { prompt, context_paths, max_tokens, .. }
             if prompt == "Check PRs" && context_paths.len() == 1 && max_tokens == 2048)
         );
     }
@@ -623,13 +725,87 @@ mod tests {
             "event"
         );
         assert_eq!(
-            Trigger::Webhook {
-                path: None,
-                secret: None
+            Trigger::SystemEvent {
+                source: String::new(),
+                event_type: String::new(),
+                filters: std::collections::HashMap::new(),
             }
             .type_tag(),
-            "webhook"
+            "system_event"
         );
         assert_eq!(Trigger::Manual.type_tag(), "manual");
+    }
+
+    #[test]
+    fn test_action_lightweight_backward_compat_no_use_tools() {
+        // Simulate old DB record without use_tools field
+        let json = serde_json::json!({
+            "prompt": "old routine",
+            "context_paths": [],
+            "max_tokens": 4096
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse lightweight");
+        assert!(
+            matches!(parsed, RoutineAction::Lightweight { use_tools, max_tool_rounds, .. }
+            if !use_tools && max_tool_rounds == 3),
+            "missing use_tools should default to false, max_tool_rounds to 3"
+        );
+    }
+
+    #[test]
+    fn test_max_tool_rounds_clamped_to_upper_bound() {
+        let json = serde_json::json!({
+            "prompt": "test",
+            "use_tools": true,
+            "max_tool_rounds": 9999
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse");
+        match parsed {
+            RoutineAction::Lightweight {
+                max_tool_rounds, ..
+            } => {
+                assert_eq!(
+                    max_tool_rounds, MAX_TOOL_ROUNDS_LIMIT,
+                    "should clamp to MAX_TOOL_ROUNDS_LIMIT"
+                );
+            }
+            _ => panic!("expected Lightweight"),
+        }
+    }
+
+    #[test]
+    fn test_max_tool_rounds_clamped_to_lower_bound() {
+        let json = serde_json::json!({
+            "prompt": "test",
+            "use_tools": true,
+            "max_tool_rounds": 0
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse");
+        match parsed {
+            RoutineAction::Lightweight {
+                max_tool_rounds, ..
+            } => {
+                assert_eq!(max_tool_rounds, 1, "should clamp 0 to 1");
+            }
+            _ => panic!("expected Lightweight"),
+        }
+    }
+
+    #[test]
+    fn test_max_tool_rounds_normal_value_passes_through() {
+        let json = serde_json::json!({
+            "prompt": "test",
+            "use_tools": true,
+            "max_tool_rounds": 10
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse");
+        match parsed {
+            RoutineAction::Lightweight {
+                max_tool_rounds, ..
+            } => {
+                assert_eq!(max_tool_rounds, 10, "normal value should pass through");
+            }
+            _ => panic!("expected Lightweight"),
+        }
     }
 }

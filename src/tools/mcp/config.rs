@@ -163,10 +163,8 @@ impl McpServerConfig {
                 }
 
                 // Remote servers must use HTTPS (localhost is allowed for development)
-                let url_lower = self.url.to_lowercase();
-                let is_localhost =
-                    url_lower.contains("localhost") || url_lower.contains("127.0.0.1");
-                if !is_localhost && !url_lower.starts_with("https://") {
+                let is_localhost = is_localhost_url(&self.url);
+                if !is_localhost && !self.url.to_lowercase().starts_with("https://") {
                     return Err(ConfigError::InvalidConfig {
                         reason: "Remote MCP servers must use HTTPS".to_string(),
                     });
@@ -188,7 +186,40 @@ impl McpServerConfig {
             }
         }
 
+        // Validate custom header names and values using the http crate's RFC 9110
+        // token validation (catches CRLF, spaces, colons, null bytes, etc.)
+        for (name, value) in &self.headers {
+            if name.is_empty() {
+                return Err(ConfigError::InvalidConfig {
+                    reason: "Header name cannot be empty".to_string(),
+                });
+            }
+            if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                return Err(ConfigError::InvalidConfig {
+                    reason: format!(
+                        "Header name '{}' is not a valid HTTP header name (RFC 9110)",
+                        name
+                    ),
+                });
+            }
+            if reqwest::header::HeaderValue::from_str(value).is_err() {
+                return Err(ConfigError::InvalidConfig {
+                    reason: format!("Header value for '{}' contains invalid characters", name),
+                });
+            }
+        }
+
         Ok(())
+    }
+
+    /// Check if any custom header sets an Authorization value.
+    ///
+    /// Used to skip OAuth token injection when the user has explicitly
+    /// configured an Authorization header (e.g. for API-key-based servers).
+    pub fn has_custom_auth_header(&self) -> bool {
+        self.headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"))
     }
 
     /// Check if this server requires authentication.
@@ -381,6 +412,13 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     let content = fs::read_to_string(path).await?;
     let config: McpServersFile = serde_json::from_str(&content)?;
 
+    // Validate every server on load so corrupted configs are caught early
+    for server in &config.servers {
+        server.validate().map_err(|e| ConfigError::InvalidConfig {
+            reason: format!("Server '{}': {}", server.name, e),
+        })?;
+    }
+
     Ok(config)
 }
 
@@ -402,7 +440,12 @@ pub async fn save_mcp_servers_to(
     }
 
     let content = serde_json::to_string_pretty(config)?;
-    fs::write(path, content).await?;
+
+    // Write to a temporary file first, then atomically rename to avoid
+    // corrupting the config if the process crashes during the write.
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, content).await?;
+    fs::rename(&tmp_path, path).await?;
 
     Ok(())
 }
@@ -457,6 +500,12 @@ pub async fn load_mcp_servers_from_db(
     match store.get_setting(user_id, "mcp_servers").await {
         Ok(Some(value)) => {
             let config: McpServersFile = serde_json::from_value(value)?;
+            // Validate every server on load so corrupted DB configs are caught early
+            for server in &config.servers {
+                server.validate().map_err(|e| ConfigError::InvalidConfig {
+                    reason: format!("Server '{}': {}", server.name, e),
+                })?;
+            }
             Ok(config)
         }
         Ok(None) => {
@@ -524,7 +573,7 @@ pub async fn remove_mcp_server_db(
 ///
 /// Uses `url::Url` for proper parsing so edge cases (IPv6, userinfo, ports)
 /// are handled correctly without manual string splitting.
-fn is_localhost_url(url: &str) -> bool {
+pub(crate) fn is_localhost_url(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
@@ -667,6 +716,34 @@ mod tests {
 
         let config = load_mcp_servers_from(&path).await.unwrap();
         assert!(config.servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_rejects_corrupted_headers() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        // Write a config with an invalid header name directly to disk,
+        // bypassing the add_mcp_server() validation path.
+        let corrupted = serde_json::json!({
+            "servers": [{
+                "name": "bad-server",
+                "url": "https://mcp.example.com",
+                "enabled": true,
+                "headers": { "X Bad": "value" }
+            }]
+        });
+        tokio::fs::write(&path, corrupted.to_string())
+            .await
+            .unwrap();
+
+        let result = load_mcp_servers_from(&path).await;
+        assert!(result.is_err(), "Load should reject corrupted headers");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("bad-server"),
+            "Error should name the offending server, got: {err}"
+        );
     }
 
     #[test]
@@ -831,6 +908,94 @@ mod tests {
     }
 
     #[test]
+    fn test_header_crlf_injection_rejected() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Good".to_string(), "safe".to_string());
+        headers.insert("X-Bad\r\nInjected: true".to_string(), "value".to_string());
+
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("not a valid HTTP header name"),
+            "Expected RFC 9110 error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_header_value_crlf_injection_rejected() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "X-Header".to_string(),
+            "value\r\nInjected: true".to_string(),
+        );
+
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("invalid characters"),
+            "Expected invalid characters error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_header_name_with_space_rejected() {
+        let headers = HashMap::from([("X Bad".to_string(), "value".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_header_name_with_colon_rejected() {
+        let headers = HashMap::from([("X:Bad".to_string(), "value".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_header_name_with_null_byte_rejected() {
+        let headers = HashMap::from([("X-Bad\0".to_string(), "value".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_header_empty_name_rejected() {
+        let mut headers = HashMap::new();
+        headers.insert(String::new(), "value".to_string());
+
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("empty"),
+            "Expected empty name error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_has_custom_auth_header_case_insensitive() {
+        let headers = HashMap::from([("authorization".to_string(), "Bearer token".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.has_custom_auth_header());
+
+        let headers = HashMap::from([("AUTHORIZATION".to_string(), "Bearer token".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(config.has_custom_auth_header());
+
+        let headers = HashMap::from([("X-Api-Key".to_string(), "key".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(!config.has_custom_auth_header());
+    }
+
+    #[test]
     fn test_custom_headers() {
         let headers = HashMap::from([
             ("X-Api-Key".to_string(), "secret".to_string()),
@@ -962,5 +1127,34 @@ mod tests {
         assert_eq!(parsed.name, "http-server");
         assert!(parsed.transport.is_none());
         assert_eq!(parsed.headers.get("X-Custom").unwrap(), "value");
+    }
+
+    // --- Issue 3 regression: is_localhost_url rejects attacker subdomains ---
+
+    #[test]
+    fn test_is_localhost_url_rejects_attacker_subdomain() {
+        // Before the fix, url.contains("localhost") matched this.
+        assert!(
+            !is_localhost_url("http://evil.localhost.attacker.com:8080/mcp"),
+            "attacker subdomain containing 'localhost' must not be treated as local"
+        );
+    }
+
+    #[test]
+    fn test_is_localhost_url_accepts_real_localhost() {
+        assert!(is_localhost_url("http://localhost:8080/mcp"));
+        assert!(is_localhost_url("https://localhost/path"));
+    }
+
+    #[test]
+    fn test_is_localhost_url_accepts_loopback_ip() {
+        assert!(is_localhost_url("http://127.0.0.1:3000"));
+        assert!(is_localhost_url("http://[::1]:3000"));
+    }
+
+    #[test]
+    fn test_is_localhost_url_rejects_remote() {
+        assert!(!is_localhost_url("https://mcp.example.com"));
+        assert!(!is_localhost_url("http://192.168.1.1:8080"));
     }
 }

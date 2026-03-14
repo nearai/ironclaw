@@ -26,13 +26,15 @@
 
 pub mod api;
 pub mod claude_bridge;
+pub mod container;
+pub mod job;
 pub mod proxy_llm;
-pub mod runtime;
 
 pub use api::WorkerHttpClient;
 pub use claude_bridge::ClaudeBridgeRuntime;
+pub use container::WorkerRuntime;
+pub use job::{Worker, WorkerDeps};
 pub use proxy_llm::ProxyLlmProvider;
-pub use runtime::WorkerRuntime;
 
 /// Run the Worker subcommand (inside Docker containers).
 pub async fn run_worker(
@@ -46,7 +48,7 @@ pub async fn run_worker(
         orchestrator_url
     );
 
-    let config = runtime::WorkerConfig {
+    let config = container::WorkerConfig {
         job_id,
         orchestrator_url: orchestrator_url.to_string(),
         max_iterations,

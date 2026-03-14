@@ -144,6 +144,8 @@ jobs:
       - name: Patch manifests with WASM checksums
         if: ${{ needs.plan.outputs.publishing == 'true' }}
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           CHECKSUMS="target/distrib/checksums.txt"
           if [ ! -f "$CHECKSUMS" ]; then
@@ -154,14 +156,25 @@ jobs:
           while IFS= read -r line; do
             sha256=$(echo "$line" | awk '{print $1}')
             filename=$(echo "$line" | awk '{print $2}')
-            name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
+            # Skip non-WASM entries (e.g. binary tarballs from cargo-dist)
+            case "$filename" in *-wasm32-wasip2.tar.gz) ;; *) continue ;; esac
+            # Parse kind-prefixed filename: "tool-slack-0.2.1-wasm32-wasip2.tar.gz"
+            # → kind=tool, name=slack
+            kind=$(echo "$filename" | cut -d'-' -f1)
+            if [ "$kind" != "tool" ] && [ "$kind" != "channel" ]; then
+              echo "::warning::Skipping '$filename': unrecognized kind prefix '$kind'"
+              continue
+            fi
+            name=$(echo "$filename" | sed "s/^${kind}-//" | sed 's/-[0-9].*-wasm32-wasip2\.tar\.gz$//')
+            url="https://github.com/nearai/ironclaw/releases/download/${RELEASE_TAG}/${filename}"
 
-            for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
-              if [ -f "$manifest" ]; then
-                jq --arg sha "$sha256" '.artifacts["wasm32-wasip2"].sha256 = $sha' "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest with sha256=$sha256"
-              fi
-            done
+            manifest="registry/${kind}s/${name}.json"
+            if [ -f "$manifest" ]; then
+              jq --arg sha "$sha256" --arg url "$url" \
+                '.artifacts["wasm32-wasip2"].sha256 = $sha | .artifacts["wasm32-wasip2"].url = $url' \
+                "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
+              echo "Patched $manifest with sha256=$sha256 url=$url"
+            fi
           done < "$CHECKSUMS"
       - name: Install dependencies
         run: |
@@ -268,21 +281,46 @@ jobs:
           for manifest in registry/tools/*.json registry/channels/*.json; do
             [ -f "$manifest" ] || continue
 
-            name=$(jq -r '.name' "$manifest")
+            # file_stem: JSON filename without extension (e.g. "slack" for slack.json).
+            file_stem=$(basename "$manifest" .json)
+            # kind: "tool" or "channel" — used as bundle filename prefix to avoid
+            # collisions when a tool and channel share the same file_stem (e.g. slack).
+            kind=$(jq -r '.kind' "$manifest")
+            if [ "$kind" != "tool" ] && [ "$kind" != "channel" ]; then
+              echo "::error::Manifest '$manifest' has invalid or missing .kind ('$kind'); expected 'tool' or 'channel'"
+              exit 1
+            fi
+            # ext_name: the manifest's .name field (e.g. "slack-tool").
+            # Used for file names *inside* the archive — the installer extracts by manifest.name.
+            ext_name=$(jq -r '.name' "$manifest")
             source_dir=$(jq -r '.source.dir' "$manifest")
             caps_file=$(jq -r '.source.capabilities' "$manifest")
             crate_name=$(jq -r '.source.crate_name' "$manifest")
+            ext_version=$(jq -r '.version // ""' "$manifest")
 
             if [ ! -d "$source_dir" ]; then
-              echo "::warning::Source dir '$source_dir' not found for '$name', skipping"
+              echo "::warning::Source dir '$source_dir' not found for '$file_stem', skipping"
               continue
             fi
 
-            echo "=== Building $name from $source_dir ==="
+            # Skip rebuild if this exact version was already built and checksummed.
+            # Checks that (1) the manifest already has a sha256, and (2) the version
+            # embedded in the existing artifact URL matches the current manifest version.
+            # This ensures stable checksums: only rebuild when the source version changes.
+            existing_sha=$(jq -r '.artifacts["wasm32-wasip2"].sha256 // ""' "$manifest")
+            existing_url=$(jq -r '.artifacts["wasm32-wasip2"].url // ""' "$manifest")
+            url_version=$(echo "$existing_url" | sed -n 's/.*-\([0-9].*\)-wasm32-wasip2\.tar\.gz$/\1/p')
+
+            if [[ -n "$ext_version" && "$url_version" == "$ext_version" && -n "$existing_sha" ]]; then
+              echo "=== Skipping $file_stem v$ext_version — already checksummed at $existing_url ==="
+              continue
+            fi
+
+            echo "=== Building $file_stem ($ext_name) v$ext_version from $source_dir ==="
 
             # Build WASM component
             cargo component build --release --manifest-path "$source_dir/Cargo.toml" || {
-              echo "::warning::Build failed for '$name', skipping"
+              echo "::warning::Build failed for '$file_stem', skipping"
               continue
             }
 
@@ -298,30 +336,37 @@ jobs:
             done
 
             if [ -z "$wasm_path" ]; then
-              echo "::warning::No WASM output found for '$name', skipping"
+              echo "::warning::No WASM output found for '$file_stem', skipping"
               continue
             fi
 
-            # Copy files with standardized names for the archive
-            cp "$wasm_path" "target/wasm-bundles/${name}.wasm"
+            # Archive contents use ext_name (manifest .name) — the installer extracts
+            # files by manifest.name, so these must match even when file_stem differs.
+            cp "$wasm_path" "target/wasm-bundles/${ext_name}.wasm"
 
             caps_path="$source_dir/$caps_file"
             if [ -f "$caps_path" ]; then
-              cp "$caps_path" "target/wasm-bundles/${name}.capabilities.json"
+              cp "$caps_path" "target/wasm-bundles/${ext_name}.capabilities.json"
             else
-              echo "::warning::No capabilities file at '$caps_path' for '$name'"
+              echo "::warning::No capabilities file at '$caps_path' for '$file_stem'"
             fi
 
-            # Create tar.gz bundle
-            bundle="target/wasm-bundles/${name}-wasm32-wasip2.tar.gz"
-            (cd target/wasm-bundles && if [ -f "${name}.capabilities.json" ]; then tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm" "${name}.capabilities.json"; else tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm"; fi)
+            # Bundle filename uses kind+file_stem to avoid collisions when a tool
+            # and channel share the same name (e.g. tool-slack vs channel-slack).
+            bundle_name="${kind}-${file_stem}-${ext_version}-wasm32-wasip2.tar.gz"
+            bundle="target/wasm-bundles/${bundle_name}"
+            (cd target/wasm-bundles && if [ -f "${ext_name}.capabilities.json" ]; then
+              tar czf "${bundle_name}" "${ext_name}.wasm" "${ext_name}.capabilities.json"
+            else
+              tar czf "${bundle_name}" "${ext_name}.wasm"
+            fi)
 
             # Compute SHA256
             sha256=$(sha256sum "$bundle" | cut -d' ' -f1)
-            echo "$sha256  ${name}-wasm32-wasip2.tar.gz" >> target/wasm-bundles/checksums.txt
+            echo "$sha256  ${bundle_name}" >> target/wasm-bundles/checksums.txt
 
             # Clean up intermediate files
-            rm -f "target/wasm-bundles/${name}.wasm" "target/wasm-bundles/${name}.capabilities.json"
+            rm -f "target/wasm-bundles/${ext_name}.wasm" "target/wasm-bundles/${ext_name}.capabilities.json"
 
             echo "  -> $bundle ($sha256)"
           done
@@ -427,8 +472,10 @@ jobs:
         with:
           name: artifacts-wasm-extensions
           path: target/wasm-bundles/
-      - name: Patch manifests with SHA256
+      - name: Patch manifests with SHA256 and version-pinned URL
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           CHECKSUMS="target/wasm-bundles/checksums.txt"
           if [ ! -f "$CHECKSUMS" ]; then
@@ -439,14 +486,25 @@ jobs:
           while IFS= read -r line; do
             sha256=$(echo "$line" | awk '{print $1}')
             filename=$(echo "$line" | awk '{print $2}')
-            name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
+            # Skip non-WASM entries (defensive — this checksums.txt should only have WASM)
+            case "$filename" in *-wasm32-wasip2.tar.gz) ;; *) continue ;; esac
+            # Parse kind-prefixed filename: "tool-slack-0.2.1-wasm32-wasip2.tar.gz"
+            # → kind=tool, name=slack
+            kind=$(echo "$filename" | cut -d'-' -f1)
+            if [ "$kind" != "tool" ] && [ "$kind" != "channel" ]; then
+              echo "::warning::Skipping '$filename': unrecognized kind prefix '$kind'"
+              continue
+            fi
+            name=$(echo "$filename" | sed "s/^${kind}-//" | sed 's/-[0-9].*-wasm32-wasip2\.tar\.gz$//')
+            url="https://github.com/nearai/ironclaw/releases/download/${RELEASE_TAG}/${filename}"
 
-            for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
-              if [ -f "$manifest" ]; then
-                jq --arg sha "$sha256" '.artifacts["wasm32-wasip2"].sha256 = $sha' "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
-                echo "Patched $manifest with sha256=$sha256"
-              fi
-            done
+            manifest="registry/${kind}s/${name}.json"
+            if [ -f "$manifest" ]; then
+              jq --arg sha "$sha256" --arg url "$url" \
+                '.artifacts["wasm32-wasip2"].sha256 = $sha | .artifacts["wasm32-wasip2"].url = $url' \
+                "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
+              echo "Patched $manifest with sha256=$sha256 url=$url"
+            fi
           done < "$CHECKSUMS"
       - name: Create PR with updated manifests
         run: |
@@ -461,8 +519,8 @@ jobs:
             git commit -m "chore: update WASM artifact SHA256 checksums [skip ci]"
             git push origin "$BRANCH"
             gh pr create \
-              --title "chore: update WASM artifact SHA256 checksums" \
-              --body "Auto-generated by release CI. Updates SHA256 checksums in registry manifests to match the released WASM artifacts." \
+              --title "chore: update WASM artifact checksums and version-pinned URLs" \
+              --body "Auto-generated by release CI. Updates SHA256 checksums and version-pinned artifact URLs in registry manifests to match the released WASM artifacts. Only extensions whose version changed since the last release are included." \
               --base main \
               --head "$BRANCH"
           fi

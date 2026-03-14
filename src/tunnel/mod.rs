@@ -294,10 +294,11 @@ mod tests {
 
     #[test]
     fn factory_cloudflare_with_config_ok() {
+        use crate::testing::credentials::TEST_BEARER_TOKEN;
         let cfg = TunnelProviderConfig {
             provider: "cloudflare".into(),
             cloudflare: Some(CloudflareTunnelConfig {
-                token: "test-token".into(),
+                token: TEST_BEARER_TOKEN.into(),
             }),
             ..Default::default()
         };
