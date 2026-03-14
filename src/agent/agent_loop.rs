@@ -750,6 +750,23 @@ impl Agent {
             "Message details"
         );
 
+        // Internal job-monitor notifications are already rendered text and
+        // should be forwarded directly to the user without entering the
+        // normal user-input pipeline (which would run the LLM/tool loop).
+        if message
+            .metadata
+            .get("__internal_job_monitor")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
+            tracing::debug!(
+                message_id = %message.id,
+                channel = %message.channel,
+                "Forwarding internal job monitor notification"
+            );
+            return Ok(Some(message.content.clone()));
+        }
+
         // Set message tool context for this turn (current channel and target)
         // For Signal, use signal_target from metadata (group:ID or phone number),
         // otherwise fall back to user_id

@@ -21,6 +21,33 @@ use uuid::Uuid;
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
 
+/// Route context for forwarding job monitor events back to the user's channel.
+#[derive(Debug, Clone)]
+pub struct JobMonitorRoute {
+    pub channel: String,
+    pub user_id: String,
+    pub thread_id: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
+fn build_internal_metadata(route: &JobMonitorRoute, job_id: Uuid) -> serde_json::Value {
+    let mut metadata = route.metadata.clone();
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "__internal_job_monitor".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        obj.insert(
+            "__job_monitor_job_id".to_string(),
+            serde_json::Value::String(job_id.to_string()),
+        );
+    }
+    metadata
+}
+
 /// Spawn a background task that watches for events from a specific job and
 /// injects assistant messages into the agent loop.
 ///
@@ -35,6 +62,7 @@ pub fn spawn_job_monitor(
     job_id: Uuid,
     mut event_rx: broadcast::Receiver<(Uuid, SseEvent)>,
     inject_tx: mpsc::Sender<IncomingMessage>,
+    route: JobMonitorRoute,
 ) -> JoinHandle<()> {
     let short_id = job_id.to_string()[..8].to_string();
 
@@ -50,11 +78,15 @@ pub fn spawn_job_monitor(
 
                     match event {
                         SseEvent::JobMessage { role, content, .. } if role == "assistant" => {
-                            let msg = IncomingMessage::new(
-                                "job_monitor",
-                                "system",
+                            let mut msg = IncomingMessage::new(
+                                route.channel.clone(),
+                                route.user_id.clone(),
                                 format!("[Job {}] Claude Code: {}", short_id, content),
-                            );
+                            )
+                            .with_metadata(build_internal_metadata(&route, job_id));
+                            if let Some(ref thread_id) = route.thread_id {
+                                msg = msg.with_thread(thread_id.clone());
+                            }
                             if inject_tx.send(msg).await.is_err() {
                                 tracing::debug!(
                                     job_id = %short_id,
@@ -64,14 +96,18 @@ pub fn spawn_job_monitor(
                             }
                         }
                         SseEvent::JobResult { status, .. } => {
-                            let msg = IncomingMessage::new(
-                                "job_monitor",
-                                "system",
+                            let mut msg = IncomingMessage::new(
+                                route.channel.clone(),
+                                route.user_id.clone(),
                                 format!(
                                     "[Job {}] Container finished (status: {})",
                                     short_id, status
                                 ),
-                            );
+                            )
+                            .with_metadata(build_internal_metadata(&route, job_id));
+                            if let Some(ref thread_id) = route.thread_id {
+                                msg = msg.with_thread(thread_id.clone());
+                            }
                             let _ = inject_tx.send(msg).await;
                             tracing::debug!(
                                 job_id = %short_id,
@@ -108,13 +144,24 @@ pub fn spawn_job_monitor(
 mod tests {
     use super::*;
 
+    fn test_route() -> JobMonitorRoute {
+        JobMonitorRoute {
+            channel: "cli".to_string(),
+            user_id: "user-1".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            metadata: serde_json::json!({
+                "source": "test",
+            }),
+        }
+    }
+
     #[tokio::test]
     async fn test_monitor_forwards_assistant_messages() {
         let (event_tx, _) = broadcast::channel::<(Uuid, SseEvent)>(16);
         let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
 
         let job_id = Uuid::new_v4();
-        let _handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx);
+        let _handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx, test_route());
 
         // Send an assistant message
         event_tx
@@ -133,9 +180,16 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(msg.channel, "job_monitor");
-        assert_eq!(msg.user_id, "system");
+        assert_eq!(msg.channel, "cli");
+        assert_eq!(msg.user_id, "user-1");
+        assert_eq!(msg.thread_id, Some("thread-1".to_string()));
         assert!(msg.content.contains("I found a bug"));
+        assert_eq!(
+            msg.metadata
+                .get("__internal_job_monitor")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -145,7 +199,7 @@ mod tests {
 
         let job_id = Uuid::new_v4();
         let other_job_id = Uuid::new_v4();
-        let _handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx);
+        let _handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx, test_route());
 
         // Send a message for a different job
         event_tx
@@ -174,7 +228,7 @@ mod tests {
         let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
 
         let job_id = Uuid::new_v4();
-        let handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx);
+        let handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx, test_route());
 
         // Send a completion event
         event_tx
@@ -208,7 +262,7 @@ mod tests {
         let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
 
         let job_id = Uuid::new_v4();
-        let _handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx);
+        let _handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx, test_route());
 
         // Send tool use event (should be skipped)
         event_tx
