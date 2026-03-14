@@ -55,7 +55,7 @@ pub async fn execute_tool_with_safety(
     // Execute with per-tool timeout
     let timeout = tool.execution_timeout();
     let start = std::time::Instant::now();
-    let result = tokio::time::timeout(timeout, async { tool.execute(params, job_ctx).await }).await;
+    let result = tokio::time::timeout(timeout, tool.execute(params, job_ctx)).await;
     let elapsed = start.elapsed();
 
     match &result {
