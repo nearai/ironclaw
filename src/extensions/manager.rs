@@ -80,6 +80,27 @@ enum TelegramOwnerBindingState {
     VerifiedNow,
 }
 
+fn telegram_request_error(action: &'static str, error: &reqwest::Error) -> ExtensionError {
+    tracing::warn!(
+        action,
+        status = error.status().map(|status| status.as_u16()),
+        is_timeout = error.is_timeout(),
+        is_connect = error.is_connect(),
+        "Telegram API request failed"
+    );
+    ExtensionError::Other(format!("Telegram {action} request failed"))
+}
+
+fn telegram_response_parse_error(action: &'static str, error: &reqwest::Error) -> ExtensionError {
+    tracing::warn!(
+        action,
+        status = error.status().map(|status| status.as_u16()),
+        is_timeout = error.is_timeout(),
+        "Telegram API response parse failed"
+    );
+    ExtensionError::Other(format!("Failed to parse Telegram {action} response"))
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct TelegramGetMeResponse {
     ok: bool,
@@ -3984,10 +4005,11 @@ impl ExtensionManager {
             .map_err(|e| ExtensionError::Other(e.to_string()))?;
 
         let get_me_url = format!("https://api.telegram.org/bot{bot_token}/getMe");
-        let get_me_resp =
-            client.get(&get_me_url).send().await.map_err(|e| {
-                ExtensionError::Other(format!("Telegram getMe request failed: {e}"))
-            })?;
+        let get_me_resp = client
+            .get(&get_me_url)
+            .send()
+            .await
+            .map_err(|e| telegram_request_error("getMe", &e))?;
         let get_me_status = get_me_resp.status();
         if !get_me_status.is_success() {
             return Err(ExtensionError::ValidationFailed(format!(
@@ -3995,9 +4017,10 @@ impl ExtensionManager {
             )));
         }
 
-        let get_me: TelegramGetMeResponse = get_me_resp.json().await.map_err(|e| {
-            ExtensionError::Other(format!("Failed to parse Telegram getMe response: {e}"))
-        })?;
+        let get_me: TelegramGetMeResponse = get_me_resp
+            .json()
+            .await
+            .map_err(|e| telegram_response_parse_error("getMe", &e))?;
         if !get_me.ok {
             return Err(ExtensionError::ValidationFailed(
                 get_me
@@ -4020,9 +4043,11 @@ impl ExtensionManager {
         }
 
         let delete_webhook_url = format!("https://api.telegram.org/bot{bot_token}/deleteWebhook");
-        let delete_webhook_resp = client.post(&delete_webhook_url).send().await.map_err(|e| {
-            ExtensionError::Other(format!("Telegram deleteWebhook request failed: {e}"))
-        })?;
+        let delete_webhook_resp = client
+            .post(&delete_webhook_url)
+            .send()
+            .await
+            .map_err(|e| telegram_request_error("deleteWebhook", &e))?;
         if !delete_webhook_resp.status().is_success() {
             return Err(ExtensionError::Other(format!(
                 "Telegram deleteWebhook failed (HTTP {})",
@@ -4055,9 +4080,7 @@ impl ExtensionManager {
                 ])
                 .send()
                 .await
-                .map_err(|e| {
-                    ExtensionError::Other(format!("Telegram getUpdates request failed: {e}"))
-                })?;
+                .map_err(|e| telegram_request_error("getUpdates", &e))?;
 
             if !resp.status().is_success() {
                 return Err(ExtensionError::Other(format!(
@@ -4066,9 +4089,10 @@ impl ExtensionManager {
                 )));
             }
 
-            let updates: TelegramGetUpdatesResponse = resp.json().await.map_err(|e| {
-                ExtensionError::Other(format!("Failed to parse Telegram getUpdates response: {e}"))
-            })?;
+            let updates: TelegramGetUpdatesResponse = resp
+                .json()
+                .await
+                .map_err(|e| telegram_response_parse_error("getUpdates", &e))?;
 
             if !updates.ok {
                 return Err(ExtensionError::Other(updates.description.unwrap_or_else(

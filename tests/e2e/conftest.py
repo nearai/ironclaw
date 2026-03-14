@@ -57,11 +57,14 @@ def _latest_mtime(path: Path) -> float:
         return path.stat().st_mtime
 
     latest = path.stat().st_mtime
-    for child in path.rglob("*"):
-        try:
-            latest = max(latest, child.stat().st_mtime)
-        except FileNotFoundError:
-            continue
+    for root, dirnames, filenames in os.walk(path):
+        dirnames[:] = [dirname for dirname in dirnames if dirname != "target"]
+        for name in filenames:
+            child = Path(root) / name
+            try:
+                latest = max(latest, child.stat().st_mtime)
+            except FileNotFoundError:
+                continue
     return latest
 
 
