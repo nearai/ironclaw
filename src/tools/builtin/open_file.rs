@@ -2,7 +2,7 @@
 //!
 //! This is intended for user requests like "open this file in TextEdit".
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use async_trait::async_trait;
@@ -26,7 +26,7 @@ impl OpenFileTool {
     }
 }
 
-fn build_open_program_and_args(path: &PathBuf, app: Option<&str>) -> (String, Vec<String>) {
+fn build_open_program_and_args(path: &Path, app: Option<&str>) -> (String, Vec<String>) {
     #[cfg(target_os = "macos")]
     {
         let mut args = Vec::new();
