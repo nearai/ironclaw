@@ -17,6 +17,7 @@ Commands:
   mcp         Manage MCP servers
   memory      Manage workspace memory
   pairing     Manage DM pairing
+  gateway     Manage web gateway
   service     Manage OS service
   skills      Manage skills
   doctor      Run diagnostics

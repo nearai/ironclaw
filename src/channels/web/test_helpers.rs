@@ -100,7 +100,8 @@ impl TestGatewayBuilder {
         let addr: SocketAddr = "127.0.0.1:0"
             .parse()
             .expect("hard-coded address must parse");
-        let bound = start_server(addr, state.clone(), auth_token.to_string()).await?;
+        let (bound, _server_handle) =
+            start_server(addr, state.clone(), auth_token.to_string()).await?;
         Ok((bound, state))
     }
 }

@@ -3388,6 +3388,7 @@ dependencies = [
  "insta",
  "ironclaw_safety",
  "json5",
+ "libc",
  "libsql",
  "lru",
  "mime_guess",

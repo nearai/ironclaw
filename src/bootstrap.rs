@@ -482,6 +482,16 @@ pub fn pid_lock_path() -> PathBuf {
     ironclaw_base_dir().join("ironclaw.pid")
 }
 
+/// Path to the gateway PID lock file: `~/.ironclaw/gateway.pid`.
+pub fn gateway_pid_lock_path() -> PathBuf {
+    ironclaw_base_dir().join("gateway.pid")
+}
+
+/// Path to the gateway log file: `~/.ironclaw/gateway.log`.
+pub fn gateway_log_path() -> PathBuf {
+    ironclaw_base_dir().join("gateway.log")
+}
+
 /// A PID-based lock that prevents multiple IronClaw instances from running
 /// simultaneously.
 ///
@@ -516,8 +526,8 @@ impl PidLock {
         Self::acquire_at(pid_lock_path())
     }
 
-    /// Acquire at a specific path (for testing).
-    fn acquire_at(path: PathBuf) -> Result<Self, PidLockError> {
+    /// Acquire at a specific path (for gateway PID or testing).
+    pub(crate) fn acquire_at(path: PathBuf) -> Result<Self, PidLockError> {
         use fs4::FileExt;
         use std::fs::OpenOptions;
         use std::io::Write;

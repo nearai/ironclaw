@@ -281,7 +281,8 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
+        let (_bound_addr, _server_handle) =
+            server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
