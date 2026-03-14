@@ -5534,22 +5534,22 @@ mod tests {
         let url = endpoint_template.replace(&format!("{{{}}}", secret_name), token);
 
         // Verify colon is preserved
-        // safety: test assertion, panic expected
         assert_eq!(
+            // safety: test assertion
             url,
             "https://api.telegram.org/bot123456789:AABBccDDeeFFgg_Test-Token/getMe"
         );
 
         // Verify it does NOT contain the broken percent-encoded version
-        // safety: test assertion, panic expected
         assert!(
+            // safety: test assertion
             !url.contains("%3A"),
             "Token should not contain URL-encoded colon (%3A)"
         );
 
         // Verify the URL contains the original colon
-        // safety: test assertion, panic expected
         assert!(
+            // safety: test assertion
             url.contains("123456789:AABBccDDeeFFgg_Test-Token"),
             "Token should be present with colon preserved"
         );
