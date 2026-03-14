@@ -487,6 +487,15 @@ impl RoutineStore for PgBackend {
         self.store.count_running_routine_runs(routine_id).await
     }
 
+    async fn count_running_routine_runs_batch(
+        &self,
+        routine_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, i64>, DatabaseError> {
+        self.store
+            .count_running_routine_runs_batch(routine_ids)
+            .await
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,

@@ -65,6 +65,7 @@ pub struct ProxyToolCompletionRequest {
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    pub stop_sequences: Option<Vec<String>>,
     pub tool_choice: Option<String>,
 }
 
@@ -251,6 +252,7 @@ impl WorkerHttpClient {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
+            stop_sequences: request.stop_sequences.clone(),
             tool_choice: request.tool_choice.clone(),
         };
 
