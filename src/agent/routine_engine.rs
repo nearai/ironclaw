@@ -1017,14 +1017,14 @@ async fn execute_routine_tool(
         .get(&tc.name)
         .await
         .ok_or_else(|| format!("Tool '{}' not found", tc.name))?;
-    let params = prepare_tool_params(tool.as_ref(), &tc.arguments);
+    let normalized_params = prepare_tool_params(tool.as_ref(), &tc.arguments);
 
     // Check approval requirement: only allow Never tools in lightweight routines.
     // UnlessAutoApproved and Always tools are blocked to prevent prompt injection attacks.
     // Lightweight routines can be triggered by external events and may process untrusted data,
     // making them vulnerable to prompt injection that could trick the LLM into calling
     // sensitive tools. Blocking these tools entirely is the safest approach.
-    match tool.requires_approval(&params) {
+    match tool.requires_approval(&normalized_params) {
         ApprovalRequirement::Never => {}
         ApprovalRequirement::UnlessAutoApproved | ApprovalRequirement::Always => {
             return Err(format!(
@@ -1036,7 +1036,10 @@ async fn execute_routine_tool(
     }
 
     // Validate tool parameters
-    let validation = ctx.safety.validator().validate_tool_params(&params);
+    let validation = ctx
+        .safety
+        .validator()
+        .validate_tool_params(&normalized_params);
     if !validation.is_valid {
         let details = validation
             .errors
@@ -1051,7 +1054,7 @@ async fn execute_routine_tool(
     let timeout = tool.execution_timeout();
     let start = std::time::Instant::now();
     let result = tokio::time::timeout(timeout, async {
-        tool.execute(params.clone(), job_ctx).await
+        tool.execute(normalized_params.clone(), job_ctx).await
     })
     .await;
     let elapsed = start.elapsed();

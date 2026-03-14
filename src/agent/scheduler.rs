@@ -505,10 +505,10 @@ impl Scheduler {
             .into());
         }
 
-        let params = prepare_tool_params(tool.as_ref(), &params);
+        let normalized_params = prepare_tool_params(tool.as_ref(), &params);
 
         // Scheduler-specific approval check
-        let requirement = tool.requires_approval(&params);
+        let requirement = tool.requires_approval(&normalized_params);
         let blocked =
             ApprovalContext::is_blocked_or_default(&approval_context, tool_name, requirement);
         if blocked {
@@ -520,7 +520,11 @@ impl Scheduler {
 
         // Delegate to shared tool execution pipeline
         let output_str = crate::tools::execute::execute_tool_with_safety(
-            &tools, &safety, tool_name, &params, &job_ctx,
+            &tools,
+            &safety,
+            tool_name,
+            &normalized_params,
+            &job_ctx,
         )
         .await?;
 

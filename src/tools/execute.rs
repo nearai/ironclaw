@@ -29,10 +29,10 @@ pub async fn execute_tool_with_safety(
             name: tool_name.to_string(),
         })?;
 
-    let params = prepare_tool_params(tool.as_ref(), params);
+    let normalized_params = prepare_tool_params(tool.as_ref(), params);
 
     // Validate tool parameters
-    let validation = safety.validator().validate_tool_params(&params);
+    let validation = safety.validator().validate_tool_params(&normalized_params);
     if !validation.is_valid {
         let details = validation
             .errors
@@ -47,7 +47,7 @@ pub async fn execute_tool_with_safety(
         .into());
     }
 
-    let safe_params = redact_params(&params, tool.sensitive_params());
+    let safe_params = redact_params(&normalized_params, tool.sensitive_params());
     tracing::debug!(
         tool = %tool_name,
         params = %safe_params,
@@ -58,7 +58,7 @@ pub async fn execute_tool_with_safety(
     let timeout = tool.execution_timeout();
     let start = std::time::Instant::now();
     let result = tokio::time::timeout(timeout, async {
-        tool.execute(params.clone(), job_ctx).await
+        tool.execute(normalized_params.clone(), job_ctx).await
     })
     .await;
     let elapsed = start.elapsed();

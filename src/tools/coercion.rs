@@ -13,6 +13,10 @@ pub(crate) fn prepare_params_for_schema(
 }
 
 fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_json::Value {
+    // This coercer intentionally handles the concrete schema shapes we expose in
+    // discovery today. It does not resolve combinators like anyOf/oneOf/allOf or
+    // references via $ref; those schemas pass through unchanged unless they also
+    // advertise a directly coercible type/property shape.
     if value.is_null() {
         return value.clone();
     }

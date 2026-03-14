@@ -776,11 +776,11 @@ Create alongside the .wasm file to grant capabilities:
             self.tools.get(tool_name).await.ok_or_else(|| {
                 ToolError::ExecutionFailed(format!("Tool not found: {}", tool_name))
             })?;
-        let params = prepare_tool_params(tool.as_ref(), params);
+        let normalized_params = prepare_tool_params(tool.as_ref(), params);
 
         // Execute with a dummy context (build tools don't need job context)
         let ctx = JobContext::default();
-        tool.execute(params, &ctx).await
+        tool.execute(normalized_params, &ctx).await
     }
 
     /// Find the build artifact based on project type.
