@@ -59,8 +59,6 @@ pub struct TurnInfo {
     pub turn_number: usize,
     pub user_input: String,
     pub response: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
     pub state: String,
     pub started_at: String,
     pub completed_at: Option<String>,

@@ -1337,7 +1337,6 @@ async fn chat_history_handler(
                 turn_number: t.turn_number,
                 user_input: t.user_input.clone(),
                 response: t.response.clone(),
-                error: t.error.clone(),
                 state: format!("{:?}", t.state),
                 started_at: t.started_at.to_rfc3339(),
                 completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),

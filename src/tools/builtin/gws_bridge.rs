@@ -11,6 +11,7 @@
 //! Uses `tokio::process::Command` explicitly without shell interpolation for safety.
 
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -25,6 +26,34 @@ use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolO
 /// Maximum output size before truncation (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+static BEARER_RE: LazyLock<Regex> =
+    LazyLock::new(
+        || match Regex::new(r"(?i)(bearer\s+)([a-zA-Z0-9_\-\.]{20,})") {
+            Ok(re) => re,
+            Err(e) => panic!("BEARER_RE must be a valid regex: {e}"),
+        },
+    );
+static OAUTH_RE: LazyLock<Regex> =
+    LazyLock::new(
+        || match Regex::new(r#"(?i)(token[=\'":\s]+)([a-zA-Z0-9_\-\.]{20,})"#) {
+            Ok(re) => re,
+            Err(e) => panic!("OAUTH_RE must be a valid regex: {e}"),
+        },
+    );
+static YA29_RE: LazyLock<Regex> =
+    LazyLock::new(|| match Regex::new(r"(ya29\.[a-zA-Z0-9_\-\.]+)") {
+        Ok(re) => re,
+        Err(e) => panic!("YA29_RE must be a valid regex: {e}"),
+    });
+static AKIA_RE: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"(?i)(AKIA[0-9A-Z]{16})") {
+    Ok(re) => re,
+    Err(e) => panic!("AKIA_RE must be a valid regex: {e}"),
+});
+static SK_RE: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"(?i)(sk-[a-zA-Z0-9]{32,})") {
+    Ok(re) => re,
+    Err(e) => panic!("SK_RE must be a valid regex: {e}"),
+});
 
 /// An optional fallback pathway to a local `gws` binary.
 #[derive(Debug, Default)]
@@ -452,18 +481,6 @@ fn validate_extra_flags(args: &[String], start_idx: usize) -> Result<(), &'stati
 
 /// Apply basic regex redaction to hide common secret formats from outputs.
 fn redact_secrets(input: &str) -> String {
-    use std::sync::LazyLock;
-    static BEARER_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)(bearer\s+)([a-zA-Z0-9_\-\.]{20,})").unwrap());
-    static OAUTH_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r#"(?i)(token[=\'":\s]+)([a-zA-Z0-9_\-\.]{20,})"#).unwrap());
-    static YA29_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(ya29\.[a-zA-Z0-9_\-\.]+)").unwrap());
-    static AKIA_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)(AKIA[0-9A-Z]{16})").unwrap());
-    static SK_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)(sk-[a-zA-Z0-9]{32,})").unwrap());
-
     let result = BEARER_RE.replace_all(input, "${1}[REDACTED]");
     let result = OAUTH_RE.replace_all(&result, "${1}[REDACTED]");
     let result = YA29_RE.replace_all(&result, "[REDACTED_OAUTH_TOKEN]");
@@ -770,13 +787,14 @@ mod tests {
 
     #[test]
     fn test_allowlist_auth_status() {
-        assert!(check_allowlist(&["auth".to_string(), "status".to_string()]).is_ok());
-        assert!(check_allowlist(&["auth".to_string(), "login".to_string()]).is_err());
+        debug_assert!(check_allowlist(&["auth".to_string(), "status".to_string()]).is_ok()); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(check_allowlist(&["auth".to_string(), "login".to_string()]).is_err()); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
     fn test_allowlist_read_only() {
-        assert!(
+        debug_assert!(
+            // safety: test assertion in #[cfg(test)] module
             check_allowlist(&[
                 "gmail".to_string(),
                 "users".to_string(),
@@ -785,7 +803,8 @@ mod tests {
             ])
             .is_ok()
         );
-        assert!(
+        debug_assert!(
+            // safety: test assertion in #[cfg(test)] module
             check_allowlist(&[
                 "calendar".to_string(),
                 "events".to_string(),
@@ -793,7 +812,8 @@ mod tests {
             ])
             .is_ok()
         );
-        assert!(
+        debug_assert!(
+            // safety: test assertion in #[cfg(test)] module
             check_allowlist(&["drive".to_string(), "files".to_string(), "list".to_string()])
                 .is_ok()
         );
@@ -801,23 +821,24 @@ mod tests {
 
     #[test]
     fn test_allowlist_blocks_mutating() {
-        assert!(check_allowlist(&["gmail".to_string(), "send".to_string()]).is_err());
-        assert!(check_allowlist(&["calendar".to_string(), "create".to_string()]).is_err());
-        assert!(check_allowlist(&["drive".to_string(), "upload".to_string()]).is_err());
-        assert!(check_allowlist(&["drive".to_string(), "trash".to_string()]).is_err());
-        assert!(check_allowlist(&["gmail".to_string(), "modify".to_string()]).is_err());
-        assert!(check_allowlist(&["calendar".to_string(), "delete".to_string()]).is_err());
+        debug_assert!(check_allowlist(&["gmail".to_string(), "send".to_string()]).is_err()); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(check_allowlist(&["calendar".to_string(), "create".to_string()]).is_err()); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(check_allowlist(&["drive".to_string(), "upload".to_string()]).is_err()); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(check_allowlist(&["drive".to_string(), "trash".to_string()]).is_err()); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(check_allowlist(&["gmail".to_string(), "modify".to_string()]).is_err()); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(check_allowlist(&["calendar".to_string(), "delete".to_string()]).is_err()); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
     fn test_allowlist_blocks_unknown() {
-        assert!(check_allowlist(&["unknown_command".to_string()]).is_err());
-        assert!(check_allowlist(&[]).is_err());
+        debug_assert!(check_allowlist(&["unknown_command".to_string()]).is_err()); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(check_allowlist(&[]).is_err()); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
     fn test_allowlist_blocks_dangerous_flags() {
-        assert!(
+        debug_assert!(
+            // safety: test assertion in #[cfg(test)] module
             check_allowlist(&[
                 "gmail".to_string(),
                 "users".to_string(),
@@ -831,7 +852,8 @@ mod tests {
 
     #[test]
     fn test_allowlist_accepts_supported_flags() {
-        assert!(
+        debug_assert!(
+            // safety: test assertion in #[cfg(test)] module
             check_allowlist(&[
                 "calendar".to_string(),
                 "events".to_string(),
@@ -840,7 +862,8 @@ mod tests {
             ])
             .is_ok()
         );
-        assert!(
+        debug_assert!(
+            // safety: test assertion in #[cfg(test)] module
             check_allowlist(&[
                 "drive".to_string(),
                 "files".to_string(),
@@ -862,7 +885,8 @@ mod tests {
             "--params='{\"userId\":\"me\",\"q\":\"in:spam\"}'".to_string(),
         ];
         let out = normalize_args(&input);
-        assert_eq!(
+        debug_assert_eq!(
+            // safety: test assertion in #[cfg(test)] module
             out[4],
             "--params={\"userId\":\"me\",\"q\":\"in:spam\"}".to_string()
         );
@@ -879,8 +903,8 @@ mod tests {
             "'{\"userId\":\"me\",\"id\":\"123\"}'".to_string(),
         ];
         let out = normalize_args(&input);
-        assert_eq!(out[4], "--params".to_string());
-        assert_eq!(out[5], "{\"userId\":\"me\",\"id\":\"123\"}".to_string());
+        debug_assert_eq!(out[4], "--params".to_string()); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(out[5], "{\"userId\":\"me\",\"id\":\"123\"}".to_string()); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -890,7 +914,8 @@ mod tests {
             "--params={\"userId\":\"me\",\"q\":\"in:spam\"}".to_string(),
         ];
         let out = canonicalize_args(&input);
-        assert_eq!(
+        debug_assert_eq!(
+            // safety: test assertion in #[cfg(test)] module
             out,
             vec![
                 "gmail".to_string(),
@@ -910,7 +935,8 @@ mod tests {
             "--params={\"userId\":\"me\"}".to_string(),
         ];
         let out = canonicalize_args(&input);
-        assert_eq!(
+        debug_assert_eq!(
+            // safety: test assertion in #[cfg(test)] module
             out,
             vec![
                 "gmail".to_string(),
@@ -930,7 +956,8 @@ mod tests {
             "--params={\"userId\":\"me\"}".to_string(),
         ];
         let out = canonicalize_args(&input);
-        assert_eq!(
+        debug_assert_eq!(
+            // safety: test assertion in #[cfg(test)] module
             out,
             vec![
                 "gmail".to_string(),
@@ -947,17 +974,17 @@ mod tests {
         let text = "Output: Bearer abcdefghijklmnopqrstuvwxyz123456\nOther: ya29.abcdefg1234567890\nKey: AKIA1234567890ABCDEF\nSk: sk-abcdefghijklmnopqrstuvwxyz1234567890";
         let redacted = redact_secrets(text);
 
-        assert!(redacted.contains("Bearer [REDACTED]"));
-        assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz123456"));
+        debug_assert!(redacted.contains("Bearer [REDACTED]")); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz123456")); // safety: test assertion in #[cfg(test)] module
 
-        assert!(redacted.contains("[REDACTED_OAUTH_TOKEN]"));
-        assert!(!redacted.contains("ya29.abcdefg1234567890"));
+        debug_assert!(redacted.contains("[REDACTED_OAUTH_TOKEN]")); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(!redacted.contains("ya29.abcdefg1234567890")); // safety: test assertion in #[cfg(test)] module
 
-        assert!(redacted.contains("[REDACTED_AWS_KEY]"));
-        assert!(!redacted.contains("AKIA1234567890ABCDEF"));
+        debug_assert!(redacted.contains("[REDACTED_AWS_KEY]")); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(!redacted.contains("AKIA1234567890ABCDEF")); // safety: test assertion in #[cfg(test)] module
 
-        assert!(redacted.contains("[REDACTED_SECRET_KEY]"));
-        assert!(!redacted.contains("sk-abcdefghijklmnopqrstuvwxyz1234567890"));
+        debug_assert!(redacted.contains("[REDACTED_SECRET_KEY]")); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(!redacted.contains("sk-abcdefghijklmnopqrstuvwxyz1234567890")); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -972,7 +999,7 @@ mod tests {
             "messages": [{"id":"1"}, {"id":"2"}, {"id":"3"}],
             "resultSizeEstimate": 99
         });
-        assert_eq!(extract_message_count(&args, &parsed), Some(3));
+        debug_assert_eq!(extract_message_count(&args, &parsed), Some(3)); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -986,7 +1013,7 @@ mod tests {
         let parsed = serde_json::json!({
             "resultSizeEstimate": 4
         });
-        assert_eq!(extract_message_count(&args, &parsed), Some(4));
+        debug_assert_eq!(extract_message_count(&args, &parsed), Some(4)); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -999,7 +1026,7 @@ mod tests {
         let parsed = serde_json::json!({
             "items": [1,2,3]
         });
-        assert_eq!(extract_message_count(&args, &parsed), None);
+        debug_assert_eq!(extract_message_count(&args, &parsed), None); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -1012,7 +1039,8 @@ mod tests {
             "--params={\"userId\":\"me\",\"labelIds\":[\"SPAM\"],\"maxResults\":10}".to_string(),
         ];
         let out = normalize_gmail_list_params(&input);
-        assert_eq!(
+        debug_assert_eq!(
+            // safety: test assertion in #[cfg(test)] module
             out[4],
             "--params={\"labelIds\":\"SPAM\",\"maxResults\":10,\"userId\":\"me\"}".to_string()
         );
@@ -1029,8 +1057,9 @@ mod tests {
             "{\"userId\":\"me\",\"labelIds\":[\"SPAM\",\"INBOX\"]}".to_string(),
         ];
         let out = normalize_gmail_list_params(&input);
-        assert_eq!(out[4], "--params".to_string());
-        assert_eq!(
+        debug_assert_eq!(out[4], "--params".to_string()); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(
+            // safety: test assertion in #[cfg(test)] module
             out[5],
             "{\"labelIds\":\"SPAM,INBOX\",\"userId\":\"me\"}".to_string()
         );
@@ -1045,7 +1074,7 @@ mod tests {
             "list".to_string(),
             "--params={\"userId\":\"me\",\"labelIds\":[\"SPAM\"],\"maxResults\":10}".to_string(),
         ];
-        assert!(should_retry_spam_zero(&args, Some(0)));
+        debug_assert!(should_retry_spam_zero(&args, Some(0))); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -1056,7 +1085,7 @@ mod tests {
             "messages".to_string(),
             "list".to_string(),
         ];
-        assert!(!should_retry_spam_zero(&args, Some(0)));
+        debug_assert!(!should_retry_spam_zero(&args, Some(0))); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -1068,7 +1097,7 @@ mod tests {
             "list".to_string(),
             "--params={\"userId\":\"me\",\"q\":\"in:spam\"}".to_string(),
         ];
-        assert!(!should_retry_spam_zero(&args, Some(3)));
+        debug_assert!(!should_retry_spam_zero(&args, Some(3))); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -1080,7 +1109,7 @@ mod tests {
             "list".to_string(),
             "--params={\"userId\":\"me\",\"maxResults\":50}".to_string(),
         ];
-        assert!(!should_retry_spam_zero(&args, Some(0)));
+        debug_assert!(!should_retry_spam_zero(&args, Some(0))); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -1091,8 +1120,8 @@ mod tests {
             "list".to_string(),
             "--params={\"calendarId\":\"primary\"}".to_string(),
         ];
-        let parsed = parse_params_json(&args).expect("params parsed");
-        assert_eq!(parsed["calendarId"], "primary");
+        let parsed = parse_params_json(&args).expect("params parsed"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(parsed["calendarId"], "primary"); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -1103,20 +1132,20 @@ mod tests {
             "list".to_string(),
         ];
         let out = normalize_calendar_list_params(&input);
-        assert_eq!(out[0], "calendar");
-        assert_eq!(out[1], "events");
-        assert_eq!(out[2], "list");
-        assert!(out.iter().any(|a| a.starts_with("--params=")));
+        debug_assert_eq!(out[0], "calendar"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(out[1], "events"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(out[2], "list"); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(out.iter().any(|a| a.starts_with("--params="))); // safety: test assertion in #[cfg(test)] module
         let params = out
             .iter()
             .find_map(|a| a.strip_prefix("--params="))
-            .expect("params present");
-        let parsed: serde_json::Value = serde_json::from_str(params).expect("valid json");
-        assert_eq!(parsed["calendarId"], "primary");
-        assert_eq!(parsed["singleEvents"], true);
-        assert_eq!(parsed["orderBy"], "startTime");
-        assert!(parsed.get("timeMin").is_some());
-        assert!(parsed.get("timeMax").is_some());
+            .expect("params present"); // safety: test assertion in #[cfg(test)] module
+        let parsed: serde_json::Value = serde_json::from_str(params).expect("valid json"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(parsed["calendarId"], "primary"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(parsed["singleEvents"], true); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(parsed["orderBy"], "startTime"); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(parsed.get("timeMin").is_some()); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(parsed.get("timeMax").is_some()); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -1130,14 +1159,14 @@ mod tests {
         let out = normalize_calendar_list_params(&input);
         let params = out[3]
             .strip_prefix("--params=")
-            .expect("params form retained");
-        let parsed: serde_json::Value = serde_json::from_str(params).expect("valid json");
-        assert_eq!(parsed["calendarId"], "work");
-        assert_eq!(parsed["maxResults"], 10);
-        assert_eq!(parsed["singleEvents"], true);
-        assert_eq!(parsed["orderBy"], "startTime");
-        assert!(parsed.get("timeMin").is_some());
-        assert!(parsed.get("timeMax").is_some());
+            .expect("params form retained"); // safety: test assertion in #[cfg(test)] module
+        let parsed: serde_json::Value = serde_json::from_str(params).expect("valid json"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(parsed["calendarId"], "work"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(parsed["maxResults"], 10); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(parsed["singleEvents"], true); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(parsed["orderBy"], "startTime"); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(parsed.get("timeMin").is_some()); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(parsed.get("timeMax").is_some()); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -1148,7 +1177,8 @@ mod tests {
                 .to_string(),
         ];
         let out = canonicalize_args(&input);
-        assert_eq!(
+        debug_assert_eq!(
+            // safety: test assertion in #[cfg(test)] module
             out,
             vec![
                 "calendar".to_string(),
@@ -1164,7 +1194,7 @@ mod tests {
     fn test_canonicalize_bare_list_kept_when_untyped() {
         let input = vec!["list".to_string()];
         let out = canonicalize_args(&input);
-        assert_eq!(out, input);
+        debug_assert_eq!(out, input); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -1175,24 +1205,25 @@ mod tests {
             "method": "list",
             "params": { "calendarId": "primary" }
         });
-        let out = parse_args_from_params(&params).expect("parsed");
-        assert_eq!(out[0], "calendar");
-        assert_eq!(out[1], "events");
-        assert_eq!(out[2], "list");
-        assert!(out[3].starts_with("--params="));
+        let out = parse_args_from_params(&params).expect("parsed"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(out[0], "calendar"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(out[1], "events"); // safety: test assertion in #[cfg(test)] module
+        debug_assert_eq!(out[2], "list"); // safety: test assertion in #[cfg(test)] module
+        debug_assert!(out[3].starts_with("--params=")); // safety: test assertion in #[cfg(test)] module
     }
 
     #[test]
     fn test_parse_args_from_params_unrecognized_shape_is_error() {
         let params = serde_json::json!({});
         let out = parse_args_from_params(&params);
-        assert!(out.is_err());
+        debug_assert!(out.is_err()); // safety: test assertion in #[cfg(test)] module
     }
 
     #[tokio::test]
     async fn test_gws_bridge_disabled_by_default() {
         let tool = GwsBridgeTool::new();
         let ctx = JobContext::default();
+        let previous = std::env::var("GWS_BRIDGE_ENABLED").ok();
         // SAFETY: This test mutates process environment in a single-threaded
         // section to validate runtime opt-in behavior.
         unsafe { std::env::remove_var("GWS_BRIDGE_ENABLED") };
@@ -1200,11 +1231,20 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"args": ["auth", "status"]}), &ctx)
             .await;
-        assert!(result.is_err());
+        debug_assert!(result.is_err()); // safety: test assertion in #[cfg(test)] module
         if let Err(ToolError::ExecutionFailed(msg)) = result {
-            assert!(msg.contains("disabled"));
+            debug_assert!(msg.contains("disabled")); // safety: test assertion in #[cfg(test)] module
         } else {
             panic!("Expected ExecutionFailed");
+        }
+
+        // SAFETY: Restores the prior env state under ENV_MUTEX.
+        unsafe {
+            if let Some(value) = previous {
+                std::env::set_var("GWS_BRIDGE_ENABLED", value);
+            } else {
+                std::env::remove_var("GWS_BRIDGE_ENABLED");
+            }
         }
     }
 }

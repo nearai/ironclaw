@@ -627,80 +627,30 @@ function filterSlashCommands(value) {
   }
 }
 
-function sendApprovalAction(requestId, action, threadId) {
-  const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
-  const approvalThreadId = threadId
-    || (card ? card.getAttribute('data-thread-id') : '')
-    || currentThreadId
-    || null;
+function sendApprovalAction(requestId, action) {
+  apiFetch('/api/chat/approval', {
+    method: 'POST',
+    body: { request_id: requestId, action: action, thread_id: currentThreadId },
+  }).catch((err) => {
+    addMessage('system', 'Failed to send approval: ' + err.message);
+  });
 
+  // Disable buttons and show confirmation on the card
+  const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
   if (card) {
     const buttons = card.querySelectorAll('.approval-actions button');
     buttons.forEach((btn) => {
       btn.disabled = true;
     });
-    showApprovalResolved(card, action);
+    const actions = card.querySelector('.approval-actions');
+    const label = document.createElement('span');
+    label.className = 'approval-resolved';
+    const labelText = action === 'approve' ? 'Approved' : action === 'always' ? 'Always approved' : 'Denied';
+    label.textContent = labelText;
+    actions.appendChild(label);
+    // Remove the card after showing the confirmation briefly
+    setTimeout(() => { card.remove(); }, 1500);
   }
-
-  apiFetch('/api/chat/approval', {
-    method: 'POST',
-    body: { request_id: requestId, action: action, thread_id: approvalThreadId },
-  }).then(() => {
-    // Approval can transition to another pending approval in the same turn.
-    // If SSE is missed or delayed, poll briefly to recover next state.
-    if (approvalThreadId) {
-      pollApprovalContinuation(approvalThreadId);
-    }
-  }).catch((err) => {
-    addMessage('system', 'Failed to send approval: ' + err.message);
-  });
-}
-
-function showApprovalResolved(card, action) {
-  if (!card) return;
-  const actions = card.querySelector('.approval-actions');
-  if (!actions) return;
-  if (actions.querySelector('.approval-resolved')) return;
-
-  const label = document.createElement('span');
-  label.className = 'approval-resolved';
-  const labelText = action === 'approve' ? 'Approved' : action === 'always' ? 'Always approved' : 'Denied';
-  label.textContent = labelText;
-  actions.appendChild(label);
-  setTimeout(() => { card.remove(); }, 1500);
-}
-
-function pollApprovalContinuation(threadId) {
-  let attempts = 0;
-  const maxAttempts = 20;
-  const timer = setInterval(() => {
-    attempts += 1;
-    apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId) + '&limit=1')
-      .then((data) => {
-        if (!data) return;
-
-        if (data.pending_approval) {
-          showApproval(data.pending_approval);
-          clearInterval(timer);
-          return;
-        }
-
-        const turns = Array.isArray(data.turns) ? data.turns : [];
-        const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null;
-        const isTerminal = !!(lastTurn && (lastTurn.response || lastTurn.state === 'Failed' || lastTurn.state === 'Completed'));
-        if (isTerminal || attempts >= maxAttempts) {
-          if (threadId === currentThreadId) {
-            loadHistory();
-          }
-          clearInterval(timer);
-        }
-      })
-      .catch(() => {
-        if (attempts >= maxAttempts) {
-          clearInterval(timer);
-        }
-      });
-  }, 750);
 }
 
 function renderMarkdown(text) {
@@ -1060,7 +1010,6 @@ function showApproval(data) {
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.setAttribute('data-request-id', data.request_id);
-  card.setAttribute('data-thread-id', data.thread_id || '');
 
   const header = document.createElement('div');
   header.className = 'approval-header';
@@ -1102,17 +1051,17 @@ function showApproval(data) {
   const approveBtn = document.createElement('button');
   approveBtn.className = 'approve';
   approveBtn.textContent = I18n.t('approval.approve');
-  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve', data.thread_id));
+  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
 
   const alwaysBtn = document.createElement('button');
   alwaysBtn.className = 'always';
   alwaysBtn.textContent = I18n.t('approval.always');
-  alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always', data.thread_id));
+  alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
 
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
   denyBtn.textContent = I18n.t('approval.deny');
-  denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny', data.thread_id));
+  denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
 
   actions.appendChild(approveBtn);
   actions.appendChild(alwaysBtn);
@@ -1411,8 +1360,6 @@ function loadHistory(before) {
         }
         if (turn.response) {
           addMessage('assistant', turn.response);
-        } else if (turn.state === 'Failed' && turn.error) {
-          addMessage('system', 'Turn failed: ' + turn.error);
         }
       }
       // Show processing indicator if the last turn is still in-progress
@@ -1439,9 +1386,6 @@ function loadHistory(before) {
         if (turn.response) {
           const assistantDiv = createMessageElement('assistant', turn.response);
           fragment.appendChild(assistantDiv);
-        } else if (turn.state === 'Failed' && turn.error) {
-          const errorDiv = createMessageElement('system', 'Turn failed: ' + turn.error);
-          fragment.appendChild(errorDiv);
         }
       }
       container.insertBefore(fragment, container.firstChild);

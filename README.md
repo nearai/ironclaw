@@ -180,9 +180,6 @@ LLM_MODEL=anthropic/claude-sonnet-4
 ```
 
 See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
-
-
-
 ### Optional GWS Bridge (Fallback)
 
 IronClaw native Google WASM tools are the primary and default way to interact with Google services. However, if those tools encounter OAuth blockages, an optional fallback called `gws_bridge` is available.
@@ -195,6 +192,7 @@ GWS_BINARY_PATH=/path/to/your/gws  # Optional, defaults to finding 'gws' in PATH
 ```
 
 Note: In its initial phase, `gws_bridge` only allows read-only preflight operations on Gmail, Calendar, and Drive.
+
 ## Security
 
 IronClaw implements defense in depth to protect your data and prevent misuse.
