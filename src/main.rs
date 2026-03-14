@@ -920,7 +920,16 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     if let Some(ref ws_arc) = webhook_server {
-        ws_arc.lock().await.shutdown().await;
+        let (shutdown_tx, handle) = {
+            let mut ws = ws_arc.lock().await;
+            ws.begin_shutdown()
+        };
+        if let Some(tx) = shutdown_tx {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 
     if let Some(tunnel) = active_tunnel {

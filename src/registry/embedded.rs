@@ -20,6 +20,8 @@ struct EmbeddedCatalogRaw {
     #[serde(default)]
     channels: Vec<ExtensionManifest>,
     #[serde(default)]
+    mcp_servers: Vec<ExtensionManifest>,
+    #[serde(default)]
     bundles: BundlesFile,
 }
 
@@ -50,6 +52,10 @@ fn parsed_catalog() -> &'static ParsedCatalog {
         }
         for m in raw.channels {
             let key = format!("channels/{}", m.name);
+            manifests.insert(key, m);
+        }
+        for m in raw.mcp_servers {
+            let key = format!("mcp-servers/{}", m.name);
             manifests.insert(key, m);
         }
 

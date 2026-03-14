@@ -212,9 +212,10 @@ impl HttpMcpTransport {
                     }
                 }
             }
-            // Keep only the unprocessed trailing fragment.
+            // Keep only the unprocessed trailing fragment without allocating
+            // a new String each iteration.
             if remaining_start > 0 {
-                buffer = buffer[remaining_start..].to_string();
+                buffer.drain(..remaining_start);
             }
         }
 
