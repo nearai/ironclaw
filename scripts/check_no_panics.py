@@ -266,6 +266,7 @@ def main() -> int:
 
     print("::error::Found panic-style calls outside test-only Rust code.")
     print("Production code must use proper error handling instead of panicking.")
+    print("Suppress false positives with an inline '// safety: <reason>' comment.")
     print("")
     for path, line_no, line in violations[:20]:
         print(f"{path}:{line_no}: {line}")
