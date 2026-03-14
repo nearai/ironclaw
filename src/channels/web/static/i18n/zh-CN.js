@@ -29,9 +29,14 @@ I18n.register('zh-CN', {
   'tab.memory': '记忆',
   'tab.jobs': '任务',
   'tab.routines': '定时任务',
+  'tab.settings': '设置',
   'tab.extensions': '扩展',
   'tab.skills': '技能',
   'tab.logs': '日志',
+  'settings.inference': '推理',
+  'settings.agent': '代理',
+  'settings.channels': '频道',
+  'settings.mcp': 'MCP',
   
   // 状态
   'status.connected': '已连接',
@@ -131,10 +136,10 @@ I18n.register('zh-CN', {
   
   // 扩展标签页
   'extensions.installed': '已安装扩展',
-  'extensions.available': '可用 WASM 扩展',
-  'extensions.installWasm': '安装 WASM 扩展',
+  'extensions.available': '可用扩展',
+  'extensions.installWasm': '安装扩展',
   'extensions.noInstalled': '没有安装扩展',
-  'extensions.noAvailable': '没有其他可用的 WASM 扩展',
+  'extensions.noAvailable': '没有其他可用扩展',
   'extensions.loading': '加载中...',
   'extensions.install': '安装',
   'extensions.installing': '安装中...',
@@ -348,4 +353,13 @@ I18n.register('zh-CN', {
   'config.autoGenerate': '如果为空则自动生成',
   'config.save': '保存',
   'config.cancel': '取消',
+
+  // 设置工具栏
+  'settings.export': '导出',
+  'settings.import': '导入',
+  'settings.searchPlaceholder': '搜索设置...',
+  'settings.exportSuccess': '设置已导出',
+  'settings.importSuccess': '设置导入成功',
+  'settings.importFailed': '导入失败: {message}',
+  'settings.restartRequired': '需要重启才能使更改生效。',
 });

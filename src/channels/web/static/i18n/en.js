@@ -29,9 +29,14 @@ I18n.register('en', {
   'tab.memory': 'Memory',
   'tab.jobs': 'Jobs',
   'tab.routines': 'Routines',
+  'tab.settings': 'Settings',
   'tab.extensions': 'Extensions',
   'tab.skills': 'Skills',
   'tab.logs': 'Logs',
+  'settings.inference': 'Inference',
+  'settings.agent': 'Agent',
+  'settings.channels': 'Channels',
+  'settings.mcp': 'MCP',
   
   // Status
   'status.connected': 'Connected',
@@ -131,10 +136,10 @@ I18n.register('en', {
   
   // Extensions Tab
   'extensions.installed': 'Installed Extensions',
-  'extensions.available': 'Available WASM Extensions',
-  'extensions.installWasm': 'Install WASM Extension',
+  'extensions.available': 'Available Extensions',
+  'extensions.installWasm': 'Install Extension',
   'extensions.noInstalled': 'No extensions installed',
-  'extensions.noAvailable': 'No additional WASM extensions available',
+  'extensions.noAvailable': 'No additional extensions available',
   'extensions.loading': 'Loading...',
   'extensions.install': 'Install',
   'extensions.installing': 'Installing...',
@@ -348,4 +353,13 @@ I18n.register('en', {
   'config.autoGenerate': 'Auto-generated if empty',
   'config.save': 'Save',
   'config.cancel': 'Cancel',
+
+  // Settings toolbar
+  'settings.export': 'Export',
+  'settings.import': 'Import',
+  'settings.searchPlaceholder': 'Search settings...',
+  'settings.exportSuccess': 'Settings exported',
+  'settings.importSuccess': 'Settings imported successfully',
+  'settings.importFailed': 'Import failed: {message}',
+  'settings.restartRequired': 'Restart required for changes to take effect.',
 });

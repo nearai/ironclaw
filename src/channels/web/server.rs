@@ -126,6 +126,14 @@ impl RateLimiter {
     }
 }
 
+/// Snapshot of the active (resolved) configuration exposed to the frontend.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ActiveConfigSnapshot {
+    pub llm_backend: String,
+    pub llm_model: String,
+    pub enabled_channels: Vec<String>,
+}
+
 /// Shared state for all gateway handlers.
 pub struct GatewayState {
     /// Channel to send messages to the agent loop.
@@ -177,6 +185,8 @@ pub struct GatewayState {
     pub routine_engine: RoutineEngineSlot,
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
+    /// Snapshot of active (resolved) configuration for the frontend.
+    pub active_config: ActiveConfigSnapshot,
 }
 
 /// Start the gateway HTTP server.
@@ -2688,6 +2698,9 @@ async fn gateway_status_handler(
         daily_cost,
         actions_this_hour,
         model_usage,
+        llm_backend: state.active_config.llm_backend.clone(),
+        llm_model: state.active_config.llm_model.clone(),
+        enabled_channels: state.active_config.enabled_channels.clone(),
     })
 }
 
@@ -2713,6 +2726,9 @@ struct GatewayStatusResponse {
     actions_this_hour: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_usage: Option<Vec<ModelUsageEntry>>,
+    llm_backend: String,
+    llm_model: String,
+    enabled_channels: Vec<String>,
 }
 
 #[cfg(test)]
@@ -2826,6 +2842,7 @@ mod tests {
             cost_guard: None,
             routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
             startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
         })
     }
 

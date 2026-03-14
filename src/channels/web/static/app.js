@@ -20,6 +20,7 @@ const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
 let _ghostSuggestion = '';
+let currentSettingsSubtab = 'inference';
 
 // --- Slash Commands ---
 
@@ -134,6 +135,7 @@ function apiFetch(path, options) {
         throw new Error(body || (res.status + ' ' + res.statusText));
       });
     }
+    if (res.status === 204) return null;
     return res.json();
   });
 }
@@ -363,8 +365,8 @@ function connectSSE() {
       debouncedLoadThreads();
     }
 
-    // Extension setup flows can surface approvals while user is on Extensions tab.
-    if (currentTab === 'extensions') loadExtensions();
+    // Extension setup flows can surface approvals while user is on Settings > Extensions.
+    if (currentTab === 'settings' && currentSettingsSubtab === 'extensions') loadExtensions();
   });
 
   eventSource.addEventListener('auth_required', (e) => {
@@ -372,11 +374,25 @@ function connectSSE() {
   });
 
   eventSource.addEventListener('auth_completed', (e) => {
-    handleAuthCompleted(JSON.parse(e.data));
+    const data = JSON.parse(e.data);
+    // Dismiss whichever UI path was active: auth card (OAuth) or configure modal (setup).
+    removeAuthCard(data.extension_name);
+    closeConfigureModal();
+    showToast(data.message, data.success ? 'success' : 'error');
+    if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
+      addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
+    }
+    // Refresh extensions list so status indicators update
+    if (currentTab === 'settings' && currentSettingsSubtab === 'extensions') loadExtensions();
+    if (currentTab === 'settings' && currentSettingsSubtab === 'mcp') loadMcpServers();
+    if (currentTab === 'settings' && currentSettingsSubtab === 'channels') loadChannelsStatus();
+    enableChatInput();
   });
 
   eventSource.addEventListener('extension_status', (e) => {
-    if (currentTab === 'extensions') loadExtensions();
+    if (currentTab === 'settings' && currentSettingsSubtab === 'extensions') loadExtensions();
+    if (currentTab === 'settings' && currentSettingsSubtab === 'mcp') loadMcpServers();
+    if (currentTab === 'settings' && currentSettingsSubtab === 'channels') loadChannelsStatus();
   });
 
   eventSource.addEventListener('image_generated', (e) => {
@@ -1825,13 +1841,11 @@ function switchTab(tab) {
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
-  if (tab === 'extensions') {
-    loadExtensions();
-    startPairingPoll();
+  if (tab === 'settings') {
+    loadSettingsSubtab(currentSettingsSubtab);
   } else {
     stopPairingPoll();
   }
-  if (tab === 'skills') loadSkills();
 }
 
 // --- Memory (filesystem tree) ---
@@ -2218,7 +2232,6 @@ var kindLabels = { 'wasm_channel': 'Channel', 'wasm_tool': 'Tool', 'mcp_server':
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
   const wasmList = document.getElementById('available-wasm-list');
-  const mcpList = document.getElementById('mcp-servers-list');
   const toolsTbody = document.getElementById('tools-tbody');
   const toolsEmpty = document.getElementById('tools-empty');
 
@@ -2228,38 +2241,32 @@ function loadExtensions() {
     apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
     apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
   ]).then(([extData, toolData, registryData]) => {
-    // Render installed extensions
-    if (extData.extensions.length === 0) {
+    // Render installed extensions (exclude wasm_channel and mcp_server — shown in their own tabs)
+    var nonChannelExts = extData.extensions.filter(function(e) {
+      return e.kind !== 'wasm_channel' && e.kind !== 'mcp_server';
+    });
+    if (nonChannelExts.length === 0) {
       extList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noInstalled') + '</div>';
     } else {
       extList.innerHTML = '';
-      for (const ext of extData.extensions) {
+      for (const ext of nonChannelExts) {
         extList.appendChild(renderExtensionCard(ext));
       }
     }
 
-    // Split registry entries by kind
-    var wasmEntries = registryData.entries.filter(function(e) { return e.kind !== 'mcp_server' && !e.installed; });
-    var mcpEntries = registryData.entries.filter(function(e) { return e.kind === 'mcp_server'; });
+    // Available extensions (exclude MCP servers and channels — they have their own tabs)
+    var wasmEntries = registryData.entries.filter(function(e) {
+      return e.kind !== 'mcp_server' && e.kind !== 'wasm_channel' && e.kind !== 'channel' && !e.installed;
+    });
 
-    // Available WASM extensions
+    var wasmSection = document.getElementById('available-wasm-section');
     if (wasmEntries.length === 0) {
-      wasmList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noAvailable') + '</div>';
+      if (wasmSection) wasmSection.style.display = 'none';
     } else {
+      if (wasmSection) wasmSection.style.display = '';
       wasmList.innerHTML = '';
       for (const entry of wasmEntries) {
         wasmList.appendChild(renderAvailableExtensionCard(entry));
-      }
-    }
-
-    // MCP servers (show both installed and uninstalled)
-    if (mcpEntries.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">' + I18n.t('mcp.noServers') + '</div>';
-    } else {
-      mcpList.innerHTML = '';
-      for (const entry of mcpEntries) {
-        var installedExt = extData.extensions.find(function(e) { return e.name === entry.name; });
-        mcpList.appendChild(renderMcpServerCard(entry, installedExt));
       }
     }
 
@@ -2338,18 +2345,18 @@ function renderAvailableExtensionCard(entry) {
           showToast('Opening authentication for ' + entry.display_name, 'info');
           openOAuthUrl(res.auth_url);
         }
-        loadExtensions();
+        refreshCurrentSettingsTab();
         // Auto-open configure for WASM channels
         if (entry.kind === 'wasm_channel') {
           showConfigureModal(entry.name);
         }
       } else {
         showToast('Install: ' + (res.message || 'unknown error'), 'error');
-        loadExtensions();
+        refreshCurrentSettingsTab();
       }
     }).catch(function(err) {
       showToast('Install failed: ' + err.message, 'error');
-      loadExtensions();
+      refreshCurrentSettingsTab();
     });
   });
   actions.appendChild(installBtn);
@@ -2405,6 +2412,13 @@ function renderMcpServerCard(entry, installedExt) {
       activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
     }
+    if (installedExt.needs_setup || (installedExt.has_auth && installedExt.authenticated)) {
+      var configBtn = document.createElement('button');
+      configBtn.className = 'btn-ext configure';
+      configBtn.textContent = installedExt.authenticated ? 'Reconfigure' : 'Configure';
+      configBtn.addEventListener('click', function() { showConfigureModal(installedExt.name); });
+      actions.appendChild(configBtn);
+    }
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
     removeBtn.textContent = I18n.t('ext.remove');
@@ -2426,10 +2440,10 @@ function renderMcpServerCard(entry, installedExt) {
         } else {
           showToast(I18n.t('ext.install') + ': ' + (res.message || 'unknown error'), 'error');
         }
-        loadExtensions();
+        loadMcpServers();
       }).catch(function(err) {
         showToast(I18n.t('ext.installFailed', { message: err.message }), 'error');
-        loadExtensions();
+        loadMcpServers();
       });
     });
     actions.appendChild(installBtn);
@@ -2594,6 +2608,12 @@ function renderExtensionCard(ext) {
   return card;
 }
 
+function refreshCurrentSettingsTab() {
+  if (currentSettingsSubtab === 'extensions') loadExtensions();
+  if (currentSettingsSubtab === 'channels') loadChannelsStatus();
+  if (currentSettingsSubtab === 'mcp') loadMcpServers();
+}
+
 function activateExtension(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/activate', { method: 'POST' })
     .then((res) => {
@@ -2607,7 +2627,7 @@ function activateExtension(name) {
           showToast('Opening authentication for ' + name, 'info');
           openOAuthUrl(res.auth_url);
         }
-        loadExtensions();
+        refreshCurrentSettingsTab();
         return;
       }
 
@@ -2623,23 +2643,24 @@ function activateExtension(name) {
       } else {
         showToast('Activate failed: ' + res.message, 'error');
       }
-      loadExtensions();
+      refreshCurrentSettingsTab();
     })
     .catch((err) => showToast('Activate failed: ' + err.message, 'error'));
 }
 
 function removeExtension(name) {
-  if (!confirm(I18n.t('ext.confirmRemove', { name: name }))) return;
-  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
-    .then((res) => {
-      if (!res.success) {
-        showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
-      } else {
-        showToast(I18n.t('ext.removed', { name: name }), 'success');
-      }
-      loadExtensions();
-    })
-    .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
+  showConfirmModal(I18n.t('ext.confirmRemove', { name: name }), '', function() {
+    apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
+      .then((res) => {
+        if (!res.success) {
+          showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
+        } else {
+          showToast(I18n.t('ext.removed', { name: name }), 'success');
+        }
+        refreshCurrentSettingsTab();
+      })
+      .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
+  });
 }
 
 function showConfigureModal(name) {
@@ -2770,7 +2791,7 @@ function submitConfigureModal(name, fields) {
           });
           showToast('Opening OAuth authorization for ' + name, 'info');
           openOAuthUrl(res.auth_url);
-          loadExtensions();
+          refreshCurrentSettingsTab();
         }
         // For non-OAuth success: the server always broadcasts auth_completed SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
@@ -2857,7 +2878,7 @@ function approvePairing(channel, code, container) {
   }).then(res => {
     if (res.success) {
       showToast('Pairing approved', 'success');
-      loadExtensions();
+      refreshCurrentSettingsTab();
     } else {
       showToast(res.message || 'Approve failed', 'error');
     }
@@ -3963,7 +3984,7 @@ function addMcpServer() {
       showToast('Added MCP server ' + name, 'success');
       document.getElementById('mcp-install-name').value = '';
       document.getElementById('mcp-install-url').value = '';
-      loadExtensions();
+      loadMcpServers();
     } else {
       showToast('Failed to add MCP server: ' + (res.message || 'unknown error'), 'error');
     }
@@ -4259,19 +4280,20 @@ function installSkill(nameOrSlug, url, btn) {
 }
 
 function removeSkill(name) {
-  if (!confirm(I18n.t('skills.confirmRemove', { name: name }))) return;
-  apiFetch('/api/skills/' + encodeURIComponent(name), {
-    method: 'DELETE',
-    headers: { 'X-Confirm-Action': 'true' },
-  }).then(function(res) {
-    if (res.success) {
-      showToast(I18n.t('skills.removed', { name: name }), 'success');
-    } else {
-      showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
-    }
-    loadSkills();
-  }).catch(function(err) {
-    showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
+  showConfirmModal(I18n.t('skills.confirmRemove', { name: name }), '', function() {
+    apiFetch('/api/skills/' + encodeURIComponent(name), {
+      method: 'DELETE',
+      headers: { 'X-Confirm-Action': 'true' },
+    }).then(function(res) {
+      if (res.success) {
+        showToast(I18n.t('skills.removed', { name: name }), 'success');
+      } else {
+        showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
+      }
+      loadSkills();
+    }).catch(function(err) {
+      showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
+    });
   });
 }
 
@@ -4301,10 +4323,10 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   const inInput = tag === 'input' || tag === 'textarea';
 
-  // Mod+1-6: switch tabs
-  if (mod && e.key >= '1' && e.key <= '6') {
+  // Mod+1-5: switch tabs
+  if (mod && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'extensions', 'skills'];
+    const tabs = ['chat', 'memory', 'jobs', 'routines', 'settings'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;
@@ -4343,6 +4365,593 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 });
+
+// --- Settings Tab ---
+
+document.querySelectorAll('.settings-subtab').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    switchSettingsSubtab(btn.getAttribute('data-settings-subtab'));
+  });
+});
+
+function switchSettingsSubtab(subtab) {
+  currentSettingsSubtab = subtab;
+  document.querySelectorAll('.settings-subtab').forEach(function(b) {
+    b.classList.toggle('active', b.getAttribute('data-settings-subtab') === subtab);
+  });
+  document.querySelectorAll('.settings-subpanel').forEach(function(p) {
+    p.classList.toggle('active', p.id === 'settings-' + subtab);
+  });
+  loadSettingsSubtab(subtab);
+}
+
+function loadSettingsSubtab(subtab) {
+  if (subtab === 'inference') loadInferenceSettings();
+  else if (subtab === 'agent') loadAgentSettings();
+  else if (subtab === 'channels') { loadChannelsStatus(); startPairingPoll(); }
+  else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
+  else if (subtab === 'mcp') loadMcpServers();
+  else if (subtab === 'skills') loadSkills();
+  if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
+}
+
+// --- Structured Settings Definitions ---
+
+var INFERENCE_SETTINGS = [
+  {
+    group: 'LLM Provider',
+    settings: [
+      { key: 'llm_backend', label: 'Backend', description: 'LLM inference provider',
+        type: 'select', options: ['nearai', 'anthropic', 'openai', 'ollama', 'openai_compatible', 'tinfoil', 'bedrock'] },
+      { key: 'selected_model', label: 'Model', description: 'Model name or ID for the selected backend', type: 'text' },
+      { key: 'ollama_base_url', label: 'Ollama URL', description: 'Base URL for Ollama API', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'ollama' } },
+      { key: 'openai_compatible_base_url', label: 'OpenAI-compatible URL', description: 'Base URL for OpenAI-compatible API', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'openai_compatible' } },
+      { key: 'bedrock_region', label: 'Bedrock Region', description: 'AWS region for Bedrock', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'bedrock' } },
+      { key: 'bedrock_cross_region', label: 'Cross-Region', description: 'Enable cross-region inference', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'bedrock' } },
+      { key: 'bedrock_profile', label: 'AWS Profile', description: 'AWS profile for Bedrock auth', type: 'text',
+        showWhen: { key: 'llm_backend', value: 'bedrock' } },
+    ]
+  },
+  {
+    group: 'Embeddings',
+    settings: [
+      { key: 'embeddings.enabled', label: 'Enabled', description: 'Enable vector embeddings for memory search', type: 'boolean' },
+      { key: 'embeddings.provider', label: 'Provider', description: 'Embeddings API provider',
+        type: 'select', options: ['openai', 'nearai'] },
+      { key: 'embeddings.model', label: 'Model', description: 'Embedding model name', type: 'text' },
+    ]
+  },
+];
+
+var AGENT_SETTINGS = [
+  {
+    group: 'Agent',
+    settings: [
+      { key: 'agent.name', label: 'Name', description: 'Agent display name', type: 'text' },
+      { key: 'agent.max_parallel_jobs', label: 'Max Parallel Jobs', description: 'Maximum concurrent background jobs', type: 'number' },
+      { key: 'agent.job_timeout_secs', label: 'Job Timeout', description: 'Max duration per job in seconds', type: 'number' },
+      { key: 'agent.max_tool_iterations', label: 'Max Tool Iterations', description: 'Max tool calls per turn', type: 'number' },
+      { key: 'agent.use_planning', label: 'Planning', description: 'Enable multi-step planning before execution', type: 'boolean' },
+      { key: 'agent.auto_approve_tools', label: 'Auto-approve Tools', description: 'Skip manual approval for tool calls', type: 'boolean' },
+      { key: 'agent.default_timezone', label: 'Timezone', description: 'Default timezone (IANA)', type: 'text' },
+      { key: 'agent.session_idle_timeout_secs', label: 'Session Idle Timeout', description: 'Seconds before idle session expires', type: 'number' },
+      { key: 'agent.stuck_threshold_secs', label: 'Stuck Threshold', description: 'Seconds before a job is considered stuck', type: 'number' },
+      { key: 'agent.max_repair_attempts', label: 'Max Repair Attempts', description: 'Auto-recovery attempts for stuck jobs', type: 'number' },
+      { key: 'agent.max_cost_per_day_cents', label: 'Max Daily Cost', description: 'Daily LLM spend cap in cents (0 = unlimited)', type: 'number', min: 0 },
+      { key: 'agent.max_actions_per_hour', label: 'Max Actions/Hour', description: 'Hourly tool call rate limit (0 = unlimited)', type: 'number', min: 0 },
+      { key: 'agent.allow_local_tools', label: 'Allow Local Tools', description: 'Enable local filesystem tool execution', type: 'boolean' },
+    ]
+  },
+  {
+    group: 'Heartbeat',
+    settings: [
+      { key: 'heartbeat.enabled', label: 'Enabled', description: 'Run periodic background checks', type: 'boolean' },
+      { key: 'heartbeat.interval_secs', label: 'Interval', description: 'Seconds between heartbeats (default: 1800)', type: 'number' },
+      { key: 'heartbeat.notify_channel', label: 'Notify Channel', description: 'Channel to send heartbeat findings to', type: 'text' },
+      { key: 'heartbeat.notify_user', label: 'Notify User', description: 'User ID to notify', type: 'text' },
+      { key: 'heartbeat.quiet_hours_start', label: 'Quiet Hours Start', description: 'Hour (0-23) to stop heartbeats', type: 'number', min: 0, max: 23 },
+      { key: 'heartbeat.quiet_hours_end', label: 'Quiet Hours End', description: 'Hour (0-23) to resume heartbeats', type: 'number', min: 0, max: 23 },
+      { key: 'heartbeat.timezone', label: 'Timezone', description: 'Timezone for quiet hours (IANA)', type: 'text' },
+    ]
+  },
+  {
+    group: 'Sandbox',
+    settings: [
+      { key: 'sandbox.enabled', label: 'Enabled', description: 'Enable Docker sandbox for background jobs', type: 'boolean' },
+      { key: 'sandbox.policy', label: 'Policy', description: 'Sandbox security policy',
+        type: 'select', options: ['readonly', 'workspace_write', 'full_access'] },
+      { key: 'sandbox.timeout_secs', label: 'Timeout', description: 'Max job duration in seconds', type: 'number', min: 0 },
+      { key: 'sandbox.memory_limit_mb', label: 'Memory Limit', description: 'Container memory limit (MB)', type: 'number', min: 0 },
+      { key: 'sandbox.image', label: 'Docker Image', description: 'Container image for sandbox jobs', type: 'text' },
+    ]
+  },
+  {
+    group: 'Routines',
+    settings: [
+      { key: 'routines.max_concurrent', label: 'Max Concurrent', description: 'Maximum routines running simultaneously', type: 'number', min: 0 },
+      { key: 'routines.default_cooldown_secs', label: 'Default Cooldown', description: 'Minimum seconds between routine fires', type: 'number', min: 0 },
+    ]
+  },
+  {
+    group: 'Safety',
+    settings: [
+      { key: 'safety.max_output_length', label: 'Max Output Length', description: 'Maximum output tokens per response', type: 'number', min: 0 },
+      { key: 'safety.injection_check_enabled', label: 'Injection Check', description: 'Enable prompt injection detection', type: 'boolean' },
+    ]
+  },
+  {
+    group: 'Skills',
+    settings: [
+      { key: 'skills.max_active', label: 'Max Active Skills', description: 'Maximum skills active simultaneously', type: 'number', min: 0 },
+      { key: 'skills.max_context_tokens', label: 'Max Context Tokens', description: 'Token budget for skill prompts', type: 'number', min: 0 },
+    ]
+  },
+  {
+    group: 'Search',
+    settings: [
+      { key: 'search.fusion_strategy', label: 'Fusion Strategy', description: 'Hybrid search ranking method',
+        type: 'select', options: ['rrf', 'weighted'] },
+    ]
+  },
+];
+
+function loadInferenceSettings() {
+  var container = document.getElementById('settings-inference-content');
+  container.innerHTML = '<div class="empty-state">Loading settings...</div>';
+
+  Promise.all([
+    apiFetch('/api/settings/export'),
+    apiFetch('/api/gateway/status').catch(function() { return {}; })
+  ]).then(function(results) {
+    var settings = results[0].settings || {};
+    var status = results[1];
+    var activeValues = {
+      'llm_backend': status.llm_backend,
+      'selected_model': status.llm_model
+    };
+    container.innerHTML = '';
+    renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, activeValues);
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">Failed to load settings: '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function loadAgentSettings() {
+  loadStructuredSettings('settings-agent-content', AGENT_SETTINGS);
+}
+
+function loadStructuredSettings(containerId, settingsDefs) {
+  var container = document.getElementById(containerId);
+  container.innerHTML = '<div class="empty-state">Loading settings...</div>';
+
+  apiFetch('/api/settings/export').then(function(data) {
+    var settings = data.settings || {};
+    container.innerHTML = '';
+    renderStructuredSettingsInto(container, settingsDefs, settings, {});
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">Failed to load settings: '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderStructuredSettingsInto(container, settingsDefs, settings, activeValues) {
+    for (var gi = 0; gi < settingsDefs.length; gi++) {
+      var groupDef = settingsDefs[gi];
+      var group = document.createElement('div');
+      group.className = 'settings-group';
+
+      var title = document.createElement('div');
+      title.className = 'settings-group-title';
+      title.textContent = groupDef.group;
+      group.appendChild(title);
+
+      var rows = [];
+      for (var si = 0; si < groupDef.settings.length; si++) {
+        var def = groupDef.settings[si];
+        var activeVal = activeValues ? activeValues[def.key] : undefined;
+        var row = renderStructuredSettingsRow(def, settings[def.key], activeVal);
+        if (def.showWhen) {
+          row.setAttribute('data-show-when-key', def.showWhen.key);
+          row.setAttribute('data-show-when-value', def.showWhen.value);
+          var currentVal = settings[def.showWhen.key];
+          if (currentVal === def.showWhen.value) {
+            row.classList.remove('hidden');
+          } else {
+            row.classList.add('hidden');
+          }
+        }
+        rows.push(row);
+        group.appendChild(row);
+      }
+
+      container.appendChild(group);
+
+      // Wire up showWhen reactivity for select fields in this group
+      (function(groupRows, allSettings) {
+        for (var ri = 0; ri < groupRows.length; ri++) {
+          var sel = groupRows[ri].querySelector('.settings-select');
+          if (sel) {
+            sel.addEventListener('change', function() {
+              var changedKey = this.getAttribute('data-setting-key');
+              var changedVal = this.value;
+              for (var rj = 0; rj < groupRows.length; rj++) {
+                var whenKey = groupRows[rj].getAttribute('data-show-when-key');
+                var whenVal = groupRows[rj].getAttribute('data-show-when-value');
+                if (whenKey === changedKey) {
+                  if (changedVal === whenVal) {
+                    groupRows[rj].classList.remove('hidden');
+                  } else {
+                    groupRows[rj].classList.add('hidden');
+                  }
+                }
+              }
+            });
+          }
+        }
+      })(rows, settings);
+    }
+
+    if (container.children.length === 0) {
+      container.innerHTML = '<div class="empty-state">No settings found</div>';
+    }
+}
+
+function renderStructuredSettingsRow(def, value, activeValue) {
+  var row = document.createElement('div');
+  row.className = 'settings-row';
+
+  var labelWrap = document.createElement('div');
+  labelWrap.className = 'settings-label-wrap';
+
+  var label = document.createElement('div');
+  label.className = 'settings-label';
+  label.textContent = def.label;
+  labelWrap.appendChild(label);
+
+  if (def.description) {
+    var desc = document.createElement('div');
+    desc.className = 'settings-description';
+    desc.textContent = def.description;
+    labelWrap.appendChild(desc);
+  }
+
+  row.appendChild(labelWrap);
+
+  var inputWrap = document.createElement('div');
+  inputWrap.style.display = 'flex';
+  inputWrap.style.alignItems = 'center';
+  inputWrap.style.gap = '8px';
+
+  var ariaLabel = def.label + (def.description ? '. ' + def.description : '');
+  var placeholderText = activeValue ? 'env: ' + activeValue : (def.placeholder || 'env default');
+
+  if (def.type === 'boolean') {
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!value;
+    cb.setAttribute('aria-label', ariaLabel);
+    cb.addEventListener('change', function() { saveSetting(def.key, cb.checked); });
+    inputWrap.appendChild(cb);
+  } else if (def.type === 'select' && def.options) {
+    var sel = document.createElement('select');
+    sel.className = 'settings-select';
+    sel.setAttribute('data-setting-key', def.key);
+    sel.setAttribute('aria-label', ariaLabel);
+    var emptyOpt = document.createElement('option');
+    emptyOpt.value = '';
+    emptyOpt.textContent = activeValue ? '\u2014 env: ' + activeValue + ' \u2014' : '\u2014 use env default \u2014';
+    if (!value && value !== false && value !== 0) emptyOpt.selected = true;
+    sel.appendChild(emptyOpt);
+    for (var oi = 0; oi < def.options.length; oi++) {
+      var opt = document.createElement('option');
+      opt.value = def.options[oi];
+      opt.textContent = def.options[oi];
+      if (String(value) === def.options[oi]) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener('change', (function(k, el) {
+      return function() { saveSetting(k, el.value === '' ? null : el.value); };
+    })(def.key, sel));
+    inputWrap.appendChild(sel);
+  } else if (def.type === 'number') {
+    var numInp = document.createElement('input');
+    numInp.type = 'number';
+    numInp.className = 'settings-input';
+    numInp.setAttribute('aria-label', ariaLabel);
+    numInp.value = (value === null || value === undefined) ? '' : value;
+    if (!value && value !== 0) numInp.placeholder = placeholderText;
+    if (def.min !== undefined) numInp.min = def.min;
+    if (def.max !== undefined) numInp.max = def.max;
+    numInp.addEventListener('change', (function(k, el) {
+      return function() { saveSetting(k, el.value === '' ? null : parseFloat(el.value)); };
+    })(def.key, numInp));
+    inputWrap.appendChild(numInp);
+  } else {
+    var textInp = document.createElement('input');
+    textInp.type = 'text';
+    textInp.className = 'settings-input';
+    textInp.setAttribute('aria-label', ariaLabel);
+    textInp.value = (value === null || value === undefined) ? '' : String(value);
+    if (!value) textInp.placeholder = placeholderText;
+    textInp.addEventListener('change', (function(k, el) {
+      return function() { saveSetting(k, el.value === '' ? null : el.value); };
+    })(def.key, textInp));
+    inputWrap.appendChild(textInp);
+  }
+
+  var saved = document.createElement('span');
+  saved.className = 'settings-saved-indicator';
+  saved.textContent = 'Saved';
+  saved.setAttribute('data-key', def.key);
+  saved.setAttribute('role', 'status');
+  saved.setAttribute('aria-live', 'polite');
+  inputWrap.appendChild(saved);
+
+  row.appendChild(inputWrap);
+  return row;
+}
+
+var RESTART_REQUIRED_KEYS = ['llm_backend', 'selected_model', 'ollama_base_url', 'openai_compatible_base_url',
+  'bedrock_region', 'bedrock_cross_region', 'bedrock_profile', 'embeddings.enabled', 'embeddings.provider', 'embeddings.model',
+  'agent.auto_approve_tools'];
+
+function saveSetting(key, value) {
+  var method = (value === null || value === undefined) ? 'DELETE' : 'PUT';
+  var opts = { method: method };
+  if (method === 'PUT') opts.body = { value: value };
+  apiFetch('/api/settings/' + encodeURIComponent(key), opts).then(function() {
+    var indicator = document.querySelector('.settings-saved-indicator[data-key="' + key + '"]');
+    if (indicator) {
+      indicator.classList.add('visible');
+      setTimeout(function() { indicator.classList.remove('visible'); }, 1500);
+    }
+    // Show restart banner for inference settings
+    if (RESTART_REQUIRED_KEYS.indexOf(key) !== -1) {
+      showRestartBanner();
+    }
+  }).catch(function(err) {
+    showToast('Failed to save ' + key + ': ' + err.message, 'error');
+  });
+}
+
+function showRestartBanner() {
+  var container = document.querySelector('.settings-content');
+  if (!container || container.querySelector('.restart-banner')) return;
+  var banner = document.createElement('div');
+  banner.className = 'restart-banner';
+  banner.setAttribute('role', 'alert');
+  banner.innerHTML = '<span>\u26A0\uFE0F Restart required for changes to take effect.</span>';
+  container.insertBefore(banner, container.firstChild);
+}
+
+function loadMcpServers() {
+  var mcpList = document.getElementById('mcp-servers-list');
+  mcpList.innerHTML = '<div class="empty-state">Loading...</div>';
+
+  Promise.all([
+    apiFetch('/api/extensions').catch(function() { return { extensions: [] }; }),
+    apiFetch('/api/extensions/registry').catch(function() { return { entries: [] }; }),
+  ]).then(function(results) {
+    var extData = results[0];
+    var registryData = results[1];
+    var mcpEntries = (registryData.entries || []).filter(function(e) { return e.kind === 'mcp_server'; });
+    var installedMcp = (extData.extensions || []).filter(function(e) { return e.kind === 'mcp_server'; });
+
+    mcpList.innerHTML = '';
+    var renderedNames = {};
+
+    // Registry entries (cross-referenced with installed)
+    for (var i = 0; i < mcpEntries.length; i++) {
+      renderedNames[mcpEntries[i].name] = true;
+      var installedExt = installedMcp.find(function(e) { return e.name === mcpEntries[i].name; });
+      mcpList.appendChild(renderMcpServerCard(mcpEntries[i], installedExt));
+    }
+
+    // Custom installed MCP servers not in registry
+    for (var j = 0; j < installedMcp.length; j++) {
+      if (!renderedNames[installedMcp[j].name]) {
+        mcpList.appendChild(renderExtensionCard(installedMcp[j]));
+      }
+    }
+
+    if (mcpList.children.length === 0) {
+      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+    }
+  }).catch(function(err) {
+    mcpList.innerHTML = '<div class="empty-state">Failed to load MCP servers: '
+      + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function loadChannelsStatus() {
+  var container = document.getElementById('settings-channels-content');
+  container.innerHTML = '<div class="empty-state">Loading channels...</div>';
+
+  Promise.all([
+    apiFetch('/api/gateway/status').catch(function() { return {}; }),
+    apiFetch('/api/extensions').catch(function() { return { extensions: [] }; }),
+    apiFetch('/api/extensions/registry').catch(function() { return { entries: [] }; }),
+  ]).then(function(results) {
+    var status = results[0];
+    var extensions = results[1].extensions || [];
+    var registry = results[2].entries || [];
+
+    container.innerHTML = '';
+
+    // Built-in Channels section
+    var builtinSection = document.createElement('div');
+    builtinSection.className = 'extensions-section';
+    var builtinTitle = document.createElement('h3');
+    builtinTitle.textContent = 'Built-in Channels';
+    builtinSection.appendChild(builtinTitle);
+    var builtinList = document.createElement('div');
+    builtinList.className = 'extensions-list';
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      'Web Gateway',
+      'Browser-based chat interface',
+      true,
+      'SSE: ' + (status.sse_connections || 0) + ' \u00B7 WS: ' + (status.ws_connections || 0)
+    ));
+
+    var enabledChannels = status.enabled_channels || [];
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      'HTTP Webhook',
+      'Incoming webhook endpoint for external integrations',
+      enabledChannels.indexOf('http') !== -1,
+      'Configure via ENABLE_HTTP=true'
+    ));
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      'CLI',
+      'Terminal UI with Ratatui',
+      enabledChannels.indexOf('repl') !== -1,
+      'Run with: ironclaw run --cli'
+    ));
+
+    builtinList.appendChild(renderBuiltinChannelCard(
+      'REPL',
+      'Simple read-eval-print loop for testing',
+      enabledChannels.indexOf('repl') !== -1,
+      'Run with: ironclaw run --repl'
+    ));
+
+    builtinSection.appendChild(builtinList);
+    container.appendChild(builtinSection);
+
+    // Messaging Channels section — use extension cards with full stepper/pairing UI
+    var channelEntries = registry.filter(function(e) {
+      return e.kind === 'wasm_channel' || e.kind === 'channel';
+    });
+    var installedChannels = extensions.filter(function(e) {
+      return e.kind === 'wasm_channel';
+    });
+
+    if (channelEntries.length > 0 || installedChannels.length > 0) {
+      var messagingSection = document.createElement('div');
+      messagingSection.className = 'extensions-section';
+      var messagingTitle = document.createElement('h3');
+      messagingTitle.textContent = 'Messaging Channels';
+      messagingSection.appendChild(messagingTitle);
+      var messagingList = document.createElement('div');
+      messagingList.className = 'extensions-list';
+
+      var renderedNames = {};
+
+      // Registry entries: show full ext card if installed, available card if not
+      for (var i = 0; i < channelEntries.length; i++) {
+        var entry = channelEntries[i];
+        renderedNames[entry.name] = true;
+        var installed = null;
+        for (var k = 0; k < installedChannels.length; k++) {
+          if (installedChannels[k].name === entry.name) { installed = installedChannels[k]; break; }
+        }
+        if (installed) {
+          messagingList.appendChild(renderExtensionCard(installed));
+        } else {
+          messagingList.appendChild(renderAvailableExtensionCard(entry));
+        }
+      }
+
+      // Installed channels not in registry (custom installs)
+      for (var j = 0; j < installedChannels.length; j++) {
+        if (!renderedNames[installedChannels[j].name]) {
+          messagingList.appendChild(renderExtensionCard(installedChannels[j]));
+        }
+      }
+
+      messagingSection.appendChild(messagingList);
+      container.appendChild(messagingSection);
+    }
+
+    // Tunnel settings section
+    var tunnelSection = document.createElement('div');
+    tunnelSection.className = 'extensions-section';
+    var tunnelTitle = document.createElement('h3');
+    tunnelTitle.textContent = 'Tunnel';
+    tunnelSection.appendChild(tunnelTitle);
+    var tunnelContainer = document.createElement('div');
+    tunnelContainer.className = 'settings-group';
+    var TUNNEL_SETTINGS = [
+      {
+        group: 'Tunnel',
+        settings: [
+          { key: 'tunnel.provider', label: 'Provider', description: 'Public URL tunnel provider',
+            type: 'select', options: ['none', 'cloudflare', 'ngrok', 'tailscale', 'custom'] },
+          { key: 'tunnel.public_url', label: 'Public URL', description: 'Static public URL (if not using tunnel provider)', type: 'text' },
+        ]
+      }
+    ];
+    apiFetch('/api/settings/export').then(function(tunnelData) {
+      var tunnelSettings = tunnelData.settings || {};
+      renderStructuredSettingsInto(tunnelContainer, TUNNEL_SETTINGS, tunnelSettings, {});
+    }).catch(function() {});
+    tunnelSection.appendChild(tunnelContainer);
+    container.appendChild(tunnelSection);
+  });
+}
+
+function renderBuiltinChannelCard(name, description, active, detail) {
+  var card = document.createElement('div');
+  card.className = 'ext-card';
+
+  var header = document.createElement('div');
+  header.className = 'ext-header';
+
+  var nameEl = document.createElement('span');
+  nameEl.className = 'ext-name';
+  nameEl.textContent = name;
+  header.appendChild(nameEl);
+
+  var kindEl = document.createElement('span');
+  kindEl.className = 'ext-kind kind-builtin';
+  kindEl.textContent = 'Built-in';
+  header.appendChild(kindEl);
+
+  var statusDot = document.createElement('span');
+  statusDot.className = 'ext-auth-dot ' + (active ? 'authed' : 'unauthed');
+  statusDot.title = active ? 'Active' : 'Inactive';
+  header.appendChild(statusDot);
+
+  card.appendChild(header);
+
+  var desc = document.createElement('div');
+  desc.className = 'ext-desc';
+  desc.textContent = description;
+  card.appendChild(desc);
+
+  if (detail) {
+    var detailEl = document.createElement('div');
+    detailEl.className = 'ext-url';
+    detailEl.textContent = detail;
+    card.appendChild(detailEl);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'ext-actions';
+  var label = document.createElement('span');
+  label.className = 'ext-active-label';
+  label.textContent = active ? 'Active' : 'Inactive';
+  actions.appendChild(label);
+  card.appendChild(actions);
+
+  return card;
+}
+
+function formatGroupName(name) {
+  return name.charAt(0).toUpperCase() + name.slice(1).replace(/_/g, ' ');
+}
+
+function formatSettingLabel(name) {
+  var s = name.replace(/_/g, ' ');
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 // --- Toasts ---
 
@@ -4463,4 +5072,101 @@ document.addEventListener('click', function(e) {
 
 document.getElementById('language-btn').addEventListener('click', function() {
   if (typeof toggleLanguageMenu === 'function') toggleLanguageMenu();
+});
+
+// --- Confirmation Modal ---
+
+var _confirmModalCallback = null;
+
+function showConfirmModal(title, message, onConfirm) {
+  var modal = document.getElementById('confirm-modal');
+  document.getElementById('confirm-modal-title').textContent = title;
+  document.getElementById('confirm-modal-message').textContent = message || '';
+  document.getElementById('confirm-modal-message').style.display = message ? '' : 'none';
+  _confirmModalCallback = onConfirm;
+  modal.style.display = 'flex';
+}
+
+function closeConfirmModal() {
+  document.getElementById('confirm-modal').style.display = 'none';
+  _confirmModalCallback = null;
+}
+
+document.getElementById('confirm-modal-btn').addEventListener('click', function() {
+  if (_confirmModalCallback) _confirmModalCallback();
+  closeConfirmModal();
+});
+
+// --- Settings Import/Export ---
+
+function exportSettings() {
+  apiFetch('/api/settings/export').then(function(data) {
+    var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'ironclaw-settings.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }).catch(function(err) {
+    showToast('Export failed: ' + err.message, 'error');
+  });
+}
+
+function importSettings() {
+  var input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.addEventListener('change', function() {
+    if (!input.files || !input.files[0]) return;
+    var reader = new FileReader();
+    reader.onload = function() {
+      try {
+        var data = JSON.parse(reader.result);
+        apiFetch('/api/settings/import', {
+          method: 'POST',
+          body: data,
+        }).then(function() {
+          showToast('Settings imported successfully', 'success');
+          loadSettingsSubtab(currentSettingsSubtab);
+        }).catch(function(err) {
+          showToast('Import failed: ' + err.message, 'error');
+        });
+      } catch (e) {
+        showToast('Invalid JSON file', 'error');
+      }
+    };
+    reader.readAsText(input.files[0]);
+  });
+  input.click();
+}
+
+// --- Settings Search ---
+
+document.getElementById('settings-search-input').addEventListener('input', function() {
+  var query = this.value.toLowerCase();
+  var activePanel = document.querySelector('.settings-subpanel.active');
+  if (!activePanel) return;
+  var rows = activePanel.querySelectorAll('.settings-row');
+  rows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+  // Show/hide group titles based on visible children
+  var groups = activePanel.querySelectorAll('.settings-group');
+  groups.forEach(function(group) {
+    var visibleRows = group.querySelectorAll('.settings-row:not(.search-hidden):not(.hidden)');
+    var title = group.querySelector('.settings-group-title');
+    if (visibleRows.length === 0 && query !== '') {
+      group.style.display = 'none';
+    } else {
+      group.style.display = '';
+    }
+  });
 });
