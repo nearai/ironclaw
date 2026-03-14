@@ -101,20 +101,6 @@ impl SkillApproveTool {
     }
 }
 
-/// Validate that a skill name is safe for use as a filesystem directory name.
-/// Prevents path traversal attacks.
-fn is_safe_skill_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-        && name != "."
-        && name != ".."
-        && !name.starts_with('-')
-        && !name.starts_with('.')
-}
-
 #[async_trait]
 impl Tool for SkillApproveTool {
     fn name(&self) -> &str {
@@ -210,23 +196,11 @@ impl Tool for SkillApproveTool {
                 )));
             }
 
-            // Validate skill_name to prevent path traversal
-            if !is_safe_skill_name(&skill.skill_name) {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Skill name '{}' contains unsafe characters",
-                    skill.skill_name
-                )));
-            }
-
             let auto_dir = crate::bootstrap::ironclaw_base_dir().join("installed_skills/auto");
-            let skill_dir = auto_dir.join(&skill.skill_name);
-
-            // Verify the resolved path is still under auto_dir (defense in depth)
-            if !skill_dir.starts_with(&auto_dir) {
-                return Err(ToolError::ExecutionFailed(
-                    "Skill path escapes auto-skills directory".to_string(),
-                ));
-            }
+            // Use UUID for directory name — guarantees uniqueness (no hash-prefix collisions)
+            // and is inherently safe for filesystem paths (no traversal possible).
+            // The skill's activation name is read from SKILL.md frontmatter, not the directory.
+            let skill_dir = auto_dir.join(skill_id.to_string());
 
             // Write to disk first, update status only on success
             tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
