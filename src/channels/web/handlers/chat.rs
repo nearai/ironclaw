@@ -37,11 +37,17 @@ pub async fn chat_send_handler(
     let msg_id = msg.id;
     let thread_id = msg.thread_id.clone();
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tx.send(msg).await.map_err(|_| {
         (
@@ -111,11 +117,17 @@ pub async fn chat_approval_handler(
 
     let msg_id = msg.id;
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tx.send(msg).await.map_err(|_| {
         (

@@ -2,7 +2,7 @@
   "name": "web-search",
   "display_name": "Web Search",
   "kind": "tool",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wit_version": "0.3.0",
   "description": "Search the web using Brave Search API",
   "keywords": [
@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/latest/download/web-search-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "url": "https://github.com/nearai/ironclaw/releases/download/v0.18.0/web-search-0.2.0-wasm32-wasip2.tar.gz",
+      "sha256": "56834573c54ea2a33cea1eb0f04bbdf59f1ef8d8702995cf431b0921302eeccc"
     }
   },
   "auth_summary": {

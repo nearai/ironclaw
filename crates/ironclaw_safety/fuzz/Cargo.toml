@@ -1,0 +1,40 @@
+[package]
+name = "ironclaw-safety-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.ironclaw_safety]
+path = ".."
+
+[[bin]]
+name = "fuzz_safety_sanitizer"
+path = "fuzz_targets/fuzz_safety_sanitizer.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_safety_validator"
+path = "fuzz_targets/fuzz_safety_validator.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_leak_detector"
+path = "fuzz_targets/fuzz_leak_detector.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_config_env"
+path = "fuzz_targets/fuzz_config_env.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_credential_detect"
+path = "fuzz_targets/fuzz_credential_detect.rs"
+doc = false

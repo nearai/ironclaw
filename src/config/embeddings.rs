@@ -23,6 +23,9 @@ pub struct EmbeddingsConfig {
     pub ollama_base_url: String,
     /// Embedding vector dimension. Inferred from the model name when not set explicitly.
     pub dimension: usize,
+    /// Custom base URL for OpenAI-compatible embedding providers.
+    /// When set, overrides the default `https://api.openai.com`.
+    pub openai_base_url: Option<String>,
 }
 
 impl Default for EmbeddingsConfig {
@@ -36,6 +39,7 @@ impl Default for EmbeddingsConfig {
             model,
             ollama_base_url: "http://localhost:11434".to_string(),
             dimension,
+            openai_base_url: None,
         }
     }
 }
@@ -74,6 +78,8 @@ impl EmbeddingsConfig {
 
         let enabled = parse_bool_env("EMBEDDING_ENABLED", settings.embeddings.enabled)?;
 
+        let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
+
         Ok(Self {
             enabled,
             provider,
@@ -81,6 +87,7 @@ impl EmbeddingsConfig {
             model,
             ollama_base_url,
             dimension,
+            openai_base_url,
         })
     }
 
@@ -130,16 +137,27 @@ impl EmbeddingsConfig {
             }
             _ => {
                 if let Some(api_key) = self.openai_api_key() {
-                    tracing::debug!(
-                        "Embeddings enabled via OpenAI (model: {}, dim: {})",
-                        self.model,
-                        self.dimension,
-                    );
-                    Some(Arc::new(crate::workspace::OpenAiEmbeddings::with_model(
+                    let mut provider = crate::workspace::OpenAiEmbeddings::with_model(
                         api_key,
                         &self.model,
                         self.dimension,
-                    )))
+                    );
+                    if let Some(ref base_url) = self.openai_base_url {
+                        tracing::debug!(
+                            "Embeddings enabled via OpenAI (model: {}, base_url: {}, dim: {})",
+                            self.model,
+                            base_url,
+                            self.dimension,
+                        );
+                        provider = provider.with_base_url(base_url);
+                    } else {
+                        tracing::debug!(
+                            "Embeddings enabled via OpenAI (model: {}, dim: {})",
+                            self.model,
+                            self.dimension,
+                        );
+                    }
+                    Some(Arc::new(provider))
                 } else {
                     tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
                     None
@@ -164,6 +182,7 @@ mod tests {
             std::env::remove_var("EMBEDDING_PROVIDER");
             std::env::remove_var("EMBEDDING_MODEL");
             std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("EMBEDDING_BASE_URL");
         }
     }
 
@@ -246,5 +265,42 @@ mod tests {
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
         }
+    }
+
+    #[test]
+    fn embedding_base_url_parsed_from_env() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_embedding_env();
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_BASE_URL", "https://custom.example.com");
+        }
+
+        let settings = Settings::default();
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            config.openai_base_url.as_deref(),
+            Some("https://custom.example.com"),
+            "EMBEDDING_BASE_URL env var should be parsed into openai_base_url"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn embedding_base_url_defaults_to_none() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_embedding_env();
+
+        let settings = Settings::default();
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(
+            config.openai_base_url.is_none(),
+            "openai_base_url should be None when EMBEDDING_BASE_URL is not set"
+        );
     }
 }

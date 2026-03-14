@@ -10,6 +10,7 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::error::RoutineError;
@@ -182,16 +183,40 @@ pub async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    let was_enabled = routine.enabled;
     // If a specific value was provided, use it; otherwise toggle.
     routine.enabled = match body {
         Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
         None => !routine.enabled,
     };
 
+    // When re-enabling a cron routine, recompute next_fire_at so the cron
+    // ticker can pick it up. Mirrors the CLI behavior (issue #1077).
+    if routine.enabled
+        && !was_enabled
+        && let Trigger::Cron {
+            ref schedule,
+            ref timezone,
+        } = routine.trigger
+    {
+        routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to compute next fire: {e}"),
+            )
+        })?;
+    }
+
     store
         .update_routine(&routine)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Refresh the in-memory event trigger cache so event/system_event
+    // routines reflect the new enabled state immediately (issue #1076).
+    if let Some(engine) = state.routine_engine.read().await.as_ref() {
+        engine.refresh_event_cache().await;
+    }
 
     Ok(Json(serde_json::json!({
         "status": if routine.enabled { "enabled" } else { "disabled" },
@@ -217,6 +242,12 @@ pub async fn routines_delete_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if deleted {
+        // Refresh the in-memory event trigger cache so deleted event/system_event
+        // routines stop firing immediately (issue #1076).
+        if let Some(engine) = state.routine_engine.read().await.as_ref() {
+            engine.refresh_event_cache().await;
+        }
+
         Ok(Json(serde_json::json!({
             "status": "deleted",
             "routine_id": routine_id,
