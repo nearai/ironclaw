@@ -252,6 +252,7 @@ mod tests {
         let safety = SafetyLayer::new(&config);
 
         let wrapped = safety.wrap_for_llm("bad&\"<>name", "ok", false);
+        // safety: test assertion in #[cfg(test)] module
         assert!(wrapped.contains("name=\"bad&amp;&quot;&lt;&gt;name\""));
     }
 
