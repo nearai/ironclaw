@@ -1011,20 +1011,19 @@ fn snapshot_messages_for_tool_iteration(messages: &[ChatMessage]) -> Vec<ChatMes
     }
 
     let mut snapshot = Vec::with_capacity(MAX_TOOL_LOOP_MESSAGES);
-    let mut start = messages.len().saturating_sub(MAX_TOOL_LOOP_MESSAGES);
 
-    if messages
-        .first()
-        .map(|m| matches!(m.role, crate::llm::Role::System))
-        .unwrap_or(false)
+    if let Some(first) = messages.first()
+        && first.role == crate::llm::Role::System
     {
-        snapshot.push(messages[0].clone());
-        start = start.max(1);
+        snapshot.push(first.clone());
+        let tail_len = MAX_TOOL_LOOP_MESSAGES - 1;
+        let tail_start = (messages.len() - tail_len).max(1);
+        snapshot.extend_from_slice(&messages[tail_start..]);
+    } else {
+        let tail_start = messages.len() - MAX_TOOL_LOOP_MESSAGES;
+        snapshot.extend_from_slice(&messages[tail_start..]);
     }
 
-    let remaining = MAX_TOOL_LOOP_MESSAGES.saturating_sub(snapshot.len());
-    let tail_start = messages.len().saturating_sub(remaining).max(start);
-    snapshot.extend_from_slice(&messages[tail_start..]);
     snapshot
 }
 
