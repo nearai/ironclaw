@@ -3535,10 +3535,13 @@ function renderRoutinesList(routines) {
 
     const toggleLabel = r.enabled ? 'Disable' : 'Enable';
     const toggleClass = r.enabled ? 'btn-cancel' : 'btn-restart';
+    const triggerTitle = (r.trigger_type === 'cron' && r.trigger_raw)
+      ? ' title="' + escapeHtml(r.trigger_raw) + '"'
+      : '';
 
     return '<tr class="routine-row" data-action="open-routine" data-id="' + escapeHtml(r.id) + '">'
       + '<td>' + escapeHtml(r.name) + '</td>'
-      + '<td>' + escapeHtml(r.trigger_summary) + '</td>'
+      + '<td' + triggerTitle + '>' + escapeHtml(r.trigger_summary) + '</td>'
       + '<td>' + escapeHtml(r.action_type) + '</td>'
       + '<td>' + formatRelativeTime(r.last_run_at) + '</td>'
       + '<td>' + formatRelativeTime(r.next_fire_at) + '</td>'
@@ -3606,8 +3609,23 @@ function renderRoutineDetail(routine) {
   }
 
   // Trigger config
-  html += '<div class="job-description"><h3>Trigger</h3>'
-    + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
+  if (routine.trigger_type === 'cron') {
+    const summary = routine.trigger_summary || 'cron';
+    const raw = routine.trigger_raw || '';
+    const timezone = routine.trigger && routine.trigger.timezone ? String(routine.trigger.timezone) : '';
+    html += '<div class="job-description"><h3>Trigger</h3>'
+      + '<div class="job-description-body"><strong>' + escapeHtml(summary) + '</strong></div>';
+    if (raw) {
+      html += '<div class="job-meta-item">'
+        + '<span class="job-meta-label">Raw</span>'
+        + '<span class="job-meta-value">' + escapeHtml(raw + (timezone ? ' (' + timezone + ')' : '')) + '</span>'
+        + '</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="job-description"><h3>Trigger</h3>'
+      + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
+  }
 
   // Action config
   html += '<div class="job-description"><h3>Action</h3>'
