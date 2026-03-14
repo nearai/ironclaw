@@ -1067,6 +1067,8 @@ mod tests {
                 prompt: "Check status".to_string(),
                 context_paths: vec![],
                 max_tokens: 500,
+                use_tools: false,
+                max_tool_rounds: 3,
             },
             guardrails: RoutineGuardrails {
                 cooldown: std::time::Duration::from_secs(60),
@@ -1198,6 +1200,8 @@ mod tests {
                 prompt: "test".to_string(),
                 context_paths: vec![],
                 max_tokens: 100,
+                use_tools: false,
+                max_tool_rounds: 3,
             },
             guardrails: RoutineGuardrails {
                 cooldown: std::time::Duration::from_secs(0),

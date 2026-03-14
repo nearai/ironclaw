@@ -1,6 +1,41 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
+  "description": "Search the web using Brave Search. Returns titles, URLs, descriptions, and publication dates for matching web pages. Supports filtering by country, language, and freshness. Authentication is handled via the 'brave_api_key' secret injected by the host.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The search query to look up on the web"
+      },
+      "count": {
+        "type": "integer",
+        "description": "Number of results to return (1-20, default 5)",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 5
+      },
+      "country": {
+        "type": "string",
+        "description": "2-letter uppercase country code to bias results (e.g. 'US', 'DE', 'JP')"
+      },
+      "search_lang": {
+        "type": "string",
+        "description": "2-letter lowercase language code for search results (e.g. 'en', 'de', 'fr')"
+      },
+      "ui_lang": {
+        "type": "string",
+        "description": "Locale in language-region format (e.g. 'en-US', 'de-DE')"
+      },
+      "freshness": {
+        "type": "string",
+        "description": "Filter by discovery time: 'pd' (past day), 'pw' (past week), 'pm' (past month), 'py' (past year), or date range 'YYYY-MM-DDtoYYYY-MM-DD'"
+      }
+    },
+    "required": ["query"],
+    "additionalProperties": false
+  },
   "capabilities": {
     "http": {
       "allowlist": [
