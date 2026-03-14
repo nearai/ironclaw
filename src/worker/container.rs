@@ -462,15 +462,14 @@ impl LoopDelegate for ContainerDelegate {
                 ..Default::default()
             };
 
-            let result =
-                execute_tool_simple(
-                    &self.tools,
-                    &self.safety,
-                    &tc.name,
-                    tc.arguments.clone(),
-                    &job_ctx,
-                )
-                .await;
+            let result = execute_tool_simple(
+                &self.tools,
+                &self.safety,
+                &tc.name,
+                tc.arguments.clone(),
+                &job_ctx,
+            )
+            .await;
 
             self.post_event(
                 "tool_result",
