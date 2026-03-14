@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
 COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/

@@ -9,6 +9,10 @@ mod support;
 mod advanced {
     use std::time::Duration;
 
+    use ironclaw::agent::routine::Trigger;
+    use ironclaw::channels::IncomingMessage;
+    use ironclaw::db::Database;
+
     use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -18,6 +22,28 @@ mod advanced {
         "/tests/fixtures/llm_traces/advanced"
     );
     const TIMEOUT: Duration = Duration::from_secs(30);
+
+    async fn wait_for_routine_run(
+        db: &std::sync::Arc<dyn Database>,
+        routine_id: uuid::Uuid,
+        timeout: Duration,
+    ) -> Vec<ironclaw::agent::routine::RoutineRun> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let runs = db
+                .list_routine_runs(routine_id, 10)
+                .await
+                .expect("list_routine_runs");
+            if !runs.is_empty() {
+                return runs;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for routine run"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 
     // -----------------------------------------------------------------------
     // 1. Multi-turn memory coherence
@@ -251,6 +277,8 @@ mod advanced {
         assert!(!responses.is_empty(), "no response -- agent may have hung");
 
         let started = rig.tool_calls_started();
+        // Bound is 8 (not 4) because auto-approve lets the agent chain
+        // multiple tool calls per iteration without blocking on approval.
         assert!(
             started.len() <= 8,
             "expected <= 8 tool calls with max_tool_iterations=3, got {}: {started:?}",
@@ -379,6 +407,118 @@ mod advanced {
     }
 
     // -----------------------------------------------------------------------
+    // 6b. Event routine: Telegram-scoped trigger fires on matching message
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_event_trigger_telegram_channel_fires() {
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/routine_event_telegram.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_routines()
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message(
+            "Create a routine that watches Telegram messages starting with 'bug:' and alerts me.",
+        )
+        .await;
+        let create_responses = rig.wait_for_responses(1, TIMEOUT).await;
+        rig.verify_trace_expects(&trace, &create_responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "telegram-bug-watcher")
+            .await
+            .expect("get_routine_by_name")
+            .expect("telegram-bug-watcher should exist");
+
+        match &routine.trigger {
+            Trigger::Event { channel, pattern } => {
+                assert_eq!(channel.as_deref(), Some("telegram"));
+                assert_eq!(pattern, "^bug\\b");
+            }
+            other => panic!("expected event trigger, got {other:?}"),
+        }
+
+        rig.send_incoming(IncomingMessage::new(
+            "telegram",
+            "test-user",
+            "bug: home button broken",
+        ))
+        .await;
+
+        let runs = wait_for_routine_run(rig.database(), routine.id, TIMEOUT).await;
+        assert_eq!(runs[0].trigger_type, "event");
+
+        let responses = rig.wait_for_responses(3, TIMEOUT).await;
+        assert!(
+            responses.iter().any(|response| {
+                response
+                    .metadata
+                    .get("source")
+                    .and_then(|value| value.as_str())
+                    == Some("routine")
+                    && response.content.contains("telegram-bug-watcher")
+                    && response.content.contains("Bug report detected")
+            }),
+            "expected routine notification in responses: {responses:?}"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 6c. Event routine without channel filter still fires on Telegram
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_event_trigger_without_channel_filter_still_fires() {
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/routine_event_any_channel.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_routines()
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message(
+            "Create a routine that watches messages starting with 'bug:' and alerts me.",
+        )
+        .await;
+        let _ = rig.wait_for_responses(1, TIMEOUT).await;
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "any-channel-bug-watcher")
+            .await
+            .expect("get_routine_by_name")
+            .expect("any-channel-bug-watcher should exist");
+
+        match &routine.trigger {
+            Trigger::Event { channel, pattern } => {
+                assert_eq!(channel, &None);
+                assert_eq!(pattern, "^bug\\b");
+            }
+            other => panic!("expected event trigger, got {other:?}"),
+        }
+
+        rig.send_incoming(IncomingMessage::new(
+            "telegram",
+            "test-user",
+            "bug: login button broken",
+        ))
+        .await;
+
+        let runs = wait_for_routine_run(rig.database(), routine.id, TIMEOUT).await;
+        assert_eq!(runs[0].trigger_type, "event");
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
     // 7. Prompt injection resilience
     // -----------------------------------------------------------------------
 
@@ -399,6 +539,138 @@ mod advanced {
         let responses = rig.wait_for_responses(1, TIMEOUT).await;
 
         rig.verify_trace_expects(&trace, &responses);
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. MCP extension lifecycle (search → install → activate → use)
+    //
+    // Exercises the MCP extension flow with a mock MCP server:
+    //   Turn 1: tool_search → tool_install → text
+    //   (inject token + activate between turns)
+    //   Turn 2: mock-notion_notion-search → mock-notion_notion-fetch → text
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mcp_extension_lifecycle() {
+        use crate::support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
+        use ironclaw::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
+
+        // 1. Start mock MCP server with pre-configured tool responses.
+        let mock_server = start_mock_mcp_server(vec![
+            MockToolResponse {
+                name: "notion-search".into(),
+                content: serde_json::json!({
+                    "results": [
+                        {"id": "page-001", "title": "Project Alpha", "type": "page"},
+                        {"id": "page-002", "title": "Sprint Planning", "type": "page"}
+                    ]
+                }),
+            },
+            MockToolResponse {
+                name: "notion-fetch".into(),
+                content: serde_json::json!({
+                    "id": "page-001",
+                    "title": "Project Alpha",
+                    "content": "Status: In Progress\n- Sprint planning on March 15\n- API redesign review pending"
+                }),
+            },
+        ])
+        .await;
+
+        // 2. Load trace fixture.
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/mcp_extension_lifecycle.json")).unwrap();
+
+        // 3. Build rig with auto-approve (so tool_install doesn't block).
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .with_max_tool_iterations(15)
+            .build()
+            .await;
+
+        // 4. Inject mock-notion registry entry pointing to the mock server.
+        let ext_mgr = rig
+            .extension_manager()
+            .expect("test rig must expose extension manager");
+        ext_mgr
+            .inject_registry_entry(RegistryEntry {
+                name: "mock-notion".to_string(),
+                display_name: "Mock Notion".to_string(),
+                kind: ExtensionKind::McpServer,
+                description: "Test MCP server for E2E lifecycle test".to_string(),
+                keywords: vec!["mock-notion".into(), "notion".into()],
+                source: ExtensionSource::McpUrl {
+                    url: mock_server.mcp_url(),
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::Dcr,
+                version: None,
+            })
+            .await;
+
+        // 5. Turn 1: "setup mock-notion" → search → install → text.
+        rig.send_message("setup mock-notion").await;
+        let r1 = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(!r1.is_empty(), "Turn 1: no response");
+
+        // 6. Simulate OAuth completion: inject token + activate.
+        // This mirrors what the gateway's oauth_callback_handler does after
+        // the user completes the OAuth flow in their browser.
+        let secret_name = "mcp_mock-notion_access_token";
+        ext_mgr
+            .secrets()
+            .create(
+                "default",
+                ironclaw::secrets::CreateSecretParams::new(secret_name, "mock-access-token")
+                    .with_provider("mcp:mock-notion".to_string()),
+            )
+            .await
+            .expect("failed to inject test token");
+
+        let activate_result = ext_mgr.activate("mock-notion").await;
+        assert!(
+            activate_result.is_ok(),
+            "activation failed: {:?}",
+            activate_result.err()
+        );
+
+        // 7. Turn 2: "check what's in my notion" → notion-search → notion-fetch → text.
+        // Wait for r1.len() + 1 to ensure we observe at least one new turn-2 response.
+        let turn1_count = r1.len();
+        rig.send_message("it's done, check what's in my notion")
+            .await;
+        let r2 = rig.wait_for_responses(turn1_count + 1, TIMEOUT).await;
+        assert!(
+            r2.len() > turn1_count,
+            "Turn 2: expected new responses beyond turn 1's {turn1_count}, got {}",
+            r2.len()
+        );
+
+        // 8. Verify tool calls across both turns.
+        let started = rig.tool_calls_started();
+        assert!(
+            started.iter().any(|s| s == "tool_search"),
+            "tool_search not called: {started:?}"
+        );
+        assert!(
+            started.iter().any(|s| s == "tool_install"),
+            "tool_install not called: {started:?}"
+        );
+
+        // Verify MCP tools were called in turn 2.
+        assert!(
+            started.iter().any(|s| s.starts_with("mock-notion_")),
+            "No mock-notion MCP tools called: {started:?}"
+        );
+
+        // Verify all tools that completed did so successfully.
+        let completed = rig.tool_calls_completed();
+        let failed: Vec<_> = completed.iter().filter(|(_, success)| !success).collect();
+        assert!(failed.is_empty(), "Tools failed: {failed:?}");
+
+        mock_server.shutdown().await;
         rig.shutdown();
     }
 }

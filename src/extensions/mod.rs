@@ -517,6 +517,9 @@ pub enum ExtensionError {
     #[error("Authentication failed: {0}")]
     AuthFailed(String),
 
+    #[error("Server does not support OAuth: {0}")]
+    AuthNotSupported(String),
+
     #[error("Activation failed: {0}")]
     ActivationFailed(String),
 

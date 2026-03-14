@@ -63,7 +63,11 @@ const ALLOWED_MIME_PREFIXES: &[&str] = &[
     "application/x-tar",
     "application/octet-stream",
 ];
-
+/// Truncate a string to at most `max_bytes` without splitting UTF-8 code points.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    let end = crate::util::floor_char_boundary(s, max_bytes);
+    &s[..end]
+}
 /// A message emitted by a WASM channel to be sent to the agent.
 #[derive(Debug, Clone)]
 pub struct EmittedMessage {
@@ -264,7 +268,7 @@ impl ChannelHostState {
                 max = MAX_MESSAGE_CONTENT_SIZE,
                 "Message content too large, truncating"
             );
-            let mut truncated = msg.content[..MAX_MESSAGE_CONTENT_SIZE].to_string();
+            let mut truncated = truncate_utf8(&msg.content, MAX_MESSAGE_CONTENT_SIZE).to_string();
             truncated.push_str("... (truncated)");
             let msg = EmittedMessage {
                 content: truncated,
@@ -570,6 +574,30 @@ impl ChannelWorkspaceStore {
         data.insert(path.to_string(), serialized);
         Ok(())
     }
+
+    /// Atomically move a queued JSON array of text frames from `source_path` to `dest_path`.
+    pub fn move_json_text_queue(&self, source_path: &str, dest_path: &str) -> Result<bool, String> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| "workspace store lock poisoned".to_string())?;
+
+        let Some(raw_queue) = data.remove(source_path) else {
+            data.remove(dest_path);
+            return Ok(false);
+        };
+
+        let queue: Vec<String> = serde_json::from_str(&raw_queue)
+            .map_err(|error| format!("failed to deserialize websocket queue: {error}"))?;
+
+        if queue.is_empty() {
+            data.remove(dest_path);
+            return Ok(false);
+        }
+
+        data.insert(dest_path.to_string(), raw_queue);
+        Ok(true)
+    }
 }
 
 impl crate::tools::wasm::WorkspaceReader for ChannelWorkspaceStore {
@@ -666,6 +694,7 @@ mod tests {
     use crate::channels::wasm::host::{
         Attachment, ChannelEmitRateLimiter, ChannelHostState, EmittedMessage,
         MAX_ATTACHMENTS_PER_MESSAGE, MAX_ATTACHMENT_TOTAL_SIZE, MAX_EMITS_PER_EXECUTION,
+        MAX_MESSAGE_CONTENT_SIZE,
     };
 
     #[test]
@@ -722,6 +751,25 @@ mod tests {
 
         assert_eq!(state.emitted_count(), MAX_EMITS_PER_EXECUTION);
         assert_eq!(state.emits_dropped(), 1);
+    }
+
+    #[test]
+    fn test_emit_message_truncates_utf8_safely() {
+        let caps = ChannelCapabilities::for_channel("test");
+        let mut state = ChannelHostState::new("test", caps);
+
+        let prefix = "a".repeat(MAX_MESSAGE_CONTENT_SIZE - 1);
+        let content = format!("{}🙂suffix", prefix);
+        let msg = EmittedMessage::new("user123", content);
+
+        state.emit_message(msg).unwrap();
+        let messages = state.take_emitted_messages();
+        assert_eq!(messages.len(), 1);
+
+        let emitted = &messages[0].content;
+        assert!(emitted.starts_with(&prefix));
+        assert!(emitted.ends_with("... (truncated)"));
+        assert!(!emitted.contains("🙂"));
     }
 
     #[test]
@@ -843,6 +891,35 @@ mod tests {
 
         let queue: Vec<String> = serde_json::from_str(&store.read(path).unwrap()).unwrap();
         assert_eq!(queue, vec!["frame-2".to_string(), "frame-3".to_string()]);
+    }
+
+    #[test]
+    fn test_channel_workspace_store_move_json_text_queue_is_atomic() {
+        use crate::channels::wasm::host::ChannelWorkspaceStore;
+        use crate::tools::wasm::WorkspaceReader;
+
+        let store = ChannelWorkspaceStore::new();
+        let live_path = "channels/discord/state/gateway_event_queue";
+        let drain_path = "channels/discord/state/gateway_event_queue_processing";
+
+        store
+            .append_json_text_queue(live_path, "frame-1", 4)
+            .unwrap();
+        store
+            .append_json_text_queue(live_path, "frame-2", 4)
+            .unwrap();
+
+        assert!(store.move_json_text_queue(live_path, drain_path).unwrap());
+        assert_eq!(store.read(live_path), None);
+
+        let drained: Vec<String> = serde_json::from_str(&store.read(drain_path).unwrap()).unwrap();
+        assert_eq!(drained, vec!["frame-1".to_string(), "frame-2".to_string()]);
+
+        store
+            .append_json_text_queue(live_path, "frame-3", 4)
+            .unwrap();
+        let live: Vec<String> = serde_json::from_str(&store.read(live_path).unwrap()).unwrap();
+        assert_eq!(live, vec!["frame-3".to_string()]);
     }
 
     // === QA Plan P2 - 2.3: WASM channel lifecycle tests ===

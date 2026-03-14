@@ -24,6 +24,8 @@ wit_bindgen::generate!({
 });
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
@@ -164,6 +166,7 @@ const DISCORD_MESSAGE_CHAR_LIMIT: usize = 2000;
 const DISCORD_MULTIPART_BOUNDARY: &str = "ironclaw-discord-response-boundary";
 const DISCORD_ATTACHMENT_FILENAME: &str = "response.md";
 const DISCORD_ATTACHMENT_NOTICE: &str = "Response too long for Discord; attached as response.md.";
+static MULTIPART_BOUNDARY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, PartialEq, Eq)]
 struct DiscordHttpRequest {
@@ -212,6 +215,7 @@ fn build_discord_attachment_request(
     content: &str,
     embeds: Option<&serde_json::Value>,
 ) -> Result<DiscordHttpRequest, String> {
+    let boundary = next_multipart_boundary();
     let mut payload = serde_json::json!({
         "content": DISCORD_ATTACHMENT_NOTICE,
     });
@@ -227,31 +231,40 @@ fn build_discord_attachment_request(
     body.extend_from_slice(
         format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n{payload_json}\r\n",
-            boundary = DISCORD_MULTIPART_BOUNDARY,
+            boundary = boundary,
         )
         .as_bytes(),
     );
     body.extend_from_slice(
         format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"{filename}\"\r\nContent-Type: text/markdown\r\n\r\n",
-            boundary = DISCORD_MULTIPART_BOUNDARY,
+            boundary = boundary,
             filename = DISCORD_ATTACHMENT_FILENAME,
         )
         .as_bytes(),
     );
     body.extend_from_slice(content.as_bytes());
-    body.extend_from_slice(format!("\r\n--{}--\r\n", DISCORD_MULTIPART_BOUNDARY).as_bytes());
+    body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
 
     Ok(DiscordHttpRequest {
         headers_json: serde_json::json!({
             "Content-Type": format!(
                 "multipart/form-data; boundary={}",
-                DISCORD_MULTIPART_BOUNDARY
+                boundary
             )
         })
         .to_string(),
         body,
     })
+}
+
+fn next_multipart_boundary() -> String {
+    let counter = MULTIPART_BOUNDARY_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{:x}-{:x}", DISCORD_MULTIPART_BOUNDARY, nanos, counter)
 }
 
 fn build_discord_reply_plan(response: &AgentResponse) -> Result<DiscordReplyPlan, String> {
@@ -301,8 +314,8 @@ const OWNER_ID_PATH: &str = "state/owner_id";
 const DM_POLICY_PATH: &str = "state/dm_policy";
 /// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
 const ALLOW_FROM_PATH: &str = "state/allow_from";
-/// Workspace path for queued gateway text frames persisted by the host runtime.
-const GATEWAY_EVENT_QUEUE_PATH: &str = "state/gateway_event_queue";
+/// Workspace path for the current gateway text-frame batch prepared by the host runtime.
+const GATEWAY_EVENT_QUEUE_PATH: &str = "state/gateway_event_queue_processing";
 /// Workspace path for persisting the bot user id learned from READY dispatches.
 const BOT_USER_ID_PATH: &str = "state/bot_user_id";
 /// Channel name for pairing store (used by pairing host APIs).
@@ -602,7 +615,11 @@ impl Guest for DiscordChannel {
                 Some(&message.user_name),
                 message.is_dm,
                 PermissionSource::Gateway,
-                None,
+                Some(&PairingReplyCtx {
+                    channel_id: message.channel_id.clone(),
+                    application_id: String::new(),
+                    token: String::new(),
+                }),
             ) {
                 continue;
             }
@@ -743,6 +760,7 @@ fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
         is_dm,
         PermissionSource::Webhook,
         Some(&PairingReplyCtx {
+            channel_id: interaction.channel_id.clone().unwrap_or_default(),
             application_id: interaction.application_id.clone(),
             token: interaction.token.clone(),
         }),
@@ -880,6 +898,7 @@ fn handle_message_component(interaction: &DiscordInteraction, message: &DiscordM
 
 /// Context needed to send a pairing reply via Discord webhook followup.
 struct PairingReplyCtx {
+    channel_id: String,
     application_id: String,
     token: String,
 }
@@ -891,7 +910,10 @@ enum PermissionSource {
 }
 
 fn should_apply_dm_pairing(source: PermissionSource, is_dm: bool) -> bool {
-    matches!(source, PermissionSource::Webhook) && is_dm
+    matches!(
+        source,
+        PermissionSource::Webhook | PermissionSource::Gateway
+    ) && is_dm
 }
 
 /// Check if a sender is permitted to interact with the bot.
@@ -980,29 +1002,48 @@ fn check_sender_permission(
     false
 }
 
-/// Send a pairing code as an ephemeral Discord followup message.
+fn pairing_reply_route(ctx: &PairingReplyCtx) -> DiscordResponseRoute {
+    if !ctx.application_id.is_empty() && !ctx.token.is_empty() {
+        DiscordResponseRoute::InteractionWebhook(format!(
+            "https://discord.com/api/v10/webhooks/{}/{}",
+            ctx.application_id, ctx.token
+        ))
+    } else {
+        DiscordResponseRoute::ChannelMessage(format!(
+            "https://discord.com/api/v10/channels/{}/messages",
+            ctx.channel_id
+        ))
+    }
+}
+
+/// Send a pairing code reply via webhook followup or channel message.
 fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
-    let url = format!(
-        "https://discord.com/api/v10/webhooks/{}/{}",
-        ctx.application_id, ctx.token
-    );
+    let route = pairing_reply_route(ctx);
 
     let payload = serde_json::json!({
         "content": format!(
             "To pair with this bot, run: `ironclaw pairing approve discord {}`",
             code
-        ),
-        "flags": 64 // Ephemeral — only visible to the sender
+        )
     });
+
+    let mut payload = payload;
+    if matches!(route, DiscordResponseRoute::InteractionWebhook(_)) {
+        payload["flags"] = serde_json::json!(64);
+    }
 
     let payload_bytes =
         serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
 
     let headers = serde_json::json!({"Content-Type": "application/json"});
+    let url = match &route {
+        DiscordResponseRoute::InteractionWebhook(url) => url,
+        DiscordResponseRoute::ChannelMessage(url) => url,
+    };
 
     let result = channel_host::http_request(
         "POST",
-        &url,
+        url,
         &headers.to_string(),
         Some(&payload_bytes),
         None,
@@ -1163,6 +1204,56 @@ mod tests {
     }
 
     #[test]
+    fn test_reply_plan_uses_dynamic_multipart_boundary() {
+        let content = "# Heading\n\nA long markdown reply".repeat(80);
+
+        let first = build_discord_reply_plan(&test_response(test_metadata_json(), content.clone()))
+            .unwrap();
+        let second =
+            build_discord_reply_plan(&test_response(test_metadata_json(), content)).unwrap();
+
+        let DiscordReplyPlan::Attachment {
+            upload: first_upload,
+            ..
+        } = first
+        else {
+            panic!("expected attachment plan");
+        };
+        let DiscordReplyPlan::Attachment {
+            upload: second_upload,
+            ..
+        } = second
+        else {
+            panic!("expected attachment plan");
+        };
+
+        let first_headers: serde_json::Value =
+            serde_json::from_str(&first_upload.headers_json).unwrap();
+        let second_headers: serde_json::Value =
+            serde_json::from_str(&second_upload.headers_json).unwrap();
+
+        let first_boundary = first_headers["Content-Type"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("multipart/form-data; boundary=")
+            .unwrap();
+        let second_boundary = second_headers["Content-Type"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("multipart/form-data; boundary=")
+            .unwrap();
+
+        assert!(first_boundary.starts_with(DISCORD_MULTIPART_BOUNDARY));
+        assert!(second_boundary.starts_with(DISCORD_MULTIPART_BOUNDARY));
+        assert_ne!(first_boundary, second_boundary);
+
+        let first_body = String::from_utf8(first_upload.body).unwrap();
+        let second_body = String::from_utf8(second_upload.body).unwrap();
+        assert!(first_body.contains(&format!("--{first_boundary}\r\n")));
+        assert!(second_body.contains(&format!("--{second_boundary}\r\n")));
+    }
+
+    #[test]
     fn test_reply_plan_includes_truncated_text_fallback_for_attachment_failures() {
         let content = "a".repeat(2400);
         let plan = build_discord_reply_plan(&test_response(test_metadata_json(), content.clone()))
@@ -1318,7 +1409,7 @@ mod tests {
 
         assert_eq!(
             caps["capabilities"]["channel"]["allow_polling"],
-            serde_json::Value::Bool(false)
+            serde_json::Value::Bool(true)
         );
         assert!(allowlist.iter().any(|entry| {
             entry["host"] == serde_json::Value::String("gateway.discord.gg".to_string())
@@ -1335,6 +1426,10 @@ mod tests {
         assert_eq!(
             caps["capabilities"]["websocket"]["identify_secret_name"],
             serde_json::Value::String("discord_bot_token".to_string())
+        );
+        assert_eq!(
+            caps["capabilities"]["websocket"]["identify"]["intents"],
+            serde_json::Value::Number(4609u64.into())
         );
     }
 
@@ -1456,13 +1551,46 @@ mod tests {
     }
 
     #[test]
-    fn test_gateway_messages_bypass_dm_pairing_policy() {
-        assert!(!should_apply_dm_pairing(PermissionSource::Gateway, true));
-    }
-
-    #[test]
     fn test_non_gateway_dm_pairing_behavior_is_unchanged() {
         assert!(should_apply_dm_pairing(PermissionSource::Webhook, true));
         assert!(!should_apply_dm_pairing(PermissionSource::Webhook, false));
+    }
+
+    #[test]
+    fn test_gateway_dm_pairing_behavior_matches_webhook_dm() {
+        assert!(should_apply_dm_pairing(PermissionSource::Gateway, true));
+        assert!(!should_apply_dm_pairing(PermissionSource::Gateway, false));
+    }
+
+    #[test]
+    fn test_pairing_reply_route_uses_channel_messages_for_gateway_metadata() {
+        let route = pairing_reply_route(&PairingReplyCtx {
+            channel_id: "chan-1".to_string(),
+            application_id: String::new(),
+            token: String::new(),
+        });
+
+        assert_eq!(
+            route,
+            DiscordResponseRoute::ChannelMessage(
+                "https://discord.com/api/v10/channels/chan-1/messages".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_pairing_reply_route_uses_webhook_for_interactions() {
+        let route = pairing_reply_route(&PairingReplyCtx {
+            channel_id: "chan-1".to_string(),
+            application_id: "app-1".to_string(),
+            token: "tok-1".to_string(),
+        });
+
+        assert_eq!(
+            route,
+            DiscordResponseRoute::InteractionWebhook(
+                "https://discord.com/api/v10/webhooks/app-1/tok-1".to_string()
+            )
+        );
     }
 }

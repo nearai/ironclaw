@@ -1,9 +1,9 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wit_version": "0.3.0",
   "type": "channel",
   "name": "discord",
-  "description": "Discord Gateway/Webhook channel for handling slash commands, buttons, and messages",
+  "description": "Discord webhook channel for slash commands, components, and optional mention polling",
   "setup": {
     "required_secrets": [
       {
@@ -42,7 +42,7 @@
       "connect_on_start": true,
       "identify_secret_name": "discord_bot_token",
       "identify": {
-        "intents": 513,
+        "intents": 4609,
         "properties": {
           "os": "linux",
           "browser": "ironclaw",
@@ -55,7 +55,7 @@
     },
     "channel": {
       "allowed_paths": ["/webhook/discord"],
-      "allow_polling": false,
+      "allow_polling": true,
       "callback_timeout_secs": 45,
       "workspace_prefix": "channels/discord/",
       "emit_rate_limit": {
@@ -69,6 +69,10 @@
   },
   "config": {
     "require_signature_verification": true,
+    "webhook_secret": null,
+    "polling_enabled": false,
+    "poll_interval_ms": 30000,
+    "mention_channel_ids": [],
     "owner_id": null,
     "dm_policy": "pairing",
     "allow_from": []

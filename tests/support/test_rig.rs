@@ -6,94 +6,24 @@
 
 #![allow(dead_code)] // Public API consumed by later test modules (Task 4+).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use async_trait::async_trait;
 
 use ironclaw::agent::{Agent, AgentDeps};
 use ironclaw::app::{AppBuilder, AppBuilderFlags};
 use ironclaw::channels::web::log_layer::LogBroadcaster;
-use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use ironclaw::channels::{OutgoingResponse, StatusUpdate};
 use ironclaw::config::Config;
 use ironclaw::db::Database;
-use ironclaw::error::ChannelError;
 use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
 use ironclaw::tools::Tool;
 
 use crate::support::instrumented_llm::InstrumentedLlm;
 use crate::support::metrics::{ToolInvocation, TraceMetrics};
-use crate::support::test_channel::TestChannel;
+use crate::support::test_channel::{TestChannel, TestChannelHandle};
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
 use ironclaw::llm::recording::{HttpExchange, ReplayingHttpInterceptor};
-
-// ---------------------------------------------------------------------------
-// TestChannelHandle -- wraps Arc<TestChannel> as Box<dyn Channel>
-// ---------------------------------------------------------------------------
-
-/// A thin wrapper around `Arc<TestChannel>` that implements `Channel`.
-///
-/// This lets us hand a `Box<dyn Channel>` to `ChannelManager::add()` while
-/// keeping an `Arc<TestChannel>` in the `TestRig` for sending messages and
-/// reading captures.
-struct TestChannelHandle {
-    inner: Arc<TestChannel>,
-}
-
-impl TestChannelHandle {
-    fn new(inner: Arc<TestChannel>) -> Self {
-        Self { inner }
-    }
-}
-
-#[async_trait]
-impl Channel for TestChannelHandle {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    async fn start(&self) -> Result<MessageStream, ChannelError> {
-        self.inner.start().await
-    }
-
-    async fn respond(
-        &self,
-        msg: &IncomingMessage,
-        response: OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        self.inner.respond(msg, response).await
-    }
-
-    async fn send_status(
-        &self,
-        status: StatusUpdate,
-        metadata: &serde_json::Value,
-    ) -> Result<(), ChannelError> {
-        self.inner.send_status(status, metadata).await
-    }
-
-    async fn broadcast(
-        &self,
-        user_id: &str,
-        response: OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        self.inner.broadcast(user_id, response).await
-    }
-
-    async fn health_check(&self) -> Result<(), ChannelError> {
-        self.inner.health_check().await
-    }
-
-    fn conversation_context(&self, metadata: &serde_json::Value) -> HashMap<String, String> {
-        self.inner.conversation_context(metadata)
-    }
-
-    async fn shutdown(&self) -> Result<(), ChannelError> {
-        self.inner.shutdown().await
-    }
-}
 
 // ---------------------------------------------------------------------------
 // TestRig
@@ -120,6 +50,9 @@ pub struct TestRig {
     /// The underlying TraceLlm for inspecting captured requests.
     #[cfg(feature = "libsql")]
     trace_llm: Option<Arc<TraceLlm>>,
+    /// Extension manager for direct extension operations in tests.
+    #[cfg(feature = "libsql")]
+    extension_manager: Option<Arc<ironclaw::extensions::ExtensionManager>>,
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
@@ -144,6 +77,11 @@ impl TestRig {
             .as_ref()
             .map(|t| t.captured_requests())
             .unwrap_or_default()
+    }
+
+    /// Return the extension manager for direct extension operations in tests.
+    pub fn extension_manager(&self) -> Option<&Arc<ironclaw::extensions::ExtensionManager>> {
+        self.extension_manager.as_ref()
     }
 
     /// Wait until at least `n` responses have been captured, or `timeout` elapses.
@@ -670,6 +608,7 @@ impl TestRigBuilder {
         // Save references for test accessors.
         let db_ref = components.db.clone().expect("test rig requires a database");
         let workspace_ref = components.workspace.clone();
+        let ext_mgr_ref = components.extension_manager.clone();
 
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
@@ -765,6 +704,7 @@ impl TestRigBuilder {
             db: db_ref,
             workspace: workspace_ref,
             trace_llm: trace_llm_ref,
+            extension_manager: ext_mgr_ref,
             _temp_dir: temp_dir,
         }
     }
