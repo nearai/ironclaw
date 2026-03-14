@@ -20,9 +20,9 @@ use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
     MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    ToolUpgradeTool, WriteFileTool,
+    SessionSearchTool, ShellTool, SkillApproveTool, SkillInstallTool, SkillListPendingTool,
+    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
@@ -71,6 +71,9 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_search",
     "skill_install",
     "skill_remove",
+    "session_search",
+    "skill_list_pending",
+    "skill_approve",
     "message",
     "web_fetch",
     "restart",
@@ -341,6 +344,23 @@ impl ToolRegistry {
         self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
 
         tracing::debug!("Registered 4 memory tools");
+    }
+
+    /// Register learning system tools (session search, skill approval).
+    ///
+    /// Requires the learning store handles from `DatabaseHandles`.
+    pub fn register_learning_tools(
+        &self,
+        session_search_store: Arc<dyn crate::db::SessionSearchStore>,
+        learning_store: Arc<dyn crate::db::LearningStore>,
+    ) {
+        self.register_sync(Arc::new(SessionSearchTool::new(session_search_store)));
+        self.register_sync(Arc::new(SkillListPendingTool::new(Arc::clone(
+            &learning_store,
+        ))));
+        self.register_sync(Arc::new(SkillApproveTool::new(learning_store)));
+
+        tracing::debug!("Registered 3 learning tools");
     }
 
     /// Register job management tools.
