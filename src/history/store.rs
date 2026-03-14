@@ -1,5 +1,6 @@
 //! PostgreSQL store for persisting agent data.
 
+#[cfg(feature = "postgres")]
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -1298,6 +1299,7 @@ impl Store {
 
     /// Batch-load concurrent run counts for multiple routines in a single query.
     /// Returns a map where missing routine IDs default to 0.
+    #[cfg(feature = "postgres")]
     pub async fn count_running_routine_runs_batch(
         &self,
         routine_ids: &[Uuid],
