@@ -15,7 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 
 use crate::channels::wasm::wrapper::WasmChannel;
 
@@ -52,6 +52,9 @@ pub struct WasmChannelRouter {
     message_id_json_pointers: RwLock<HashMap<String, String>>,
     /// Database for webhook message deduplication (optional - graceful degradation if not set).
     db: RwLock<Option<Arc<dyn crate::db::WebhookDedupStore>>>,
+    /// Pending webhook ACKs - keyed by "channel:message_id", value is signaled when
+    /// ack_message() is called after message persistence.
+    pending_acks: RwLock<HashMap<String, oneshot::Sender<()>>>,
 }
 
 impl WasmChannelRouter {
@@ -67,6 +70,65 @@ impl WasmChannelRouter {
             verification_modes: RwLock::new(HashMap::new()),
             message_id_json_pointers: RwLock::new(HashMap::new()),
             db: RwLock::new(None),
+            pending_acks: RwLock::new(HashMap::new()),
+        }
+    }
+
+    // ========================================================================
+    // Webhook Acknowledgment (reliable message processing)
+    // ========================================================================
+
+    /// Register a pending acknowledgment for a webhook message.
+    ///
+    /// Call this before processing a webhook message. The returned receiver
+    /// will be signaled when the message has been persisted to the database.
+    /// The webhook handler should wait on this receiver before returning 200 OK.
+    ///
+    /// # Arguments
+    /// * `key` - Unique identifier for the message, typically "channel:message_id"
+    ///
+    /// # Returns
+    /// A oneshot receiver that will be signaled when ack_message() is called.
+    pub async fn register_pending_ack(&self, key: String) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_acks.write().await.insert(key.clone(), tx);
+        tracing::debug!(key = %key, "Registered pending webhook ACK");
+        rx
+    }
+
+    /// Signal that a message has been persisted and the webhook can return 200 OK.
+    ///
+    /// Called by the agent loop after persist_user_message() completes.
+    /// Also triggers the on_message_persisted WASM callback for channels that
+    /// implement it (e.g., WhatsApp for mark_as_read).
+    ///
+    /// Note: Deduplication recording happens at webhook handler level (before
+    /// sending to agent) to prevent race conditions with concurrent webhooks.
+    ///
+    /// # Arguments
+    /// * `key` - The same key passed to register_pending_ack() (format: "channel:message_id")
+    /// * `message_metadata` - JSON metadata for channel-specific post-persistence actions
+    pub async fn ack_message(&self, key: &str, message_metadata: &str) {
+        if let Some(tx) = self.pending_acks.write().await.remove(key) {
+            // Signal the webhook handler to return 200 OK
+            let _ = tx.send(());
+            tracing::debug!(key = %key, "Webhook ACK signaled");
+
+            // Parse key to get channel name for callback
+            let channel_name = key.split(':').next().unwrap_or("");
+
+            // Look up the channel and call on_message_persisted
+            if let Some(channel) = self.channels.read().await.get(channel_name)
+                && let Err(e) = channel.call_on_message_persisted(message_metadata).await
+            {
+                tracing::warn!(
+                    channel = %channel_name,
+                    error = %e,
+                    "on_message_persisted callback failed (best-effort)"
+                );
+            }
+        } else {
+            tracing::debug!(key = %key, "No pending ACK found (may have timed out)");
         }
     }
 
@@ -176,12 +238,20 @@ impl WasmChannelRouter {
         self.secret_headers.write().await.remove(channel_name);
         self.signature_keys.write().await.remove(channel_name);
         self.hmac_secrets.write().await.remove(channel_name);
+        self.verification_modes.write().await.remove(channel_name);
+        self.message_id_json_pointers.write().await.remove(channel_name);
 
         // Remove all paths for this channel
         self.path_to_channel
             .write()
             .await
             .retain(|_, name| name != channel_name);
+
+        // Remove pending ACKs for this channel
+        self.pending_acks
+            .write()
+            .await
+            .retain(|key, _| !key.starts_with(&format!("{}:", channel_name)));
 
         tracing::info!(
             channel = %channel_name,
@@ -1691,5 +1761,61 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "POST request without HMAC signature should return 401"
         );
+    }
+
+    // ── Webhook ACK Mechanism Tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_register_and_ack_message() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("test");
+
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
+
+        // Register pending ACK
+        let key = "test:message123".to_string();
+        let rx = router.register_pending_ack(key.clone()).await;
+
+        // ACK the message with metadata
+        let metadata = r#"{"phone_number_id":"123","message_id":"msg456"}"#;
+        router.ack_message(&key, metadata).await;
+
+        // Receiver should be signaled
+        let result = rx.await;
+        assert!(result.is_ok(), "ACK receiver should be signaled");
+    }
+
+    #[tokio::test]
+    async fn test_ack_nonexistent_key_is_safe() {
+        let router = WasmChannelRouter::new();
+
+        // ACK a key that was never registered (should not panic)
+        router.ack_message("nonexistent:key", "{}").await;
+    }
+
+    #[tokio::test]
+    async fn test_unregister_clears_pending_acks() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("test");
+
+        router
+            .register(channel, vec![], None, None, None, None)
+            .await;
+
+        // Register pending ACK
+        let key = "test:message123".to_string();
+        let rx = router.register_pending_ack(key.clone()).await;
+
+        // Unregister the channel
+        router.unregister("test").await;
+
+        // ACK the message (should be no-op since channel was unregistered)
+        router.ack_message(&key, "{}").await;
+
+        // Receiver should NOT be signaled (sender was dropped during retain)
+        let result = rx.await;
+        assert!(result.is_err(), "ACK receiver should not be signaled after unregister");
     }
 }
