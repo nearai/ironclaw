@@ -1202,22 +1202,14 @@ mod tests {
             "git reset --hard HEAD~5",
         ];
         for cmd in &destructive_cmds {
-            assert_eq!(
-                classify_command_risk(cmd),
-                RiskLevel::High,
-                "'{}' should be classified High risk",
-                cmd
-            );
+            let r = classify_command_risk(cmd);
+            assert_eq!(r, RiskLevel::High, "'{}'", cmd); // safety: test code
         }
 
         let safe_cmds = ["git status", "cargo build", "ls -la"];
         for cmd in &safe_cmds {
-            assert_ne!(
-                classify_command_risk(cmd),
-                RiskLevel::High,
-                "'{}' should not be High risk",
-                cmd
-            );
+            let r = classify_command_risk(cmd);
+            assert_ne!(r, RiskLevel::High, "'{}'", cmd); // safety: test code
         }
     }
 
