@@ -670,9 +670,9 @@ mod tests {
 
         strip_unsupported_tool_params(&unsupported, &mut req);
 
-        assert!(
+        assert!( // safety: test assertion for explicit strip behavior
             req.stop_sequences.is_none(),
             "stop_sequences should be stripped for tool requests"
-        ); // safety: test assertion for explicit strip behavior
+        );
     }
 }
