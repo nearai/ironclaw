@@ -2791,7 +2791,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_channel_activation_status_owner_bound_counts_as_active() {
+    fn test_wasm_channel_activation_status_owner_bound_counts_as_active() -> Result<(), String> {
         let ext = InstalledExtension {
             name: "telegram".to_string(),
             kind: ExtensionKind::WasmChannel,
@@ -2808,14 +2808,23 @@ mod tests {
             version: None,
         };
 
-        assert_eq!(
-            classify_wasm_channel_activation(&ext, false, true),
-            Some(ExtensionActivationStatus::Active)
-        );
-        assert_eq!(
-            classify_wasm_channel_activation(&ext, false, false),
-            Some(ExtensionActivationStatus::Pairing)
-        );
+        let owner_bound = classify_wasm_channel_activation(&ext, false, true);
+        if owner_bound != Some(ExtensionActivationStatus::Active) {
+            return Err(format!(
+                "owner-bound channel should be active, got {:?}",
+                owner_bound
+            ));
+        }
+
+        let unbound = classify_wasm_channel_activation(&ext, false, false);
+        if unbound != Some(ExtensionActivationStatus::Pairing) {
+            return Err(format!(
+                "unbound channel should be pairing, got {:?}",
+                unbound
+            ));
+        }
+
+        Ok(())
     }
 
     // --- OAuth callback handler tests ---

@@ -443,9 +443,7 @@ impl ExtensionManager {
             }
         }
 
-        let Some(store) = self.store.as_ref() else {
-            return None;
-        };
+        let store = self.store.as_ref()?;
         let key = format!("channels.wasm_channel_owner_ids.{name}");
         match store.get_setting(&self.user_id, &key).await {
             Ok(Some(value)) => value.as_i64(),
@@ -4829,6 +4827,7 @@ fn combine_install_errors(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
     use std::sync::Arc;
 
     use async_trait::async_trait;
@@ -4849,6 +4848,28 @@ mod tests {
     };
     use crate::extensions::{ExtensionError, ExtensionKind, ExtensionSource, InstallResult};
     use crate::pairing::PairingStore;
+
+    fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.into())
+        }
+    }
+
+    fn require_eq<T>(actual: T, expected: T, label: &str) -> Result<(), String>
+    where
+        T: PartialEq + Debug,
+    {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "{label} mismatch: expected {:?}, got {:?}",
+                expected, actual
+            ))
+        }
+    }
 
     #[derive(Clone)]
     struct RecordingChannel {
@@ -5280,7 +5301,10 @@ mod tests {
         std::fs::create_dir_all(&channels_dir).ok();
 
         let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
-        let crypto = Arc::new(SecretsCrypto::new(master_key).unwrap());
+        let crypto = Arc::new(
+            SecretsCrypto::new(master_key)
+                .unwrap_or_else(|err| panic!("failed to construct test crypto: {err}")),
+        );
 
         ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
@@ -5324,31 +5348,39 @@ mod tests {
     }
 
     #[test]
-    fn test_telegram_hot_activation_runtime_config_includes_owner_id() {
+    fn test_telegram_hot_activation_runtime_config_includes_owner_id() -> Result<(), String> {
         let updates = build_wasm_channel_runtime_config_updates(
             Some("https://example.test"),
             Some("secret-123"),
             Some(424242),
         );
 
-        assert_eq!(
+        require_eq(
             updates.get("tunnel_url"),
-            Some(&serde_json::json!("https://example.test"))
-        );
-        assert_eq!(
+            Some(&serde_json::json!("https://example.test")),
+            "tunnel_url",
+        )?;
+        require_eq(
             updates.get("webhook_secret"),
-            Some(&serde_json::json!("secret-123"))
-        );
-        assert_eq!(updates.get("owner_id"), Some(&serde_json::json!(424242)));
+            Some(&serde_json::json!("secret-123")),
+            "webhook_secret",
+        )?;
+        require_eq(
+            updates.get("owner_id"),
+            Some(&serde_json::json!(424242)),
+            "owner_id",
+        )
     }
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn test_telegram_hot_activation_configure_uses_mock_loader_and_persists_state() {
-        let dir = tempfile::tempdir().expect("temp dir");
+    async fn test_telegram_hot_activation_configure_uses_mock_loader_and_persists_state()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
         let channels_dir = dir.path().join("channels");
-        std::fs::create_dir_all(&channels_dir).expect("channels dir");
-        std::fs::write(channels_dir.join("telegram.wasm"), b"mock").expect("write wasm");
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
+        std::fs::write(channels_dir.join("telegram.wasm"), b"mock")
+            .map_err(|err| format!("write wasm: {err}"))?;
         std::fs::write(
             channels_dir.join("telegram.capabilities.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -5372,9 +5404,9 @@ mod tests {
                     "owner_id": null
                 }
             }))
-            .expect("serialize capabilities"),
+            .map_err(|err| format!("serialize capabilities: {err}"))?,
         )
-        .expect("write capabilities");
+        .map_err(|err| format!("write capabilities: {err}"))?;
 
         let (db, _db_tmp) = crate::testing::test_db().await;
         let manager = {
@@ -5385,7 +5417,10 @@ mod tests {
             use crate::tools::mcp::session::McpSessionManager;
 
             let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
-            let crypto = Arc::new(SecretsCrypto::new(master_key).unwrap());
+            let crypto = Arc::new(
+                SecretsCrypto::new(master_key)
+                    .unwrap_or_else(|err| panic!("failed to construct test crypto: {err}")),
+            );
 
             ExtensionManager::new(
                 Arc::new(McpSessionManager::new()),
@@ -5405,7 +5440,8 @@ mod tests {
 
         let channel_manager = Arc::new(ChannelManager::new());
         let runtime = Arc::new(
-            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing()).expect("runtime"),
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
         );
         let pairing_store = Arc::new(PairingStore::with_base_dir(
             dir.path().join("pairing-state"),
@@ -5435,10 +5471,11 @@ mod tests {
             .await;
         manager
             .set_test_telegram_binding_resolver(Arc::new(|_token, existing_owner_id| {
-                assert_eq!(
-                    existing_owner_id, None,
-                    "owner binding should be derived during setup"
-                );
+                if existing_owner_id.is_some() {
+                    return Err(ExtensionError::Other(
+                        "owner binding should be derived during setup".to_string(),
+                    ));
+                }
                 Ok(TelegramBindingData {
                     owner_id: 424242,
                     bot_username: Some("test_hot_bot".to_string()),
@@ -5462,70 +5499,77 @@ mod tests {
                 )]),
             )
             .await
-            .expect("configure succeeds");
+            .map_err(|err| format!("configure succeeds: {err}"))?;
 
-        assert!(result.activated, "expected hot activation to succeed");
-        assert!(
+        require(result.activated, "expected hot activation to succeed")?;
+        require(
             result.message.contains("activated"),
-            "unexpected message: {}",
-            result.message
-        );
-        assert!(
+            format!("unexpected message: {}", result.message),
+        )?;
+        require(
             !manager
                 .activation_errors
                 .read()
                 .await
                 .contains_key("telegram"),
-            "successful configure should clear stale activation errors"
-        );
-        assert!(
+            "successful configure should clear stale activation errors",
+        )?;
+        require(
             manager
                 .active_channel_names
                 .read()
                 .await
                 .contains("telegram"),
-            "telegram should be marked active after hot activation"
-        );
-        assert!(
+            "telegram should be marked active after hot activation",
+        )?;
+        require(
             channel_manager.get_channel("telegram").await.is_some(),
-            "telegram should be hot-added to the running channel manager"
-        );
-        assert_eq!(
+            "telegram should be hot-added to the running channel manager",
+        )?;
+        require_eq(
             manager.load_persisted_active_channels().await,
-            vec!["telegram".to_string()]
-        );
-        assert_eq!(
+            vec!["telegram".to_string()],
+            "persisted active channels",
+        )?;
+        require_eq(
             manager.current_channel_owner_id("telegram").await,
-            Some(424242)
-        );
-        assert!(
+            Some(424242),
+            "current owner id",
+        )?;
+        require(
             manager.has_wasm_channel_owner_binding("telegram").await,
-            "telegram should report an explicit owner binding after setup"
-        );
+            "telegram should report an explicit owner binding after setup".to_string(),
+        )?;
         let owner_setting = manager
             .store
             .as_ref()
-            .expect("db-backed manager")
+            .ok_or_else(|| "db-backed manager missing".to_string())?
             .get_setting("test", "channels.wasm_channel_owner_ids.telegram")
             .await
-            .expect("owner_id setting query");
-        assert_eq!(owner_setting, Some(serde_json::json!(424242)));
+            .map_err(|err| format!("owner_id setting query: {err}"))?;
+        require_eq(
+            owner_setting,
+            Some(serde_json::json!(424242)),
+            "owner setting",
+        )?;
         let bot_username_setting = manager
             .store
             .as_ref()
-            .expect("db-backed manager")
+            .ok_or_else(|| "db-backed manager missing".to_string())?
             .get_setting("test", &bot_username_setting_key("telegram"))
             .await
-            .expect("bot username setting query");
-        assert_eq!(
+            .map_err(|err| format!("bot username setting query: {err}"))?;
+        require_eq(
             bot_username_setting,
-            Some(serde_json::json!("test_hot_bot"))
-        );
+            Some(serde_json::json!("test_hot_bot")),
+            "bot username setting",
+        )
     }
 
     #[tokio::test]
-    async fn test_notify_telegram_owner_verified_sends_confirmation_for_new_binding() {
-        let dir = tempfile::tempdir().expect("temp dir");
+    async fn test_notify_telegram_owner_verified_sends_confirmation_for_new_binding()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
         let manager =
             make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
 
@@ -5546,7 +5590,7 @@ mod tests {
                 channel_manager,
                 wasm_channel_runtime: Arc::new(
                     WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
-                        .expect("runtime"),
+                        .map_err(|err| format!("runtime: {err}"))?,
                 ),
                 pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
                 wasm_channel_router: Arc::new(WasmChannelRouter::new()),
@@ -5565,17 +5609,17 @@ mod tests {
             .await;
 
         let sent = broadcasts.lock().await;
-        assert_eq!(sent.len(), 1, "should send exactly one confirmation DM");
-        assert_eq!(sent[0].0, "424242");
-        assert!(
+        require_eq(sent.len(), 1, "broadcast count")?;
+        require_eq(sent[0].0.clone(), "424242".to_string(), "broadcast user_id")?;
+        require(
             sent[0].1.content.contains("Telegram owner verified"),
-            "confirmation DM should acknowledge owner verification"
-        );
+            "confirmation DM should acknowledge owner verification",
+        )
     }
 
     #[tokio::test]
-    async fn test_notify_telegram_owner_verified_skips_existing_binding() {
-        let dir = tempfile::tempdir().expect("temp dir");
+    async fn test_notify_telegram_owner_verified_skips_existing_binding() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
         let manager =
             make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
 
@@ -5596,7 +5640,7 @@ mod tests {
                 channel_manager,
                 wasm_channel_runtime: Arc::new(
                     WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
-                        .expect("runtime"),
+                        .map_err(|err| format!("runtime: {err}"))?,
                 ),
                 pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
                 wasm_channel_router: Arc::new(WasmChannelRouter::new()),
@@ -5614,10 +5658,10 @@ mod tests {
             )
             .await;
 
-        assert!(
+        require(
             broadcasts.lock().await.is_empty(),
-            "existing owner bindings should not trigger another confirmation DM"
-        );
+            "existing owner bindings should not trigger another confirmation DM",
+        )
     }
 
     // ── resolve_env_credentials tests ────────────────────────────────────
@@ -6309,12 +6353,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_telegram_auth_instructions_include_owner_verification_guidance() {
-        let dir = tempfile::tempdir().expect("temp dir");
+    async fn test_telegram_auth_instructions_include_owner_verification_guidance()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
         let channels_dir = dir.path().join("channels");
-        std::fs::create_dir_all(&channels_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
 
-        std::fs::write(channels_dir.join("telegram.wasm"), b"\0asm fake").unwrap();
+        std::fs::write(channels_dir.join("telegram.wasm"), b"\0asm fake")
+            .map_err(|err| format!("write wasm: {err}"))?;
         let caps = serde_json::json!({
             "type": "channel",
             "name": "telegram",
@@ -6329,23 +6375,28 @@ mod tests {
         });
         std::fs::write(
             channels_dir.join("telegram.capabilities.json"),
-            serde_json::to_string(&caps).unwrap(),
+            serde_json::to_string(&caps).map_err(|err| format!("serialize caps: {err}"))?,
         )
-        .unwrap();
+        .map_err(|err| format!("write caps: {err}"))?;
 
         let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
 
-        let result = mgr.auth("telegram").await.expect("telegram auth status");
-        let instructions = result.instructions().expect("awaiting token instructions");
+        let result = mgr
+            .auth("telegram")
+            .await
+            .map_err(|err| format!("telegram auth status: {err}"))?;
+        let instructions = result
+            .instructions()
+            .ok_or_else(|| "awaiting token instructions missing".to_string())?;
 
-        assert!(
+        require(
             instructions.contains("Telegram Bot API token"),
-            "telegram auth instructions should still ask for the bot token"
-        );
-        assert!(
+            "telegram auth instructions should still ask for the bot token",
+        )?;
+        require(
             instructions.contains("send a private message to your bot in Telegram"),
-            "telegram auth instructions should explain the owner verification step"
-        );
+            "telegram auth instructions should explain the owner verification step",
+        )
     }
 
     #[tokio::test]
