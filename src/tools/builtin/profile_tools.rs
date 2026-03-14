@@ -166,7 +166,9 @@ impl Tool for ProfileEditTool {
         })?;
 
         // Validate key format
-        if key.is_empty() || key.len() > 64 || !key.chars().all(|c| c.is_alphanumeric() || c == '_')
+        if key.is_empty()
+            || key.len() > 64
+            || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         {
             return Err(ToolError::InvalidParameters(
                 "Key must be 1-64 alphanumeric/underscore characters".to_string(),
@@ -227,8 +229,9 @@ impl Tool for ProfileClearTool {
     }
 
     fn description(&self) -> &str {
-        "Remove a specific profile fact or all facts in a category. \
-         Use when the user says 'forget that' or 'clear my profile'."
+        "Remove a specific profile fact (provide key) or all facts in a category \
+         (omit key). WARNING: omitting key deletes ALL facts in the category. \
+         Use when the user explicitly asks to forget something."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -245,7 +248,7 @@ impl Tool for ProfileClearTool {
                     "description": "Specific fact key to remove"
                 }
             },
-            "required": ["category", "key"]
+            "required": ["category"]
         })
     }
 
@@ -257,25 +260,67 @@ impl Tool for ProfileClearTool {
         let start = std::time::Instant::now();
 
         let category_str = require_str(&params, "category")?;
-        let key = require_str(&params, "key")?;
+        let key = params.get("key").and_then(|v| v.as_str());
 
         let category = FactCategory::from_str_opt(category_str).ok_or_else(|| {
             ToolError::InvalidParameters(format!("Invalid category '{category_str}'"))
         })?;
 
-        let removed = self
-            .engine
-            .remove_fact(&ctx.user_id, "default", &category, key)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to remove fact: {e}")))?;
+        // If key is provided, remove specific fact; otherwise remove all in category
+        if let Some(key) = key {
+            let removed = self
+                .engine
+                .remove_fact(&ctx.user_id, "default", &category, key)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Failed to remove fact: {e}")))?;
 
-        let msg = if removed {
-            format!("Removed profile fact: {category}/{key}")
+            let msg = if removed {
+                format!("Removed profile fact: {category}/{key}")
+            } else {
+                format!("No fact found: {category}/{key}")
+            };
+            Ok(ToolOutput::text(msg, start.elapsed()))
         } else {
-            format!("No fact found: {category}/{key}")
-        };
+            // Remove all facts in category by loading and deleting each
+            let profile = self
+                .engine
+                .load_profile(&ctx.user_id, "default")
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Failed to load profile: {e}")))?;
 
-        Ok(ToolOutput::text(msg, start.elapsed()))
+            let keys: Vec<String> = profile
+                .facts
+                .iter()
+                .filter(|f| f.category == category)
+                .map(|f| f.key.clone())
+                .collect();
+
+            let mut removed_count = 0;
+            let mut error_count = 0;
+            for k in &keys {
+                match self
+                    .engine
+                    .remove_fact(&ctx.user_id, "default", &category, k)
+                    .await
+                {
+                    Ok(true) => removed_count += 1,
+                    Ok(false) => {} // already deleted by another process
+                    Err(e) => {
+                        tracing::warn!("Profile clear: failed to remove fact '{k}': {e}");
+                        error_count += 1;
+                    }
+                }
+            }
+
+            let msg = if error_count > 0 {
+                format!(
+                    "Removed {removed_count} fact(s) from category '{category}' ({error_count} failed with error)."
+                )
+            } else {
+                format!("Removed {removed_count} fact(s) from category '{category}'.")
+            };
+            Ok(ToolOutput::text(msg, start.elapsed()))
+        }
     }
 
     fn requires_sanitization(&self) -> bool {

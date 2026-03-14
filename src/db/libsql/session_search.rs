@@ -55,7 +55,13 @@ impl SessionSearchStore for LibSqlBackend {
         let embedding_blob: Option<Vec<u8>> =
             embedding.map(|e| e.iter().flat_map(|f| f.to_le_bytes()).collect());
 
-        conn.execute(
+        // Wrap INSERT + SELECT-back in a transaction for atomicity
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| DatabaseError::Query(format!("upsert_session_summary begin tx: {e}")))?;
+
+        tx.execute(
             r#"
             INSERT INTO session_summaries
                 (id, conversation_id, user_id, agent_id, summary, topics, tool_names,
@@ -87,9 +93,7 @@ impl SessionSearchStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(format!("upsert_session_summary: {e}")))?;
 
-        // SELECT the real id back (ON CONFLICT UPDATE keeps the original id,
-        // not the one we passed in ?1).
-        let mut rows = conn
+        let mut rows = tx
             .query(
                 "SELECT id FROM session_summaries WHERE conversation_id = ?1",
                 libsql::params![conversation_id.to_string()],
@@ -112,8 +116,14 @@ impl SessionSearchStore for LibSqlBackend {
             })?;
 
         let real_id_str = get_text(&row, 0);
-        Uuid::parse_str(&real_id_str)
-            .map_err(|e| DatabaseError::Query(format!("Invalid UUID after upsert: {e}")))
+        let result = Uuid::parse_str(&real_id_str)
+            .map_err(|e| DatabaseError::Query(format!("Invalid UUID after upsert: {e}")))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| DatabaseError::Query(format!("upsert_session_summary commit: {e}")))?;
+
+        Ok(result)
     }
 
     async fn search_sessions_fts(

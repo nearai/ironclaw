@@ -17,7 +17,8 @@ use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ConversationStore, Database, JobStore, LearningStore, RoutineStore, SandboxStore,
-    SessionSearchStore, SettingsStore, ToolFailureStore, UserProfileStore, WorkspaceStore,
+    SessionSearchStore, SettingsStore, SkillStatus, ToolFailureStore, UserProfileStore,
+    WorkspaceStore,
 };
 use crate::db::{ProfileFactRow, SessionSummaryRow, SynthesizedSkillRow};
 use crate::error::{DatabaseError, WorkspaceError};
@@ -808,7 +809,7 @@ impl SessionSearchStore for PgBackend {
                 ORDER BY score DESC
                 LIMIT $3
                 "#,
-                &[&user_id, &query, &(limit as i64)],
+                &[&user_id, &trimmed, &(limit as i64)],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1101,7 +1102,7 @@ impl LearningStore for PgBackend {
         skill_content: Option<&str>,
         content_hash: &str,
         source_conversation_id: Option<Uuid>,
-        status: &str,
+        status: SkillStatus,
         safety_scan_passed: bool,
         quality_score: i32,
     ) -> Result<Uuid, DatabaseError> {
@@ -1128,7 +1129,7 @@ impl LearningStore for PgBackend {
                     &skill_content,
                     &content_hash,
                     &source_conversation_id,
-                    &status,
+                    &status.as_str(),
                     &safety_scan_passed,
                     &quality_score,
                 ],
@@ -1143,7 +1144,7 @@ impl LearningStore for PgBackend {
         &self,
         id: Uuid,
         user_id: &str,
-        status: &str,
+        status: SkillStatus,
     ) -> Result<bool, DatabaseError> {
         let conn = self
             .store
@@ -1157,9 +1158,9 @@ impl LearningStore for PgBackend {
                 r#"
                 UPDATE synthesized_skills
                 SET status = $3, reviewed_at = NOW()
-                WHERE id = $1 AND user_id = $2
+                WHERE id = $1 AND user_id = $2 AND status = 'pending'
                 "#,
-                &[&id, &user_id, &status],
+                &[&id, &user_id, &status.as_str()],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -1171,7 +1172,7 @@ impl LearningStore for PgBackend {
         &self,
         user_id: &str,
         agent_id: &str,
-        status: Option<&str>,
+        status: Option<SkillStatus>,
     ) -> Result<Vec<SynthesizedSkillRow>, DatabaseError> {
         let conn = self
             .store
@@ -1190,7 +1191,7 @@ impl LearningStore for PgBackend {
                 WHERE user_id = $1 AND agent_id = $2 AND status = $3
                 ORDER BY created_at DESC
                 "#,
-                &[&user_id, &agent_id, &status],
+                &[&user_id, &agent_id, &status.as_str()],
             )
             .await
         } else {
@@ -1219,7 +1220,13 @@ impl LearningStore for PgBackend {
                 skill_content: r.get("skill_content"),
                 skill_content_hash: r.get("skill_content_hash"),
                 source_conversation_id: r.get("source_conversation_id"),
-                status: r.get("status"),
+                status: {
+                    let s: String = r.get("status");
+                    SkillStatus::from_str_opt(&s).unwrap_or_else(|| {
+                        tracing::warn!("Unknown skill status in DB, defaulting to Pending");
+                        SkillStatus::Pending
+                    })
+                },
                 safety_scan_passed: r.get("safety_scan_passed"),
                 quality_score: r.get("quality_score"),
                 created_at: r.get("created_at"),
@@ -1262,7 +1269,13 @@ impl LearningStore for PgBackend {
             skill_content: r.get("skill_content"),
             skill_content_hash: r.get("skill_content_hash"),
             source_conversation_id: r.get("source_conversation_id"),
-            status: r.get("status"),
+            status: {
+                let s: String = r.get("status");
+                SkillStatus::from_str_opt(&s).unwrap_or_else(|| {
+                    tracing::warn!("Unknown skill status in DB, defaulting to Pending");
+                    SkillStatus::Pending
+                })
+            },
             safety_scan_passed: r.get("safety_scan_passed"),
             quality_score: r.get("quality_score"),
             created_at: r.get("created_at"),

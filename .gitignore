@@ -40,3 +40,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Local architecture docs (not for upstream)
+docs/architecture/adaptive-learning/

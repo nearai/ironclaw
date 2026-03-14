@@ -754,7 +754,8 @@ async fn async_main() -> anyhow::Result<()> {
                             ironclaw::user_profile::engine::EncryptedProfileEngine::new(
                                 Arc::clone(ups),
                                 Arc::new(crypto),
-                            ),
+                            )
+                            .with_max_facts(config.user_profile.max_facts_per_user),
                         )),
                         Err(e) => {
                             tracing::warn!("Failed to init profile crypto: {e}");
@@ -762,7 +763,13 @@ async fn async_main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                _ => None,
+                _ => {
+                    tracing::warn!(
+                        "USER_PROFILE_ENABLED=true but database or master key unavailable — \
+                         profile engine disabled"
+                    );
+                    None
+                }
             }
         } else {
             None

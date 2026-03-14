@@ -133,7 +133,7 @@ RULES:
             // Validate key format: alphanumeric + underscores, max 64 chars
             if key.is_empty()
                 || key.len() > 64
-                || !key.chars().all(|c| c.is_alphanumeric() || c == '_')
+                || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             {
                 continue;
             }
@@ -143,9 +143,13 @@ RULES:
                 continue;
             }
 
-            // Safety scan on extracted value
+            // Safety scan on extracted key and value
+            if ironclaw_safety::scan_content_for_threats(&key).is_some() {
+                tracing::warn!("Profile distiller: rejected fact due to threat pattern in key");
+                continue;
+            }
             if ironclaw_safety::scan_content_for_threats(&value).is_some() {
-                tracing::warn!("Profile distiller: rejected fact '{key}' due to threat pattern");
+                tracing::warn!("Profile distiller: rejected fact due to threat pattern in value");
                 continue;
             }
 

@@ -78,10 +78,10 @@ impl Tool for SessionSearchTool {
         let mut output = format!("Found {} matching session(s):\n\n", results.len());
         for (i, r) in results.iter().enumerate() {
             output.push_str(&format!(
-                "{}. **{}** (score: {:.2})\n   Topics: {}\n   Tools: {}\n   Messages: {}\n\n",
+                "{}. **{}** ({})\n   Topics: {}\n   Tools: {}\n   Messages: {}\n\n",
                 i + 1,
                 r.summary.chars().take(200).collect::<String>(),
-                r.score,
+                r.created_at.format("%Y-%m-%d"),
                 if r.topics.is_empty() {
                     "none".to_string()
                 } else {

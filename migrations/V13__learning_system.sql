@@ -58,3 +58,4 @@ CREATE TABLE synthesized_skills (
 
 CREATE INDEX idx_synthesized_skills_user ON synthesized_skills(user_id, agent_id);
 CREATE INDEX idx_synthesized_skills_status ON synthesized_skills(status);
+CREATE UNIQUE INDEX idx_synthesized_skills_dedup ON synthesized_skills(user_id, skill_content_hash);

@@ -70,12 +70,26 @@ pub fn spawn_learning_worker(
                 continue;
             };
 
-            // Check skill count limit before synthesizing
-            let existing_count = store
-                .list_synthesized_skills(&event.user_id, &event.agent_id, None)
+            // Check skill count limit (only pending + accepted, not rejected)
+            let pending = store
+                .list_synthesized_skills(
+                    &event.user_id,
+                    &event.agent_id,
+                    Some(crate::db::SkillStatus::Pending),
+                )
                 .await
-                .map(|rows| rows.len())
+                .map(|r| r.len())
                 .unwrap_or(0);
+            let accepted = store
+                .list_synthesized_skills(
+                    &event.user_id,
+                    &event.agent_id,
+                    Some(crate::db::SkillStatus::Accepted),
+                )
+                .await
+                .map(|r| r.len())
+                .unwrap_or(0);
+            let existing_count = pending + accepted;
             if existing_count >= config.max_skills_per_user {
                 tracing::debug!(
                     user_id = %event.user_id,
@@ -144,7 +158,7 @@ pub fn spawn_learning_worker(
                     Some(&skill_content),
                     &content_hash,
                     Some(event.conversation_id),
-                    "pending",
+                    crate::db::SkillStatus::Pending,
                     true, // safety_passed — only reached if validation succeeded
                     event.quality_score as i32,
                 )
