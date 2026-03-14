@@ -764,6 +764,18 @@ impl SessionSearchStore for PgBackend {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SessionSummaryRow>, DatabaseError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Err(DatabaseError::Query(
+                "search query must not be empty".to_string(),
+            ));
+        }
+        if trimmed.len() > 512 {
+            return Err(DatabaseError::Query(
+                "search query too long (max 512 chars)".to_string(),
+            ));
+        }
+
         let conn = self
             .store
             .pool()

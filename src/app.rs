@@ -56,6 +56,10 @@ pub struct AppComponents {
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
+    /// Learning system store handles (from DatabaseHandles, before type erasure).
+    pub session_search_store: Option<Arc<dyn crate::db::SessionSearchStore>>,
+    pub user_profile_store: Option<Arc<dyn crate::db::UserProfileStore>>,
+    pub learning_store: Option<Arc<dyn crate::db::LearningStore>>,
 }
 
 /// Options that control optional init phases.
@@ -81,6 +85,14 @@ pub struct AppBuilder {
 
     // Backend-specific handles needed by secrets store
     handles: Option<crate::db::DatabaseHandles>,
+
+    // Learning system store handles (captured from DatabaseHandles before take())
+    #[allow(clippy::type_complexity)]
+    learning_stores: (
+        Option<Arc<dyn crate::db::SessionSearchStore>>,
+        Option<Arc<dyn crate::db::UserProfileStore>>,
+        Option<Arc<dyn crate::db::LearningStore>>,
+    ),
 }
 
 impl AppBuilder {
@@ -106,6 +118,7 @@ impl AppBuilder {
             secrets_store: None,
             llm_override: None,
             handles: None,
+            learning_stores: (None, None, None),
         }
     }
 
@@ -137,6 +150,12 @@ impl AppBuilder {
         let (db, handles) = crate::db::connect_with_handles(&self.config.database)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+        // Capture learning store handles before they might be consumed
+        self.learning_stores = (
+            handles.session_search_store.clone(),
+            handles.user_profile_store.clone(),
+            handles.learning_store.clone(),
+        );
         self.handles = Some(handles);
 
         // Post-init: migrate disk config, reload config from DB, attach session, cleanup
@@ -810,6 +829,9 @@ impl AppBuilder {
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,
+            session_search_store: self.learning_stores.0.take(),
+            user_profile_store: self.learning_stores.1.take(),
+            learning_store: self.learning_stores.2.take(),
         })
     }
 }
