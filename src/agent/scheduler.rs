@@ -187,12 +187,22 @@ impl Scheduler {
                     if max_tokens > 0 {
                         ctx.max_tokens = max_tokens;
                     }
+                    // Store approval context in JobContext so tools can access it
+                    if let Some(ref approval) = approval_context {
+                        ctx.approval_context = Some(approval.clone());
+                    }
                 })
                 .await?;
-        } else if max_tokens > 0 {
+        } else {
             self.context_manager
                 .update_context(job_id, |ctx| {
-                    ctx.max_tokens = max_tokens;
+                    if max_tokens > 0 {
+                        ctx.max_tokens = max_tokens;
+                    }
+                    // Store approval context in JobContext so tools can access it
+                    if let Some(ref approval) = approval_context {
+                        ctx.approval_context = Some(approval.clone());
+                    }
                 })
                 .await?;
         }

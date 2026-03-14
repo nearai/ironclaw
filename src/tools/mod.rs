@@ -27,6 +27,6 @@ pub use builder::{
 pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
 pub use tool::{
-    ApprovalContext, ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput,
-    ToolRateLimitConfig, redact_params, validate_tool_schema,
+    check_approval_in_context, ApprovalContext, ApprovalRequirement, Tool, ToolDomain, ToolError,
+    ToolOutput, ToolRateLimitConfig, redact_params, validate_tool_schema,
 };

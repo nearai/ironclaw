@@ -379,6 +379,53 @@ pub fn require_param<'a>(
         .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
 }
 
+/// Check if a tool invocation is allowed based on the job's approval context.
+///
+/// This helper function should be called by tools that execute sub-tools
+/// (like the builder) to ensure proper approval checking is done even when
+/// bypassing the worker's normal approval flow.
+///
+/// Returns `Ok(())` if the tool is allowed, `Err(ToolError::NotAuthorized)` if blocked.
+///
+/// # Security semantics
+///
+/// When `approval_context` is `None`, this function uses **legacy blocking behavior**:
+/// - `Never` tools: allowed
+/// - `UnlessAutoApproved` tools: blocked (require interactive approval)
+/// - `Always` tools: blocked (require explicit approval)
+///
+/// This matches the worker-level `ApprovalContext::is_blocked_or_default()` semantics
+/// to prevent privilege escalation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// # use ironclaw::context::JobContext;
+/// # use ironclaw::tools::{Tool, ToolError, ToolOutput, check_approval_in_context};
+/// # use serde_json::Value;
+/// async fn execute(&self, params: Value, ctx: &JobContext) -> Result<ToolOutput, ToolError> {
+///     // If this tool executes sub-tools, check their approval first
+///     check_approval_in_context(ctx, "sub_tool_name", self.requires_approval(&params))?;
+///
+///     // ... rest of implementation
+///     # todo!()
+/// }
+/// ```
+pub fn check_approval_in_context(
+    ctx: &crate::context::JobContext,
+    tool_name: &str,
+    requirement: ApprovalRequirement,
+) -> Result<(), ToolError> {
+    // Match worker-level approval semantics exactly to prevent inconsistency
+    if ApprovalContext::is_blocked_or_default(&ctx.approval_context, tool_name, requirement) {
+        return Err(ToolError::NotAuthorized(format!(
+            "Tool '{}' requires approval in this context",
+            tool_name
+        )));
+    }
+    Ok(())
+}
+
 /// Replace sensitive parameter values with `"[REDACTED]"`.
 ///
 /// Returns a new JSON value with the specified keys replaced. Non-object params

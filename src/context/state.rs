@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::llm::recording::HttpInterceptor;
+use crate::tools::ApprovalContext;
 
 /// Error returned when a job exceeds its token budget.
 #[derive(Debug, thiserror::Error)]
@@ -176,6 +177,12 @@ pub struct JobContext {
     pub tool_output_stash: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
     /// User's preferred timezone (IANA name, e.g. "America/New_York"). Defaults to "UTC".
     pub user_timezone: String,
+    /// Approval context for tool execution in this job.
+    ///
+    /// When set, tools check this context before executing to determine
+    /// if they're allowed to run in autonomous/non-interactive contexts.
+    #[serde(skip)]
+    pub approval_context: Option<ApprovalContext>,
 }
 
 impl JobContext {
@@ -216,12 +223,19 @@ impl JobContext {
             metadata: serde_json::Value::Null,
             tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             user_timezone: "UTC".to_string(),
+            approval_context: None,
         }
     }
 
     /// Set the user timezone on this context.
     pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
         self.user_timezone = tz.into();
+        self
+    }
+
+    /// Set the approval context on this context.
+    pub fn with_approval_context(mut self, ctx: ApprovalContext) -> Self {
+        self.approval_context = Some(ctx);
         self
     }
 
@@ -324,6 +338,9 @@ impl JobContext {
 
 impl Default for JobContext {
     fn default() -> Self {
+        // Default has no approval_context - safer default that requires explicit
+        // opt-in for autonomous execution. Code that creates JobContext directly
+        // must use with_approval_context() to enable autonomous tool use.
         Self::with_user("default", "Untitled", "No description")
     }
 }

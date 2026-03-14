@@ -483,19 +483,34 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     name: tool_name.to_string(),
                 })?;
 
-        // Check approval: use context-aware check if available, else block all non-Never tools
+        // Fetch job context early for approval checking and other needs
+        let mut job_ctx = deps.context_manager.get_context(job_id).await?;
+
+        // Check approval: additive semantics - BOTH job-level AND worker-level must approve
         let requirement = tool.requires_approval(params);
-        let blocked =
-            ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
-        if blocked {
+
+        // Check job-level approval context (if set by tools like the builder)
+        let job_level_blocked = job_ctx
+            .approval_context
+            .as_ref()
+            .map(|ctx| ctx.is_blocked(tool_name, requirement))
+            .unwrap_or(false);
+
+        // Check worker-level approval context (set by scheduler for autonomous jobs)
+        let worker_level_blocked = ApprovalContext::is_blocked_or_default(
+            &deps.approval_context,
+            tool_name,
+            requirement,
+        );
+
+        // Tool is blocked if EITHER level blocks it (additive/intersection semantics)
+        // This maintains defense in depth: job-level cannot bypass worker-level restrictions
+        if job_level_blocked || worker_level_blocked {
             return Err(crate::error::ToolError::AuthRequired {
                 name: tool_name.to_string(),
             }
             .into());
         }
-
-        // Fetch job context early so we have the real user_id for hooks and rate limiting
-        let mut job_ctx = deps.context_manager.get_context(job_id).await?;
         // Propagate http_interceptor for trace recording/replay
         if job_ctx.http_interceptor.is_none() {
             job_ctx.http_interceptor = deps.http_interceptor.clone();
@@ -1756,6 +1771,107 @@ mod tests {
         assert!(
             result.is_ok(),
             "Always tool should be allowed with permission"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_semantics_both_levels_must_approve() {
+        // Test additive semantics: BOTH job-level AND worker-level must approve
+        // If either blocks, the tool is blocked (defense in depth)
+
+        // Scenario 1: Worker-level allows, job-level blocks → BLOCKED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level allows the tool
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "always_approval".to_string(),
+            ])),
+        )
+        .await;
+
+        // Set job-level context to block the tool (by not listing it)
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context = Some(crate::tools::ApprovalContext::autonomous());
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_err(),
+            "Tool should be blocked when job-level doesn't allow it, \
+             even if worker-level does (additive semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_worker_block_overrides_job_allow() {
+        // Scenario 2: Job-level allows, worker-level blocks → BLOCKED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level does NOT allow the tool
+            Some(crate::tools::ApprovalContext::autonomous()),
+        )
+        .await;
+
+        // Set job-level context to allow the tool
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context = Some(
+                    crate::tools::ApprovalContext::autonomous_with_tools([
+                        "always_approval".to_string(),
+                    ]),
+                );
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_err(),
+            "Tool should be blocked when worker-level doesn't allow it, \
+             even if job-level does (additive semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_both_levels_allow() {
+        // Scenario 3: Both levels allow → ALLOWED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level allows
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "always_approval".to_string(),
+            ])),
+        )
+        .await;
+
+        // Job-level also allows
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context = Some(
+                    crate::tools::ApprovalContext::autonomous_with_tools([
+                        "always_approval".to_string(),
+                    ]),
+                );
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_ok(),
+            "Tool should be allowed when both job-level and worker-level allow it"
         );
     }
 
