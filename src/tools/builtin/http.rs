@@ -214,6 +214,7 @@ fn is_disallowed_ipv4(v4: &Ipv4Addr) -> bool {
         || v4.is_multicast()
         || v4.is_unspecified()
         || *v4 == Ipv4Addr::new(169, 254, 169, 254)
+        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
 }
 
 fn is_disallowed_ip(ip: &IpAddr) -> bool {
@@ -913,6 +914,8 @@ mod tests {
         assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(
             169, 254, 169, 254
         ))));
+        // Carrier-grade NAT
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
         // Public
         assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
     }

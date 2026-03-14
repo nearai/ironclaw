@@ -18,8 +18,16 @@
               "name": "daily-check",
               "trigger_type": "cron",
               "schedule": "0 0 9 * * *",
+              "timezone": "America/New_York",
               "prompt": "Check system status and report any issues.",
-              "description": "Daily system health check"
+              "description": "Daily system health check",
+              "context_paths": ["context/priorities.md"],
+              "action_type": "lightweight",
+              "use_tools": true,
+              "max_tool_rounds": 2,
+              "cooldown_secs": 600,
+              "notify_channel": "telegram",
+              "notify_user": "ops-team"
             }
           }
         ],

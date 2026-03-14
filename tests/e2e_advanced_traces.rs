@@ -9,6 +9,10 @@ mod support;
 mod advanced {
     use std::time::Duration;
 
+    use ironclaw::agent::routine::Trigger;
+    use ironclaw::channels::IncomingMessage;
+    use ironclaw::db::Database;
+
     use crate::support::cleanup::CleanupGuard;
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -18,6 +22,28 @@ mod advanced {
         "/tests/fixtures/llm_traces/advanced"
     );
     const TIMEOUT: Duration = Duration::from_secs(30);
+
+    async fn wait_for_routine_run(
+        db: &std::sync::Arc<dyn Database>,
+        routine_id: uuid::Uuid,
+        timeout: Duration,
+    ) -> Vec<ironclaw::agent::routine::RoutineRun> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let runs = db
+                .list_routine_runs(routine_id, 10)
+                .await
+                .expect("list_routine_runs");
+            if !runs.is_empty() {
+                return runs;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for routine run"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 
     // -----------------------------------------------------------------------
     // 1. Multi-turn memory coherence
@@ -376,6 +402,118 @@ mod advanced {
         // Main conversation tools should have succeeded.
         let completed = rig.tool_calls_completed();
         crate::support::assertions::assert_all_tools_succeeded(&completed);
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 6b. Event routine: Telegram-scoped trigger fires on matching message
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_event_trigger_telegram_channel_fires() {
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/routine_event_telegram.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_routines()
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message(
+            "Create a routine that watches Telegram messages starting with 'bug:' and alerts me.",
+        )
+        .await;
+        let create_responses = rig.wait_for_responses(1, TIMEOUT).await;
+        rig.verify_trace_expects(&trace, &create_responses);
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "telegram-bug-watcher")
+            .await
+            .expect("get_routine_by_name")
+            .expect("telegram-bug-watcher should exist");
+
+        match &routine.trigger {
+            Trigger::Event { channel, pattern } => {
+                assert_eq!(channel.as_deref(), Some("telegram"));
+                assert_eq!(pattern, "^bug\\b");
+            }
+            other => panic!("expected event trigger, got {other:?}"),
+        }
+
+        rig.send_incoming(IncomingMessage::new(
+            "telegram",
+            "test-user",
+            "bug: home button broken",
+        ))
+        .await;
+
+        let runs = wait_for_routine_run(rig.database(), routine.id, TIMEOUT).await;
+        assert_eq!(runs[0].trigger_type, "event");
+
+        let responses = rig.wait_for_responses(3, TIMEOUT).await;
+        assert!(
+            responses.iter().any(|response| {
+                response
+                    .metadata
+                    .get("source")
+                    .and_then(|value| value.as_str())
+                    == Some("routine")
+                    && response.content.contains("telegram-bug-watcher")
+                    && response.content.contains("Bug report detected")
+            }),
+            "expected routine notification in responses: {responses:?}"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // 6c. Event routine without channel filter still fires on Telegram
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_event_trigger_without_channel_filter_still_fires() {
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/routine_event_any_channel.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_trace(trace)
+            .with_routines()
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message(
+            "Create a routine that watches messages starting with 'bug:' and alerts me.",
+        )
+        .await;
+        let _ = rig.wait_for_responses(1, TIMEOUT).await;
+
+        let routine = rig
+            .database()
+            .get_routine_by_name("test-user", "any-channel-bug-watcher")
+            .await
+            .expect("get_routine_by_name")
+            .expect("any-channel-bug-watcher should exist");
+
+        match &routine.trigger {
+            Trigger::Event { channel, pattern } => {
+                assert_eq!(channel, &None);
+                assert_eq!(pattern, "^bug\\b");
+            }
+            other => panic!("expected event trigger, got {other:?}"),
+        }
+
+        rig.send_incoming(IncomingMessage::new(
+            "telegram",
+            "test-user",
+            "bug: login button broken",
+        ))
+        .await;
+
+        let runs = wait_for_routine_run(rig.database(), routine.id, TIMEOUT).await;
+        assert_eq!(runs[0].trigger_type, "event");
 
         rig.shutdown();
     }
