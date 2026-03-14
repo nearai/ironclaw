@@ -485,28 +485,28 @@ mod tests {
             },
             // Two entries with same name but different kinds should coexist
             RegistryEntry {
-                name: "slack-mcp".to_string(),
-                display_name: "Slack MCP".to_string(),
+                name: "dual-ext".to_string(),
+                display_name: "Dual MCP".to_string(),
                 kind: ExtensionKind::McpServer,
-                description: "Slack MCP server".to_string(),
+                description: "Dual extension MCP server".to_string(),
                 keywords: vec!["messaging".into()],
                 source: ExtensionSource::McpUrl {
-                    url: "https://mcp.slack.com".to_string(),
+                    url: "https://mcp.example.com".to_string(),
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::Dcr,
                 version: None,
             },
             RegistryEntry {
-                name: "slack-mcp".to_string(),
-                display_name: "Slack MCP WASM".to_string(),
+                name: "dual-ext".to_string(),
+                display_name: "Dual WASM".to_string(),
                 kind: ExtensionKind::WasmTool,
-                description: "Slack WASM tool".to_string(),
+                description: "Dual extension WASM tool".to_string(),
                 keywords: vec!["messaging".into()],
                 source: ExtensionSource::WasmBuildable {
-                    source_dir: "tools-src/slack".to_string(),
-                    build_dir: Some("tools-src/slack".to_string()),
-                    crate_name: Some("slack-tool".to_string()),
+                    source_dir: "tools-src/dual".to_string(),
+                    build_dir: Some("tools-src/dual".to_string()),
+                    crate_name: Some("dual-tool".to_string()),
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
@@ -521,16 +521,16 @@ mod tests {
         assert!(!results.is_empty(), "Should find telegram from catalog");
         assert_eq!(results[0].entry.name, "telegram");
 
-        // Should have both MCP slack-mcp and WASM slack-mcp
-        let results = registry.search("slack").await;
-        let slack_mcp = results
+        // Should have both MCP and WASM entries with the same name
+        let results = registry.search("dual-ext").await;
+        let has_mcp = results
             .iter()
-            .any(|r| r.entry.name == "slack-mcp" && r.entry.kind == ExtensionKind::McpServer);
-        let slack_wasm = results
+            .any(|r| r.entry.name == "dual-ext" && r.entry.kind == ExtensionKind::McpServer);
+        let has_wasm = results
             .iter()
-            .any(|r| r.entry.name == "slack-mcp" && r.entry.kind == ExtensionKind::WasmTool);
-        assert!(slack_mcp, "Should have MCP slack-mcp");
-        assert!(slack_wasm, "Should have WASM slack-mcp");
+            .any(|r| r.entry.name == "dual-ext" && r.entry.kind == ExtensionKind::WasmTool);
+        assert!(has_mcp, "Should have MCP dual-ext");
+        assert!(has_wasm, "Should have WASM dual-ext");
     }
 
     #[tokio::test]
