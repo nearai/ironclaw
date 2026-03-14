@@ -455,6 +455,9 @@ impl TestHarnessBuilder {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            learning_tx: None,
+            profile_engine: None,
+            user_profile_config: crate::config::UserProfileConfig::default(),
         };
 
         TestHarness {

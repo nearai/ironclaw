@@ -10,6 +10,7 @@ pub mod learning_tools;
 mod memory;
 mod message;
 pub mod path_utils;
+pub mod profile_tools;
 mod restart;
 pub mod routine;
 pub mod secrets_tools;
@@ -34,6 +35,7 @@ pub use json::JsonTool;
 pub use learning_tools::{SkillApproveTool, SkillListPendingTool};
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use profile_tools::{ProfileClearTool, ProfileEditTool, ProfileViewTool};
 pub use restart::RestartTool;
 pub use routine::{
     EventEmitTool, RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool,
