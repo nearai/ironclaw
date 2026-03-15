@@ -563,6 +563,7 @@ async fn oauth_callback_handler(
                 lookup_key = %lookup_key,
                 "OAuth callback received with unknown or expired state"
             );
+            clear_auth_mode(&state).await;
             return oauth_error_page("IronClaw");
         }
     };
@@ -581,6 +582,7 @@ async fn oauth_callback_handler(
                 message: "OAuth flow expired. Please try again.".to_string(),
             });
         }
+        clear_auth_mode(&state).await;
         return oauth_error_page(&flow.display_name);
     }
 
@@ -2186,12 +2188,12 @@ async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
+    // Clear auth mode regardless of outcome so the next user message goes
+    // through to the LLM instead of being intercepted as a token.
+    clear_auth_mode(&state).await;
+
     match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
-            // Clear auth mode so the next user message goes through to the LLM
-            // instead of being intercepted as a token.
-            clear_auth_mode(&state).await;
-
             // Broadcast auth_completed so the chat UI can dismiss any in-progress
             // auth card or setup modal that was triggered by tool_auth/tool_activate.
             state.sse.broadcast(SseEvent::AuthCompleted {

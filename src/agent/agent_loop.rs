@@ -838,19 +838,31 @@ impl Agent {
         };
 
         if let Some(pending) = pending_auth {
-            match &submission {
-                Submission::UserInput { content } => {
-                    return self
-                        .process_auth_token(message, &pending, content, session, thread_id)
-                        .await;
+            if pending.is_expired() {
+                // TTL exceeded — clear stale auth and fall through to normal handling
+                tracing::warn!(
+                    extension = %pending.extension_name,
+                    "Auth mode expired after TTL, clearing"
+                );
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thread.pending_auth = None;
                 }
-                _ => {
-                    // Any control submission (interrupt, undo, etc.) cancels auth mode
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.pending_auth = None;
+            } else {
+                match &submission {
+                    Submission::UserInput { content } => {
+                        return self
+                            .process_auth_token(message, &pending, content, session, thread_id)
+                            .await;
                     }
-                    // Fall through to normal handling
+                    _ => {
+                        // Any control submission (interrupt, undo, etc.) cancels auth mode
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.pending_auth = None;
+                        }
+                        // Fall through to normal handling
+                    }
                 }
             }
         }
