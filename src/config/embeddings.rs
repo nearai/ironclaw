@@ -1,3 +1,4 @@
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::sync::Arc;
 
 use secrecy::{ExposeSecret, SecretString};
@@ -79,6 +80,9 @@ impl EmbeddingsConfig {
         let enabled = parse_bool_env("EMBEDDING_ENABLED", settings.embeddings.enabled)?;
 
         let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
+        if let Some(ref base_url) = openai_base_url {
+            validate_embedding_base_url(base_url)?;
+        }
 
         Ok(Self {
             enabled,
@@ -167,6 +171,174 @@ impl EmbeddingsConfig {
     }
 }
 
+fn validate_embedding_base_url(base_url: &str) -> Result<(), ConfigError> {
+    let parsed = reqwest::Url::parse(base_url).map_err(|e| ConfigError::InvalidValue {
+        key: "EMBEDDING_BASE_URL".to_string(),
+        message: format!("must be a valid URL: {e}"),
+    })?;
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ConfigError::InvalidValue {
+            key: "EMBEDDING_BASE_URL".to_string(),
+            message: "must not include URL credentials".to_string(),
+        });
+    }
+
+    let scheme = parsed.scheme();
+    if !matches!(scheme, "http" | "https") {
+        return Err(ConfigError::InvalidValue {
+            key: "EMBEDDING_BASE_URL".to_string(),
+            message: "must use http:// or https://".to_string(),
+        });
+    }
+
+    let host = parsed.host_str().ok_or_else(|| ConfigError::InvalidValue {
+        key: "EMBEDDING_BASE_URL".to_string(),
+        message: "must include a host".to_string(),
+    })?;
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or_else(|| if scheme == "https" { 443 } else { 80 });
+
+    if is_forbidden_embedding_host(host) {
+        return Err(ConfigError::InvalidValue {
+            key: "EMBEDDING_BASE_URL".to_string(),
+            message: format!("host '{host}' is not allowed"),
+        });
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if scheme == "http" && !ip.is_loopback() {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_BASE_URL".to_string(),
+                message: "http:// is only allowed for localhost/loopback embedding servers"
+                    .to_string(),
+            });
+        }
+        if is_forbidden_embedding_ip(ip) {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_BASE_URL".to_string(),
+                message: format!("IP '{ip}' is not allowed"),
+            });
+        }
+    } else if scheme == "http" && !host.eq_ignore_ascii_case("localhost") {
+        return Err(ConfigError::InvalidValue {
+            key: "EMBEDDING_BASE_URL".to_string(),
+            message: "http:// is only allowed for localhost/loopback embedding servers".to_string(),
+        });
+    } else {
+        let addrs: Vec<IpAddr> = (host, port)
+            .to_socket_addrs()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "EMBEDDING_BASE_URL".to_string(),
+                message: format!("host '{host}' could not be resolved: {e}"),
+            })?
+            .map(|addr| addr.ip())
+            .collect();
+
+        if addrs.is_empty() {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_BASE_URL".to_string(),
+                message: format!("host '{host}' could not be resolved"),
+            });
+        }
+
+        if scheme == "http" {
+            if addrs.iter().any(|ip| !ip.is_loopback()) {
+                return Err(ConfigError::InvalidValue {
+                    key: "EMBEDDING_BASE_URL".to_string(),
+                    message: "http:// is only allowed for localhost/loopback embedding servers"
+                        .to_string(),
+                });
+            }
+        } else if let Some(bad_ip) = addrs.into_iter().find(|ip| is_forbidden_embedding_ip(*ip)) {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_BASE_URL".to_string(),
+                message: format!("host '{host}' resolves to disallowed IP '{bad_ip}'"),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn is_forbidden_embedding_host(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower == "host.docker.internal" || lower == "metadata.google.internal"
+}
+
+fn is_forbidden_embedding_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                return false;
+            }
+            is_forbidden_embedding_ipv4(v4)
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return false;
+            }
+            if let Some(mapped) = ipv6_mapped_ipv4(v6) {
+                if mapped.is_loopback() {
+                    return false;
+                }
+                return is_forbidden_embedding_ipv4(mapped);
+            }
+            v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+                || is_documentation_ipv6(v6)
+        }
+    }
+}
+
+fn is_forbidden_embedding_ipv4(v4: Ipv4Addr) -> bool {
+    if v4.is_private()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        || v4.is_unspecified()
+        || v4.is_multicast()
+    {
+        return true;
+    }
+
+    let octets = v4.octets();
+    // Carrier-grade NAT range (100.64.0.0/10).
+    if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+        return true;
+    }
+    // Benchmark testing range (198.18.0.0/15).
+    octets[0] == 198 && matches!(octets[1], 18 | 19)
+}
+
+fn ipv6_mapped_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = v6.segments();
+    if segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0xffff
+    {
+        Some(Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        ))
+    } else {
+        None
+    }
+}
+
+fn is_documentation_ipv6(v6: Ipv6Addr) -> bool {
+    let segments = v6.segments();
+    segments[0] == 0x2001 && segments[1] == 0x0db8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,7 +360,7 @@ mod tests {
 
     #[test]
     fn embeddings_disabled_not_overridden_by_openai_key() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
 
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
@@ -204,7 +376,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
         assert!(
             !config.enabled,
             "embeddings should remain disabled when settings.embeddings.enabled=false, \
@@ -219,7 +391,7 @@ mod tests {
 
     #[test]
     fn embeddings_enabled_from_settings() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
 
         let settings = Settings {
@@ -230,7 +402,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
         assert!(
             config.enabled,
             "embeddings should be enabled when settings say so"
@@ -239,7 +411,7 @@ mod tests {
 
     #[test]
     fn embeddings_env_override_takes_precedence() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
 
         clear_embedding_env();
         // SAFETY: Under ENV_MUTEX.
@@ -255,7 +427,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
         assert!(
             config.enabled,
             "EMBEDDING_ENABLED=true env var should override settings"
@@ -269,19 +441,19 @@ mod tests {
 
     #[test]
     fn embedding_base_url_parsed_from_env() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
-            std::env::set_var("EMBEDDING_BASE_URL", "https://custom.example.com");
+            std::env::set_var("EMBEDDING_BASE_URL", "https://8.8.8.8");
         }
 
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
-        assert_eq!(
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
+        debug_assert_eq!(
             config.openai_base_url.as_deref(),
-            Some("https://custom.example.com"),
+            Some("https://8.8.8.8"),
             "EMBEDDING_BASE_URL env var should be parsed into openai_base_url"
         );
 
@@ -293,14 +465,122 @@ mod tests {
 
     #[test]
     fn embedding_base_url_defaults_to_none() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
         clear_embedding_env();
 
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
         assert!(
             config.openai_base_url.is_none(),
             "openai_base_url should be None when EMBEDDING_BASE_URL is not set"
         );
+    }
+
+    #[test]
+    fn embedding_base_url_rejects_http_non_localhost() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_BASE_URL", "http://example.com/v1");
+        }
+        let settings = Settings::default();
+        let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
+        assert!(err.to_string().contains("EMBEDDING_BASE_URL")); // safety: test assertion in #[cfg(test)] module
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn embedding_base_url_allows_http_localhost() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_BASE_URL", "http://localhost:11434/v1");
+        }
+        let settings = Settings::default();
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed"); // safety: test-only assertion setup
+        debug_assert_eq!(
+            config.openai_base_url.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn embedding_base_url_rejects_unresolvable_host() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_BASE_URL", "https://no-such-host.invalid/v1");
+        }
+        let settings = Settings::default();
+        let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
+        assert!(err.to_string().contains("could not be resolved")); // safety: test assertion in #[cfg(test)] module
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn embedding_base_url_rejects_private_ip() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_BASE_URL", "https://10.0.0.1/v1");
+        }
+        let settings = Settings::default();
+        let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
+        assert!(err.to_string().contains("not allowed")); // safety: test assertion in #[cfg(test)] module
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn embedding_base_url_rejects_url_credentials() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_BASE_URL", "https://user:pass@example.com/v1");
+        }
+        let settings = Settings::default();
+        let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
+        assert!(err.to_string().contains("credentials")); // safety: test assertion in #[cfg(test)] module
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_BASE_URL");
+        }
+    }
+
+    #[test]
+    fn embedding_base_url_rejects_metadata_host() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned"); // safety: test-only env guard
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                "EMBEDDING_BASE_URL",
+                "https://metadata.google.internal/computeMetadata/v1",
+            );
+        }
+        let settings = Settings::default();
+        let err = EmbeddingsConfig::resolve(&settings).expect_err("resolve should fail");
+        assert!(err.to_string().contains("not allowed")); // safety: test assertion in #[cfg(test)] module
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_BASE_URL");
+        }
     }
 }
