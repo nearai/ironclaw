@@ -87,7 +87,7 @@ mod router;
 mod runtime;
 mod schema;
 pub mod setup;
-pub(crate) mod signature;
+pub mod signature;
 #[allow(dead_code)]
 pub(crate) mod storage;
 mod wrapper;

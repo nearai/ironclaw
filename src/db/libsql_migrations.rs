@@ -656,6 +656,21 @@ ALTER TABLE agent_jobs ADD COLUMN max_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE agent_jobs ADD COLUMN total_tokens_used INTEGER NOT NULL DEFAULT 0;
 "#,
     ),
+    (
+        13,
+        "webhook_dedup",
+        // Webhook message deduplication table.
+        // Prevents duplicate processing when channels retry on errors.
+        r#"
+CREATE TABLE IF NOT EXISTS webhook_message_dedup (
+    key TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_dedup_created_at
+    ON webhook_message_dedup(created_at);
+"#,
+    ),
 ];
 
 /// Run incremental migrations that haven't been applied yet.

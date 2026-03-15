@@ -1152,6 +1152,10 @@ impl WasmChannel {
     /// Execute the on_http_request callback.
     ///
     /// Called when an HTTP request arrives at a registered endpoint.
+    ///
+    /// Returns the HTTP response and a list of (message_id, metadata) tuples for
+    /// messages that were emitted during processing. This enables ACK tracking
+    /// for reliable webhook processing.
     pub async fn call_on_http_request(
         &self,
         method: &str,
@@ -1160,7 +1164,7 @@ impl WasmChannel {
         query: &HashMap<String, String>,
         body: &[u8],
         secret_validated: bool,
-    ) -> Result<HttpResponse, WasmChannelError> {
+    ) -> Result<(HttpResponse, Vec<(uuid::Uuid, serde_json::Value)>), WasmChannelError> {
         tracing::info!(
             channel = %self.name,
             method = method,
@@ -1196,7 +1200,7 @@ impl WasmChannel {
                 path = path,
                 "WASM channel on_http_request called (no WASM module)"
             );
-            return Ok(HttpResponse::ok());
+            return Ok((HttpResponse::ok(), Vec::new()));
         }
 
         let runtime = Arc::clone(&self.runtime);
@@ -1269,16 +1273,17 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         match result {
             Ok(Ok((response, mut host_state))) => {
-                // Process emitted messages
+                // Process emitted messages and collect (message_id, metadata) for ACK tracking
                 let emitted = host_state.take_emitted_messages();
-                self.process_emitted_messages(emitted).await?;
+                let emitted_info = self.process_emitted_messages(emitted).await?;
 
                 tracing::debug!(
                     channel = %channel_name,
                     status = response.status,
+                    emitted_count = emitted_info.len(),
                     "WASM channel on_http_request completed"
                 );
-                Ok(response)
+                Ok((response, emitted_info))
             }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(WasmChannelError::Timeout {
@@ -1709,6 +1714,81 @@ impl WasmChannel {
         }
     }
 
+    /// Execute the on_message_persisted callback.
+    ///
+    /// Called after a message has been successfully persisted to the database.
+    /// Channels can use this for follow-up actions like WhatsApp mark_as_read.
+    ///
+    /// Returns Ok(()) even on failure - this is best-effort and should not block ACKs.
+    pub async fn call_on_message_persisted(
+        &self,
+        metadata_json: &str,
+    ) -> Result<(), WasmChannelError> {
+        // If no WASM bytes, return Ok (for testing)
+        if self.prepared.component().is_none() {
+            tracing::debug!(
+                channel = %self.name,
+                "on_message_persisted called (no WASM module)"
+            );
+            return Ok(());
+        }
+
+        let runtime = Arc::clone(&self.runtime);
+        let prepared = Arc::clone(&self.prepared);
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
+        let timeout = self.runtime.config().callback_timeout;
+        let credentials = self.get_credentials().await;
+        let host_credentials =
+            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+                .await;
+        let pairing_store = self.pairing_store.clone();
+        let metadata_json = metadata_json.to_string();
+        let channel_name = self.name.clone();
+
+        let result = tokio::time::timeout(timeout, async move {
+            tokio::task::spawn_blocking(move || {
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    host_credentials,
+                    pairing_store,
+                )?;
+                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
+
+                let channel_iface = instance.near_agent_channel();
+                let _ = channel_iface
+                    .call_on_message_persisted(&mut store, &metadata_json)
+                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+
+                Ok::<_, WasmChannelError>(())
+            })
+            .await
+            .map_err(|e| WasmChannelError::ExecutionPanicked {
+                name: channel_name,
+                reason: e.to_string(),
+            })?
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => {
+                tracing::debug!(channel = %self.name, "on_message_persisted completed");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                // Log but don't fail - this is best-effort
+                tracing::warn!(channel = %self.name, error = %e, "on_message_persisted failed");
+                Ok(())
+            }
+            Err(_timeout) => {
+                tracing::warn!(channel = %self.name, "on_message_persisted timed out");
+                Ok(())
+            }
+        }
+    }
+
     /// Execute a single on_status callback with a fresh WASM instance.
     ///
     /// Static method for use by the background typing repeat task (which
@@ -1979,10 +2059,12 @@ impl WasmChannel {
     }
 
     /// Process emitted messages from a callback.
+    ///
+    /// Returns a vector of (message_id, metadata) for ACK tracking.
     async fn process_emitted_messages(
         &self,
         messages: Vec<EmittedMessage>,
-    ) -> Result<(), WasmChannelError> {
+    ) -> Result<Vec<(uuid::Uuid, serde_json::Value)>, WasmChannelError> {
         tracing::info!(
             channel = %self.name,
             message_count = messages.len(),
@@ -1991,7 +2073,7 @@ impl WasmChannel {
 
         if messages.is_empty() {
             tracing::debug!(channel = %self.name, "No messages emitted");
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         // Clone sender to avoid holding RwLock read guard across send().await in the loop
@@ -2003,10 +2085,12 @@ impl WasmChannel {
                     count = messages.len(),
                     "Messages emitted but no sender available - channel may not be started!"
                 );
-                return Ok(());
+                return Ok(Vec::new());
             };
             tx.clone()
         };
+
+        let mut emitted_info = Vec::new();
 
         for emitted in messages {
             // Check rate limit — acquire and release the write lock before send().await
@@ -2025,6 +2109,7 @@ impl WasmChannel {
 
             // Convert to IncomingMessage
             let mut msg = IncomingMessage::new(&self.name, &emitted.user_id, &emitted.content);
+            let message_id = msg.id; // Capture ID before moving msg
 
             if let Some(name) = emitted.user_name {
                 msg = msg.with_user_name(name);
@@ -2056,11 +2141,15 @@ impl WasmChannel {
             }
 
             // Parse metadata JSON
-            if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
-                msg = msg.with_metadata(metadata);
-                // Store for broadcast routing (chat_id etc.)
-                self.update_broadcast_metadata(&emitted.metadata_json).await;
-            }
+            let metadata: serde_json::Value =
+                if let Ok(m) = serde_json::from_str::<serde_json::Value>(&emitted.metadata_json) {
+                    msg = msg.with_metadata(m.clone());
+                    // Store for broadcast routing (chat_id etc.)
+                    self.update_broadcast_metadata(&emitted.metadata_json).await;
+                    m
+                } else {
+                    serde_json::Value::Null
+                };
 
             // Send to stream — no locks held across this await
             tracing::info!(
@@ -2083,9 +2172,12 @@ impl WasmChannel {
                 channel = %self.name,
                 "Message successfully sent to agent queue"
             );
+
+            // Track for ACK mechanism
+            emitted_info.push((message_id, metadata));
         }
 
-        Ok(())
+        Ok(emitted_info)
     }
 
     /// Start the polling loop if configured.

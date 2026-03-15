@@ -317,6 +317,13 @@ fn instantiate_channel_component(
             .map_err(|e| format!("failed to create versioned channel-host@0.3.0: {e}"))?;
         stub_channel_host(&mut host)?;
     }
+    {
+        let mut root = linker.root();
+        let mut host = root
+            .instance("near:agent/channel-host@0.4.0")
+            .map_err(|e| format!("failed to create versioned channel-host@0.4.0: {e}"))?;
+        stub_channel_host(&mut host)?;
+    }
 
     let mut store = Store::new(engine, TestStoreData::new());
     linker

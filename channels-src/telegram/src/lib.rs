@@ -768,6 +768,11 @@ impl Guest for TelegramChannel {
         }
     }
 
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        // Telegram doesn't require mark_as_read functionality
+        Ok(())
+    }
+
     fn on_shutdown() {
         channel_host::log(
             channel_host::LogLevel::Info,
