@@ -1517,7 +1517,9 @@ mod seed_tests {
         let (ws, _dir) = create_test_workspace().await;
 
         // Pre-create an empty profile.json (simulates a previous failed write).
-        ws.write(paths::PROFILE, "").await.expect("write empty profile");
+        ws.write(paths::PROFILE, "")
+            .await
+            .expect("write empty profile");
 
         // Seed should still create BOOTSTRAP.md because the profile is empty.
         let count = ws.seed_if_empty().await.expect("seed_if_empty");
