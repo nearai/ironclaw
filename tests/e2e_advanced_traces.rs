@@ -673,4 +673,37 @@ mod advanced {
         mock_server.shutdown().await;
         rig.shutdown();
     }
+
+    // -----------------------------------------------------------------------
+    // 9. Bootstrap greeting fires on fresh workspace
+    // -----------------------------------------------------------------------
+
+    /// Verifies that a fresh workspace triggers a static bootstrap greeting
+    /// before the user sends any message (no LLM call needed).
+    #[tokio::test]
+    async fn bootstrap_greeting_fires() {
+        let rig = TestRigBuilder::new().with_bootstrap().build().await;
+
+        // The static bootstrap greeting should arrive without us sending any
+        // message and without an LLM call.
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert!(
+            !responses.is_empty(),
+            "bootstrap greeting should produce a response"
+        );
+        let greeting = &responses[0].content;
+        assert!(
+            greeting.contains("chief of staff"),
+            "bootstrap greeting should contain the static text, got: {greeting}"
+        );
+
+        // The bootstrap greeting must carry a thread_id so the gateway can
+        // route it to the correct assistant conversation.
+        assert!(
+            responses[0].thread_id.is_some(),
+            "bootstrap greeting response should have a thread_id set"
+        );
+
+        rig.shutdown();
+    }
 }

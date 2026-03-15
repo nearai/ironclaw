@@ -95,6 +95,17 @@ pub struct Settings {
     #[serde(default)]
     pub heartbeat: HeartbeatSettings,
 
+    // === Conversational Profile Onboarding ===
+    /// Whether the conversational profile onboarding has been completed.
+    ///
+    /// Set during the user's first interaction with the running assistant
+    /// (not during the setup wizard), after the agent builds a psychographic
+    /// profile via `memory_write`. Used by the agent loop (via workspace
+    /// system-prompt wiring) to suppress BOOTSTRAP.md injection once
+    /// onboarding is complete.
+    #[serde(default, alias = "personal_onboarding_completed")]
+    pub profile_onboarding_completed: bool,
+
     // === Advanced Settings (not asked during setup, editable via CLI) ===
     /// Agent behavior configuration.
     #[serde(default)]

@@ -297,6 +297,9 @@ pub enum WorkspaceError {
 
     #[error("I/O error: {reason}")]
     IoError { reason: String },
+
+    #[error("Write rejected for '{path}': prompt injection detected ({reason})")]
+    InjectionRejected { path: String, reason: String },
 }
 
 /// Orchestrator errors (internal API, container management).

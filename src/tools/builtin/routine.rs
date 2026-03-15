@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
+    normalize_cron_expression,
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
@@ -200,7 +201,7 @@ impl Tool for RoutineCreateTool {
         // Build trigger
         let trigger = match trigger_type {
             "cron" => {
-                let schedule =
+                let raw_schedule =
                     params
                         .get("schedule")
                         .and_then(|v| v.as_str())
@@ -209,6 +210,8 @@ impl Tool for RoutineCreateTool {
                                 "cron trigger requires 'schedule'".to_string(),
                             )
                         })?;
+                // Normalize 5/6-field cron to 7-field for the cron crate.
+                let schedule = normalize_cron_expression(raw_schedule);
                 let timezone = params
                     .get("timezone")
                     .and_then(|v| v.as_str())
@@ -223,13 +226,10 @@ impl Tool for RoutineCreateTool {
                     })
                     .transpose()?;
                 // Validate cron expression
-                next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
+                next_cron_fire(&schedule, timezone.as_deref()).map_err(|e| {
                     ToolError::InvalidParameters(format!("invalid cron schedule: {e}"))
                 })?;
-                Trigger::Cron {
-                    schedule: schedule.to_string(),
-                    timezone,
-                }
+                Trigger::Cron { schedule, timezone }
             }
             "event" => {
                 let pattern = params
@@ -577,7 +577,10 @@ impl Tool for RoutineUpdateTool {
             })
             .transpose()?;
 
-        let new_schedule = params.get("schedule").and_then(|v| v.as_str());
+        let new_schedule = params
+            .get("schedule")
+            .and_then(|v| v.as_str())
+            .map(normalize_cron_expression);
 
         if new_schedule.is_some() || new_timezone.is_some() {
             // Extract existing cron fields (cloned to avoid borrow conflict)
@@ -587,7 +590,7 @@ impl Tool for RoutineUpdateTool {
             };
 
             if let Some((old_schedule, old_tz)) = existing_cron {
-                let effective_schedule = new_schedule.unwrap_or(&old_schedule);
+                let effective_schedule = new_schedule.as_deref().unwrap_or(&old_schedule);
                 let effective_tz = new_timezone.or(old_tz);
                 // Validate
                 next_cron_fire(effective_schedule, effective_tz.as_deref()).map_err(|e| {

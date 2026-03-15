@@ -106,6 +106,12 @@ Step 9: Background Tasks (heartbeat)
 
 `--channels-only` mode runs only Step 6, skipping everything else.
 
+**Personal onboarding** happens conversationally during the user's first interaction
+with the running assistant (not during the wizard). The `## First-Run Bootstrap` block in
+`src/workspace/mod.rs` injects onboarding instructions from `BOOTSTRAP.md` into the system
+prompt on first run. Once the agent writes a profile via `memory_write` and deletes
+`BOOTSTRAP.md`, the block stops injecting.
+
 ---
 
 ### Step 1: Database Connection

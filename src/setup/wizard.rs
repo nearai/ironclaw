@@ -173,13 +173,50 @@ impl SetupWizard {
             self.auto_setup_security().await?;
             self.persist_after_step().await;
 
-            print_step(1, 2, "Inference Provider");
-            self.step_inference_provider().await?;
-            self.persist_after_step().await;
+            // Pre-populate backend from env so step_inference_provider
+            // can offer "Keep current provider?" instead of asking from scratch.
+            if self.settings.llm_backend.is_none() {
+                if let Ok(b) = std::env::var("LLM_BACKEND") {
+                    self.settings.llm_backend = Some(b);
+                } else if std::env::var("NEARAI_API_KEY").is_ok() {
+                    self.settings.llm_backend = Some("nearai".to_string());
+                } else if std::env::var("ANTHROPIC_API_KEY").is_ok()
+                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
+                {
+                    self.settings.llm_backend = Some("anthropic".to_string());
+                } else if std::env::var("OPENAI_API_KEY").is_ok() {
+                    self.settings.llm_backend = Some("openai".to_string());
+                }
+            }
 
-            print_step(2, 2, "Model Selection");
-            self.step_model_selection().await?;
-            self.persist_after_step().await;
+            if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+                && !api_key.is_empty()
+                && self.settings.llm_backend.as_deref() == Some("nearai")
+            {
+                // NEARAI_API_KEY is set and backend auto-detected — skip interactive prompts
+                print_info("NEARAI_API_KEY found — using NEAR AI provider");
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                        tracing::warn!("Failed to persist NEARAI_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(api_key));
+                if self.settings.selected_model.is_none() {
+                    let default = crate::llm::DEFAULT_MODEL;
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
+                }
+                self.persist_after_step().await;
+            } else {
+                print_step(1, 2, "Inference Provider");
+                self.step_inference_provider().await?;
+                self.persist_after_step().await;
+
+                print_step(2, 2, "Model Selection");
+                self.step_model_selection().await?;
+                self.persist_after_step().await;
+            }
         } else {
             let total_steps = 9;
 
@@ -241,6 +278,10 @@ impl SetupWizard {
             print_step(9, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
+
+            // Personal onboarding now happens conversationally during the
+            // user's first interaction with the assistant (see bootstrap
+            // block in workspace/mod.rs system_prompt_for_context).
         }
 
         // Save settings and print summary
@@ -1151,6 +1192,27 @@ impl SetupWizard {
     async fn setup_nearai(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("nearai");
 
+        // Check if NEARAI_API_KEY is already provided via environment or runtime overlay
+        if let Some(existing) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
+            && !existing.is_empty()
+        {
+            print_info(&format!(
+                "NEARAI_API_KEY found: {}",
+                mask_api_key(&existing)
+            ));
+            if confirm("Use this key?", true).map_err(SetupError::Io)? {
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(existing.clone());
+                    if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                        tracing::warn!("Failed to persist NEARAI_API_KEY to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(existing));
+                print_success("NEAR AI configured (from env)");
+                return Ok(());
+            }
+        }
+
         // Check if we already have a session
         if let Some(ref session) = self.session_manager
             && session.has_token().await
@@ -1579,25 +1641,8 @@ impl SetupWizard {
         if backend == "nearai" {
             // NEAR AI: use existing provider list_models()
             let fetched = self.fetch_nearai_models().await;
-            let default_models: Vec<(String, String)> = vec![
-                (
-                    "zai-org/GLM-latest".into(),
-                    "GLM Latest (default, fast)".into(),
-                ),
-                (
-                    "anthropic::claude-sonnet-4-20250514".into(),
-                    "Claude Sonnet 4 (best quality)".into(),
-                ),
-                (
-                    "openai::gpt-5.3-codex".into(),
-                    "GPT-5.3 Codex (flagship)".into(),
-                ),
-                ("openai::gpt-5.2".into(), "GPT-5.2".into()),
-                ("openai::gpt-4o".into(), "GPT-4o".into()),
-            ];
-
             let models = if fetched.is_empty() {
-                default_models
+                crate::llm::default_models()
             } else {
                 fetched.iter().map(|m| (m.clone(), m.clone())).collect()
             };
@@ -3386,12 +3431,12 @@ async fn discover_wasm_channels(dir: &std::path::Path) -> Vec<(String, ChannelCa
 /// via Cloud API key (option 4) don't get re-prompted during model selection.
 fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
     // If the user authenticated via API key (option 4), the key is stored
-    // as an env var. Pass it through so `resolve_bearer_token()` doesn't
-    // re-trigger the interactive auth prompt.
-    let api_key = std::env::var("NEARAI_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-        .map(secrecy::SecretString::from);
+    // via set_runtime_env(). Use env_or_override() (not std::env::var) so
+    // the runtime overlay is checked — otherwise resolve_bearer_token()
+    // falls back to session-token auth and re-triggers the interactive
+    // auth prompt.
+    let api_key =
+        crate::config::helpers::env_or_override("NEARAI_API_KEY").map(secrecy::SecretString::from);
 
     // Match the same base_url logic as LlmConfig::resolve(): use cloud-api
     // when an API key is present, private.near.ai for session-token auth.
@@ -4122,6 +4167,32 @@ mod tests {
         assert!(
             config.nearai.api_key.is_none(),
             "config should have no api_key when env var is empty"
+        );
+    }
+
+    /// Regression: API key set via set_runtime_env (interactive api_key_login
+    /// path) must be picked up by build_nearai_model_fetch_config so that
+    /// model listing doesn't fall back to session-token auth and re-trigger
+    /// the NEAR AI authentication menu.
+    #[test]
+    fn test_build_nearai_model_fetch_config_picks_up_runtime_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // Ensure the real env var is unset so the only source is the overlay.
+        let _guard = EnvGuard::clear("NEARAI_API_KEY");
+
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "test-key-from-overlay");
+        let config = build_nearai_model_fetch_config();
+
+        // Clean up runtime overlay
+        crate::config::helpers::set_runtime_env("NEARAI_API_KEY", "");
+
+        assert!(
+            config.nearai.api_key.is_some(),
+            "config must pick up NEARAI_API_KEY from runtime overlay"
+        );
+        assert_eq!(
+            config.nearai.base_url, "https://cloud-api.near.ai",
+            "API key auth must use cloud-api base URL"
         );
     }
 }
