@@ -1162,9 +1162,8 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 // Preserve the LLM's reasoning text so it appears in the
                 // assistant_with_tool_calls message pushed by execute_tool_calls.
                 let reasoning_text = s
-                    .first()
-                    .map(|sel| sel.reasoning.clone())
-                    .filter(|r| !r.is_empty());
+                    .iter()
+                    .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
                 let tool_calls: Vec<ToolCall> = selections_to_tool_calls(&s);
                 return Ok(crate::llm::RespondOutput {
                     result: RespondResult::ToolCalls {
@@ -1882,7 +1881,7 @@ mod tests {
     /// the LLM's reasoning context is lost and subsequent turns lack context.
     #[test]
     fn test_reasoning_text_extraction_from_selections() {
-        // Simulate what call_llm does: extract reasoning from first selection
+        // Simulate what call_llm does: extract first non-empty reasoning
         let selections = [
             ToolSelection {
                 tool_name: "search".into(),
@@ -1901,14 +1900,13 @@ mod tests {
         ];
 
         let reasoning_text = selections
-            .first()
-            .map(|sel| sel.reasoning.clone())
-            .filter(|r| !r.is_empty());
+            .iter()
+            .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
 
         assert_eq!(
             reasoning_text.as_deref(),
             Some("I need to search for relevant information"),
-            "Reasoning text should be extracted from first selection"
+            "Reasoning text should be extracted from first non-empty selection"
         );
 
         // Empty reasoning should result in None
@@ -1921,13 +1919,52 @@ mod tests {
         }];
 
         let empty_reasoning = empty_selections
-            .first()
-            .map(|sel| sel.reasoning.clone())
-            .filter(|r| !r.is_empty());
+            .iter()
+            .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
 
         assert!(
             empty_reasoning.is_none(),
             "Empty reasoning should not be included as content"
+        );
+    }
+
+    /// When the first selection has empty reasoning but a subsequent one has
+    /// non-empty reasoning, find_map should skip the empty one and return the
+    /// first non-empty reasoning.
+    #[test]
+    fn test_reasoning_text_skips_empty_first_selection() {
+        let selections = [
+            ToolSelection {
+                tool_name: "echo".into(),
+                parameters: serde_json::json!({}),
+                reasoning: String::new(),
+                alternatives: vec![],
+                tool_call_id: "call_1".into(),
+            },
+            ToolSelection {
+                tool_name: "search".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "Found the answer in the second selection".into(),
+                alternatives: vec![],
+                tool_call_id: "call_2".into(),
+            },
+            ToolSelection {
+                tool_name: "fetch".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "Third selection reasoning".into(),
+                alternatives: vec![],
+                tool_call_id: "call_3".into(),
+            },
+        ];
+
+        let reasoning_text = selections
+            .iter()
+            .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
+
+        assert_eq!(
+            reasoning_text.as_deref(),
+            Some("Found the answer in the second selection"),
+            "Should skip empty first reasoning and return the first non-empty one"
         );
     }
 }
