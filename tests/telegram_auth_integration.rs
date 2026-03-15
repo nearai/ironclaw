@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use ironclaw::channels::Channel;
 use ironclaw::channels::wasm::{
     ChannelCapabilities, PreparedChannelModule, WasmChannel, WasmChannelRuntime,
     WasmChannelRuntimeConfig,
