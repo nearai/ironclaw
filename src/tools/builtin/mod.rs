@@ -41,6 +41,9 @@ pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
 pub use tool_info::ToolInfoTool;
+
+mod gws_bridge;
+pub use gws_bridge::GwsBridgeTool;
 mod html_converter;
 pub mod image_analyze;
 pub mod image_edit;
