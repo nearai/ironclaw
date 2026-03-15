@@ -535,42 +535,7 @@ impl SetupWizard {
     ) -> Result<(), SetupError> {
         let (db, handles) = crate::db::connect_without_migrations(config)
             .await
-            .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?;
-
-        // Validate PostgreSQL prerequisites
-        #[cfg(feature = "postgres")]
-        if config.backend == crate::config::DatabaseBackend::Postgres
-            && let Some(ref pool) = handles.pg_pool
-        {
-            let diagnostics = crate::db::validate_postgres(pool)
-                .await
-                .map_err(|e| SetupError::Database(e.to_string()))?;
-
-            if let Some(diag) = diagnostics.first() {
-                match diag {
-                    crate::db::PgDiagnostic::VersionTooOld { found, minimum } => {
-                        return Err(SetupError::Database(format!(
-                            "PostgreSQL {} detected. IronClaw requires PostgreSQL {} or later \
-                             for pgvector support.\n\
-                             Upgrade: https://www.postgresql.org/download/",
-                            found, minimum
-                        )));
-                    }
-                    crate::db::PgDiagnostic::PgVectorMissing { pg_major_version } => {
-                        return Err(SetupError::Database(format!(
-                            "pgvector extension not found on your PostgreSQL server.\n\n\
-                             Install it:\n  \
-                             macOS:   brew install pgvector\n  \
-                             Ubuntu:  apt install postgresql-{0}-pgvector\n  \
-                             Docker:  use the pgvector/pgvector:pg{0} image\n  \
-                             Source:  https://github.com/pgvector/pgvector#installation\n\n\
-                             Then restart PostgreSQL and re-run: ironclaw onboard",
-                            pg_major_version
-                        )));
-                    }
-                }
-            }
-        }
+            .map_err(|e| SetupError::Database(e.to_string()))?;
 
         self.db = Some(db);
         self.db_handles = Some(handles);

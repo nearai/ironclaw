@@ -182,16 +182,8 @@ pub async fn create_secrets_store(
 
 // ==================== Wizard / testing helpers ====================
 
-/// Issues found during PostgreSQL prerequisite validation.
-#[derive(Debug)]
-pub enum PgDiagnostic {
-    /// PostgreSQL version is too old.
-    VersionTooOld { found: String, minimum: u32 },
-    /// pgvector extension is not available.
-    PgVectorMissing { pg_major_version: u32 },
-}
-
-/// Connect to the database WITHOUT running migrations.
+/// Connect to the database WITHOUT running migrations, validating
+/// prerequisites when applicable (PostgreSQL version, pgvector).
 ///
 /// Returns both the `Database` trait object and backend-specific handles.
 /// Used by the wizard to test connectivity before committing — call
@@ -236,6 +228,9 @@ pub async fn connect_without_migrations(
 
             handles.pg_pool = Some(pg.pool());
 
+            // Validate PostgreSQL prerequisites (version, pgvector)
+            validate_postgres(&pg.pool()).await?;
+
             Ok((Arc::new(pg) as Arc<dyn Database>, handles))
         }
         #[cfg(not(feature = "postgres"))]
@@ -247,13 +242,10 @@ pub async fn connect_without_migrations(
 
 /// Validate PostgreSQL prerequisites (version >= 15, pgvector available).
 ///
-/// Returns an empty vec if everything is fine.
+/// Returns `Ok(())` if all prerequisites are met, or a `DatabaseError`
+/// with a user-facing message describing the issue.
 #[cfg(feature = "postgres")]
-pub async fn validate_postgres(
-    pool: &deadpool_postgres::Pool,
-) -> Result<Vec<PgDiagnostic>, DatabaseError> {
-    let mut diagnostics = Vec::new();
-
+async fn validate_postgres(pool: &deadpool_postgres::Pool) -> Result<(), DatabaseError> {
     let client = pool
         .get()
         .await
@@ -274,10 +266,12 @@ pub async fn validate_postgres(
     const MIN_PG_MAJOR_VERSION: u32 = 15;
 
     if major_version < MIN_PG_MAJOR_VERSION {
-        diagnostics.push(PgDiagnostic::VersionTooOld {
-            found: version_str.to_string(),
-            minimum: MIN_PG_MAJOR_VERSION,
-        });
+        return Err(DatabaseError::Pool(format!(
+            "PostgreSQL {} detected. IronClaw requires PostgreSQL {} or later \
+             for pgvector support.\n\
+             Upgrade: https://www.postgresql.org/download/",
+            version_str, MIN_PG_MAJOR_VERSION
+        )));
     }
 
     // Check if pgvector extension is available.
@@ -292,12 +286,19 @@ pub async fn validate_postgres(
         })?;
 
     if pgvector_row.is_none() {
-        diagnostics.push(PgDiagnostic::PgVectorMissing {
-            pg_major_version: major_version,
-        });
+        return Err(DatabaseError::Pool(format!(
+            "pgvector extension not found on your PostgreSQL server.\n\n\
+             Install it:\n  \
+             macOS:   brew install pgvector\n  \
+             Ubuntu:  apt install postgresql-{0}-pgvector\n  \
+             Docker:  use the pgvector/pgvector:pg{0} image\n  \
+             Source:  https://github.com/pgvector/pgvector#installation\n\n\
+             Then restart PostgreSQL and re-run: ironclaw onboard",
+            major_version
+        )));
     }
 
-    Ok(diagnostics)
+    Ok(())
 }
 
 // ==================== Sub-traits ====================
