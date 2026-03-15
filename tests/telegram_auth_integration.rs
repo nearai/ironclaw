@@ -13,11 +13,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::StreamExt;
 use ironclaw::channels::wasm::{
     ChannelCapabilities, PreparedChannelModule, WasmChannel, WasmChannelRuntime,
     WasmChannelRuntimeConfig,
 };
 use ironclaw::pairing::PairingStore;
+use tokio::time::{Duration, timeout};
 
 /// Skip the test if the Telegram WASM module hasn't been built.
 /// In CI (detected via the `CI` env var), panic instead of skipping so a
@@ -276,6 +278,59 @@ async fn test_private_message_with_owner_id_set_uses_guest_pairing_flow() {
         .expect("pairing store should be readable");
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, "999");
+}
+
+#[tokio::test]
+async fn test_private_messages_use_chat_id_as_thread_scope() {
+    require_telegram_wasm!();
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": null,
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    })
+    .to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel.start().await.expect("Failed to start channel");
+
+    for (update_id, message_id, text) in [(6, 105, "first"), (7, 106, "second")] {
+        let update = build_telegram_update(
+            update_id,
+            message_id,
+            999,
+            "private",
+            999,
+            "ThreadUser",
+            text,
+        );
+
+        let response = channel
+            .call_on_http_request(
+                "POST",
+                "/webhook/telegram",
+                &HashMap::new(),
+                &HashMap::new(),
+                &update,
+                true,
+            )
+            .await
+            .expect("HTTP callback failed");
+
+        assert_eq!(response.status, 200);
+
+        let msg = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("message should arrive")
+            .expect("stream should yield a message");
+        assert_eq!(msg.thread_id.as_deref(), Some("999"));
+        assert_eq!(msg.conversation_scope(), Some("999"));
+    }
+
+    channel.shutdown().await.expect("Shutdown failed");
 }
 
 #[tokio::test]

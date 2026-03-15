@@ -59,12 +59,19 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _find_distinct_free_ports(count: int) -> list[int]:
-    """Return distinct OS-assigned loopback ports."""
-    ports: set[int] = set()
-    while len(ports) < count:
-        ports.add(_find_free_port())
-    return list(ports)
+def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
+    """Bind loopback sockets and keep them open until the server starts."""
+    sockets: list[socket.socket] = []
+    try:
+        while len(sockets) < count:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", 0))
+            sockets.append(sock)
+        return sockets
+    except Exception:
+        for sock in sockets:
+            sock.close()
+        raise
 
 
 @pytest.fixture(scope="session")
@@ -85,12 +92,17 @@ def ironclaw_binary():
 
 @pytest.fixture(scope="session")
 def server_ports():
-    """Choose distinct dynamic ports for the gateway and HTTP webhook channel."""
-    gateway_port, http_port = _find_distinct_free_ports(2)
-    return {
-        "gateway": gateway_port,
-        "http": http_port,
-    }
+    """Reserve dynamic ports for the gateway and HTTP webhook channel."""
+    reserved = _reserve_loopback_sockets(2)
+    try:
+        yield {
+            "gateway": reserved[0].getsockname()[1],
+            "http": reserved[1].getsockname()[1],
+            "sockets": reserved,
+        }
+    finally:
+        for sock in reserved:
+            sock.close()
 
 
 @pytest.fixture(scope="session")
@@ -171,6 +183,9 @@ async def ironclaw_server(
     """Start the ironclaw gateway. Yields the base URL."""
     gateway_port = server_ports["gateway"]
     http_port = server_ports["http"]
+    for sock in server_ports["sockets"]:
+        if sock.fileno() != -1:
+            sock.close()
     env = {
         # Minimal env: PATH for process spawning, HOME for Rust/cargo defaults
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),

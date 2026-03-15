@@ -26,7 +26,7 @@ mod tunnel;
 mod wasm;
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, Once};
 
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -72,6 +72,7 @@ pub use self::helpers::{env_or_override, set_runtime_env};
 /// their data. Whichever runs first initialises the map; the second merges in.
 static INJECTED_VARS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static WARNED_EXPLICIT_DEFAULT_OWNER_ID: Once = Once::new();
 
 /// Main configuration for the agent.
 #[derive(Debug, Clone)]
@@ -342,11 +343,29 @@ pub(crate) fn load_bootstrap_settings(
 }
 
 pub(crate) fn resolve_owner_id(settings: &Settings) -> Result<String, ConfigError> {
-    Ok(self::helpers::optional_env("IRONCLAW_OWNER_ID")?
-        .or_else(|| settings.owner_id.clone())
+    let env_owner_id = self::helpers::optional_env("IRONCLAW_OWNER_ID")?;
+    let settings_owner_id = settings.owner_id.clone();
+    let configured_owner_id = env_owner_id.clone().or(settings_owner_id.clone());
+
+    let owner_id = configured_owner_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "default".to_string()))
+        .unwrap_or_else(|| "default".to_string());
+
+    if owner_id == "default"
+        && (env_owner_id.is_some()
+            || settings_owner_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()))
+    {
+        WARNED_EXPLICIT_DEFAULT_OWNER_ID.call_once(|| {
+            tracing::warn!(
+                "IRONCLAW_OWNER_ID resolved to the legacy 'default' scope explicitly; durable state will keep legacy owner behavior"
+            );
+        });
+    }
+
+    Ok(owner_id)
 }
 
 /// Load API keys from the encrypted secrets store into a thread-safe overlay.
