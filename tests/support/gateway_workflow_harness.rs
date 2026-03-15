@@ -143,6 +143,9 @@ impl GatewayWorkflowHarness {
             model: model.to_string(),
             extra_headers: Vec::new(),
             oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
             cache_retention: Default::default(),
             unsupported_params: Vec::new(),
         });
