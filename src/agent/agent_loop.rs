@@ -839,15 +839,26 @@ impl Agent {
 
         if let Some(pending) = pending_auth {
             if pending.is_expired() {
-                // TTL exceeded — clear stale auth and fall through to normal handling
+                // TTL exceeded — clear stale auth mode
                 tracing::warn!(
                     extension = %pending.extension_name,
                     "Auth mode expired after TTL, clearing"
                 );
-                let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.pending_auth = None;
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thread.pending_auth = None;
+                    }
                 }
+                // If this was a user message (possibly a pasted token), return an
+                // explicit error instead of forwarding it to the LLM/history.
+                if matches!(submission, Submission::UserInput { .. }) {
+                    return Ok(Some(format!(
+                        "Authentication for **{}** expired. Please try again.",
+                        pending.extension_name
+                    )));
+                }
+                // Control submissions (interrupt, undo, etc.) fall through to normal handling
             } else {
                 match &submission {
                     Submission::UserInput { content } => {

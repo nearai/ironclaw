@@ -526,23 +526,33 @@ async fn oauth_callback_handler(
             .get("error_description")
             .cloned()
             .unwrap_or_else(|| error.clone());
+        clear_auth_mode(&state).await;
         return oauth_error_page(&description);
     }
 
     let state_param = match params.get("state") {
         Some(s) if !s.is_empty() => s.clone(),
-        _ => return oauth_error_page("IronClaw"),
+        _ => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     let code = match params.get("code") {
         Some(c) if !c.is_empty() => c.clone(),
-        _ => return oauth_error_page("IronClaw"),
+        _ => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     // Look up the pending flow by CSRF state (atomic remove prevents replay)
     let ext_mgr = match state.extension_manager.as_ref() {
         Some(mgr) => mgr,
-        None => return oauth_error_page("IronClaw"),
+        None => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     // Strip instance prefix from state for registry lookup.
