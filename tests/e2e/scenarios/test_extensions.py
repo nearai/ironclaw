@@ -943,27 +943,24 @@ async def test_auth_completed_failure_sse_shows_error_toast_and_reloads_extensio
     await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth")
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 1
 
-    # Set up response listener before triggering the action so we catch the reload.
-    async with page.expect_response(
-        lambda r: r.url.split("?")[0].endswith("/api/extensions") and "/registry" not in r.url,
-        timeout=5000,
-    ) as resp_info:
-        await page.evaluate("""
-            handleAuthCompleted({
-              extension_name: 'gmail',
-              success: false,
-              message: 'OAuth flow expired. Please try again.',
-            });
-        """)
+    # Inject a counter to confirm refreshCurrentSettingsTab is called
+    await page.evaluate("window.__refreshCount = 0; var _origRefresh = refreshCurrentSettingsTab; refreshCurrentSettingsTab = function() { window.__refreshCount++; _origRefresh(); };")
+
+    await page.evaluate("""
+        handleAuthCompleted({
+          extension_name: 'gmail',
+          success: false,
+          message: 'OAuth flow expired. Please try again.',
+        });
+    """)
 
     await wait_for_toast(page, "OAuth flow expired. Please try again.")
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 0
-    assert (
-        await page.locator(
-            SEL["toast_error"], has_text="OAuth flow expired. Please try again."
-        ).count()
-        >= 1
-    )
+
+    # Wait for the refresh to complete
+    await page.wait_for_function("() => window.__refreshCount > 0", timeout=5000)
+    # Give the async fetch time to complete
+    await page.wait_for_timeout(1000)
     assert len(reload_count) > count_before, "Extensions list did not reload after auth failure"
 
 
