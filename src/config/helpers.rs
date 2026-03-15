@@ -176,6 +176,97 @@ pub(crate) fn parse_string_env(
     Ok(optional_env(key)?.unwrap_or_else(|| default.into()))
 }
 
+/// Validate a user-configurable base URL to prevent SSRF attacks (#1103).
+///
+/// Rejects:
+/// - Non-HTTP(S) schemes (file://, ftp://, etc.)
+/// - HTTPS URLs pointing at private/loopback/link-local IPs
+/// - HTTP URLs pointing at anything other than localhost/127.0.0.1/::1
+///
+/// This is intended for config-time validation of base URLs like
+/// `OLLAMA_BASE_URL`, `EMBEDDING_BASE_URL`, `NEARAI_BASE_URL`, etc.
+pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), ConfigError> {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let parsed = reqwest::Url::parse(url).map_err(|e| ConfigError::InvalidValue {
+        key: field_name.to_string(),
+        message: format!("invalid URL '{}': {}", url, e),
+    })?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(ConfigError::InvalidValue {
+            key: field_name.to_string(),
+            message: format!("only http/https URLs are allowed, got '{}'", scheme),
+        });
+    }
+
+    let host = parsed.host_str().ok_or_else(|| ConfigError::InvalidValue {
+        key: field_name.to_string(),
+        message: "URL is missing a host".to_string(),
+    })?;
+
+    let host_lower = host.to_lowercase();
+
+    // For HTTP (non-TLS), only allow localhost — remote HTTP endpoints
+    // risk credential leakage (e.g. NEAR AI bearer tokens sent over plaintext).
+    if scheme == "http" {
+        let is_localhost = host_lower == "localhost"
+            || host_lower == "127.0.0.1"
+            || host_lower == "::1"
+            || host_lower == "[::1]"
+            || host_lower.ends_with(".localhost");
+        if !is_localhost {
+            return Err(ConfigError::InvalidValue {
+                key: field_name.to_string(),
+                message: format!(
+                    "HTTP (non-TLS) is only allowed for localhost, got '{}'. \
+                     Use HTTPS for remote endpoints.",
+                    host
+                ),
+            });
+        }
+        return Ok(());
+    }
+
+    // For HTTPS, reject private/loopback/link-local/metadata IP literals.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let is_dangerous = match ip {
+            IpAddr::V4(v4) => {
+                v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_multicast()
+                    || v4.is_unspecified()
+                    || v4 == Ipv4Addr::new(169, 254, 169, 254)
+                    || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
+            }
+            IpAddr::V6(v6) => {
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    v4.is_private()
+                        || v4.is_loopback()
+                        || v4.is_link_local()
+                        || v4 == Ipv4Addr::new(169, 254, 169, 254)
+                } else {
+                    v6.is_loopback() || v6.is_unspecified()
+                }
+            }
+        };
+        if is_dangerous {
+            return Err(ConfigError::InvalidValue {
+                key: field_name.to_string(),
+                message: format!(
+                    "HTTPS URL points to a private/internal IP '{}'. \
+                     This is blocked to prevent SSRF attacks.",
+                    ip
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +316,44 @@ mod tests {
 
         // Now the runtime override is visible again
         assert_eq!(env_or_override(key), Some("override_value".to_string()));
+    }
+
+    // --- validate_base_url tests (regression for #1103) ---
+
+    #[test]
+    fn validate_base_url_allows_https() {
+        assert!(validate_base_url("https://api.example.com", "TEST").is_ok());
+        assert!(validate_base_url("https://api.example.com/v1", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_allows_http_localhost() {
+        assert!(validate_base_url("http://localhost:11434", "TEST").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:11434", "TEST").is_ok());
+        assert!(validate_base_url("http://[::1]:11434", "TEST").is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_http_remote() {
+        assert!(validate_base_url("http://evil.example.com", "TEST").is_err());
+        assert!(validate_base_url("http://192.168.1.1", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_non_http_schemes() {
+        assert!(validate_base_url("file:///etc/passwd", "TEST").is_err());
+        assert!(validate_base_url("ftp://evil.com", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_cloud_metadata() {
+        assert!(validate_base_url("https://169.254.169.254", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_private_ips() {
+        assert!(validate_base_url("https://10.0.0.1", "TEST").is_err());
+        assert!(validate_base_url("https://192.168.1.1", "TEST").is_err());
+        assert!(validate_base_url("https://172.16.0.1", "TEST").is_err());
     }
 }
