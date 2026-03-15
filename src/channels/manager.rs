@@ -56,6 +56,17 @@ impl ChannelManager {
     /// the agent loop.
     pub async fn hot_add(&self, channel: Box<dyn Channel>) -> Result<(), ChannelError> {
         let name = channel.name().to_string();
+
+        // Shut down any existing channel with the same name to avoid parallel consumers.
+        // The old forwarding task will stop when the channel's stream ends after shutdown.
+        {
+            let channels = self.channels.read().await;
+            if let Some(existing) = channels.get(&name) {
+                tracing::debug!(channel = %name, "Shutting down existing channel before hot-add replacement");
+                let _ = existing.shutdown().await;
+            }
+        }
+
         let stream = channel.start().await?;
 
         // Register for respond/broadcast/send_status
@@ -75,7 +86,7 @@ impl ChannelManager {
                     break;
                 }
             }
-            tracing::info!(channel = %name, "Hot-added channel stream ended");
+            tracing::debug!(channel = %name, "Hot-added channel stream ended");
         });
 
         Ok(())
@@ -92,7 +103,7 @@ impl ChannelManager {
         for (name, channel) in channels.iter() {
             match channel.start().await {
                 Ok(stream) => {
-                    tracing::info!("Started channel: {}", name);
+                    tracing::debug!("Started channel: {}", name);
                     streams.push(stream);
                 }
                 Err(e) => {
@@ -233,5 +244,134 @@ impl ChannelManager {
 impl Default for ChannelManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::channels::IncomingMessage;
+    use crate::testing::StubChannel;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn test_add_and_start_all() {
+        let manager = ChannelManager::new();
+        let (stub, sender) = StubChannel::new("test");
+
+        manager.add(Box::new(stub)).await;
+
+        let mut stream = manager.start_all().await.expect("start_all failed");
+
+        // Inject a message through the stub
+        sender
+            .send(IncomingMessage::new("test", "user1", "hello"))
+            .await
+            .expect("send failed");
+
+        // Should appear in the merged stream
+        let msg = stream.next().await.expect("stream ended");
+        assert_eq!(msg.content, "hello");
+        assert_eq!(msg.channel, "test");
+    }
+
+    #[tokio::test]
+    async fn test_respond_routes_to_correct_channel() {
+        let manager = ChannelManager::new();
+        let (stub, _sender) = StubChannel::new("alpha");
+
+        // Keep a reference for response inspection
+        let responses = stub.captured_responses_handle();
+        manager.add(Box::new(stub)).await;
+
+        let msg = IncomingMessage::new("alpha", "user1", "request");
+        manager
+            .respond(&msg, OutgoingResponse::text("reply"))
+            .await
+            .expect("respond failed");
+
+        // Verify the stub captured the response
+        let captured = responses.lock().expect("poisoned");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].1.content, "reply");
+    }
+
+    #[tokio::test]
+    async fn test_respond_unknown_channel_errors() {
+        let manager = ChannelManager::new();
+        let msg = IncomingMessage::new("nonexistent", "user1", "test");
+        let result = manager.respond(&msg, OutgoingResponse::text("hi")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_health_check_all() {
+        let manager = ChannelManager::new();
+        let (stub1, _) = StubChannel::new("healthy");
+        let (stub2, _) = StubChannel::new("sick");
+        stub2.set_healthy(false);
+
+        manager.add(Box::new(stub1)).await;
+        manager.add(Box::new(stub2)).await;
+
+        let results = manager.health_check_all().await;
+        assert!(results["healthy"].is_ok());
+        assert!(results["sick"].is_err());
+    }
+
+    #[tokio::test]
+    async fn test_start_all_no_channels_errors() {
+        let manager = ChannelManager::new();
+        let result = manager.start_all().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_injection_channel_merges() {
+        let manager = ChannelManager::new();
+        let (stub, _sender) = StubChannel::new("real");
+        manager.add(Box::new(stub)).await;
+
+        let mut stream = manager.start_all().await.expect("start_all failed");
+
+        // Use the injection channel (simulating background task)
+        let inject_tx = manager.inject_sender();
+        inject_tx
+            .send(IncomingMessage::new(
+                "injected",
+                "system",
+                "background alert",
+            ))
+            .await
+            .expect("inject failed");
+
+        let msg = stream.next().await.expect("stream ended");
+        assert_eq!(msg.content, "background alert");
+    }
+
+    #[tokio::test]
+    async fn test_hot_add_replaces_existing_channel() {
+        // Regression: hot_add must shut down the existing channel before replacing it,
+        // to prevent duplicate SSE consumers from running in parallel.
+        let manager = ChannelManager::new();
+        let (stub1, _tx1) = StubChannel::new("relay");
+        manager.add(Box::new(stub1)).await;
+        let mut stream = manager.start_all().await.expect("start_all");
+
+        // Hot-add a replacement channel with the same name
+        let (stub2, tx2) = StubChannel::new("relay");
+        manager.hot_add(Box::new(stub2)).await.expect("hot_add");
+
+        // Send through the new channel — should arrive in the merged stream
+        tx2.send(IncomingMessage::new("relay", "u1", "from new"))
+            .await
+            .expect("send");
+        let msg = stream.next().await.expect("stream");
+        assert_eq!(msg.content, "from new");
+
+        // Verify only one channel entry exists
+        let channels = manager.channels.read().await;
+        assert_eq!(channels.len(), 1);
+        assert!(channels.contains_key("relay"));
     }
 }

@@ -1,0 +1,71 @@
+{
+  "model_name": "advanced-steering",
+  "expects": {
+    "tools_used": ["write_file"],
+    "all_tools_succeeded": true
+  },
+  "turns": [
+    {
+      "user_input": "Write hello to /tmp/ironclaw_steer_test.txt",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "hello" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_wf_1",
+                "name": "write_file",
+                "arguments": {
+                  "path": "/tmp/ironclaw_steer_test.txt",
+                  "content": "hello"
+                }
+              }
+            ],
+            "input_tokens": 60,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Done, I wrote 'hello' to /tmp/ironclaw_steer_test.txt.",
+            "input_tokens": 80,
+            "output_tokens": 15
+          }
+        }
+      ]
+    },
+    {
+      "user_input": "Actually, change it to goodbye instead",
+      "steps": [
+        {
+          "request_hint": { "last_user_message_contains": "goodbye" },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_wf_2",
+                "name": "write_file",
+                "arguments": {
+                  "path": "/tmp/ironclaw_steer_test.txt",
+                  "content": "goodbye"
+                }
+              }
+            ],
+            "input_tokens": 100,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Updated the file to say 'goodbye'.",
+            "input_tokens": 120,
+            "output_tokens": 12
+          }
+        }
+      ]
+    }
+  ]
+}

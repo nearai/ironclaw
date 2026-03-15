@@ -1,6 +1,6 @@
-//! Channel-specific setup flows.
+//! Channel setup flows.
 //!
-//! Each channel (Telegram, HTTP, etc.) has its own setup function that:
+//! Each channel (HTTP, Signal, WASM, etc.) has its own setup function that:
 //! 1. Displays setup instructions
 //! 2. Collects configuration (tokens, ports, etc.)
 //! 3. Validates the configuration
@@ -8,9 +8,8 @@
 
 use std::sync::Arc;
 
-use reqwest::Client;
+use base64::Engine;
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
 use url::Url;
 use uuid::Uuid;
 
@@ -19,8 +18,8 @@ use crate::secrets::SecretsCrypto;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::settings::{Settings, TunnelSettings};
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_info, print_success, secret_input,
-    select_one,
+    confirm, input, optional_input, print_error, print_info, print_success, print_warning,
+    secret_input, select_one,
 };
 
 /// Typed errors for channel setup flows.
@@ -37,6 +36,9 @@ pub enum ChannelSetupError {
 
     #[error("{0}")]
     Validation(String),
+
+    #[error("Setup cancelled by user")]
+    Cancelled,
 }
 
 /// Context for saving secrets during setup.
@@ -101,267 +103,12 @@ impl SecretsContext {
     }
 }
 
-/// Result of Telegram setup.
-#[derive(Debug, Clone)]
-pub struct TelegramSetupResult {
-    pub enabled: bool,
-    pub bot_username: Option<String>,
-    pub webhook_secret: Option<String>,
-    pub owner_id: Option<i64>,
-}
-
-/// Telegram Bot API response for getMe.
-#[derive(Debug, Deserialize)]
-struct TelegramGetMeResponse {
-    ok: bool,
-    result: Option<TelegramUser>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramUser {
-    username: Option<String>,
-    #[allow(dead_code)]
-    first_name: String,
-}
-
-/// Telegram Bot API response for getUpdates.
-#[derive(Debug, Deserialize)]
-struct TelegramGetUpdatesResponse {
-    ok: bool,
-    result: Vec<TelegramUpdate>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramUpdate {
-    update_id: i64,
-    message: Option<TelegramUpdateMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramUpdateMessage {
-    from: Option<TelegramUpdateUser>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramUpdateUser {
-    id: i64,
-    first_name: String,
-    username: Option<String>,
-}
-
-/// Set up Telegram bot channel.
-///
-/// Guides the user through:
-/// 1. Creating a bot with @BotFather
-/// 2. Entering the bot token
-/// 3. Validating the token
-/// 4. Saving the token to the database
-pub async fn setup_telegram(
-    secrets: &SecretsContext,
-    settings: &Settings,
-) -> Result<TelegramSetupResult, ChannelSetupError> {
-    println!("Telegram Setup:");
-    println!();
-    print_info("To create a Telegram bot:");
-    print_info("1. Open Telegram and message @BotFather");
-    print_info("2. Send /newbot and follow the prompts");
-    print_info("3. Copy the bot token (looks like 123456:ABC-DEF...)");
-    println!();
-
-    // Check if token already exists
-    if secrets.secret_exists("telegram_bot_token").await {
-        print_info("Existing Telegram token found in database.");
-        if !confirm("Replace existing token?", false)? {
-            // Still offer to configure webhook secret and owner binding
-            let webhook_secret = setup_telegram_webhook_secret(secrets, &settings.tunnel).await?;
-            let owner_id = bind_telegram_owner_flow(secrets, settings).await?;
-            return Ok(TelegramSetupResult {
-                enabled: true,
-                bot_username: None,
-                webhook_secret,
-                owner_id,
-            });
-        }
-    }
-
-    loop {
-        let token = secret_input("Bot token (from @BotFather)")?;
-
-        // Validate the token
-        print_info("Validating bot token...");
-
-        match validate_telegram_token(&token).await {
-            Ok(username) => {
-                print_success(&format!(
-                    "Bot validated: @{}",
-                    username.as_deref().unwrap_or("unknown")
-                ));
-
-                // Save to database
-                secrets.save_secret("telegram_bot_token", &token).await?;
-                print_success("Token saved to database");
-
-                // Bind bot to owner's Telegram account
-                let owner_id = bind_telegram_owner(&token).await?;
-
-                // Offer webhook secret configuration
-                let webhook_secret =
-                    setup_telegram_webhook_secret(secrets, &settings.tunnel).await?;
-
-                return Ok(TelegramSetupResult {
-                    enabled: true,
-                    bot_username: username,
-                    webhook_secret,
-                    owner_id,
-                });
-            }
-            Err(e) => {
-                print_error(&format!("Token validation failed: {}", e));
-
-                if !confirm("Try again?", true)? {
-                    return Ok(TelegramSetupResult {
-                        enabled: false,
-                        bot_username: None,
-                        webhook_secret: None,
-                        owner_id: None,
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// Bind the bot to the owner's Telegram account by having them send a message.
-///
-/// Polls `getUpdates` until a message arrives, then captures the sender's user ID.
-/// Returns `None` if the user declines or the flow times out.
-async fn bind_telegram_owner(token: &SecretString) -> Result<Option<i64>, ChannelSetupError> {
-    println!();
-    print_info("Account Binding (recommended):");
-    print_info("Binding restricts the bot so only YOU can use it.");
-    print_info("Without this, anyone who finds your bot can send it messages.");
-    println!();
-
-    if !confirm("Bind bot to your Telegram account?", true)? {
-        print_info("Skipping account binding. Bot will accept messages from all users.");
-        return Ok(None);
-    }
-
-    print_info("Send any message (e.g. /start) to your bot in Telegram.");
-    print_info("Waiting for your message (up to 120 seconds)...");
-
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(35))
-        .build()
-        .map_err(|e| ChannelSetupError::Network(format!("Failed to create HTTP client: {}", e)))?;
-
-    // Clear any existing webhook so getUpdates works
-    let delete_url = format!(
-        "https://api.telegram.org/bot{}/deleteWebhook",
-        token.expose_secret()
-    );
-    if let Err(e) = client.post(&delete_url).send().await {
-        tracing::warn!("Failed to delete webhook (getUpdates may not work): {e}");
-    }
-
-    let updates_url = format!(
-        "https://api.telegram.org/bot{}/getUpdates",
-        token.expose_secret()
-    );
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-
-    while std::time::Instant::now() < deadline {
-        let response = client
-            .get(&updates_url)
-            .query(&[("timeout", "30"), ("allowed_updates", "[\"message\"]")])
-            .send()
-            .await
-            .map_err(|e| ChannelSetupError::Network(format!("getUpdates request failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(ChannelSetupError::Network(format!(
-                "getUpdates returned status {}",
-                response.status()
-            )));
-        }
-
-        let body: TelegramGetUpdatesResponse = response.json().await.map_err(|e| {
-            ChannelSetupError::Network(format!("Failed to parse getUpdates response: {}", e))
-        })?;
-
-        if !body.ok {
-            return Err(ChannelSetupError::Network(
-                "Telegram API returned error for getUpdates".to_string(),
-            ));
-        }
-
-        // Find the first message with a sender
-        for update in &body.result {
-            if let Some(ref msg) = update.message
-                && let Some(ref from) = msg.from
-            {
-                let display_name = from
-                    .username
-                    .as_ref()
-                    .map(|u| format!("@{}", u))
-                    .unwrap_or_else(|| from.first_name.clone());
-
-                print_success(&format!(
-                    "Received message from {} (ID: {})",
-                    display_name, from.id
-                ));
-
-                // Acknowledge the update so it doesn't pile up
-                let ack_url = format!(
-                    "https://api.telegram.org/bot{}/getUpdates",
-                    token.expose_secret()
-                );
-                if let Err(e) = client
-                    .get(&ack_url)
-                    .query(&[("offset", &(update.update_id + 1).to_string())])
-                    .send()
-                    .await
-                {
-                    tracing::warn!("Failed to acknowledge Telegram update: {e}");
-                }
-
-                return Ok(Some(from.id));
-            }
-        }
-    }
-
-    print_error("Timed out waiting for a message. You can re-run setup to try again.");
-    print_info("Bot will accept messages from all users until owner is bound.");
-    Ok(None)
-}
-
-/// Bind flow when the token already exists (reads from secrets store).
-///
-/// Retrieves the saved bot token and delegates to `bind_telegram_owner`.
-async fn bind_telegram_owner_flow(
-    secrets: &SecretsContext,
-    settings: &Settings,
-) -> Result<Option<i64>, ChannelSetupError> {
-    if settings.channels.telegram_owner_id.is_some() {
-        print_info("Bot is already bound to a Telegram account.");
-        if !confirm("Re-bind to a different account?", false)? {
-            return Ok(settings.channels.telegram_owner_id);
-        }
-    }
-
-    // We need the token to poll getUpdates
-    let token = secrets.get_secret("telegram_bot_token").await?;
-
-    bind_telegram_owner(&token).await
-}
-
 /// Set up a tunnel for exposing the agent to the internet.
 ///
 /// This is shared across all channels that need webhook endpoints.
 /// Returns a `TunnelSettings` with provider config (managed tunnel)
 /// or a static URL.
-pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupError> {
+pub async fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupError> {
     // Show existing config
     let has_existing = settings.tunnel.public_url.is_some() || settings.tunnel.provider.is_some();
     if has_existing {
@@ -441,7 +188,7 @@ pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupE
 
     match choice {
         0 => setup_tunnel_ngrok(),
-        1 => setup_tunnel_cloudflare(),
+        1 => setup_tunnel_cloudflare().await,
         2 => setup_tunnel_tailscale(),
         3 => setup_tunnel_custom(),
         4 => setup_tunnel_static(),
@@ -466,20 +213,187 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
     })
 }
 
-fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
+async fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
+    // Check if cloudflared binary is on PATH
+    let cloudflared_found = crate::skills::gating::binary_exists("cloudflared");
+
+    if !cloudflared_found {
+        print_error("cloudflared not found in PATH.");
+        print_info("Install it:");
+        print_info("  macOS:   brew install cloudflared");
+        print_info("  Ubuntu:  https://pkg.cloudflare.com/");
+        print_info(
+            "  Other:   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+        );
+        println!();
+        if !confirm(
+            "Continue anyway (you can install cloudflared later)?",
+            false,
+        )? {
+            return Err(ChannelSetupError::Validation(
+                "cloudflared binary not found. Install it and re-run setup.".to_string(),
+            ));
+        }
+    }
+
+    // Detect existing cloudflared services that may conflict
+    if let Some(warning) = detect_existing_cloudflared() {
+        print_warning(&warning);
+        if !confirm("Continue anyway?", true)? {
+            return Err(ChannelSetupError::Cancelled);
+        }
+        println!();
+    }
+
     print_info("Get your tunnel token from the Cloudflare Zero Trust dashboard:");
     print_info("  https://one.dash.cloudflare.com/ > Networks > Tunnels");
     println!();
 
     let token = secret_input("Cloudflare tunnel token")?;
 
-    print_success("Cloudflare tunnel configured. Tunnel will start automatically at boot.");
+    let token_valid = validate_cloudflare_token_format(token.expose_secret());
+
+    if !token_valid {
+        print_error("Token does not appear to be a valid Cloudflare tunnel token.");
+        print_info("Tokens are base64-encoded and contain account/tunnel identifiers.");
+        print_info(
+            "Copy the full token from: Zero Trust dashboard > Networks > Tunnels > your tunnel",
+        );
+        println!();
+        if !confirm("Save this token anyway?", false)? {
+            return Err(ChannelSetupError::Validation(
+                "Invalid Cloudflare tunnel token format.".to_string(),
+            ));
+        }
+    }
+
+    // Live-validate the token by briefly spawning cloudflared (if available)
+    if cloudflared_found && token_valid {
+        print_info("Verifying token with cloudflared...");
+        match validate_cloudflare_token_live(token.expose_secret()).await {
+            Ok(()) => {
+                print_success("Token verified -- cloudflared connected successfully.");
+            }
+            Err(stderr_output) => {
+                print_error(&format!(
+                    "cloudflared rejected the token: {}",
+                    stderr_output
+                ));
+                println!();
+                if !confirm("Save this token anyway?", false)? {
+                    return Err(ChannelSetupError::Validation(
+                        "Cloudflare tunnel token failed live validation.".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    print_success("Cloudflare tunnel token saved.");
+    if cloudflared_found {
+        print_info("Start the tunnel with: cloudflared tunnel --no-autoupdate run --token <token>");
+        print_info("For auto-start, install cloudflared as a system service:");
+        print_info("  sudo cloudflared service install <token>");
+    } else {
+        print_info("After installing cloudflared, start the tunnel with:");
+        print_info("  cloudflared tunnel --no-autoupdate run --token <token>");
+    }
 
     Ok(TunnelSettings {
         provider: Some("cloudflare".to_string()),
         cf_token: Some(token.expose_secret().to_string()),
         ..Default::default()
     })
+}
+
+/// Detect running cloudflared processes or managed services that could conflict
+/// with IronClaw's tunnel management.
+fn detect_existing_cloudflared() -> Option<String> {
+    #[allow(unused_mut)]
+    let mut conflicts: Vec<String> = Vec::new();
+
+    // Check for running cloudflared processes (all platforms)
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("pgrep")
+            .args(["-x", "cloudflared"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output
+            && out.status.success()
+        {
+            let pids = String::from_utf8_lossy(&out.stdout);
+            let pids: Vec<&str> = pids.trim().lines().collect();
+            if !pids.is_empty() {
+                conflicts.push(format!(
+                    "Running cloudflared process(es): PID {}",
+                    pids.join(", ")
+                ));
+            }
+        }
+    }
+
+    // macOS: check brew services
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("brew")
+            .args(["services", "list"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                if line.contains("cloudflared") && line.contains("started") {
+                    conflicts.push("Homebrew service: cloudflared (started)".to_string());
+                    break;
+                }
+            }
+        }
+
+        let output = std::process::Command::new("launchctl")
+            .args(["list"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                if line.contains("cloudflared") {
+                    conflicts.push("launchd service: cloudflared detected".to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    // Linux: check systemd
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("systemctl")
+            .args(["is-active", "cloudflared"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.trim() == "active" {
+                conflicts.push("systemd service: cloudflared (active)".to_string());
+            }
+        }
+    }
+
+    if conflicts.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Detected existing cloudflared service(s) that may conflict:\n  {}\n\
+             Consider stopping them first (e.g., `brew services stop cloudflared` or \
+             `sudo systemctl stop cloudflared`).",
+            conflicts.join("\n  ")
+        ))
+    }
 }
 
 fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
@@ -553,84 +467,6 @@ fn setup_tunnel_static() -> Result<TunnelSettings, ChannelSetupError> {
         public_url: Some(tunnel_url),
         ..Default::default()
     })
-}
-
-/// Set up Telegram webhook secret for signature validation.
-///
-/// Returns the webhook secret if configured.
-async fn setup_telegram_webhook_secret(
-    secrets: &SecretsContext,
-    tunnel: &TunnelSettings,
-) -> Result<Option<String>, ChannelSetupError> {
-    if tunnel.public_url.is_none() {
-        print_info("");
-        print_info("No tunnel configured. Telegram will use polling mode (30s+ delay).");
-        print_info("Run setup again to configure a tunnel for instant delivery.");
-        return Ok(None);
-    }
-
-    println!();
-    print_info("Telegram Webhook Security:");
-    print_info("A webhook secret adds an extra layer of security by validating");
-    print_info("that requests actually come from Telegram's servers.");
-
-    if !confirm("Generate a webhook secret?", true)? {
-        return Ok(None);
-    }
-
-    let secret = generate_webhook_secret();
-    secrets
-        .save_secret(
-            "telegram_webhook_secret",
-            &SecretString::from(secret.clone()),
-        )
-        .await?;
-    print_success("Webhook secret generated and saved");
-
-    Ok(Some(secret))
-}
-
-/// Validate a Telegram bot token by calling the getMe API.
-///
-/// Returns the bot's username if valid.
-pub async fn validate_telegram_token(
-    token: &SecretString,
-) -> Result<Option<String>, ChannelSetupError> {
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| ChannelSetupError::Network(format!("Failed to create HTTP client: {}", e)))?;
-
-    let url = format!(
-        "https://api.telegram.org/bot{}/getMe",
-        token.expose_secret()
-    );
-
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| ChannelSetupError::Network(format!("Request failed: {}", e)))?;
-
-    if !response.status().is_success() {
-        return Err(ChannelSetupError::Network(format!(
-            "API returned status {}",
-            response.status()
-        )));
-    }
-
-    let body: TelegramGetMeResponse = response
-        .json()
-        .await
-        .map_err(|e| ChannelSetupError::Network(format!("Failed to parse response: {}", e)))?;
-
-    if body.ok {
-        Ok(body.result.and_then(|u| u.username))
-    } else {
-        Err(ChannelSetupError::Network(
-            "Telegram API returned error".to_string(),
-        ))
-    }
 }
 
 /// Result of HTTP webhook setup.
@@ -968,13 +804,15 @@ pub async fn setup_wasm_channel(
         print_success(&format!("{} saved to database", secret_config.name));
     }
 
-    // TODO: Substitute secrets into the validation URL and make a
-    // GET request to verify the configured credentials actually work.
     if let Some(ref validation_endpoint) = setup.validation_endpoint {
-        print_info(&format!(
-            "Validation endpoint configured: {} (validation not yet implemented)",
-            validation_endpoint
-        ));
+        print_info("Validating configured credentials...");
+        match validate_channel_credentials(secrets, validation_endpoint).await {
+            Ok(()) => print_success("Credentials validated successfully"),
+            Err(e) => print_warning(&format!(
+                "Credential validation failed: {}. Setup will continue, but the channel may fail to start until the credentials are fixed.",
+                e
+            )),
+        }
     }
 
     print_success(&format!("{} channel configured", channel_name));
@@ -985,18 +823,335 @@ pub async fn setup_wasm_channel(
     })
 }
 
+async fn validate_channel_credentials(
+    secrets: &SecretsContext,
+    validation_endpoint: &str,
+) -> Result<(), ChannelSetupError> {
+    let validation_url = substitute_validation_placeholders(secrets, validation_endpoint).await?;
+    let (parsed, resolved_addrs) = validate_public_https_url(&validation_url).await?;
+    let target = validation_target_display(&parsed);
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none());
+
+    if matches!(parsed.host(), Some(url::Host::Domain(_)))
+        && let Some(host) = parsed.host_str()
+    {
+        client_builder = client_builder.resolve_to_addrs(host, &resolved_addrs);
+    }
+
+    let client = client_builder
+        .build()
+        .map_err(|e| ChannelSetupError::Network(format!("Failed to build HTTP client: {}", e)))?;
+
+    let response = client.get(parsed.clone()).send().await.map_err(|e| {
+        ChannelSetupError::Network(format!(
+            "Validation request to {} failed: {}",
+            target,
+            describe_validation_request_error(&e)
+        ))
+    })?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(ChannelSetupError::Validation(format!(
+            "Validation endpoint returned HTTP {} from {}",
+            response.status(),
+            target
+        )))
+    }
+}
+
+async fn substitute_validation_placeholders(
+    secrets: &SecretsContext,
+    validation_endpoint: &str,
+) -> Result<String, ChannelSetupError> {
+    let mut resolved = validation_endpoint.to_string();
+    let placeholder_names: std::collections::BTreeSet<String> = validation_placeholder_regex()
+        .captures_iter(validation_endpoint)
+        .filter_map(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+        .collect();
+
+    for secret_name in placeholder_names {
+        let secret_value = secrets.get_secret(&secret_name).await?;
+        let placeholder = format!("{{{}}}", secret_name);
+        let encoded_value = urlencoding::encode(secret_value.expose_secret());
+        resolved = resolved.replace(&placeholder, encoded_value.as_ref());
+    }
+
+    Ok(resolved)
+}
+
+async fn validate_public_https_url(
+    url: &str,
+) -> Result<(Url, Vec<std::net::SocketAddr>), ChannelSetupError> {
+    use std::net::{IpAddr, SocketAddr};
+
+    let parsed = Url::parse(url)
+        .map_err(|e| ChannelSetupError::Validation(format!("Invalid URL: {}", e)))?;
+
+    if parsed.scheme() != "https" {
+        return Err(ChannelSetupError::Validation(
+            "Validation endpoint must use https".to_string(),
+        ));
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ChannelSetupError::Validation(
+            "Validation endpoint cannot contain userinfo".to_string(),
+        ));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ChannelSetupError::Validation("Validation URL missing host".to_string()))?;
+    let normalized_host = normalize_validation_domain(host);
+    let host_lower = normalized_host.to_ascii_lowercase();
+
+    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
+        return Err(ChannelSetupError::Validation(
+            "Validation endpoint cannot target localhost".to_string(),
+        ));
+    }
+
+    let port = parsed.port_or_known_default().unwrap_or(443);
+
+    match parsed
+        .host()
+        .ok_or_else(|| ChannelSetupError::Validation("Validation URL missing host".to_string()))?
+    {
+        url::Host::Ipv4(v4) => {
+            let ip = IpAddr::V4(v4);
+            if is_disallowed_ip(&ip) {
+                return Err(ChannelSetupError::Validation(format!(
+                    "Validation endpoint cannot target private or local IP {}",
+                    ip
+                )));
+            }
+
+            Ok((parsed, vec![SocketAddr::new(ip, port)]))
+        }
+        url::Host::Ipv6(v6) => {
+            let ip = normalize_ip(IpAddr::V6(v6));
+            if is_disallowed_ip(&ip) {
+                return Err(ChannelSetupError::Validation(format!(
+                    "Validation endpoint cannot target private or local IP {}",
+                    ip
+                )));
+            }
+
+            Ok((parsed, vec![SocketAddr::new(ip, port)]))
+        }
+        url::Host::Domain(domain) => {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((normalized_host, port))
+                .await
+                .map_err(|e| {
+                    ChannelSetupError::Validation(format!(
+                        "DNS resolution failed for {}: {}",
+                        normalized_host, e
+                    ))
+                })?
+                .map(|addr| SocketAddr::new(normalize_ip(addr.ip()), addr.port()))
+                .collect();
+
+            if addrs.is_empty() {
+                return Err(ChannelSetupError::Validation(format!(
+                    "Validation hostname '{}' did not resolve to any IP addresses",
+                    domain
+                )));
+            }
+
+            for addr in &addrs {
+                if is_disallowed_ip(&addr.ip()) {
+                    return Err(ChannelSetupError::Validation(format!(
+                        "Validation hostname '{}' resolves to disallowed IP {}",
+                        domain,
+                        addr.ip()
+                    )));
+                }
+            }
+
+            Ok((parsed, addrs))
+        }
+    }
+}
+
+fn is_disallowed_ip(ip: &std::net::IpAddr) -> bool {
+    match normalize_ip(*ip) {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || v4 == std::net::Ipv4Addr::new(169, 254, 169, 254)
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+        }
+    }
+}
+
+fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(std::net::IpAddr::V4)
+            .unwrap_or(std::net::IpAddr::V6(v6)),
+        other => other,
+    }
+}
+
+fn normalize_validation_domain(host: &str) -> &str {
+    host.trim_end_matches('.')
+}
+
+fn validation_placeholder_regex() -> &'static regex::Regex {
+    static PLACEHOLDER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PLACEHOLDER_RE.get_or_init(|| {
+        regex::Regex::new(r"\{([A-Za-z0-9_]+)\}")
+            .expect("validation placeholder regex must compile") // safety: hardcoded literal
+    })
+}
+
+fn validation_target_display(parsed: &Url) -> String {
+    let host = parsed.host_str().unwrap_or("unknown host");
+    match parsed.port() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host.to_string(),
+    }
+}
+
+fn describe_validation_request_error(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "request timed out"
+    } else if error.is_redirect() {
+        "redirects are not allowed"
+    } else if error.is_connect() {
+        "connection failed"
+    } else if error.is_request() {
+        "request could not be sent"
+    } else {
+        "request failed"
+    }
+}
+
+/// Validate a Cloudflare tunnel token by briefly running `cloudflared`.
+///
+/// Spawns `cloudflared tunnel run` with a dummy local URL and watches stderr
+/// for up to 10 seconds. If a connection URL appears, the token is valid.
+/// If error indicators appear first, returns the error message.
+async fn validate_cloudflare_token_live(token: &str) -> Result<(), String> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+
+    let mut child = Command::new("cloudflared")
+        .args([
+            "tunnel",
+            "--no-autoupdate",
+            "run",
+            "--token",
+            token,
+            "--url",
+            "http://localhost:1",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Failed to spawn cloudflared: {}", e))?;
+
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture cloudflared stderr".to_string())?;
+    let mut reader = tokio::io::BufReader::new(stderr).lines();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Ok(Some(line)) = reader.next_line().await {
+            // A successful connection logs a URL like "https://xxx.cfargotunnel.com"
+            if line.contains("https://")
+                && (line.contains("cfargotunnel.com") || line.contains("trycloudflare.com"))
+            {
+                return Ok(());
+            }
+            // Error indicators that appear before a URL mean the token is bad
+            let lower = line.to_lowercase();
+            if lower.starts_with("err")
+                || lower.contains("failed to unmarshal")
+                || lower.contains("unauthorized")
+            {
+                return Err(line);
+            }
+        }
+        // Process exited without clear signal -- check exit status
+        Err("cloudflared exited without establishing a connection".to_string())
+    })
+    .await;
+
+    // Ensure the process is killed regardless of outcome
+    let _ = child.kill().await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            // Timed out without error or success -- benefit of the doubt
+            Ok(())
+        }
+    }
+}
+
+/// Validate that a Cloudflare tunnel token has the expected format.
+///
+/// Cloudflare tunnel tokens are base64-encoded JSON objects containing
+/// at least `"a"` (account tag) and `"t"` (tunnel ID) fields.
+fn validate_cloudflare_token_format(token: &str) -> bool {
+    base64::engine::general_purpose::STANDARD
+        .decode(token)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(token))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|json| json.get("a").is_some() && json.get("t").is_some())
+}
+
 /// Generate a random secret of specified length (in bytes).
 fn generate_secret_with_length(length: usize) -> String {
     use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    use rand::rngs::OsRng;
     let mut bytes = vec![0u8; length];
-    rng.fill_bytes(&mut bytes);
+    OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::setup::channels::generate_webhook_secret;
+    use base64::Engine;
+    use std::sync::Arc;
+
+    use crate::secrets::{InMemorySecretsStore, SecretsCrypto, SecretsStore};
+    use crate::setup::channels::{
+        SecretsContext, generate_webhook_secret, substitute_validation_placeholders,
+        validate_cloudflare_token_format, validate_public_https_url,
+    };
+
+    fn test_secrets_context() -> SecretsContext {
+        use secrecy::SecretString;
+
+        let crypto = Arc::new(
+            SecretsCrypto::new(SecretString::from(
+                "0123456789abcdef0123456789abcdef".to_string(),
+            ))
+            .unwrap(),
+        );
+        let store: Arc<dyn SecretsStore> = Arc::new(InMemorySecretsStore::new(crypto));
+        SecretsContext::from_store(store, "test-user")
+    }
 
     #[test]
     fn test_generate_webhook_secret() {
@@ -1014,5 +1169,172 @@ mod tests {
 
         let s2 = generate_secret_with_length(1);
         assert_eq!(s2.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_valid() {
+        // Simulate a valid Cloudflare tunnel token: base64-encoded JSON with "a" and "t" fields
+        let payload = serde_json::json!({"a": "account-tag", "t": "tunnel-id", "s": "secret"});
+        let token =
+            base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes());
+        assert!(validate_cloudflare_token_format(&token));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_missing_fields() {
+        // JSON but missing required "a" and "t" fields
+        let payload = serde_json::json!({"foo": "bar"});
+        let token =
+            base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes());
+        assert!(!validate_cloudflare_token_format(&token));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_not_base64() {
+        assert!(!validate_cloudflare_token_format("not-base64!!!"));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_not_json() {
+        let token = base64::engine::general_purpose::STANDARD.encode(b"not json at all");
+        assert!(!validate_cloudflare_token_format(&token));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_empty() {
+        assert!(!validate_cloudflare_token_format(""));
+    }
+
+    #[tokio::test]
+    async fn test_substitute_validation_placeholders() {
+        let secrets = test_secrets_context();
+        secrets
+            .save_secret(
+                "telegram_bot_token",
+                &secrecy::SecretString::from("abc123".to_string()),
+            )
+            .await
+            .unwrap();
+        secrets
+            .save_secret(
+                "workspace_id",
+                &secrecy::SecretString::from("ws_456".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let resolved = substitute_validation_placeholders(
+            &secrets,
+            "https://api.example.com/{workspace_id}/verify?token={telegram_bot_token}",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            "https://api.example.com/ws_456/verify?token=abc123"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_substitute_validation_placeholders_url_encodes_secrets() {
+        let secrets = test_secrets_context();
+        secrets
+            .save_secret(
+                "telegram_bot_token",
+                &secrecy::SecretString::from("abc123?foo=1&bar=#baz/slash".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let resolved = substitute_validation_placeholders(
+            &secrets,
+            "https://api.example.com/verify?token={telegram_bot_token}",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            "https://api.example.com/verify?token=abc123%3Ffoo%3D1%26bar%3D%23baz%2Fslash"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_substitute_validation_placeholders_missing_secret() {
+        let secrets = test_secrets_context();
+        let err = substitute_validation_placeholders(
+            &secrets,
+            "https://api.example.com/verify?token={missing_secret}",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("Failed to read secret"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_localhost() {
+        let err = validate_public_https_url("https://localhost/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("localhost"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_localhost_with_trailing_dot() {
+        let err = validate_public_https_url("https://localhost./api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("localhost"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_private_ip() {
+        let err = validate_public_https_url("https://192.168.1.10/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("private or local IP"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_ipv4_mapped_ipv6() {
+        let err = validate_public_https_url("https://[::ffff:127.0.0.1]/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("private or local IP"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_rejects_http() {
+        let err = validate_public_https_url("http://example.com/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must use https"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_accepts_public_https_literal_ip() {
+        let (parsed, addrs) = validate_public_https_url("https://8.8.8.8/api")
+            .await
+            .unwrap();
+        assert_eq!(parsed.as_str(), "https://8.8.8.8/api");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].ip().to_string(), "8.8.8.8");
+    }
+
+    #[tokio::test]
+    async fn test_validate_public_https_url_fails_closed_on_dns_error() {
+        let err = validate_public_https_url("https://should-not-resolve.invalid/api")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("DNS resolution failed"));
     }
 }

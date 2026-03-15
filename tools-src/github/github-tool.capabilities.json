@@ -1,5 +1,12 @@
 {
+  "version": "0.2.1",
+  "wit_version": "0.3.0",
   "capabilities": {
+    "webhook": {
+      "hmac_secret_name": "github_webhook_secret",
+      "hmac_signature_header": "x-hub-signature-256",
+      "hmac_prefix": "sha256="
+    },
     "http": {
       "allowlist": [
         {
@@ -7,7 +14,8 @@
           "path_prefix": "/",
           "methods": [
             "GET",
-            "POST"
+            "POST",
+            "PUT"
           ]
         }
       ],
@@ -33,6 +41,22 @@
         "github_*"
       ]
     }
+  },
+  "auth": {
+    "secret_name": "github_token",
+    "display_name": "GitHub",
+    "instructions": "Create a Personal Access Token at github.com/settings/tokens with repo scope, then paste it here.",
+    "setup_url": "https://github.com/settings/tokens",
+    "token_hint": "Starts with 'ghp_' or 'github_pat_'",
+    "env_var": "GITHUB_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "github_token",
+        "prompt": "GitHub Personal Access Token (create one at github.com/settings/tokens with 'repo' scope)"
+      }
+    ]
   },
   "config": {
     "default_limit": 30,

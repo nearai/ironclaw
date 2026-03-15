@@ -1,4 +1,6 @@
 {
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "http": {
     "allowlist": [
       {
@@ -46,5 +48,17 @@
     "setup_url": "https://api.slack.com/apps",
     "token_hint": "Starts with 'xoxb-'",
     "env_var": "SLACK_BOT_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "slack_oauth_client_id",
+        "prompt": "Slack OAuth Client ID (from api.slack.com/apps)"
+      },
+      {
+        "name": "slack_oauth_client_secret",
+        "prompt": "Slack OAuth Client Secret"
+      }
+    ]
   }
 }

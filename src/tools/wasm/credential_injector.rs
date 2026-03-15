@@ -77,7 +77,7 @@ impl SharedCredentialRegistry {
         }
     }
 
-    /// Add credential mappings (called when WASM tools register).
+    /// Add credential mappings tagged with an extension name (called when WASM tools register).
     pub fn add_mappings(&self, mappings: impl IntoIterator<Item = CredentialMapping>) {
         match self.mappings.write() {
             Ok(mut guard) => {
@@ -91,6 +91,23 @@ impl SharedCredentialRegistry {
                 guard.extend(mappings);
             }
         }
+    }
+
+    /// Remove all credential mappings whose `secret_name` matches any of the given names.
+    ///
+    /// Called when an extension is unregistered/deactivated so its credential
+    /// injection authority does not outlive the extension.
+    pub fn remove_mappings_for_secrets(&self, secret_names: &[String]) {
+        let mut guard = match self.mappings.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during remove_mappings_for_secrets; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.retain(|m| !secret_names.contains(&m.secret_name));
     }
 
     /// Check if any credential mapping matches this host (sync, for requires_approval).
@@ -235,14 +252,16 @@ impl CredentialInjector {
         Ok(result)
     }
 
-    /// Check if a secret name is in the allowed list.
+    /// Check if a secret name is in the allowed list (case-insensitive).
     fn is_secret_allowed(&self, name: &str) -> bool {
+        let name_lower = name.to_lowercase();
         for pattern in &self.allowed_secrets {
-            if pattern == name {
+            let pattern_lower = pattern.to_lowercase();
+            if pattern_lower == name_lower {
                 return true;
             }
-            if let Some(prefix) = pattern.strip_suffix('*')
-                && name.starts_with(prefix)
+            if let Some(prefix) = pattern_lower.strip_suffix('*')
+                && name_lower.starts_with(prefix)
             {
                 return true;
             }
@@ -346,22 +365,18 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use secrecy::SecretString;
 
     use crate::secrets::{
         CreateSecretParams, CredentialLocation, CredentialMapping, InMemorySecretsStore,
-        SecretsCrypto, SecretsStore,
+        SecretsStore,
     };
+    use crate::testing::credentials::{TEST_OPENAI_API_KEY, test_secrets_store};
     use crate::tools::wasm::credential_injector::{
         CredentialInjector, base64_encode, host_matches_pattern,
     };
 
     fn test_store() -> InMemorySecretsStore {
-        let key = "0123456789abcdef0123456789abcdef";
-        let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key.to_string())).unwrap());
-        InMemorySecretsStore::new(crypto)
+        test_secrets_store()
     }
 
     #[test]
@@ -387,7 +402,10 @@ mod tests {
     async fn test_inject_bearer() {
         let store = test_store();
         store
-            .create("user1", CreateSecretParams::new("openai_key", "sk-test123"))
+            .create(
+                "user1",
+                CreateSecretParams::new("openai_key", TEST_OPENAI_API_KEY),
+            )
             .await
             .unwrap();
 
@@ -409,7 +427,7 @@ mod tests {
 
         assert_eq!(
             result.headers.get("Authorization"),
-            Some(&"Bearer sk-test123".to_string())
+            Some(&format!("Bearer {TEST_OPENAI_API_KEY}"))
         );
     }
 
@@ -560,6 +578,36 @@ mod tests {
 
         let found = registry.find_for_host("api.example.com");
         assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn test_shared_registry_remove_mappings_for_secrets() {
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![
+            CredentialMapping::bearer("openai_key", "api.openai.com"),
+            CredentialMapping::bearer("gh_token", "*.github.com"),
+            CredentialMapping::header("openai_org", "OpenAI-Organization", "api.openai.com"),
+        ]);
+
+        assert_eq!(registry.find_for_host("api.openai.com").len(), 2);
+        assert!(registry.has_credentials_for_host("api.github.com"));
+
+        // Remove only mappings for openai secrets
+        registry.remove_mappings_for_secrets(&["openai_key".to_string(), "openai_org".to_string()]);
+
+        // OpenAI mappings should be gone
+        assert!(registry.find_for_host("api.openai.com").is_empty());
+        // GitHub mapping should remain
+        assert!(registry.has_credentials_for_host("api.github.com"));
+    }
+
+    #[test]
+    fn test_shared_registry_remove_nonexistent_is_noop() {
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![CredentialMapping::bearer("key1", "api.example.com")]);
+
+        registry.remove_mappings_for_secrets(&["nonexistent".to_string()]);
+        assert_eq!(registry.find_for_host("api.example.com").len(), 1);
     }
 
     #[test]

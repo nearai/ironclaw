@@ -9,6 +9,18 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::llm::recording::HttpInterceptor;
+
+/// Error returned when a job exceeds its token budget.
+#[derive(Debug, thiserror::Error)]
+#[error("Token budget exceeded: used {used} of {limit} allowed tokens")]
+pub struct TokenBudgetExceeded {
+    /// Total tokens consumed (including the call that exceeded the budget).
+    pub used: u64,
+    /// Configured token limit for this job.
+    pub limit: u64,
+}
+
 /// State of a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,6 +158,24 @@ pub struct JobContext {
     /// Wrapped in `Arc` for cheap cloning on every tool invocation.
     #[serde(skip)]
     pub extra_env: Arc<HashMap<String, String>>,
+    /// Optional HTTP interceptor for trace recording/replay.
+    ///
+    /// When set, tools that make outgoing HTTP requests should check this
+    /// interceptor before sending real requests. During recording, the
+    /// interceptor captures request/response pairs. During replay, it
+    /// returns pre-recorded responses.
+    #[serde(skip)]
+    pub http_interceptor: Option<Arc<dyn HttpInterceptor>>,
+    /// Stash of full tool outputs keyed by tool_call_id.
+    ///
+    /// Tool outputs may be truncated before reaching the LLM context window,
+    /// but subsequent tools (e.g., `json`) may need the full output. This
+    /// stash stores the complete, unsanitized output so tools can reference
+    /// previous results by ID via `$tool_call_id` parameter syntax.
+    #[serde(skip)]
+    pub tool_output_stash: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    /// User's preferred timezone (IANA name, e.g. "America/New_York"). Defaults to "UTC".
+    pub user_timezone: String,
 }
 
 impl JobContext {
@@ -182,8 +212,17 @@ impl JobContext {
             repair_attempts: 0,
             transitions: Vec::new(),
             extra_env: Arc::new(HashMap::new()),
+            http_interceptor: None,
             metadata: serde_json::Value::Null,
+            tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            user_timezone: "UTC".to_string(),
         }
+    }
+
+    /// Set the user timezone on this context.
+    pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
+        self.user_timezone = tz.into();
+        self
     }
 
     /// Transition to a new state.
@@ -236,15 +275,15 @@ impl JobContext {
         self.actual_cost += cost;
     }
 
-    /// Record token usage from an LLM call. Returns an error string if the
-    /// token budget has been exceeded after this addition.
-    pub fn add_tokens(&mut self, tokens: u64) -> Result<(), String> {
+    /// Record token usage from an LLM call. Returns an error if the token
+    /// budget has been exceeded after this addition.
+    pub fn add_tokens(&mut self, tokens: u64) -> Result<(), TokenBudgetExceeded> {
         self.total_tokens_used += tokens;
         if self.max_tokens > 0 && self.total_tokens_used > self.max_tokens {
-            Err(format!(
-                "Token budget exceeded: used {} of {} allowed tokens",
-                self.total_tokens_used, self.max_tokens
-            ))
+            Err(TokenBudgetExceeded {
+                used: self.total_tokens_used,
+                limit: self.max_tokens,
+            })
         } else {
             Ok(())
         }

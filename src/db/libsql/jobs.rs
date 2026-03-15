@@ -12,7 +12,7 @@ use super::{
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::JobStore;
 use crate::error::DatabaseError;
-use crate::history::LlmCallRecord;
+use crate::history::{AgentJobRecord, AgentJobSummary, LlmCallRecord};
 
 use chrono::Utc;
 
@@ -28,18 +28,23 @@ impl JobStore for LibSqlBackend {
                 r#"
                 INSERT INTO agent_jobs (
                     id, conversation_id, title, description, category, status, source,
+                    user_id,
                     budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                    actual_cost, repair_attempts, created_at, started_at, completed_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                    actual_cost, repair_attempts, max_tokens, total_tokens_used,
+                    created_at, started_at, completed_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
                 ON CONFLICT (id) DO UPDATE SET
                     title = excluded.title,
                     description = excluded.description,
                     category = excluded.category,
                     status = excluded.status,
+                    user_id = excluded.user_id,
                     estimated_cost = excluded.estimated_cost,
                     estimated_time_secs = excluded.estimated_time_secs,
                     actual_cost = excluded.actual_cost,
                     repair_attempts = excluded.repair_attempts,
+                    max_tokens = excluded.max_tokens,
+                    total_tokens_used = excluded.total_tokens_used,
                     started_at = excluded.started_at,
                     completed_at = excluded.completed_at
                 "#,
@@ -51,6 +56,7 @@ impl JobStore for LibSqlBackend {
                     opt_text(ctx.category.as_deref()),
                     status,
                     "direct",
+                    ctx.user_id.as_str(),
                     opt_text_owned(ctx.budget.map(|d| d.to_string())),
                     opt_text(ctx.budget_token.as_deref()),
                     opt_text_owned(ctx.bid_amount.map(|d| d.to_string())),
@@ -58,6 +64,8 @@ impl JobStore for LibSqlBackend {
                     estimated_time_secs,
                     ctx.actual_cost.to_string(),
                     ctx.repair_attempts as i64,
+                    ctx.max_tokens as i64,
+                    ctx.total_tokens_used as i64,
                     fmt_ts(&ctx.created_at),
                     fmt_opt_ts(&ctx.started_at),
                     fmt_opt_ts(&ctx.completed_at),
@@ -75,7 +83,8 @@ impl JobStore for LibSqlBackend {
                 r#"
                 SELECT id, conversation_id, title, description, category, status, user_id,
                        budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                       actual_cost, repair_attempts, created_at, started_at, completed_at
+                       actual_cost, repair_attempts, max_tokens, total_tokens_used,
+                       created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = ?1
                 "#,
                 params![id.to_string()],
@@ -108,15 +117,22 @@ impl JobStore for LibSqlBackend {
                     estimated_duration: estimated_time_secs
                         .map(|s| std::time::Duration::from_secs(s as u64)),
                     actual_cost: get_decimal(&row, 12),
-                    total_tokens_used: 0,
-                    max_tokens: 0,
+                    max_tokens: get_i64(&row, 14) as u64,
+                    total_tokens_used: get_i64(&row, 15) as u64,
                     repair_attempts: get_i64(&row, 13) as u32,
-                    created_at: get_ts(&row, 14),
-                    started_at: get_opt_ts(&row, 15),
-                    completed_at: get_opt_ts(&row, 16),
+                    created_at: get_ts(&row, 16),
+                    started_at: get_opt_ts(&row, 17),
+                    completed_at: get_opt_ts(&row, 18),
                     transitions: Vec::new(),
                     metadata: serde_json::Value::Null,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
+                    http_interceptor: None,
+                    tool_output_stash: std::sync::Arc::new(tokio::sync::RwLock::new(
+                        std::collections::HashMap::new(),
+                    )),
+                    // TODO(#661): persist user_timezone in agent_jobs table so
+                    // background/routine jobs retain the session's timezone context.
+                    user_timezone: "UTC".to_string(),
                 }))
             }
             None => Ok(None),
@@ -171,6 +187,93 @@ impl JobStore for LibSqlBackend {
             }
         }
         Ok(ids)
+    }
+
+    async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, failure_reason,
+                       created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'direct'
+                ORDER BY created_at DESC
+                "#,
+                (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut jobs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let id_str = get_text(&row, 0);
+            let Ok(id) = id_str.parse() else {
+                tracing::warn!("Skipping agent job with invalid UUID: {}", id_str);
+                continue;
+            };
+            jobs.push(AgentJobRecord {
+                id,
+                title: get_text(&row, 1),
+                status: get_text(&row, 2),
+                user_id: get_text(&row, 3),
+                failure_reason: get_opt_text(&row, 4),
+                created_at: get_ts(&row, 5),
+                started_at: get_opt_ts(&row, 6),
+                completed_at: get_opt_ts(&row, 7),
+            });
+        }
+        Ok(jobs)
+    }
+
+    async fn get_agent_job_failure_reason(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT failure_reason FROM agent_jobs WHERE id = ?1",
+                [id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Ok(get_opt_text(&row, 0))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' GROUP BY status",
+                (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut summary = AgentJobSummary::default();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let status = get_text(&row, 0);
+            let count = get_i64(&row, 1) as usize;
+            summary.add_count(&status, count);
+        }
+        Ok(summary)
     }
 
     async fn save_action(&self, job_id: Uuid, action: &ActionRecord) -> Result<(), DatabaseError> {

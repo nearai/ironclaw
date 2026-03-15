@@ -8,7 +8,7 @@
 //! ┌──────────┐     ┌─────────┐     ┌──────────────────┐
 //! │  Trigger  │────▶│ Engine  │────▶│  Execution Mode  │
 //! │ cron/event│     │guardrail│     │lightweight│full_job│
-//! │ webhook   │     │ check   │     └──────────────────┘
+//! │ system    │     │ check   │     └──────────────────┘
 //! │ manual    │     └─────────┘              │
 //! └──────────┘                               ▼
 //!                                     ┌──────────────┐
@@ -57,7 +57,11 @@ pub struct Routine {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Trigger {
     /// Fire on a cron schedule (e.g. "0 9 * * MON-FRI" or "every 2h").
-    Cron { schedule: String },
+    Cron {
+        schedule: String,
+        #[serde(default)]
+        timezone: Option<String>,
+    },
     /// Fire when a channel message matches a pattern.
     Event {
         /// Optional channel filter (e.g. "telegram", "slack").
@@ -65,12 +69,15 @@ pub enum Trigger {
         /// Regex pattern to match against message content.
         pattern: String,
     },
-    /// Fire on incoming webhook POST to /hooks/routine/{id}.
-    Webhook {
-        /// Optional webhook path suffix (defaults to routine id).
-        path: Option<String>,
-        /// Optional shared secret for HMAC validation.
-        secret: Option<String>,
+    /// Fire when a structured system event is emitted.
+    SystemEvent {
+        /// Event source namespace (e.g. "github", "workflow", "tool").
+        source: String,
+        /// Event type within the source (e.g. "issue.opened").
+        event_type: String,
+        /// Optional exact-match filters against payload top-level fields.
+        #[serde(default)]
+        filters: std::collections::HashMap<String, String>,
     },
     /// Only fires via tool call or CLI.
     Manual,
@@ -82,7 +89,7 @@ impl Trigger {
         match self {
             Trigger::Cron { .. } => "cron",
             Trigger::Event { .. } => "event",
-            Trigger::Webhook { .. } => "webhook",
+            Trigger::SystemEvent { .. } => "system_event",
             Trigger::Manual => "manual",
         }
     }
@@ -99,7 +106,21 @@ impl Trigger {
                         field: "schedule".into(),
                     })?
                     .to_string();
-                Ok(Trigger::Cron { schedule })
+                let timezone = config
+                    .get("timezone")
+                    .and_then(|v| v.as_str())
+                    .and_then(|tz| {
+                        if crate::timezone::parse_timezone(tz).is_some() {
+                            Some(tz.to_string())
+                        } else {
+                            tracing::warn!(
+                                "Ignoring invalid timezone '{}' from DB for cron trigger",
+                                tz
+                            );
+                            None
+                        }
+                    });
+                Ok(Trigger::Cron { schedule, timezone })
             }
             "event" => {
                 let pattern = config
@@ -116,16 +137,39 @@ impl Trigger {
                     .map(String::from);
                 Ok(Trigger::Event { channel, pattern })
             }
-            "webhook" => {
-                let path = config
-                    .get("path")
+            "system_event" => {
+                let source = config
+                    .get("source")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
-                let secret = config
-                    .get("secret")
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "system_event trigger".into(),
+                        field: "source".into(),
+                    })?
+                    .to_string();
+                let event_type = config
+                    .get("event_type")
                     .and_then(|v| v.as_str())
-                    .map(String::from);
-                Ok(Trigger::Webhook { path, secret })
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "system_event trigger".into(),
+                        field: "event_type".into(),
+                    })?
+                    .to_string();
+                let filters = config
+                    .get("filters")
+                    .and_then(|v| v.as_object())
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| {
+                                json_value_as_filter_string(v).map(|s| (k.clone(), s))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(Trigger::SystemEvent {
+                    source,
+                    event_type,
+                    filters,
+                })
             }
             "manual" => Ok(Trigger::Manual),
             other => Err(RoutineError::UnknownTriggerType {
@@ -137,14 +181,22 @@ impl Trigger {
     /// Serialize trigger-specific config to JSON for DB storage.
     pub fn to_config_json(&self) -> serde_json::Value {
         match self {
-            Trigger::Cron { schedule } => serde_json::json!({ "schedule": schedule }),
+            Trigger::Cron { schedule, timezone } => serde_json::json!({
+                "schedule": schedule,
+                "timezone": timezone,
+            }),
             Trigger::Event { channel, pattern } => serde_json::json!({
                 "pattern": pattern,
                 "channel": channel,
             }),
-            Trigger::Webhook { path, secret } => serde_json::json!({
-                "path": path,
-                "secret": secret,
+            Trigger::SystemEvent {
+                source,
+                event_type,
+                filters,
+            } => serde_json::json!({
+                "source": source,
+                "event_type": event_type,
+                "filters": filters,
             }),
             Trigger::Manual => serde_json::json!({}),
         }
@@ -155,7 +207,7 @@ impl Trigger {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RoutineAction {
-    /// Single LLM call, no tools. Cheap and fast.
+    /// Single LLM call (optionally with tools). Cheap and fast.
     Lightweight {
         /// The prompt sent to the LLM.
         prompt: String,
@@ -165,6 +217,14 @@ pub enum RoutineAction {
         /// Max output tokens (default: 4096).
         #[serde(default = "default_max_tokens")]
         max_tokens: u32,
+        /// Enable tool access (default: false for backward compatibility).
+        /// When true, the LLM can call tools during execution.
+        /// Tools requiring approval are automatically filtered out.
+        #[serde(default)]
+        use_tools: bool,
+        /// Max tool call rounds (default: 3). Only used when use_tools is true.
+        #[serde(default = "default_max_tool_rounds")]
+        max_tool_rounds: u32,
     },
     /// Full multi-turn worker job with tool access.
     FullJob {
@@ -175,6 +235,11 @@ pub enum RoutineAction {
         /// Max reasoning iterations (default: 10).
         #[serde(default = "default_max_iterations")]
         max_iterations: u32,
+        /// Tool names pre-authorized for `Always`-approval tools (e.g. destructive
+        /// shell commands, cross-channel messaging). `UnlessAutoApproved` tools are
+        /// automatically permitted in routine jobs without listing them here.
+        #[serde(default)]
+        tool_permissions: Vec<String>,
     },
 }
 
@@ -184,6 +249,32 @@ fn default_max_tokens() -> u32 {
 
 fn default_max_iterations() -> u32 {
     10
+}
+
+fn default_max_tool_rounds() -> u32 {
+    3
+}
+
+/// Hard upper bound for max_tool_rounds to prevent runaway loops and cost explosion.
+pub(crate) const MAX_TOOL_ROUNDS_LIMIT: u32 = 20;
+
+/// Clamp max_tool_rounds to [1, MAX_TOOL_ROUNDS_LIMIT].
+/// Accepts u64 to avoid truncation before clamping.
+fn clamp_max_tool_rounds(value: u64) -> u32 {
+    value.clamp(1, MAX_TOOL_ROUNDS_LIMIT as u64) as u32
+}
+
+/// Parse a `tool_permissions` JSON array into a `Vec<String>`.
+pub fn parse_tool_permissions(value: &serde_json::Value) -> Vec<String> {
+    value
+        .get("tool_permissions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl RoutineAction {
@@ -220,10 +311,22 @@ impl RoutineAction {
                     .get("max_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(default_max_tokens() as u64) as u32;
+                let use_tools = config
+                    .get("use_tools")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let max_tool_rounds = clamp_max_tool_rounds(
+                    config
+                        .get("max_tool_rounds")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(default_max_tool_rounds() as u64),
+                );
                 Ok(RoutineAction::Lightweight {
                     prompt,
                     context_paths,
                     max_tokens,
+                    use_tools,
+                    max_tool_rounds,
                 })
             }
             "full_job" => {
@@ -248,10 +351,12 @@ impl RoutineAction {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(default_max_iterations() as u64)
                     as u32;
+                let tool_permissions = parse_tool_permissions(&config);
                 Ok(RoutineAction::FullJob {
                     title,
                     description,
                     max_iterations,
+                    tool_permissions,
                 })
             }
             other => Err(RoutineError::UnknownActionType {
@@ -267,19 +372,25 @@ impl RoutineAction {
                 prompt,
                 context_paths,
                 max_tokens,
+                use_tools,
+                max_tool_rounds,
             } => serde_json::json!({
                 "prompt": prompt,
                 "context_paths": context_paths,
                 "max_tokens": max_tokens,
+                "use_tools": use_tools,
+                "max_tool_rounds": max_tool_rounds,
             }),
             RoutineAction::FullJob {
                 title,
                 description,
                 max_iterations,
+                tool_permissions,
             } => serde_json::json!({
                 "title": title,
                 "description": description,
                 "max_iterations": max_iterations,
+                "tool_permissions": tool_permissions,
             }),
         }
     }
@@ -385,6 +496,19 @@ pub struct RoutineRun {
     pub created_at: DateTime<Utc>,
 }
 
+/// Convert a JSON value to a string for filter storage.
+///
+/// Handles strings, numbers, and booleans — consistent with the matching
+/// logic in `routine_engine::json_value_as_string`.
+pub fn json_value_as_filter_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
 /// Compute a content hash for event dedup.
 pub fn content_hash(content: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -393,28 +517,206 @@ pub fn content_hash(content: &str) -> u64 {
 }
 
 /// Parse a cron expression and compute the next fire time from now.
-pub fn next_cron_fire(schedule: &str) -> Result<Option<DateTime<Utc>>, RoutineError> {
+///
+/// When `timezone` is provided and valid, the schedule is evaluated in that
+/// timezone and the result is converted back to UTC. Otherwise UTC is used.
+pub fn next_cron_fire(
+    schedule: &str,
+    timezone: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, RoutineError> {
     let cron_schedule =
         cron::Schedule::from_str(schedule).map_err(|e| RoutineError::InvalidCron {
             reason: e.to_string(),
         })?;
-    Ok(cron_schedule.upcoming(Utc).next())
+    if let Some(tz) = timezone.and_then(crate::timezone::parse_timezone) {
+        Ok(cron_schedule
+            .upcoming(tz)
+            .next()
+            .map(|dt| dt.with_timezone(&Utc)))
+    } else {
+        Ok(cron_schedule.upcoming(Utc).next())
+    }
+}
+
+/// Describe common routine cron patterns in plain English.
+///
+/// Falls back to `cron: <raw>` for malformed or complex expressions.
+pub fn describe_cron(schedule: &str, timezone: Option<&str>) -> String {
+    fn fallback(raw: &str) -> String {
+        if raw.trim().is_empty() {
+            "cron: (empty)".to_string()
+        } else {
+            format!("cron: {}", raw.trim())
+        }
+    }
+
+    fn parse_u8_token(token: &str) -> Option<u8> {
+        token.parse::<u8>().ok()
+    }
+
+    fn parse_step(token: &str) -> Option<u8> {
+        token
+            .strip_prefix("*/")
+            .and_then(parse_u8_token)
+            .filter(|n| *n > 0)
+    }
+
+    fn weekday_name(dow: &str) -> Option<&'static str> {
+        let normalized = dow.trim().to_ascii_uppercase();
+        match normalized.as_str() {
+            "MON" | "1" => Some("Monday"),
+            "TUE" | "2" => Some("Tuesday"),
+            "WED" | "3" => Some("Wednesday"),
+            "THU" | "4" => Some("Thursday"),
+            "FRI" | "5" => Some("Friday"),
+            "SAT" | "6" => Some("Saturday"),
+            "SUN" | "0" | "7" => Some("Sunday"),
+            _ => None,
+        }
+    }
+
+    fn format_time(hour: u8, minute: u8) -> String {
+        if hour == 0 && minute == 0 {
+            return "midnight".to_string();
+        }
+        let (display_hour, am_pm) = match hour {
+            0 => (12, "AM"),
+            1..=11 => (hour, "AM"),
+            12 => (12, "PM"),
+            _ => (hour - 12, "PM"),
+        };
+        format!("{display_hour}:{minute:02} {am_pm}")
+    }
+
+    fn ordinal(n: u8) -> String {
+        let suffix = if (11..=13).contains(&(n % 100)) {
+            "th"
+        } else {
+            match n % 10 {
+                1 => "st",
+                2 => "nd",
+                3 => "rd",
+                _ => "th",
+            }
+        };
+        format!("{n}{suffix}")
+    }
+
+    fn describe_inner(raw: &str) -> Option<String> {
+        let fields: Vec<&str> = raw.split_whitespace().collect();
+        let (sec, min, hour, dom, month, dow, year) = match fields.len() {
+            5 => (
+                "0", fields[0], fields[1], fields[2], fields[3], fields[4], None,
+            ),
+            6 => (
+                fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], None,
+            ),
+            7 => (
+                fields[0],
+                fields[1],
+                fields[2],
+                fields[3],
+                fields[4],
+                fields[5],
+                Some(fields[6]),
+            ),
+            _ => return None,
+        };
+
+        if year.is_some_and(|v| v != "*") {
+            return None;
+        }
+
+        if sec == "0"
+            && hour == "*"
+            && dom == "*"
+            && month == "*"
+            && dow == "*"
+            && let Some(step) = parse_step(min)
+        {
+            return Some(match step {
+                1 => "Every minute".to_string(),
+                n => format!("Every {n} minutes"),
+            });
+        }
+
+        if sec == "0"
+            && min == "0"
+            && dom == "*"
+            && month == "*"
+            && dow == "*"
+            && let Some(step) = parse_step(hour)
+        {
+            return Some(match step {
+                1 => "Every hour".to_string(),
+                n => format!("Every {n} hours"),
+            });
+        }
+
+        let hour = parse_u8_token(hour).filter(|h| *h <= 23)?;
+        let minute = parse_u8_token(min).filter(|m| *m <= 59)?;
+        let time = format_time(hour, minute);
+        let time_phrase = if time == "midnight" {
+            "at midnight".to_string()
+        } else {
+            format!("at {time}")
+        };
+
+        if sec == "0" && dom == "*" && month == "*" && dow == "*" {
+            return Some(format!("Daily {time_phrase}"));
+        }
+
+        if sec == "0" && dom == "*" && month == "*" && dow.eq_ignore_ascii_case("MON-FRI") {
+            return Some(format!("Weekdays {time_phrase}"));
+        }
+
+        if sec == "0"
+            && dom == "*"
+            && month == "*"
+            && let Some(day_name) = weekday_name(dow)
+        {
+            return Some(format!("Every {day_name} {time_phrase}"));
+        }
+
+        if sec == "0"
+            && month == "*"
+            && dow == "*"
+            && let Some(day_of_month) = parse_u8_token(dom).filter(|d| (1..=31).contains(d))
+        {
+            return Some(format!(
+                "{} of every month {time_phrase}",
+                ordinal(day_of_month)
+            ));
+        }
+
+        None
+    }
+
+    let mut description = describe_inner(schedule).unwrap_or_else(|| fallback(schedule));
+    if let Some(tz) = timezone.map(str::trim).filter(|tz| !tz.is_empty()) {
+        description.push_str(" (");
+        description.push_str(tz);
+        description.push(')');
+    }
+    description
 }
 
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{
-        RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash, next_cron_fire,
+        MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash,
+        describe_cron, next_cron_fire,
     };
 
     #[test]
     fn test_trigger_roundtrip() {
         let trigger = Trigger::Cron {
             schedule: "0 9 * * MON-FRI".to_string(),
+            timezone: None,
         };
         let json = trigger.to_config_json();
         let parsed = Trigger::from_db("cron", json).expect("parse cron");
-        assert!(matches!(parsed, Trigger::Cron { schedule } if schedule == "0 9 * * MON-FRI"));
+        assert!(matches!(parsed, Trigger::Cron { schedule, .. } if schedule == "0 9 * * MON-FRI"));
     }
 
     #[test]
@@ -430,16 +732,36 @@ mod tests {
     }
 
     #[test]
+    fn test_system_event_trigger_roundtrip() {
+        let mut filters = std::collections::HashMap::new();
+        filters.insert("repo".to_string(), "nearai/ironclaw".to_string());
+        filters.insert("action".to_string(), "opened".to_string());
+        let trigger = Trigger::SystemEvent {
+            source: "github".to_string(),
+            event_type: "issue".to_string(),
+            filters: filters.clone(),
+        };
+        let json = trigger.to_config_json();
+        let parsed = Trigger::from_db("system_event", json).expect("parse system_event");
+        assert!(
+            matches!(parsed, Trigger::SystemEvent { source, event_type, filters: f }
+            if source == "github" && event_type == "issue" && f == filters)
+        );
+    }
+
+    #[test]
     fn test_action_lightweight_roundtrip() {
         let action = RoutineAction::Lightweight {
             prompt: "Check PRs".to_string(),
             context_paths: vec!["context/priorities.md".to_string()],
             max_tokens: 2048,
+            use_tools: false,
+            max_tool_rounds: 3,
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("lightweight", json).expect("parse lightweight");
         assert!(
-            matches!(parsed, RoutineAction::Lightweight { prompt, context_paths, max_tokens }
+            matches!(parsed, RoutineAction::Lightweight { prompt, context_paths, max_tokens, .. }
             if prompt == "Check PRs" && context_paths.len() == 1 && max_tokens == 2048)
         );
     }
@@ -450,12 +772,13 @@ mod tests {
             title: "Deploy review".to_string(),
             description: "Review and deploy pending changes".to_string(),
             max_iterations: 5,
+            tool_permissions: vec!["shell".to_string()],
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("full_job", json).expect("parse full_job");
         assert!(
-            matches!(parsed, RoutineAction::FullJob { title, max_iterations, .. }
-            if title == "Deploy review" && max_iterations == 5)
+            matches!(parsed, RoutineAction::FullJob { title, max_iterations, tool_permissions, .. }
+            if title == "Deploy review" && max_iterations == 5 && tool_permissions == vec!["shell".to_string()])
         );
     }
 
@@ -486,14 +809,90 @@ mod tests {
     #[test]
     fn test_next_cron_fire_valid() {
         // Every minute should always have a next fire
-        let next = next_cron_fire("* * * * * *").expect("valid cron");
+        let next = next_cron_fire("* * * * * *", None).expect("valid cron");
         assert!(next.is_some());
     }
 
     #[test]
     fn test_next_cron_fire_invalid() {
-        let result = next_cron_fire("not a cron");
+        let result = next_cron_fire("not a cron", None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trigger_cron_timezone_roundtrip() {
+        let trigger = Trigger::Cron {
+            schedule: "0 9 * * MON-FRI".to_string(),
+            timezone: Some("America/New_York".to_string()),
+        };
+        let json = trigger.to_config_json();
+        let parsed = Trigger::from_db("cron", json).expect("parse cron");
+        assert!(matches!(parsed, Trigger::Cron { schedule, timezone }
+                if schedule == "0 9 * * MON-FRI"
+                && timezone.as_deref() == Some("America/New_York")));
+    }
+
+    #[test]
+    fn test_trigger_cron_no_timezone_backward_compat() {
+        let json = serde_json::json!({"schedule": "0 9 * * *"});
+        let parsed = Trigger::from_db("cron", json).expect("parse cron");
+        assert!(matches!(parsed, Trigger::Cron { timezone, .. } if timezone.is_none()));
+    }
+
+    #[test]
+    fn test_trigger_cron_invalid_timezone_coerced_to_none() {
+        let json = serde_json::json!({"schedule": "0 9 * * *", "timezone": "Fake/Zone"});
+        let parsed = Trigger::from_db("cron", json).expect("parse cron");
+        assert!(
+            matches!(parsed, Trigger::Cron { timezone, .. } if timezone.is_none()),
+            "invalid timezone should be coerced to None"
+        );
+    }
+
+    #[test]
+    fn test_next_cron_fire_with_timezone() {
+        let next_utc = next_cron_fire("0 0 9 * * * *", None)
+            .expect("valid cron")
+            .expect("has next");
+        let next_est = next_cron_fire("0 0 9 * * * *", Some("America/New_York"))
+            .expect("valid cron")
+            .expect("has next");
+        // EST is UTC-5 (or EDT UTC-4), so the UTC result should differ
+        assert_ne!(next_utc, next_est, "timezone should shift the fire time");
+    }
+
+    #[test]
+    fn test_describe_cron_common_patterns() {
+        let cases = vec![
+            ("0 */30 * * * *", None, "Every 30 minutes"),
+            ("0 0 9 * * *", None, "Daily at 9:00 AM"),
+            ("0 0 9 * * MON-FRI", None, "Weekdays at 9:00 AM"),
+            ("0 0 */2 * * *", None, "Every 2 hours"),
+            ("0 0 0 * * *", None, "Daily at midnight"),
+            ("0 0 9 * * 1", None, "Every Monday at 9:00 AM"),
+            ("0 0 9 1 * *", None, "1st of every month at 9:00 AM"),
+            (
+                "0 0 9 * * MON-FRI",
+                Some("America/New_York"),
+                "Weekdays at 9:00 AM (America/New_York)",
+            ),
+            ("1 2 3 4 5 6", None, "cron: 1 2 3 4 5 6"),
+        ];
+
+        for (schedule, timezone, expected) in cases {
+            let actual = describe_cron(schedule, timezone);
+            assert_eq!(actual, expected); // safety: test-only assertion in #[cfg(test)] module
+        }
+    }
+
+    #[test]
+    fn test_describe_cron_edge_cases() {
+        assert_eq!(describe_cron("", None), "cron: (empty)"); // safety: test-only assertion in #[cfg(test)] module
+        assert_eq!(describe_cron("not a cron", None), "cron: not a cron"); // safety: test-only assertion in #[cfg(test)] module
+        let weekdays_5_field = describe_cron("0 9 * * MON-FRI", None);
+        assert_eq!(weekdays_5_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
+        let weekdays_7_field = describe_cron("0 0 9 * * MON-FRI *", None);
+        assert_eq!(weekdays_7_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
     }
 
     #[test]
@@ -508,7 +907,8 @@ mod tests {
     fn test_trigger_type_tag() {
         assert_eq!(
             Trigger::Cron {
-                schedule: String::new()
+                schedule: String::new(),
+                timezone: None,
             }
             .type_tag(),
             "cron"
@@ -522,13 +922,87 @@ mod tests {
             "event"
         );
         assert_eq!(
-            Trigger::Webhook {
-                path: None,
-                secret: None
+            Trigger::SystemEvent {
+                source: String::new(),
+                event_type: String::new(),
+                filters: std::collections::HashMap::new(),
             }
             .type_tag(),
-            "webhook"
+            "system_event"
         );
         assert_eq!(Trigger::Manual.type_tag(), "manual");
+    }
+
+    #[test]
+    fn test_action_lightweight_backward_compat_no_use_tools() {
+        // Simulate old DB record without use_tools field
+        let json = serde_json::json!({
+            "prompt": "old routine",
+            "context_paths": [],
+            "max_tokens": 4096
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse lightweight");
+        assert!(
+            matches!(parsed, RoutineAction::Lightweight { use_tools, max_tool_rounds, .. }
+            if !use_tools && max_tool_rounds == 3),
+            "missing use_tools should default to false, max_tool_rounds to 3"
+        );
+    }
+
+    #[test]
+    fn test_max_tool_rounds_clamped_to_upper_bound() {
+        let json = serde_json::json!({
+            "prompt": "test",
+            "use_tools": true,
+            "max_tool_rounds": 9999
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse");
+        match parsed {
+            RoutineAction::Lightweight {
+                max_tool_rounds, ..
+            } => {
+                assert_eq!(
+                    max_tool_rounds, MAX_TOOL_ROUNDS_LIMIT,
+                    "should clamp to MAX_TOOL_ROUNDS_LIMIT"
+                );
+            }
+            _ => panic!("expected Lightweight"),
+        }
+    }
+
+    #[test]
+    fn test_max_tool_rounds_clamped_to_lower_bound() {
+        let json = serde_json::json!({
+            "prompt": "test",
+            "use_tools": true,
+            "max_tool_rounds": 0
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse");
+        match parsed {
+            RoutineAction::Lightweight {
+                max_tool_rounds, ..
+            } => {
+                assert_eq!(max_tool_rounds, 1, "should clamp 0 to 1");
+            }
+            _ => panic!("expected Lightweight"),
+        }
+    }
+
+    #[test]
+    fn test_max_tool_rounds_normal_value_passes_through() {
+        let json = serde_json::json!({
+            "prompt": "test",
+            "use_tools": true,
+            "max_tool_rounds": 10
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse");
+        match parsed {
+            RoutineAction::Lightweight {
+                max_tool_rounds, ..
+            } => {
+                assert_eq!(max_tool_rounds, 10, "normal value should pass through");
+            }
+            _ => panic!("expected Lightweight"),
+        }
     }
 }

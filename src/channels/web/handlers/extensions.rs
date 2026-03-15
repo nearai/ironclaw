@@ -33,7 +33,7 @@ pub async fn extensions_list_handler(
                     "failed".to_string()
                 } else if !ext.authenticated {
                     "installed".to_string()
-                } else if ext.active && ext.name == "telegram" {
+                } else if ext.active {
                     let has_paired = pairing_store
                         .read_allow_from(&ext.name)
                         .map(|list| !list.is_empty())
@@ -46,11 +46,20 @@ pub async fn extensions_list_handler(
                 } else {
                     "configured".to_string()
                 })
+            } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
+                Some(if ext.active {
+                    "active".to_string()
+                } else if ext.authenticated {
+                    "configured".to_string()
+                } else {
+                    "installed".to_string()
+                })
             } else {
                 None
             };
             ExtensionInfo {
                 name: ext.name,
+                display_name: ext.display_name,
                 kind: ext.kind.to_string(),
                 description: ext.description,
                 url: ext.url,
@@ -58,8 +67,10 @@ pub async fn extensions_list_handler(
                 active: ext.active,
                 tools: ext.tools,
                 needs_setup: ext.needs_setup,
+                has_auth: ext.has_auth,
                 activation_status,
                 activation_error: ext.activation_error,
+                version: ext.version,
             }
         })
         .collect();
@@ -100,6 +111,7 @@ pub async fn extensions_install_handler(
         "mcp_server" => Some(crate::extensions::ExtensionKind::McpServer),
         "wasm_tool" => Some(crate::extensions::ExtensionKind::WasmTool),
         "wasm_channel" => Some(crate::extensions::ExtensionKind::WasmChannel),
+        "channel_relay" => Some(crate::extensions::ExtensionKind::ChannelRelay),
         _ => None,
     });
 
@@ -109,58 +121,6 @@ pub async fn extensions_install_handler(
     {
         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
-    }
-}
-
-pub async fn extensions_activate_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(name): Path<String>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
-
-    match ext_mgr.activate(&name).await {
-        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-        Err(activate_err) => {
-            let err_str = activate_err.to_string();
-            let needs_auth = err_str.contains("authentication")
-                || err_str.contains("401")
-                || err_str.contains("Unauthorized");
-
-            if !needs_auth {
-                return Ok(Json(ActionResponse::fail(err_str)));
-            }
-
-            // Activation failed due to auth; try authenticating first.
-            match ext_mgr.auth(&name, None).await {
-                Ok(auth_result) if auth_result.status == "authenticated" => {
-                    // Auth succeeded, retry activation.
-                    match ext_mgr.activate(&name).await {
-                        Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
-                        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
-                    }
-                }
-                Ok(auth_result) => {
-                    // Auth in progress (OAuth URL or awaiting manual token).
-                    let mut resp = ActionResponse::fail(
-                        auth_result
-                            .instructions
-                            .clone()
-                            .unwrap_or_else(|| format!("'{}' requires authentication.", name)),
-                    );
-                    resp.auth_url = auth_result.auth_url;
-                    resp.awaiting_token = Some(auth_result.awaiting_token);
-                    resp.instructions = auth_result.instructions;
-                    Ok(Json(resp))
-                }
-                Err(auth_err) => Ok(Json(ActionResponse::fail(format!(
-                    "Authentication failed: {}",
-                    auth_err
-                )))),
-            }
-        }
     }
 }
 

@@ -14,7 +14,7 @@ use crate::db::WorkspaceStore;
 use crate::error::WorkspaceError;
 use crate::workspace::{
     MemoryChunk, MemoryDocument, RankedResult, SearchConfig, SearchResult, WorkspaceEntry,
-    reciprocal_rank_fusion,
+    fuse_results,
 };
 
 use chrono::Utc;
@@ -515,7 +515,7 @@ impl WorkspaceStore for LibSqlBackend {
             let mut rows = conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, c.content
+                    SELECT c.id, c.document_id, d.path, c.content
                     FROM memory_chunks_fts fts
                     JOIN memory_chunks c ON c._rowid = fts.rowid
                     JOIN memory_documents d ON d.id = c.document_id
@@ -542,7 +542,8 @@ impl WorkspaceStore for LibSqlBackend {
                 results.push(RankedResult {
                     chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
                     document_id: get_text(&row, 1).parse().unwrap_or_default(),
-                    content: get_text(&row, 2),
+                    document_path: get_text(&row, 2),
+                    content: get_text(&row, 3),
                     rank: results.len() as u32 + 1,
                 });
             }
@@ -560,10 +561,13 @@ impl WorkspaceStore for LibSqlBackend {
                     .join(",")
             );
 
-            let mut rows = conn
+            // vector_top_k requires a libsql_vector_idx index. After the V9
+            // migration the index is dropped (to support flexible embedding
+            // dimensions), so this query may fail. Fall back to FTS-only.
+            match conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, c.content
+                    SELECT c.id, c.document_id, d.path, c.content
                     FROM vector_top_k('idx_memory_chunks_embedding', vector(?1), ?2) AS top_k
                     JOIN memory_chunks c ON c._rowid = top_k.id
                     JOIN memory_documents d ON d.id = c.document_id
@@ -572,26 +576,34 @@ impl WorkspaceStore for LibSqlBackend {
                     params![vector_json, pre_limit, user_id, agent_id_str.as_deref()],
                 )
                 .await
-                .map_err(|e| WorkspaceError::SearchFailed {
-                    reason: format!("Vector query failed: {}", e),
-                })?;
-
-            let mut results = Vec::new();
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|e| WorkspaceError::SearchFailed {
-                    reason: format!("Vector row fetch failed: {}", e),
-                })?
             {
-                results.push(RankedResult {
-                    chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
-                    document_id: get_text(&row, 1).parse().unwrap_or_default(),
-                    content: get_text(&row, 2),
-                    rank: results.len() as u32 + 1,
-                });
+                Ok(mut rows) => {
+                    let mut results = Vec::new();
+                    while let Some(row) =
+                        rows.next()
+                            .await
+                            .map_err(|e| WorkspaceError::SearchFailed {
+                                reason: format!("Vector row fetch failed: {}", e),
+                            })?
+                    {
+                        results.push(RankedResult {
+                            chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
+                            document_id: get_text(&row, 1).parse().unwrap_or_default(),
+                            document_path: get_text(&row, 2),
+                            content: get_text(&row, 3),
+                            rank: results.len() as u32 + 1,
+                        });
+                    }
+                    results
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Vector index query failed (expected after V9 migration), \
+                         falling back to FTS-only: {e}"
+                    );
+                    Vec::new()
+                }
             }
-            results
         } else {
             Vec::new()
         };
@@ -602,6 +614,6 @@ impl WorkspaceStore for LibSqlBackend {
             );
         }
 
-        Ok(reciprocal_rank_fusion(fts_results, vector_results, config))
+        Ok(fuse_results(fts_results, vector_results, config))
     }
 }

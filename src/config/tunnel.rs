@@ -104,3 +104,215 @@ impl TunnelConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::config::tunnel::TunnelConfig;
+    use crate::tunnel::{
+        CloudflareTunnelConfig, CustomTunnelConfig, NgrokTunnelConfig, TailscaleTunnelConfig,
+        TunnelProviderConfig,
+    };
+
+    // ── Default ─────────────────────────────────────────────────────
+
+    #[test]
+    fn default_is_disabled() {
+        let cfg = TunnelConfig::default();
+        assert!(cfg.public_url.is_none());
+        assert!(cfg.provider.is_none());
+        assert!(!cfg.is_enabled());
+    }
+
+    // ── is_enabled ──────────────────────────────────────────────────
+
+    #[test]
+    fn is_enabled_with_static_url() {
+        let cfg = TunnelConfig {
+            public_url: Some("https://tunnel.example.com".to_string()),
+            provider: None,
+        };
+        assert!(cfg.is_enabled());
+    }
+
+    #[test]
+    fn is_enabled_with_provider() {
+        let cfg = TunnelConfig {
+            public_url: None,
+            provider: Some(TunnelProviderConfig {
+                provider: "cloudflare".to_string(),
+                cloudflare: Some(CloudflareTunnelConfig {
+                    token: "cf-tok".to_string(),
+                }),
+                tailscale: None,
+                ngrok: None,
+                custom: None,
+            }),
+        };
+        assert!(cfg.is_enabled());
+    }
+
+    #[test]
+    fn is_enabled_with_both() {
+        let cfg = TunnelConfig {
+            public_url: Some("https://example.com".to_string()),
+            provider: Some(TunnelProviderConfig {
+                provider: "ngrok".to_string(),
+                cloudflare: None,
+                tailscale: None,
+                ngrok: Some(NgrokTunnelConfig {
+                    auth_token: "ngrok-tok".to_string(),
+                    domain: None,
+                }),
+                custom: None,
+            }),
+        };
+        assert!(cfg.is_enabled());
+    }
+
+    // ── webhook_url ─────────────────────────────────────────────────
+
+    #[test]
+    fn webhook_url_none_when_no_public_url() {
+        let cfg = TunnelConfig::default();
+        assert!(cfg.webhook_url("/hook").is_none());
+    }
+
+    #[test]
+    fn webhook_url_basic() {
+        let cfg = TunnelConfig {
+            public_url: Some("https://abc.ngrok.io".to_string()),
+            provider: None,
+        };
+        assert_eq!(
+            cfg.webhook_url("/webhook/telegram"),
+            Some("https://abc.ngrok.io/webhook/telegram".to_string())
+        );
+    }
+
+    #[test]
+    fn webhook_url_trims_trailing_slash_on_base() {
+        let cfg = TunnelConfig {
+            public_url: Some("https://abc.ngrok.io/".to_string()),
+            provider: None,
+        };
+        assert_eq!(
+            cfg.webhook_url("/hook"),
+            Some("https://abc.ngrok.io/hook".to_string())
+        );
+    }
+
+    #[test]
+    fn webhook_url_trims_leading_slash_on_path() {
+        let cfg = TunnelConfig {
+            public_url: Some("https://abc.ngrok.io".to_string()),
+            provider: None,
+        };
+        // Path without leading slash should also work
+        assert_eq!(
+            cfg.webhook_url("hook"),
+            Some("https://abc.ngrok.io/hook".to_string())
+        );
+    }
+
+    #[test]
+    fn webhook_url_double_slash_normalization() {
+        let cfg = TunnelConfig {
+            public_url: Some("https://abc.ngrok.io/".to_string()),
+            provider: None,
+        };
+        // Both base trailing and path leading slashes trimmed
+        assert_eq!(
+            cfg.webhook_url("/api/webhook"),
+            Some("https://abc.ngrok.io/api/webhook".to_string())
+        );
+    }
+
+    #[test]
+    fn webhook_url_empty_path() {
+        let cfg = TunnelConfig {
+            public_url: Some("https://abc.ngrok.io".to_string()),
+            provider: None,
+        };
+        assert_eq!(
+            cfg.webhook_url(""),
+            Some("https://abc.ngrok.io/".to_string())
+        );
+    }
+
+    // ── TunnelProviderConfig field coverage ─────────────────────────
+
+    #[test]
+    fn provider_config_cloudflare() {
+        let p = TunnelProviderConfig {
+            provider: "cloudflare".to_string(),
+            cloudflare: Some(CloudflareTunnelConfig {
+                token: "cf-secret".to_string(),
+            }),
+            tailscale: None,
+            ngrok: None,
+            custom: None,
+        };
+        assert_eq!(p.provider, "cloudflare");
+        assert_eq!(p.cloudflare.as_ref().unwrap().token, "cf-secret");
+    }
+
+    #[test]
+    fn provider_config_tailscale() {
+        let ts = TailscaleTunnelConfig {
+            funnel: true,
+            hostname: Some("my-host".to_string()),
+        };
+        assert!(ts.funnel);
+        assert_eq!(ts.hostname.as_deref(), Some("my-host"));
+    }
+
+    #[test]
+    fn provider_config_tailscale_defaults() {
+        let ts = TailscaleTunnelConfig::default();
+        assert!(!ts.funnel);
+        assert!(ts.hostname.is_none());
+    }
+
+    #[test]
+    fn provider_config_ngrok() {
+        let ng = NgrokTunnelConfig {
+            auth_token: "ng-tok".to_string(),
+            domain: Some("custom.ngrok.dev".to_string()),
+        };
+        assert_eq!(ng.auth_token, "ng-tok");
+        assert_eq!(ng.domain.as_deref(), Some("custom.ngrok.dev"));
+    }
+
+    #[test]
+    fn provider_config_ngrok_defaults() {
+        let ng = NgrokTunnelConfig::default();
+        assert!(ng.auth_token.is_empty());
+        assert!(ng.domain.is_none());
+    }
+
+    #[test]
+    fn provider_config_custom() {
+        let c = CustomTunnelConfig {
+            start_command: "bore local {port}".to_string(),
+            health_url: Some("http://localhost:8080/health".to_string()),
+            url_pattern: Some("https://bore.pub".to_string()),
+        };
+        assert_eq!(c.start_command, "bore local {port}");
+        assert!(c.health_url.is_some());
+        assert!(c.url_pattern.is_some());
+    }
+
+    #[test]
+    fn provider_config_custom_defaults() {
+        let c = CustomTunnelConfig::default();
+        assert!(c.start_command.is_empty());
+        assert!(c.health_url.is_none());
+        assert!(c.url_pattern.is_none());
+    }
+
+    #[test]
+    fn cloudflare_config_defaults() {
+        let cf = CloudflareTunnelConfig::default();
+        assert!(cf.token.is_empty());
+    }
+}

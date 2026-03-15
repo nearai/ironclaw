@@ -1,0 +1,87 @@
+{
+  "model_name": "test-doc-lifecycle",
+  "expects": {
+    "tools_used": [
+      "memory_write",
+      "memory_read"
+    ],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mw_lc1",
+            "name": "memory_write",
+            "arguments": {
+              "content": "Version 1: Initial content",
+              "target": "context/lifecycle.md"
+            }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mr_lc1",
+            "name": "memory_read",
+            "arguments": {
+              "path": "context/lifecycle.md"
+            }
+          }
+        ],
+        "input_tokens": 200,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mw_lc2",
+            "name": "memory_write",
+            "arguments": {
+              "content": "Version 2: Updated content with changes",
+              "target": "context/lifecycle.md"
+            }
+          }
+        ],
+        "input_tokens": 300,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_mr_lc2",
+            "name": "memory_read",
+            "arguments": {
+              "path": "context/lifecycle.md"
+            }
+          }
+        ],
+        "input_tokens": 400,
+        "output_tokens": 20
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "Document lifecycle complete: wrote Version 1, read it back, overwrote with Version 2, and confirmed the update. The document now contains 'Version 2: Updated content with changes'.",
+        "input_tokens": 500,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

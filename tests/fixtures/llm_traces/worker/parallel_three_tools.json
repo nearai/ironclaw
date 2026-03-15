@@ -1,0 +1,43 @@
+{
+  "model_name": "test-parallel-three-tools",
+  "expects": {
+    "tools_used": ["echo", "time", "json"],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "steps": [
+    {
+      "request_hint": { "last_user_message_contains": "parallel" },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_echo_1",
+            "name": "echo",
+            "arguments": { "message": "hello from parallel" }
+          },
+          {
+            "id": "call_time_1",
+            "name": "time",
+            "arguments": { "operation": "now" }
+          },
+          {
+            "id": "call_json_1",
+            "name": "json",
+            "arguments": { "operation": "parse", "data": "{\"key\": \"value\"}" }
+          }
+        ],
+        "input_tokens": 100,
+        "output_tokens": 40
+      }
+    },
+    {
+      "response": {
+        "type": "text",
+        "content": "All three tools executed in parallel: echo returned the greeting, time gave the current timestamp, and json parsed the object successfully.",
+        "input_tokens": 200,
+        "output_tokens": 30
+      }
+    }
+  ]
+}

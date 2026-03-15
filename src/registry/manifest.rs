@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
 
-/// A single extension manifest loaded from `registry/{tools,channels}/<name>.json`.
+/// A single extension manifest loaded from `registry/{tools,channels,mcp-servers}/<name>.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionManifest {
     /// Unique identifier (matches crate name stem, e.g. "slack").
@@ -16,11 +16,12 @@ pub struct ExtensionManifest {
     /// Human-readable name (e.g. "Slack").
     pub display_name: String,
 
-    /// Whether this is a tool or channel.
+    /// Whether this is a tool, channel, or MCP server.
     pub kind: ManifestKind,
 
-    /// Semver version from Cargo.toml.
-    pub version: String,
+    /// Semver version from Cargo.toml. Optional for MCP server manifests.
+    #[serde(default)]
+    pub version: Option<String>,
 
     /// One-line description.
     pub description: String,
@@ -29,8 +30,9 @@ pub struct ExtensionManifest {
     #[serde(default)]
     pub keywords: Vec<String>,
 
-    /// Source code location and build info.
-    pub source: SourceSpec,
+    /// Source code location and build info. Absent for MCP server manifests.
+    #[serde(default)]
+    pub source: Option<SourceSpec>,
 
     /// Pre-built binary artifacts keyed by target triple.
     #[serde(default)]
@@ -43,6 +45,15 @@ pub struct ExtensionManifest {
     /// Tags for filtering (e.g. "default", "messaging", "google").
     #[serde(default)]
     pub tags: Vec<String>,
+
+    /// MCP server URL. Only present for `McpServer` manifests.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// MCP auth method: "dcr", "oauth_pre_configured:<setup_url>", or "none".
+    /// Only present for `McpServer` manifests.
+    #[serde(default)]
+    pub auth: Option<String>,
 }
 
 /// Extension kind as declared in manifests.
@@ -51,6 +62,7 @@ pub struct ExtensionManifest {
 pub enum ManifestKind {
     Tool,
     Channel,
+    McpServer,
 }
 
 impl From<ManifestKind> for ExtensionKind {
@@ -58,6 +70,7 @@ impl From<ManifestKind> for ExtensionKind {
         match kind {
             ManifestKind::Tool => ExtensionKind::WasmTool,
             ManifestKind::Channel => ExtensionKind::WasmChannel,
+            ManifestKind::McpServer => ExtensionKind::McpServer,
         }
     }
 }
@@ -67,6 +80,7 @@ impl std::fmt::Display for ManifestKind {
         match self {
             ManifestKind::Tool => write!(f, "tool"),
             ManifestKind::Channel => write!(f, "channel"),
+            ManifestKind::McpServer => write!(f, "mcp_server"),
         }
     }
 }
@@ -153,12 +167,64 @@ pub struct BundlesFile {
 impl ExtensionManifest {
     /// Convert this manifest into a [`RegistryEntry`] for use with the in-chat
     /// extension discovery system.
-    pub fn to_registry_entry(&self) -> RegistryEntry {
-        let buildable = ExtensionSource::WasmBuildable {
-            repo_url: self.source.dir.clone(),
-            build_dir: Some(self.source.dir.clone()),
-            crate_name: Some(self.source.crate_name.clone()),
+    ///
+    /// Returns `None` for MCP server manifests missing a `url` field.
+    pub fn to_registry_entry(&self) -> Option<RegistryEntry> {
+        if self.kind == ManifestKind::McpServer {
+            return self.to_mcp_registry_entry();
+        }
+
+        Some(self.to_wasm_registry_entry())
+    }
+
+    /// Build a [`RegistryEntry`] for an MCP server manifest.
+    fn to_mcp_registry_entry(&self) -> Option<RegistryEntry> {
+        let url = match &self.url {
+            Some(u) => u.clone(),
+            None => {
+                tracing::warn!(
+                    "MCP server manifest '{}' is missing 'url' field, skipping",
+                    self.name
+                );
+                return None;
+            }
         };
+        let auth_hint = match self.auth.as_deref() {
+            Some("dcr") | None => AuthHint::Dcr,
+            Some("none") => AuthHint::None,
+            Some(other) if other.starts_with("oauth_pre_configured:") => {
+                AuthHint::OAuthPreConfigured {
+                    setup_url: other
+                        .strip_prefix("oauth_pre_configured:")
+                        .unwrap_or("")
+                        .to_string(),
+                }
+            }
+            _ => AuthHint::Dcr,
+        };
+
+        Some(RegistryEntry {
+            name: self.name.clone(),
+            display_name: self.display_name.clone(),
+            kind: ExtensionKind::McpServer,
+            description: self.description.clone(),
+            keywords: self.keywords.clone(),
+            source: ExtensionSource::McpUrl { url },
+            fallback_source: None,
+            auth_hint,
+            version: self.version.clone(),
+        })
+    }
+
+    /// Build a [`RegistryEntry`] for a WASM tool or channel manifest.
+    fn to_wasm_registry_entry(&self) -> RegistryEntry {
+        let source_spec = self.source.as_ref();
+
+        let buildable = source_spec.map(|s| ExtensionSource::WasmBuildable {
+            source_dir: s.dir.clone(),
+            build_dir: Some(s.dir.clone()),
+            crate_name: Some(s.crate_name.clone()),
+        });
 
         // Prefer pre-built artifact download when a URL is available,
         // with build-from-source as fallback in case the download fails (e.g., 404).
@@ -170,13 +236,32 @@ impl ExtensionManifest {
                         wasm_url: url.clone(),
                         capabilities_url: artifact.capabilities_url.clone(),
                     },
-                    Some(Box::new(buildable)),
+                    buildable.map(Box::new),
                 )
+            } else if let Some(b) = buildable {
+                (b, None)
             } else {
-                (buildable, None)
+                // No source spec and no download URL — use a placeholder
+                (
+                    ExtensionSource::WasmBuildable {
+                        source_dir: String::new(),
+                        build_dir: None,
+                        crate_name: None,
+                    },
+                    None,
+                )
             }
+        } else if let Some(b) = buildable {
+            (b, None)
         } else {
-            (buildable, None)
+            (
+                ExtensionSource::WasmBuildable {
+                    source_dir: String::new(),
+                    build_dir: None,
+                    crate_name: None,
+                },
+                None,
+            )
         };
 
         let auth_hint = match self.auth_summary.as_ref().and_then(|a| a.method.as_deref()) {
@@ -195,6 +280,7 @@ impl ExtensionManifest {
             source,
             fallback_source,
             auth_hint,
+            version: self.version.clone(),
         }
     }
 }
@@ -233,10 +319,10 @@ mod tests {
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
         assert_eq!(manifest.name, "slack");
         assert_eq!(manifest.kind, ManifestKind::Tool);
-        assert_eq!(manifest.version, "0.1.0");
+        assert_eq!(manifest.version.as_deref(), Some("0.1.0"));
         assert!(manifest.tags.contains(&"default".to_string()));
 
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
         assert_eq!(entry.kind, ExtensionKind::WasmTool);
     }
 
@@ -261,7 +347,7 @@ mod tests {
         assert!(manifest.auth_summary.is_none());
         assert!(manifest.artifacts.is_empty());
 
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
         assert_eq!(entry.kind, ExtensionKind::WasmChannel);
     }
 
@@ -295,6 +381,7 @@ mod tests {
     fn test_manifest_kind_display() {
         assert_eq!(ManifestKind::Tool.to_string(), "tool");
         assert_eq!(ManifestKind::Channel.to_string(), "channel");
+        assert_eq!(ManifestKind::McpServer.to_string(), "mcp_server");
     }
 
     /// When a manifest has a download URL in artifacts, to_registry_entry()
@@ -323,7 +410,7 @@ mod tests {
         }"#;
 
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
 
         // Primary source should be WasmDownload
         assert!(
@@ -373,7 +460,7 @@ mod tests {
         }"#;
 
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
 
         assert!(
             matches!(&entry.source, ExtensionSource::WasmBuildable { .. }),
@@ -404,7 +491,7 @@ mod tests {
         }"#;
 
         let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
-        let entry = manifest.to_registry_entry();
+        let entry = manifest.to_registry_entry().unwrap();
 
         assert!(
             matches!(&entry.source, ExtensionSource::WasmBuildable { .. }),
@@ -413,6 +500,91 @@ mod tests {
         assert!(
             entry.fallback_source.is_none(),
             "Should have no fallback when already using WasmBuildable"
+        );
+    }
+
+    #[test]
+    fn test_parse_mcp_server_manifest() {
+        let json = r#"{
+            "name": "notion",
+            "display_name": "Notion",
+            "kind": "mcp_server",
+            "description": "Connect to Notion for reading and writing pages, databases, and comments",
+            "keywords": ["notes", "wiki", "docs", "pages", "database"],
+            "url": "https://mcp.notion.com/mcp",
+            "auth": "dcr"
+        }"#;
+
+        let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
+        assert_eq!(manifest.name, "notion");
+        assert_eq!(manifest.kind, ManifestKind::McpServer);
+        assert!(manifest.version.is_none());
+        assert!(manifest.source.is_none());
+        assert_eq!(manifest.url.as_deref(), Some("https://mcp.notion.com/mcp"));
+        assert_eq!(manifest.auth.as_deref(), Some("dcr"));
+
+        let entry = manifest.to_registry_entry().unwrap();
+        assert_eq!(entry.kind, ExtensionKind::McpServer);
+        assert!(
+            matches!(&entry.source, ExtensionSource::McpUrl { url } if url == "https://mcp.notion.com/mcp")
+        );
+        assert!(matches!(&entry.auth_hint, AuthHint::Dcr));
+        assert!(entry.fallback_source.is_none());
+    }
+
+    #[test]
+    fn test_mcp_server_oauth_pre_configured() {
+        let json = r#"{
+            "name": "custom-mcp",
+            "display_name": "Custom MCP",
+            "kind": "mcp_server",
+            "description": "Custom MCP server",
+            "keywords": [],
+            "url": "https://mcp.example.com",
+            "auth": "oauth_pre_configured:https://example.com/setup"
+        }"#;
+
+        let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
+        let entry = manifest.to_registry_entry().unwrap();
+
+        assert!(matches!(
+            &entry.auth_hint,
+            AuthHint::OAuthPreConfigured { setup_url } if setup_url == "https://example.com/setup"
+        ));
+    }
+
+    #[test]
+    fn test_mcp_server_auth_none() {
+        let json = r#"{
+            "name": "local-mcp",
+            "display_name": "Local MCP",
+            "kind": "mcp_server",
+            "description": "Local MCP server",
+            "keywords": [],
+            "url": "http://localhost:8080/mcp",
+            "auth": "none"
+        }"#;
+
+        let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
+        let entry = manifest.to_registry_entry().unwrap();
+
+        assert!(matches!(&entry.auth_hint, AuthHint::None));
+    }
+
+    #[test]
+    fn test_mcp_server_missing_url_returns_none() {
+        let json = r#"{
+            "name": "broken-mcp",
+            "display_name": "Broken MCP",
+            "kind": "mcp_server",
+            "description": "MCP server with no URL",
+            "keywords": []
+        }"#;
+
+        let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
+        assert!(
+            manifest.to_registry_entry().is_none(),
+            "MCP manifest without url should return None"
         );
     }
 }

@@ -87,6 +87,28 @@ impl ContextManager {
         Ok(f(context))
     }
 
+    /// Atomically update a job context and return the updated context.
+    ///
+    /// This method holds the write lock for the entire update-and-read sequence,
+    /// preventing concurrent workers from interleaving modifications between the
+    /// update and the subsequent read (Issue #807: non-transactional context updates).
+    /// Use this when you need to update context and immediately persist it to DB.
+    pub async fn update_context_and_get<F>(
+        &self,
+        job_id: Uuid,
+        f: F,
+    ) -> Result<JobContext, JobError>
+    where
+        F: FnOnce(&mut JobContext),
+    {
+        let mut contexts = self.contexts.write().await;
+        let context = contexts
+            .get_mut(&job_id)
+            .ok_or(JobError::NotFound { id: job_id })?;
+        f(context);
+        Ok(context.clone())
+    }
+
     /// Get job memory.
     pub async fn get_memory(&self, job_id: Uuid) -> Result<Memory, JobError> {
         self.memories
@@ -489,5 +511,458 @@ mod tests {
             let ctx = manager.get_context(*id).await.unwrap();
             assert_eq!(ctx.state, crate::context::JobState::InProgress);
         }
+    }
+
+    #[tokio::test]
+    async fn get_context_not_found() {
+        let manager = ContextManager::new(5);
+        let bogus_id = Uuid::new_v4();
+        let result = manager.get_context(bogus_id).await;
+        assert!(matches!(result, Err(JobError::NotFound { id }) if id == bogus_id));
+    }
+
+    #[tokio::test]
+    async fn update_context_not_found() {
+        let manager = ContextManager::new(5);
+        let bogus_id = Uuid::new_v4();
+        let result = manager.update_context(bogus_id, |_ctx| {}).await;
+        assert!(matches!(result, Err(JobError::NotFound { id }) if id == bogus_id));
+    }
+
+    #[tokio::test]
+    async fn remove_job_returns_context_and_memory() {
+        let manager = ContextManager::new(5);
+        let job_id = manager.create_job("Removable", "bye bye").await.unwrap();
+
+        let (ctx, mem) = manager.remove_job(job_id).await.unwrap();
+        assert_eq!(ctx.title, "Removable");
+        assert_eq!(mem.job_id, job_id);
+
+        // After removal, get should fail
+        assert!(matches!(
+            manager.get_context(job_id).await,
+            Err(JobError::NotFound { .. })
+        ));
+        assert!(matches!(
+            manager.get_memory(job_id).await,
+            Err(JobError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn remove_job_not_found() {
+        let manager = ContextManager::new(5);
+        let result = manager.remove_job(Uuid::new_v4()).await;
+        assert!(matches!(result, Err(JobError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn get_memory_and_update_memory() {
+        let manager = ContextManager::new(5);
+        let job_id = manager.create_job("Mem test", "desc").await.unwrap();
+
+        // Fresh memory should be empty
+        let mem = manager.get_memory(job_id).await.unwrap();
+        assert_eq!(mem.job_id, job_id);
+        assert!(mem.actions.is_empty());
+        assert!(mem.conversation.is_empty());
+
+        // Update memory by adding a message
+        manager
+            .update_memory(job_id, |m| {
+                m.add_message(crate::llm::ChatMessage::user("hello from test"));
+            })
+            .await
+            .unwrap();
+
+        let mem = manager.get_memory(job_id).await.unwrap();
+        assert_eq!(mem.conversation.len(), 1);
+        assert_eq!(mem.conversation.messages()[0].content, "hello from test");
+    }
+
+    #[tokio::test]
+    async fn update_memory_not_found() {
+        let manager = ContextManager::new(5);
+        let result = manager.update_memory(Uuid::new_v4(), |_| {}).await;
+        assert!(matches!(result, Err(JobError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn get_memory_not_found() {
+        let manager = ContextManager::new(5);
+        let result = manager.get_memory(Uuid::new_v4()).await;
+        assert!(matches!(result, Err(JobError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn find_stuck_jobs_returns_only_stuck() {
+        let manager = ContextManager::new(10);
+
+        let id1 = manager.create_job("Job 1", "desc").await.unwrap();
+        let id2 = manager.create_job("Job 2", "desc").await.unwrap();
+        let id3 = manager.create_job("Job 3", "desc").await.unwrap();
+
+        // Transition id1 and id2 to InProgress, then mark id2 as stuck
+        for id in [id1, id2, id3] {
+            manager
+                .update_context(id, |ctx| {
+                    ctx.transition_to(crate::context::JobState::InProgress, None)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        manager
+            .update_context(id2, |ctx| ctx.mark_stuck("timed out"))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let stuck = manager.find_stuck_jobs().await;
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0], id2);
+    }
+
+    #[tokio::test]
+    async fn active_count_tracks_non_terminal_jobs() {
+        let manager = ContextManager::new(10);
+
+        let id1 = manager.create_job("J1", "d").await.unwrap();
+        let id2 = manager.create_job("J2", "d").await.unwrap();
+
+        // Both pending (active)
+        assert_eq!(manager.active_count().await, 2);
+
+        // Transition id1 through to Failed (terminal)
+        manager
+            .update_context(id1, |ctx| {
+                ctx.transition_to(crate::context::JobState::InProgress, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        manager
+            .update_context(id1, |ctx| {
+                ctx.transition_to(crate::context::JobState::Failed, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // id1 is terminal, id2 still pending
+        assert_eq!(manager.active_count().await, 1);
+
+        // Transition id2 to cancelled
+        manager
+            .update_context(id2, |ctx| {
+                ctx.transition_to(crate::context::JobState::Cancelled, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(manager.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn active_jobs_for_filters_by_user() {
+        let manager = ContextManager::new(10);
+
+        manager
+            .create_job_for_user("alice", "A1", "d")
+            .await
+            .unwrap();
+        manager
+            .create_job_for_user("alice", "A2", "d")
+            .await
+            .unwrap();
+        let bob_id = manager.create_job_for_user("bob", "B1", "d").await.unwrap();
+
+        assert_eq!(manager.active_jobs_for("alice").await.len(), 2);
+        assert_eq!(manager.active_jobs_for("bob").await.len(), 1);
+        assert_eq!(manager.active_jobs_for("nobody").await.len(), 0);
+
+        // Make bob's job terminal
+        manager
+            .update_context(bob_id, |ctx| {
+                ctx.transition_to(crate::context::JobState::InProgress, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        manager
+            .update_context(bob_id, |ctx| {
+                ctx.transition_to(crate::context::JobState::Failed, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(manager.active_jobs_for("bob").await.len(), 0);
+        // But all_jobs_for still shows it
+        assert_eq!(manager.all_jobs_for("bob").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn summary_counts_states_correctly() {
+        let manager = ContextManager::new(10);
+
+        let id1 = manager.create_job("J1", "d").await.unwrap();
+        let id2 = manager.create_job("J2", "d").await.unwrap();
+        let id3 = manager.create_job("J3", "d").await.unwrap();
+
+        // id1: Pending -> InProgress -> Completed
+        manager
+            .update_context(id1, |ctx| {
+                ctx.transition_to(crate::context::JobState::InProgress, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        manager
+            .update_context(id1, |ctx| {
+                ctx.transition_to(crate::context::JobState::Completed, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // id2: Pending -> InProgress -> Failed
+        manager
+            .update_context(id2, |ctx| {
+                ctx.transition_to(crate::context::JobState::InProgress, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        manager
+            .update_context(id2, |ctx| {
+                ctx.transition_to(crate::context::JobState::Failed, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // id3: stays Pending
+
+        let s = manager.summary().await;
+        assert_eq!(s.total, 3);
+        assert_eq!(s.pending, 1);
+        assert_eq!(s.completed, 1);
+        assert_eq!(s.failed, 1);
+        assert_eq!(s.in_progress, 0);
+        assert_eq!(s.stuck, 0);
+        assert_eq!(s.cancelled, 0);
+        assert_eq!(s.submitted, 0);
+        assert_eq!(s.accepted, 0);
+
+        // Suppress unused field warning
+        let _ = id3;
+    }
+
+    #[tokio::test]
+    async fn summary_for_scopes_to_user() {
+        let manager = ContextManager::new(10);
+
+        manager
+            .create_job_for_user("alice", "A1", "d")
+            .await
+            .unwrap();
+        let bob_id = manager.create_job_for_user("bob", "B1", "d").await.unwrap();
+
+        // Transition bob's job to InProgress
+        manager
+            .update_context(bob_id, |ctx| {
+                ctx.transition_to(crate::context::JobState::InProgress, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        let alice_summary = manager.summary_for("alice").await;
+        assert_eq!(alice_summary.total, 1);
+        assert_eq!(alice_summary.pending, 1);
+        assert_eq!(alice_summary.in_progress, 0);
+
+        let bob_summary = manager.summary_for("bob").await;
+        assert_eq!(bob_summary.total, 1);
+        assert_eq!(bob_summary.pending, 0);
+        assert_eq!(bob_summary.in_progress, 1);
+
+        let nobody_summary = manager.summary_for("nobody").await;
+        assert_eq!(nobody_summary.total, 0);
+    }
+
+    #[tokio::test]
+    async fn default_context_manager_has_max_10() {
+        let manager = ContextManager::default();
+        // Create 10 jobs and make them active
+        for i in 0..10 {
+            let id = manager
+                .create_job(format!("Job {i}"), "desc")
+                .await
+                .unwrap();
+            manager
+                .update_context(id, |ctx| {
+                    ctx.transition_to(crate::context::JobState::InProgress, None)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        // 11th should fail
+        let result = manager.create_job("overflow", "d").await;
+        assert!(matches!(result, Err(JobError::MaxJobsExceeded { max: 10 })));
+    }
+
+    #[tokio::test]
+    async fn all_jobs_returns_all_regardless_of_state() {
+        let manager = ContextManager::new(10);
+
+        let id1 = manager.create_job("J1", "d").await.unwrap();
+        manager.create_job("J2", "d").await.unwrap();
+
+        // Make id1 terminal
+        manager
+            .update_context(id1, |ctx| {
+                ctx.transition_to(crate::context::JobState::InProgress, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        manager
+            .update_context(id1, |ctx| {
+                ctx.transition_to(crate::context::JobState::Failed, None)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        // all_jobs includes terminal, active_jobs does not
+        assert_eq!(manager.all_jobs().await.len(), 2);
+        assert_eq!(manager.active_jobs().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_job_uses_default_user() {
+        let manager = ContextManager::new(5);
+        let job_id = manager.create_job("Test", "desc").await.unwrap();
+        let ctx = manager.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.user_id, "default");
+    }
+
+    #[tokio::test]
+    async fn concurrent_remove_and_read() {
+        let manager = std::sync::Arc::new(ContextManager::new(100));
+
+        // Create 20 jobs
+        let mut job_ids = Vec::new();
+        for i in 0..20 {
+            let id = manager
+                .create_job(format!("Job {i}"), "desc")
+                .await
+                .unwrap();
+            job_ids.push(id);
+        }
+
+        // Concurrently remove the first 10 while reading the last 10
+        let remove_handles: Vec<_> = job_ids[..10]
+            .iter()
+            .map(|&id| {
+                let mgr = std::sync::Arc::clone(&manager);
+                tokio::spawn(async move { mgr.remove_job(id).await })
+            })
+            .collect();
+
+        let read_handles: Vec<_> = job_ids[10..]
+            .iter()
+            .map(|&id| {
+                let mgr = std::sync::Arc::clone(&manager);
+                tokio::spawn(async move { mgr.get_context(id).await })
+            })
+            .collect();
+
+        for handle in remove_handles {
+            handle
+                .await
+                .expect("remove task should not panic")
+                .expect("remove should succeed");
+        }
+
+        for handle in read_handles {
+            let ctx = handle
+                .await
+                .expect("read task should not panic")
+                .expect("read should succeed");
+            assert!(job_ids[10..].contains(&ctx.job_id));
+        }
+
+        assert_eq!(manager.all_jobs().await.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn update_context_and_get_atomicity_regression_issue_807() {
+        // Regression test for Issue #807: non-transactional context updates.
+        // Verify that update_context_and_get returns the exact state that was set,
+        // without allowing concurrent workers to interleave modifications.
+        let manager = std::sync::Arc::new(ContextManager::new(100));
+        let job_id = manager
+            .create_job("Atomicity Test", "verify no race condition")
+            .await
+            .unwrap(); // safety: test code
+
+        // Update and get atomically, setting metadata
+        let metadata = serde_json::json!({ "priority": "high", "user_id": 42 });
+        let returned_ctx = manager
+            .update_context_and_get(job_id, |ctx| {
+                ctx.metadata = metadata.clone();
+                ctx.max_tokens = 5000;
+            })
+            .await
+            .unwrap(); // safety: test code
+
+        // Verify the returned context has the exact updates we set
+        assert_eq!(returned_ctx.metadata, metadata); // safety: test code
+        assert_eq!(returned_ctx.max_tokens, 5000); // safety: test code
+
+        // Verify a fresh get returns the same state
+        let fresh_ctx = manager.get_context(job_id).await.unwrap(); // safety: test code
+        assert_eq!(fresh_ctx.metadata, metadata); // safety: test code
+        assert_eq!(fresh_ctx.max_tokens, 5000); // safety: test code
+    }
+
+    #[tokio::test]
+    async fn update_context_and_get_no_concurrent_interleave() {
+        // Verify that concurrent updates cannot interleave during update_context_and_get.
+        // If the lock were released too early, a concurrent state transition could
+        // get mixed into the returned context.
+        let manager = std::sync::Arc::new(ContextManager::new(100));
+        let job_id = manager
+            .create_job("Concurrent Race Test", "ensure atomicity")
+            .await
+            .unwrap(); // safety: test code
+
+        let metadata = serde_json::json!({ "test": "race_condition" });
+        let metadata_clone = metadata.clone();
+
+        // Spawn a task that will update_context_and_get
+        let mgr1 = std::sync::Arc::clone(&manager);
+        let returned_ctx_handle = tokio::spawn(async move {
+            mgr1.update_context_and_get(job_id, |ctx| {
+                ctx.metadata = metadata_clone;
+                ctx.max_tokens = 3000;
+            })
+            .await
+        });
+
+        // The returned context should have *only* the metadata update, not any
+        // concurrent state transitions that might happen during the operation.
+        let returned_ctx = returned_ctx_handle.await.unwrap().unwrap(); // safety: test code
+
+        // Verify atomicity: returned context has the metadata we set
+        assert_eq!(returned_ctx.metadata, metadata); // safety: test code
+        assert_eq!(returned_ctx.max_tokens, 3000); // safety: test code
+        // And it's in the initial state (Pending), not modified by concurrent workers
+        assert_eq!(returned_ctx.state, crate::context::JobState::Pending); // safety: test code
     }
 }

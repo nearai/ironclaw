@@ -1,31 +1,38 @@
 {
   "name": "telegram",
-  "display_name": "Telegram",
+  "display_name": "Telegram Channel",
   "kind": "channel",
-  "version": "0.1.0",
-  "description": "Telegram Bot API channel for receiving and responding to messages",
-  "keywords": ["messaging", "bot", "chat", "telegram"],
-
+  "version": "0.2.3",
+  "wit_version": "0.3.0",
+  "description": "Talk to your agent through a Telegram bot",
+  "keywords": [
+    "messaging",
+    "bot",
+    "chat",
+    "telegram"
+  ],
   "source": {
     "dir": "channels-src/telegram",
     "capabilities": "telegram.capabilities.json",
     "crate_name": "telegram-channel"
   },
-
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/latest/download/telegram-wasm32-wasip2.tar.gz",
-      "sha256": null
+      "url": "https://github.com/nearai/ironclaw/releases/download/v0.18.0/telegram-0.2.3-wasm32-wasip2.tar.gz",
+      "sha256": "b9a83d5a2d1285ce0ec116b354336a1f245f893291ccb01dffbcaccf89d72aed"
     }
   },
-
   "auth_summary": {
     "method": "manual",
     "provider": "Telegram",
-    "secrets": ["telegram_bot_token"],
+    "secrets": [
+      "telegram_bot_token"
+    ],
     "shared_auth": null,
     "setup_url": "https://t.me/BotFather"
   },
-
-  "tags": ["default", "messaging"]
+  "tags": [
+    "default",
+    "messaging"
+  ]
 }

@@ -1,4 +1,6 @@
 {
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
   "http": {
     "allowlist": [
       {
@@ -46,5 +48,17 @@
       }
     },
     "env_var": "GOOGLE_OAUTH_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "google_oauth_client_id",
+        "prompt": "Google OAuth Client ID (from console.cloud.google.com/apis/credentials)"
+      },
+      {
+        "name": "google_oauth_client_secret",
+        "prompt": "Google OAuth Client Secret"
+      }
+    ]
   }
 }
