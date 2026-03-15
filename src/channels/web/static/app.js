@@ -365,8 +365,8 @@ function connectSSE() {
       debouncedLoadThreads();
     }
 
-    // Extension setup flows can surface approvals while user is on Settings > Extensions.
-    if (currentTab === 'settings' && currentSettingsSubtab === 'extensions') loadExtensions();
+    // Extension setup flows can surface approvals from any settings subtab.
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
   eventSource.addEventListener('auth_required', (e) => {
@@ -4506,11 +4506,10 @@ function renderSettingsSkeleton(rows) {
 }
 
 function renderCardsSkeleton(count) {
-  var html = '<div class="extensions-list">';
+  var html = '';
   for (var i = 0; i < (count || 3); i++) {
     html += '<div class="skeleton-card"><div class="skeleton-bar" style="width:60%;height:14px"></div><div class="skeleton-bar" style="width:90%;height:10px"></div><div class="skeleton-bar" style="width:40%;height:10px"></div></div>';
   }
-  html += '</div>';
   return html;
 }
 
