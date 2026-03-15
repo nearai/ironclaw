@@ -55,7 +55,7 @@ pub struct Settings {
     pub secrets_master_key_hex: Option<String>,
 
     // === Step 3: Inference Provider ===
-    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible", "tinfoil", "bedrock".
+    /// LLM backend: "nearai", "anthropic", "openai", "github_copilot", "ollama", "openai_compatible", "tinfoil", "bedrock".
     #[serde(default)]
     pub llm_backend: Option<String>,
 

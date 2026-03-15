@@ -165,7 +165,7 @@ ironclaw onboard
 ### 替代 LLM 提供商
 
 IronClaw 默认使用 NEAR AI，但开箱即用地支持多种 LLM 提供商。
-内置提供商包括 **Anthropic**、**OpenAI**、**Google Gemini**、**MiniMax**、**Mistral** 和 **Ollama**（本地部署）。同时也支持 OpenAI 兼容服务，如 **OpenRouter**（300+ 模型）、**Together AI**、**Fireworks AI** 以及自托管服务器（**vLLM**、**LiteLLM**）。
+内置提供商包括 **Anthropic**、**OpenAI**、**GitHub Copilot**、**Google Gemini**、**MiniMax**、**Mistral** 和 **Ollama**（本地部署）。同时也支持 OpenAI 兼容服务，如 **OpenRouter**（300+ 模型）、**Together AI**、**Fireworks AI** 以及自托管服务器（**vLLM**、**LiteLLM**）。
 
 在向导中选择你的提供商，或直接设置环境变量：
 
