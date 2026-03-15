@@ -193,12 +193,11 @@ impl ExtensionManifest {
             Some("dcr") | None => AuthHint::Dcr,
             Some("none") => AuthHint::None,
             Some(other) if other.starts_with("oauth_pre_configured:") => {
-                AuthHint::OAuthPreConfigured {
-                    setup_url: other
-                        .strip_prefix("oauth_pre_configured:")
-                        .unwrap_or("")
-                        .to_string(),
-                }
+                let setup_url = other
+                    .strip_prefix("oauth_pre_configured:")
+                    .unwrap_or("")
+                    .to_string();
+                AuthHint::OAuthPreConfigured { setup_url }
             }
             _ => AuthHint::Dcr,
         };
