@@ -30,6 +30,7 @@ Set via `LLM_BACKEND` env var:
 | `nearai` (default) | NEAR AI Chat Completions | `NEARAI_SESSION_TOKEN` or `NEARAI_API_KEY` |
 | `openai` | OpenAI | `OPENAI_API_KEY` |
 | `anthropic` | Anthropic | `ANTHROPIC_API_KEY` |
+| `github_copilot` | GitHub Copilot Chat API | `GITHUB_COPILOT_TOKEN`, `GITHUB_COPILOT_MODEL` |
 | `ollama` | Ollama local | `OLLAMA_BASE_URL` |
 | `openai_compatible` | Any OpenAI-compatible endpoint | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
 | `tinfoil` | Tinfoil TEE inference | `TINFOIL_API_KEY`, `TINFOIL_MODEL` |
@@ -45,6 +46,22 @@ Uses the native Converse API via `aws-sdk-bedrockruntime` (`bedrock.rs`). Requir
 - `BEDROCK_REGION` — AWS region (default: `us-east-1`)
 - `BEDROCK_MODEL` — Required model ID (e.g., `anthropic.claude-opus-4-6-v1`)
 - `BEDROCK_CROSS_REGION` — Optional cross-region inference prefix (`us`, `eu`, `apac`, `global`)
+
+## GitHub Copilot Provider Notes
+
+`github_copilot` is a declarative registry provider backed by the existing
+OpenAI-compatible path. It defaults to `https://api.githubcopilot.com` and expects a
+GitHub Copilot OAuth token in `GITHUB_COPILOT_TOKEN` (for example the `oauth_token`
+stored by your IDE sign-in flow in `~/.config/github-copilot/apps.json`). The setup
+wizard also supports GitHub device login using the VS Code Copilot client ID and then
+stores the resulting token in the encrypted secrets store.
+
+Manual model entry is used in the setup wizard (`can_list_models = false`) because
+GitHub Copilot model discovery can require extra integration headers on some clients.
+IronClaw injects the standard VS Code identity headers automatically:
+`User-Agent`, `Editor-Version`, `Editor-Plugin-Version`, and
+`Copilot-Integration-Id`. Advanced users can still override or append headers via
+`GITHUB_COPILOT_EXTRA_HEADERS`.
 
 ## NEAR AI Provider Gotchas
 
