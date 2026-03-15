@@ -1821,30 +1821,10 @@ async fn extensions_list_handler(
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-                Some(if ext.activation_error.is_some() {
-                    "failed".to_string()
-                } else if !ext.authenticated {
-                    // No credentials configured yet.
-                    "installed".to_string()
-                } else if ext.active {
-                    // Check pairing status for active channels.
-                    let has_paired = pairing_store
-                        .read_allow_from(&ext.name)
-                        .map(|list| !list.is_empty())
-                        .unwrap_or(false);
-                    if has_paired {
-                        "active".to_string()
-                    } else {
-                        "pairing".to_string()
-                    }
-                } else {
-                    // Authenticated but not yet active.
-                    "configured".to_string()
-                })
-            } else {
-                None
-            };
+            let activation_status = crate::channels::web::handlers::extensions::derive_activation_status(
+                &ext,
+                &pairing_store,
+            );
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
