@@ -4394,101 +4394,101 @@ function loadSettingsSubtab(subtab) {
 
 var INFERENCE_SETTINGS = [
   {
-    group: 'LLM Provider',
+    group: 'cfg.group.llm',
     settings: [
-      { key: 'llm_backend', label: 'Backend', description: 'LLM inference provider',
+      { key: 'llm_backend', label: 'cfg.llm_backend.label', description: 'cfg.llm_backend.desc',
         type: 'select', options: ['nearai', 'anthropic', 'openai', 'ollama', 'openai_compatible', 'tinfoil', 'bedrock'] },
-      { key: 'selected_model', label: 'Model', description: 'Model name or ID for the selected backend', type: 'text' },
-      { key: 'ollama_base_url', label: 'Ollama URL', description: 'Base URL for Ollama API', type: 'text',
+      { key: 'selected_model', label: 'cfg.selected_model.label', description: 'cfg.selected_model.desc', type: 'text' },
+      { key: 'ollama_base_url', label: 'cfg.ollama_base_url.label', description: 'cfg.ollama_base_url.desc', type: 'text',
         showWhen: { key: 'llm_backend', value: 'ollama' } },
-      { key: 'openai_compatible_base_url', label: 'OpenAI-compatible URL', description: 'Base URL for OpenAI-compatible API', type: 'text',
+      { key: 'openai_compatible_base_url', label: 'cfg.openai_compatible_base_url.label', description: 'cfg.openai_compatible_base_url.desc', type: 'text',
         showWhen: { key: 'llm_backend', value: 'openai_compatible' } },
-      { key: 'bedrock_region', label: 'Bedrock Region', description: 'AWS region for Bedrock', type: 'text',
+      { key: 'bedrock_region', label: 'cfg.bedrock_region.label', description: 'cfg.bedrock_region.desc', type: 'text',
         showWhen: { key: 'llm_backend', value: 'bedrock' } },
-      { key: 'bedrock_cross_region', label: 'Cross-Region', description: 'Enable cross-region inference', type: 'text',
+      { key: 'bedrock_cross_region', label: 'cfg.bedrock_cross_region.label', description: 'cfg.bedrock_cross_region.desc', type: 'text',
         showWhen: { key: 'llm_backend', value: 'bedrock' } },
-      { key: 'bedrock_profile', label: 'AWS Profile', description: 'AWS profile for Bedrock auth', type: 'text',
+      { key: 'bedrock_profile', label: 'cfg.bedrock_profile.label', description: 'cfg.bedrock_profile.desc', type: 'text',
         showWhen: { key: 'llm_backend', value: 'bedrock' } },
     ]
   },
   {
-    group: 'Embeddings',
+    group: 'cfg.group.embeddings',
     settings: [
-      { key: 'embeddings.enabled', label: 'Enabled', description: 'Enable vector embeddings for memory search', type: 'boolean' },
-      { key: 'embeddings.provider', label: 'Provider', description: 'Embeddings API provider',
+      { key: 'embeddings.enabled', label: 'cfg.embeddings_enabled.label', description: 'cfg.embeddings_enabled.desc', type: 'boolean' },
+      { key: 'embeddings.provider', label: 'cfg.embeddings_provider.label', description: 'cfg.embeddings_provider.desc',
         type: 'select', options: ['openai', 'nearai'] },
-      { key: 'embeddings.model', label: 'Model', description: 'Embedding model name', type: 'text' },
+      { key: 'embeddings.model', label: 'cfg.embeddings_model.label', description: 'cfg.embeddings_model.desc', type: 'text' },
     ]
   },
 ];
 
 var AGENT_SETTINGS = [
   {
-    group: 'Agent',
+    group: 'cfg.group.agent',
     settings: [
-      { key: 'agent.name', label: 'Name', description: 'Agent display name', type: 'text' },
-      { key: 'agent.max_parallel_jobs', label: 'Max Parallel Jobs', description: 'Maximum concurrent background jobs', type: 'number' },
-      { key: 'agent.job_timeout_secs', label: 'Job Timeout', description: 'Max duration per job in seconds', type: 'number' },
-      { key: 'agent.max_tool_iterations', label: 'Max Tool Iterations', description: 'Max tool calls per turn', type: 'number' },
-      { key: 'agent.use_planning', label: 'Planning', description: 'Enable multi-step planning before execution', type: 'boolean' },
-      { key: 'agent.auto_approve_tools', label: 'Auto-approve Tools', description: 'Skip manual approval for tool calls', type: 'boolean' },
-      { key: 'agent.default_timezone', label: 'Timezone', description: 'Default timezone (IANA)', type: 'text' },
-      { key: 'agent.session_idle_timeout_secs', label: 'Session Idle Timeout', description: 'Seconds before idle session expires', type: 'number' },
-      { key: 'agent.stuck_threshold_secs', label: 'Stuck Threshold', description: 'Seconds before a job is considered stuck', type: 'number' },
-      { key: 'agent.max_repair_attempts', label: 'Max Repair Attempts', description: 'Auto-recovery attempts for stuck jobs', type: 'number' },
-      { key: 'agent.max_cost_per_day_cents', label: 'Max Daily Cost', description: 'Daily LLM spend cap in cents (0 = unlimited)', type: 'number', min: 0 },
-      { key: 'agent.max_actions_per_hour', label: 'Max Actions/Hour', description: 'Hourly tool call rate limit (0 = unlimited)', type: 'number', min: 0 },
-      { key: 'agent.allow_local_tools', label: 'Allow Local Tools', description: 'Enable local filesystem tool execution', type: 'boolean' },
+      { key: 'agent.name', label: 'cfg.agent_name.label', description: 'cfg.agent_name.desc', type: 'text' },
+      { key: 'agent.max_parallel_jobs', label: 'cfg.agent_max_parallel_jobs.label', description: 'cfg.agent_max_parallel_jobs.desc', type: 'number' },
+      { key: 'agent.job_timeout_secs', label: 'cfg.agent_job_timeout.label', description: 'cfg.agent_job_timeout.desc', type: 'number' },
+      { key: 'agent.max_tool_iterations', label: 'cfg.agent_max_tool_iterations.label', description: 'cfg.agent_max_tool_iterations.desc', type: 'number' },
+      { key: 'agent.use_planning', label: 'cfg.agent_use_planning.label', description: 'cfg.agent_use_planning.desc', type: 'boolean' },
+      { key: 'agent.auto_approve_tools', label: 'cfg.agent_auto_approve.label', description: 'cfg.agent_auto_approve.desc', type: 'boolean' },
+      { key: 'agent.default_timezone', label: 'cfg.agent_timezone.label', description: 'cfg.agent_timezone.desc', type: 'text' },
+      { key: 'agent.session_idle_timeout_secs', label: 'cfg.agent_session_idle.label', description: 'cfg.agent_session_idle.desc', type: 'number' },
+      { key: 'agent.stuck_threshold_secs', label: 'cfg.agent_stuck_threshold.label', description: 'cfg.agent_stuck_threshold.desc', type: 'number' },
+      { key: 'agent.max_repair_attempts', label: 'cfg.agent_max_repair.label', description: 'cfg.agent_max_repair.desc', type: 'number' },
+      { key: 'agent.max_cost_per_day_cents', label: 'cfg.agent_max_cost.label', description: 'cfg.agent_max_cost.desc', type: 'number', min: 0 },
+      { key: 'agent.max_actions_per_hour', label: 'cfg.agent_max_actions.label', description: 'cfg.agent_max_actions.desc', type: 'number', min: 0 },
+      { key: 'agent.allow_local_tools', label: 'cfg.agent_allow_local.label', description: 'cfg.agent_allow_local.desc', type: 'boolean' },
     ]
   },
   {
-    group: 'Heartbeat',
+    group: 'cfg.group.heartbeat',
     settings: [
-      { key: 'heartbeat.enabled', label: 'Enabled', description: 'Run periodic background checks', type: 'boolean' },
-      { key: 'heartbeat.interval_secs', label: 'Interval', description: 'Seconds between heartbeats (default: 1800)', type: 'number' },
-      { key: 'heartbeat.notify_channel', label: 'Notify Channel', description: 'Channel to send heartbeat findings to', type: 'text' },
-      { key: 'heartbeat.notify_user', label: 'Notify User', description: 'User ID to notify', type: 'text' },
-      { key: 'heartbeat.quiet_hours_start', label: 'Quiet Hours Start', description: 'Hour (0-23) to stop heartbeats', type: 'number', min: 0, max: 23 },
-      { key: 'heartbeat.quiet_hours_end', label: 'Quiet Hours End', description: 'Hour (0-23) to resume heartbeats', type: 'number', min: 0, max: 23 },
-      { key: 'heartbeat.timezone', label: 'Timezone', description: 'Timezone for quiet hours (IANA)', type: 'text' },
+      { key: 'heartbeat.enabled', label: 'cfg.heartbeat_enabled.label', description: 'cfg.heartbeat_enabled.desc', type: 'boolean' },
+      { key: 'heartbeat.interval_secs', label: 'cfg.heartbeat_interval.label', description: 'cfg.heartbeat_interval.desc', type: 'number' },
+      { key: 'heartbeat.notify_channel', label: 'cfg.heartbeat_notify_channel.label', description: 'cfg.heartbeat_notify_channel.desc', type: 'text' },
+      { key: 'heartbeat.notify_user', label: 'cfg.heartbeat_notify_user.label', description: 'cfg.heartbeat_notify_user.desc', type: 'text' },
+      { key: 'heartbeat.quiet_hours_start', label: 'cfg.heartbeat_quiet_start.label', description: 'cfg.heartbeat_quiet_start.desc', type: 'number', min: 0, max: 23 },
+      { key: 'heartbeat.quiet_hours_end', label: 'cfg.heartbeat_quiet_end.label', description: 'cfg.heartbeat_quiet_end.desc', type: 'number', min: 0, max: 23 },
+      { key: 'heartbeat.timezone', label: 'cfg.heartbeat_timezone.label', description: 'cfg.heartbeat_timezone.desc', type: 'text' },
     ]
   },
   {
-    group: 'Sandbox',
+    group: 'cfg.group.sandbox',
     settings: [
-      { key: 'sandbox.enabled', label: 'Enabled', description: 'Enable Docker sandbox for background jobs', type: 'boolean' },
-      { key: 'sandbox.policy', label: 'Policy', description: 'Sandbox security policy',
+      { key: 'sandbox.enabled', label: 'cfg.sandbox_enabled.label', description: 'cfg.sandbox_enabled.desc', type: 'boolean' },
+      { key: 'sandbox.policy', label: 'cfg.sandbox_policy.label', description: 'cfg.sandbox_policy.desc',
         type: 'select', options: ['readonly', 'workspace_write', 'full_access'] },
-      { key: 'sandbox.timeout_secs', label: 'Timeout', description: 'Max job duration in seconds', type: 'number', min: 0 },
-      { key: 'sandbox.memory_limit_mb', label: 'Memory Limit', description: 'Container memory limit (MB)', type: 'number', min: 0 },
-      { key: 'sandbox.image', label: 'Docker Image', description: 'Container image for sandbox jobs', type: 'text' },
+      { key: 'sandbox.timeout_secs', label: 'cfg.sandbox_timeout.label', description: 'cfg.sandbox_timeout.desc', type: 'number', min: 0 },
+      { key: 'sandbox.memory_limit_mb', label: 'cfg.sandbox_memory.label', description: 'cfg.sandbox_memory.desc', type: 'number', min: 0 },
+      { key: 'sandbox.image', label: 'cfg.sandbox_image.label', description: 'cfg.sandbox_image.desc', type: 'text' },
     ]
   },
   {
-    group: 'Routines',
+    group: 'cfg.group.routines',
     settings: [
-      { key: 'routines.max_concurrent', label: 'Max Concurrent', description: 'Maximum routines running simultaneously', type: 'number', min: 0 },
-      { key: 'routines.default_cooldown_secs', label: 'Default Cooldown', description: 'Minimum seconds between routine fires', type: 'number', min: 0 },
+      { key: 'routines.max_concurrent', label: 'cfg.routines_max_concurrent.label', description: 'cfg.routines_max_concurrent.desc', type: 'number', min: 0 },
+      { key: 'routines.default_cooldown_secs', label: 'cfg.routines_cooldown.label', description: 'cfg.routines_cooldown.desc', type: 'number', min: 0 },
     ]
   },
   {
-    group: 'Safety',
+    group: 'cfg.group.safety',
     settings: [
-      { key: 'safety.max_output_length', label: 'Max Output Length', description: 'Maximum output tokens per response', type: 'number', min: 0 },
-      { key: 'safety.injection_check_enabled', label: 'Injection Check', description: 'Enable prompt injection detection', type: 'boolean' },
+      { key: 'safety.max_output_length', label: 'cfg.safety_max_output.label', description: 'cfg.safety_max_output.desc', type: 'number', min: 0 },
+      { key: 'safety.injection_check_enabled', label: 'cfg.safety_injection_check.label', description: 'cfg.safety_injection_check.desc', type: 'boolean' },
     ]
   },
   {
-    group: 'Skills',
+    group: 'cfg.group.skills',
     settings: [
-      { key: 'skills.max_active', label: 'Max Active Skills', description: 'Maximum skills active simultaneously', type: 'number', min: 0 },
-      { key: 'skills.max_context_tokens', label: 'Max Context Tokens', description: 'Token budget for skill prompts', type: 'number', min: 0 },
+      { key: 'skills.max_active', label: 'cfg.skills_max_active.label', description: 'cfg.skills_max_active.desc', type: 'number', min: 0 },
+      { key: 'skills.max_context_tokens', label: 'cfg.skills_max_tokens.label', description: 'cfg.skills_max_tokens.desc', type: 'number', min: 0 },
     ]
   },
   {
-    group: 'Search',
+    group: 'cfg.group.search',
     settings: [
-      { key: 'search.fusion_strategy', label: 'Fusion Strategy', description: 'Hybrid search ranking method',
+      { key: 'search.fusion_strategy', label: 'cfg.search_fusion.label', description: 'cfg.search_fusion.desc',
         type: 'select', options: ['rrf', 'weighted'] },
     ]
   },
@@ -4574,7 +4574,7 @@ function renderStructuredSettingsInto(container, settingsDefs, settings, activeV
 
       var title = document.createElement('div');
       title.className = 'settings-group-title';
-      title.textContent = groupDef.group;
+      title.textContent = I18n.t(groupDef.group);
       group.appendChild(title);
 
       var rows = [];
@@ -4624,7 +4624,7 @@ function renderStructuredSettingsInto(container, settingsDefs, settings, activeV
     }
 
     if (container.children.length === 0) {
-      container.innerHTML = '<div class="empty-state">No settings found</div>';
+      container.innerHTML = '<div class="empty-state">' + I18n.t('settings.noSettings') + '</div>';
     }
 }
 
@@ -4637,13 +4637,13 @@ function renderStructuredSettingsRow(def, value, activeValue) {
 
   var label = document.createElement('div');
   label.className = 'settings-label';
-  label.textContent = def.label;
+  label.textContent = I18n.t(def.label);
   labelWrap.appendChild(label);
 
   if (def.description) {
     var desc = document.createElement('div');
     desc.className = 'settings-description';
-    desc.textContent = def.description;
+    desc.textContent = I18n.t(def.description);
     labelWrap.appendChild(desc);
   }
 
@@ -4654,7 +4654,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
   inputWrap.style.alignItems = 'center';
   inputWrap.style.gap = '8px';
 
-  var ariaLabel = def.label + (def.description ? '. ' + def.description : '');
+  var ariaLabel = I18n.t(def.label) + (def.description ? '. ' + I18n.t(def.description) : '');
   var placeholderText = activeValue ? 'env: ' + activeValue : (def.placeholder || 'env default');
 
   if (def.type === 'boolean') {
@@ -4838,14 +4838,14 @@ function loadChannelsStatus() {
     var builtinSection = document.createElement('div');
     builtinSection.className = 'extensions-section';
     var builtinTitle = document.createElement('h3');
-    builtinTitle.textContent = 'Built-in Channels';
+    builtinTitle.textContent = I18n.t('channels.builtin');
     builtinSection.appendChild(builtinTitle);
     var builtinList = document.createElement('div');
     builtinList.className = 'extensions-list';
 
     builtinList.appendChild(renderBuiltinChannelCard(
-      'Web Gateway',
-      'Browser-based chat interface',
+      I18n.t('channels.webGateway'),
+      I18n.t('channels.webGatewayDesc'),
       true,
       'SSE: ' + (status.sse_connections || 0) + ' \u00B7 WS: ' + (status.ws_connections || 0)
     ));
@@ -4853,24 +4853,24 @@ function loadChannelsStatus() {
     var enabledChannels = status.enabled_channels || [];
 
     builtinList.appendChild(renderBuiltinChannelCard(
-      'HTTP Webhook',
-      'Incoming webhook endpoint for external integrations',
+      I18n.t('channels.httpWebhook'),
+      I18n.t('channels.httpWebhookDesc'),
       enabledChannels.indexOf('http') !== -1,
-      'Configure via ENABLE_HTTP=true'
+      I18n.t('channels.configureVia', { env: 'ENABLE_HTTP=true' })
     ));
 
     builtinList.appendChild(renderBuiltinChannelCard(
-      'CLI',
-      'Terminal UI with Ratatui',
+      I18n.t('channels.cli'),
+      I18n.t('channels.cliDesc'),
       enabledChannels.indexOf('cli') !== -1,
-      'Run with: ironclaw run --cli'
+      I18n.t('channels.runWith', { cmd: 'ironclaw run --cli' })
     ));
 
     builtinList.appendChild(renderBuiltinChannelCard(
-      'REPL',
-      'Simple read-eval-print loop for testing',
+      I18n.t('channels.repl'),
+      I18n.t('channels.replDesc'),
       enabledChannels.indexOf('repl') !== -1,
-      'Run with: ironclaw run --repl'
+      I18n.t('channels.runWith', { cmd: 'ironclaw run --repl' })
     ));
 
     builtinSection.appendChild(builtinList);
@@ -4888,7 +4888,7 @@ function loadChannelsStatus() {
       var messagingSection = document.createElement('div');
       messagingSection.className = 'extensions-section';
       var messagingTitle = document.createElement('h3');
-      messagingTitle.textContent = 'Messaging Channels';
+      messagingTitle.textContent = I18n.t('channels.messaging');
       messagingSection.appendChild(messagingTitle);
       var messagingList = document.createElement('div');
       messagingList.className = 'extensions-list';
@@ -4974,18 +4974,18 @@ function renderBuiltinChannelCard(name, description, active, detail) {
 
 var NETWORKING_SETTINGS = [
   {
-    group: 'Tunnel',
+    group: 'cfg.group.tunnel',
     settings: [
-      { key: 'tunnel.provider', label: 'Provider', description: 'Public URL tunnel provider',
+      { key: 'tunnel.provider', label: 'cfg.tunnel_provider.label', description: 'cfg.tunnel_provider.desc',
         type: 'select', options: ['none', 'cloudflare', 'ngrok', 'tailscale', 'custom'] },
-      { key: 'tunnel.public_url', label: 'Public URL', description: 'Static public URL (if not using tunnel provider)', type: 'text' },
+      { key: 'tunnel.public_url', label: 'cfg.tunnel_public_url.label', description: 'cfg.tunnel_public_url.desc', type: 'text' },
     ]
   },
   {
-    group: 'Gateway',
+    group: 'cfg.group.gateway',
     settings: [
-      { key: 'gateway.rate_limit', label: 'Rate Limit', description: 'Max chat messages per minute', type: 'number', min: 0 },
-      { key: 'gateway.max_connections', label: 'Max Connections', description: 'Max simultaneous SSE/WS connections', type: 'number', min: 0 },
+      { key: 'gateway.rate_limit', label: 'cfg.gateway_rate_limit.label', description: 'cfg.gateway_rate_limit.desc', type: 'number', min: 0 },
+      { key: 'gateway.max_connections', label: 'cfg.gateway_max_connections.label', description: 'cfg.gateway_max_connections.desc', type: 'number', min: 0 },
     ]
   },
 ];
