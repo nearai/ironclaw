@@ -792,6 +792,16 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        // Cognitive Guardian: write pre-compaction breadcrumb before we lose context.
+        if let Some(ws) = self.workspace() {
+            let guardian =
+                crate::agent::cognitive::CognitiveGuardian::new(self.config.cognitive.clone());
+            let label = format!("thread:{}", thread_id);
+            guardian
+                .write_pre_compaction_breadcrumb(ws.as_ref(), &label, None)
+                .await;
+        }
+
         let mut sess = session.lock().await;
         let thread = sess
             .threads
@@ -831,6 +841,23 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        // Cognitive Guardian: write pre-reset breadcrumb before clearing.
+        if let Some(ws) = self.workspace() {
+            let turn_count = {
+                let sess = session.lock().await;
+                sess.threads
+                    .get(&thread_id)
+                    .map(|t| t.turns.len())
+                    .unwrap_or(0)
+            };
+            let guardian =
+                crate::agent::cognitive::CognitiveGuardian::new(self.config.cognitive.clone());
+            let label = format!("thread:{}", thread_id);
+            guardian
+                .write_pre_reset_breadcrumb(ws.as_ref(), &label, turn_count)
+                .await;
+        }
+
         let mut sess = session.lock().await;
         let thread = sess
             .threads
