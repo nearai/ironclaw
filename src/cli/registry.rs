@@ -127,7 +127,11 @@ fn cmd_list(
                 .unwrap_or("none");
             println!(
                 "{:<20} {:<8} {:<8} {:<10} {}",
-                m.name, m.kind, m.version, auth, m.description
+                m.name,
+                m.kind,
+                m.version.as_deref().unwrap_or("-"),
+                auth,
+                m.description
             );
         } else {
             println!("{:<20} {:<8} {}", m.name, m.kind, m.description);
@@ -173,17 +177,25 @@ fn cmd_info(catalog: &RegistryCatalog, name: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     println!("{} ({})", manifest.display_name, manifest.kind);
-    println!("  Version: {}", manifest.version);
+    if let Some(ref version) = manifest.version {
+        println!("  Version: {}", version);
+    }
     println!("  {}", manifest.description);
 
     if !manifest.keywords.is_empty() {
         println!("  Keywords: {}", manifest.keywords.join(", "));
     }
 
-    println!("\nSource:");
-    println!("  Directory: {}", manifest.source.dir);
-    println!("  Crate: {}", manifest.source.crate_name);
-    println!("  Capabilities: {}", manifest.source.capabilities);
+    if let Some(ref source) = manifest.source {
+        println!("\nSource:");
+        println!("  Directory: {}", source.dir);
+        println!("  Crate: {}", source.crate_name);
+        println!("  Capabilities: {}", source.capabilities);
+    }
+
+    if let Some(ref url) = manifest.url {
+        println!("\nMCP Server URL: {}", url);
+    }
 
     if let Some(artifact) = manifest.artifacts.get("wasm32-wasip2") {
         println!("\nArtifact (wasm32-wasip2):");

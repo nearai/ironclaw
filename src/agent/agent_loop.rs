@@ -36,20 +36,7 @@ use crate::workspace::Workspace;
 /// Sent before the LLM is involved so the user sees something immediately.
 /// The conversational onboarding (profile building, channel setup) happens
 /// organically in the subsequent turns driven by BOOTSTRAP.md.
-const BOOTSTRAP_GREETING: &str = "\
-Hey there! I'm excited to be your new assistant. Think of me as your always-on \
-chief of staff — here to help you stay on top of things and reclaim your time.\n\n\
-Here's what I can do for you right now:\n\n\
-**Task & Project Tracking** — Break big goals into steps, create jobs to track \
-progress, and remind you of what matters.\n\n\
-**Smart Routines** — Set up recurring tasks, daily briefings, monitoring and \
-alerts. Like \"Daily briefing at 9am\" or \"Prepare draft responses for every email.\"\n\n\
-**Persistent Memory** — I remember things across sessions — your preferences, \
-decisions, and important context — so we don't start from scratch every time.\n\n\
-**Talk to me where you are** — I can set up Telegram, Slack, Discord, or Signal \
-so I can message you directly on your preferred platforms.\n\n\
-To get started, what would you like to tackle first? And while we're getting \
-acquainted — what do you like to be called?";
+const BOOTSTRAP_GREETING: &str = include_str!("../workspace/seeds/GREETING.md");
 
 /// Collapse a tool output string into a single-line preview for display.
 pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
@@ -895,19 +882,42 @@ impl Agent {
         };
 
         if let Some(pending) = pending_auth {
-            match &submission {
-                Submission::UserInput { content } => {
-                    return self
-                        .process_auth_token(message, &pending, content, session, thread_id)
-                        .await;
-                }
-                _ => {
-                    // Any control submission (interrupt, undo, etc.) cancels auth mode
+            if pending.is_expired() {
+                // TTL exceeded — clear stale auth mode
+                tracing::warn!(
+                    extension = %pending.extension_name,
+                    "Auth mode expired after TTL, clearing"
+                );
+                {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
                         thread.pending_auth = None;
                     }
-                    // Fall through to normal handling
+                }
+                // If this was a user message (possibly a pasted token), return an
+                // explicit error instead of forwarding it to the LLM/history.
+                if matches!(submission, Submission::UserInput { .. }) {
+                    return Ok(Some(format!(
+                        "Authentication for **{}** expired. Please try again.",
+                        pending.extension_name
+                    )));
+                }
+                // Control submissions (interrupt, undo, etc.) fall through to normal handling
+            } else {
+                match &submission {
+                    Submission::UserInput { content } => {
+                        return self
+                            .process_auth_token(message, &pending, content, session, thread_id)
+                            .await;
+                    }
+                    _ => {
+                        // Any control submission (interrupt, undo, etc.) cancels auth mode
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.pending_auth = None;
+                        }
+                        // Fall through to normal handling
+                    }
                 }
             }
         }

@@ -176,8 +176,11 @@ impl LlmProvider for BedrockProvider {
             builder = builder.tool_config(tc);
         }
 
-        if let Some(config) = build_inference_config(request.temperature, request.max_tokens, None)
-        {
+        if let Some(config) = build_inference_config(
+            request.temperature,
+            request.max_tokens,
+            request.stop_sequences.as_deref(),
+        ) {
             builder = builder.inference_config(config);
         }
 

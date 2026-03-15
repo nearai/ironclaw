@@ -248,12 +248,14 @@ impl ExtensionManager {
         self.tunnel_url
             .as_ref()
             .filter(|u| !u.is_empty())
-            .and_then(|raw| url::Url::parse(raw).ok())
-            .and_then(|u| u.host_str().map(String::from))
-            .filter(|host| !oauth_defaults::is_loopback_host(host))
-            .map(|_| {
-                let base = self.tunnel_url.as_ref().unwrap().trim_end_matches('/');
-                format!("{}/oauth/callback", base)
+            .and_then(|raw| {
+                let url = url::Url::parse(raw).ok()?;
+                let host = url.host_str().map(String::from)?;
+                if oauth_defaults::is_loopback_host(&host) {
+                    return None;
+                }
+                let base = raw.trim_end_matches('/');
+                Some(format!("{}/oauth/callback", base))
             })
     }
 
@@ -302,6 +304,34 @@ impl ExtensionManager {
     /// still need to be hot-added.
     pub async fn set_relay_channel_manager(&self, channel_manager: Arc<ChannelManager>) {
         *self.relay_channel_manager.write().await = Some(channel_manager);
+    }
+
+    async fn current_channel_owner_id(&self, name: &str) -> Option<i64> {
+        {
+            let rt_guard = self.channel_runtime.read().await;
+            if let Some(owner_id) = rt_guard
+                .as_ref()
+                .and_then(|rt| rt.wasm_channel_owner_ids.get(name).copied())
+            {
+                return Some(owner_id);
+            }
+        }
+
+        let store = self.store.as_ref()?;
+        let key = format!("channels.wasm_channel_owner_ids.{name}");
+        match store.get_setting(&self.user_id, &key).await {
+            Ok(Some(serde_json::Value::Number(n))) => n.as_i64(),
+            Ok(Some(serde_json::Value::String(s))) => s.parse::<i64>().ok(),
+            Ok(Some(_)) | Ok(None) => None,
+            Err(e) => {
+                tracing::debug!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to read persisted wasm channel owner id"
+                );
+                None
+            }
+        }
     }
 
     /// Check if a channel name corresponds to a relay extension (has stored stream token).
@@ -1281,8 +1311,12 @@ impl ExtensionManager {
         match fallback_decision(&primary_result, &entry.fallback_source) {
             FallbackDecision::Return => primary_result,
             FallbackDecision::TryFallback => {
-                let primary_err = primary_result.unwrap_err();
-                let fallback = entry.fallback_source.as_ref().unwrap();
+                // TryFallback guarantees primary is Err and fallback_source is Some.
+                let (primary_err, fallback) = match (primary_result, entry.fallback_source.as_ref())
+                {
+                    (Err(e), Some(f)) => (e, f),
+                    (other, _) => return other,
+                };
                 tracing::info!(
                     extension = %entry.name,
                     primary_error = %primary_err,
@@ -2830,9 +2864,16 @@ impl ExtensionManager {
         // Try to list and create tools.
         // A 401/auth error means the server requires OAuth — surface as
         // AuthRequired so the activate handler triggers the OAuth flow.
+        // Some servers (e.g. GitHub MCP) return 400 with "Authorization header
+        // is badly formatted" instead of 401 when auth is missing or invalid.
         let mcp_tools = client.list_tools().await.map_err(|e| {
             let msg = e.to_string();
-            if msg.contains("requires authentication") || msg.contains("401") {
+            let msg_lower = msg.to_ascii_lowercase();
+            if msg_lower.contains("requires authentication")
+                || msg.contains("401")
+                || (msg.contains("400")
+                    && (msg_lower.contains("authorization") || msg_lower.contains("authenticate")))
+            {
                 ExtensionError::AuthRequired
             } else {
                 ExtensionError::ActivationFailed(msg)
@@ -2980,13 +3021,7 @@ impl ExtensionManager {
 
         // Verify runtime infrastructure is available and clone Arcs so we don't
         // hold the RwLock guard across awaits.
-        let (
-            channel_runtime,
-            channel_manager,
-            pairing_store,
-            wasm_channel_router,
-            wasm_channel_owner_ids,
-        ) = {
+        let (channel_runtime, channel_manager, pairing_store, wasm_channel_router) = {
             let rt_guard = self.channel_runtime.read().await;
             let rt = rt_guard.as_ref().ok_or_else(|| {
                 ExtensionError::ActivationFailed("WASM channel runtime not configured".to_string())
@@ -2996,7 +3031,6 @@ impl ExtensionManager {
                 Arc::clone(&rt.channel_manager),
                 Arc::clone(&rt.pairing_store),
                 Arc::clone(&rt.wasm_channel_router),
-                rt.wasm_channel_owner_ids.clone(),
             )
         };
 
@@ -3067,7 +3101,7 @@ impl ExtensionManager {
                 );
             }
 
-            if let Some(&owner_id) = wasm_channel_owner_ids.get(channel_name.as_str()) {
+            if let Some(owner_id) = self.current_channel_owner_id(&channel_name).await {
                 config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
             }
 
@@ -3417,7 +3451,8 @@ impl ExtensionManager {
             .or_else(|| relay_config.callback_url.clone())
             .unwrap_or_else(|| {
                 let host = std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-                let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3001".into());
+                let port = std::env::var("GATEWAY_PORT")
+                    .unwrap_or_else(|_| crate::config::DEFAULT_GATEWAY_PORT.to_string());
                 format!("http://{}:{}", host, port)
             });
 
@@ -3816,11 +3851,12 @@ impl ExtensionManager {
                     secret_name, name
                 )));
             }
-            if secret_value.trim().is_empty() {
+            let trimmed_value = secret_value.trim();
+            if trimmed_value.is_empty() {
                 continue;
             }
             let params =
-                CreateSecretParams::new(secret_name, secret_value).with_provider(name.to_string());
+                CreateSecretParams::new(secret_name, trimmed_value).with_provider(name.to_string());
             self.secrets
                 .create(&self.user_id, params)
                 .await
@@ -4742,6 +4778,126 @@ mod tests {
             None,
             Vec::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_current_channel_owner_id_uses_runtime_state() -> Result<(), String> {
+        let manager = make_manager_with_temp_dirs();
+        if manager.current_channel_owner_id("telegram").await.is_some() {
+            return Err("expected no owner id for telegram before runtime setup".to_string());
+        }
+
+        let channels = Arc::new(crate::channels::ChannelManager::new());
+        let runtime = Arc::new(
+            crate::channels::wasm::WasmChannelRuntime::new(
+                crate::channels::wasm::WasmChannelRuntimeConfig::default(),
+            )
+            .map_err(|e| format!("runtime init failed: {e}"))?,
+        );
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
+        let mut owner_ids = std::collections::HashMap::new();
+        owner_ids.insert("telegram".to_string(), 12345_i64);
+
+        manager
+            .set_channel_runtime(channels, runtime, pairing_store, router, owner_ids)
+            .await;
+
+        if manager.current_channel_owner_id("telegram").await != Some(12345_i64) {
+            return Err("expected runtime owner id fast-path for telegram".to_string());
+        }
+        if manager.current_channel_owner_id("slack").await.is_some() {
+            return Err("expected no owner id for slack".to_string());
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_current_channel_owner_id_uses_store_fallback() -> Result<(), String> {
+        use crate::db::{Database, SettingsStore};
+
+        let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
+        let db_path = dir.path().join("owner-id.db");
+
+        let db = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&db_path)
+                .await
+                .map_err(|e| format!("create local libsql backend failed: {e}"))?,
+        );
+        db.run_migrations()
+            .await
+            .map_err(|e| format!("run libsql migrations failed: {e}"))?;
+
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).ok();
+        std::fs::create_dir_all(&channels_dir).ok();
+
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::testing::credentials::TEST_CRYPTO_KEY;
+        use crate::tools::ToolRegistry;
+        use crate::tools::mcp::process::McpProcessManager;
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(
+            SecretsCrypto::new(master_key)
+                .map_err(|e| format!("create secrets crypto failed: {e}"))?,
+        );
+
+        let manager = ExtensionManager::new(
+            Arc::new(McpSessionManager::new()),
+            Arc::new(McpProcessManager::new()),
+            Arc::new(InMemorySecretsStore::new(crypto)),
+            Arc::new(ToolRegistry::new()),
+            None,
+            None,
+            tools_dir,
+            channels_dir,
+            None,
+            "test".to_string(),
+            Some(db.clone() as Arc<dyn crate::db::Database>),
+            Vec::new(),
+        );
+
+        if manager.current_channel_owner_id("telegram").await.is_some() {
+            return Err("expected no owner id before settings seed".to_string());
+        }
+
+        db.set_setting(
+            "test",
+            "channels.wasm_channel_owner_ids.telegram",
+            &serde_json::json!(54321_i64),
+        )
+        .await
+        .map_err(|e| format!("persist owner id in settings failed: {e}"))?;
+
+        if manager.current_channel_owner_id("telegram").await != Some(54321_i64) {
+            return Err("expected store fallback owner id for telegram".to_string());
+        }
+
+        let channels = Arc::new(crate::channels::ChannelManager::new());
+        let runtime = Arc::new(
+            crate::channels::wasm::WasmChannelRuntime::new(
+                crate::channels::wasm::WasmChannelRuntimeConfig::default(),
+            )
+            .map_err(|e| format!("runtime init failed: {e}"))?,
+        );
+        let pairing_store = Arc::new(crate::pairing::PairingStore::new());
+        let router = Arc::new(crate::channels::wasm::WasmChannelRouter::new());
+        let mut owner_ids = std::collections::HashMap::new();
+        owner_ids.insert("telegram".to_string(), 12345_i64);
+        manager
+            .set_channel_runtime(channels, runtime, pairing_store, router, owner_ids)
+            .await;
+
+        if manager.current_channel_owner_id("telegram").await != Some(12345_i64) {
+            return Err("expected runtime fast-path owner id precedence".to_string());
+        }
+
+        Ok(())
     }
 
     // ── resolve_env_credentials tests ────────────────────────────────────

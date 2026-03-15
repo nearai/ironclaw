@@ -39,7 +39,7 @@ impl HttpMcpTransport {
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .expect("Failed to create HTTP client"),
+                .expect("Failed to create HTTP client"), // safety: TLS init with default rustls cannot fail
             session_manager: None,
             custom_headers: HashMap::new(),
         }
@@ -212,9 +212,10 @@ impl HttpMcpTransport {
                     }
                 }
             }
-            // Keep only the unprocessed trailing fragment.
+            // Keep only the unprocessed trailing fragment without allocating
+            // a new String each iteration.
             if remaining_start > 0 {
-                buffer = buffer[remaining_start..].to_string();
+                buffer.drain(..remaining_start);
             }
         }
 

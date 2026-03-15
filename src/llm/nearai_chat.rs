@@ -285,10 +285,6 @@ impl NearAiChatProvider {
             reason: format!("Failed to read response body: {}", e),
         })?;
 
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            tracing::debug!("NEAR AI Chat response status: {}", status);
-        }
-
         // Log response body only at TRACE level to avoid exposing sensitive content
         // (user-generated data, tool outputs, leaked secrets) in DEBUG logs
         if tracing::enabled!(tracing::Level::TRACE) {
@@ -494,6 +490,7 @@ impl LlmProvider for NearAiChatProvider {
             messages,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
+            stop: req.stop_sequences,
             tools: None,
             tool_choice: None,
         };
@@ -573,6 +570,7 @@ impl LlmProvider for NearAiChatProvider {
             messages,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
+            stop: req.stop_sequences,
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice: req.tool_choice,
         };
@@ -698,6 +696,8 @@ struct ChatCompletionRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ChatCompletionTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1685,6 +1685,7 @@ mod tests {
             }],
             temperature: None,
             max_tokens: None,
+            stop: None,
             tools: None,
             tool_choice: None,
         };
@@ -1706,6 +1707,7 @@ mod tests {
             messages: vec![],
             temperature: Some(0.7),
             max_tokens: Some(1024),
+            stop: None,
             tools: Some(vec![ChatCompletionTool {
                 tool_type: "function".to_string(),
                 function: ChatCompletionFunction {

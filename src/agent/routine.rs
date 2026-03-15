@@ -557,11 +557,174 @@ pub fn next_cron_fire(
     }
 }
 
+/// Describe common routine cron patterns in plain English.
+///
+/// Falls back to `cron: <raw>` for malformed or complex expressions.
+pub fn describe_cron(schedule: &str, timezone: Option<&str>) -> String {
+    fn fallback(raw: &str) -> String {
+        if raw.trim().is_empty() {
+            "cron: (empty)".to_string()
+        } else {
+            format!("cron: {}", raw.trim())
+        }
+    }
+
+    fn parse_u8_token(token: &str) -> Option<u8> {
+        token.parse::<u8>().ok()
+    }
+
+    fn parse_step(token: &str) -> Option<u8> {
+        token
+            .strip_prefix("*/")
+            .and_then(parse_u8_token)
+            .filter(|n| *n > 0)
+    }
+
+    fn weekday_name(dow: &str) -> Option<&'static str> {
+        let normalized = dow.trim().to_ascii_uppercase();
+        match normalized.as_str() {
+            "MON" | "1" => Some("Monday"),
+            "TUE" | "2" => Some("Tuesday"),
+            "WED" | "3" => Some("Wednesday"),
+            "THU" | "4" => Some("Thursday"),
+            "FRI" | "5" => Some("Friday"),
+            "SAT" | "6" => Some("Saturday"),
+            "SUN" | "0" | "7" => Some("Sunday"),
+            _ => None,
+        }
+    }
+
+    fn format_time(hour: u8, minute: u8) -> String {
+        if hour == 0 && minute == 0 {
+            return "midnight".to_string();
+        }
+        let (display_hour, am_pm) = match hour {
+            0 => (12, "AM"),
+            1..=11 => (hour, "AM"),
+            12 => (12, "PM"),
+            _ => (hour - 12, "PM"),
+        };
+        format!("{display_hour}:{minute:02} {am_pm}")
+    }
+
+    fn ordinal(n: u8) -> String {
+        let suffix = if (11..=13).contains(&(n % 100)) {
+            "th"
+        } else {
+            match n % 10 {
+                1 => "st",
+                2 => "nd",
+                3 => "rd",
+                _ => "th",
+            }
+        };
+        format!("{n}{suffix}")
+    }
+
+    fn describe_inner(raw: &str) -> Option<String> {
+        let fields: Vec<&str> = raw.split_whitespace().collect();
+        let (sec, min, hour, dom, month, dow, year) = match fields.len() {
+            5 => (
+                "0", fields[0], fields[1], fields[2], fields[3], fields[4], None,
+            ),
+            6 => (
+                fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], None,
+            ),
+            7 => (
+                fields[0],
+                fields[1],
+                fields[2],
+                fields[3],
+                fields[4],
+                fields[5],
+                Some(fields[6]),
+            ),
+            _ => return None,
+        };
+
+        if year.is_some_and(|v| v != "*") {
+            return None;
+        }
+
+        if sec == "0"
+            && hour == "*"
+            && dom == "*"
+            && month == "*"
+            && dow == "*"
+            && let Some(step) = parse_step(min)
+        {
+            return Some(match step {
+                1 => "Every minute".to_string(),
+                n => format!("Every {n} minutes"),
+            });
+        }
+
+        if sec == "0"
+            && min == "0"
+            && dom == "*"
+            && month == "*"
+            && dow == "*"
+            && let Some(step) = parse_step(hour)
+        {
+            return Some(match step {
+                1 => "Every hour".to_string(),
+                n => format!("Every {n} hours"),
+            });
+        }
+
+        let hour = parse_u8_token(hour).filter(|h| *h <= 23)?;
+        let minute = parse_u8_token(min).filter(|m| *m <= 59)?;
+        let time = format_time(hour, minute);
+        let time_phrase = if time == "midnight" {
+            "at midnight".to_string()
+        } else {
+            format!("at {time}")
+        };
+
+        if sec == "0" && dom == "*" && month == "*" && dow == "*" {
+            return Some(format!("Daily {time_phrase}"));
+        }
+
+        if sec == "0" && dom == "*" && month == "*" && dow.eq_ignore_ascii_case("MON-FRI") {
+            return Some(format!("Weekdays {time_phrase}"));
+        }
+
+        if sec == "0"
+            && dom == "*"
+            && month == "*"
+            && let Some(day_name) = weekday_name(dow)
+        {
+            return Some(format!("Every {day_name} {time_phrase}"));
+        }
+
+        if sec == "0"
+            && month == "*"
+            && dow == "*"
+            && let Some(day_of_month) = parse_u8_token(dom).filter(|d| (1..=31).contains(d))
+        {
+            return Some(format!(
+                "{} of every month {time_phrase}",
+                ordinal(day_of_month)
+            ));
+        }
+
+        None
+    }
+
+    let mut description = describe_inner(schedule).unwrap_or_else(|| fallback(schedule));
+    if let Some(tz) = timezone.map(str::trim).filter(|tz| !tz.is_empty()) {
+        description.push_str(" (");
+        description.push_str(tz);
+        description.push(')');
+    }
+    description
+}
+
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{
         MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash,
-        next_cron_fire, normalize_cron_expression,
+        describe_cron, next_cron_fire, normalize_cron_expression,
     };
 
     #[test]
@@ -715,6 +878,40 @@ mod tests {
             .expect("has next");
         // EST is UTC-5 (or EDT UTC-4), so the UTC result should differ
         assert_ne!(next_utc, next_est, "timezone should shift the fire time");
+    }
+
+    #[test]
+    fn test_describe_cron_common_patterns() {
+        let cases = vec![
+            ("0 */30 * * * *", None, "Every 30 minutes"),
+            ("0 0 9 * * *", None, "Daily at 9:00 AM"),
+            ("0 0 9 * * MON-FRI", None, "Weekdays at 9:00 AM"),
+            ("0 0 */2 * * *", None, "Every 2 hours"),
+            ("0 0 0 * * *", None, "Daily at midnight"),
+            ("0 0 9 * * 1", None, "Every Monday at 9:00 AM"),
+            ("0 0 9 1 * *", None, "1st of every month at 9:00 AM"),
+            (
+                "0 0 9 * * MON-FRI",
+                Some("America/New_York"),
+                "Weekdays at 9:00 AM (America/New_York)",
+            ),
+            ("1 2 3 4 5 6", None, "cron: 1 2 3 4 5 6"),
+        ];
+
+        for (schedule, timezone, expected) in cases {
+            let actual = describe_cron(schedule, timezone);
+            assert_eq!(actual, expected); // safety: test-only assertion in #[cfg(test)] module
+        }
+    }
+
+    #[test]
+    fn test_describe_cron_edge_cases() {
+        assert_eq!(describe_cron("", None), "cron: (empty)"); // safety: test-only assertion in #[cfg(test)] module
+        assert_eq!(describe_cron("not a cron", None), "cron: not a cron"); // safety: test-only assertion in #[cfg(test)] module
+        let weekdays_5_field = describe_cron("0 9 * * MON-FRI", None);
+        assert_eq!(weekdays_5_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
+        let weekdays_7_field = describe_cron("0 0 9 * * MON-FRI *", None);
+        assert_eq!(weekdays_7_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
     }
 
     #[test]

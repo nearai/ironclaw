@@ -153,9 +153,13 @@
       <div class="chat-container">
         <div class="chat-messages" id="chat-messages"></div>
         <div id="slash-autocomplete" class="slash-autocomplete" style="display:none"></div>
+        <div id="suggestion-chips" class="suggestion-chips" style="display:none"></div>
         <div class="chat-input">
           <div id="image-preview-strip" class="image-preview-strip"></div>
-          <textarea id="chat-input" data-i18n="chat.inputPlaceholder" data-i18n-attr="placeholder" placeholder="Message or / for commands..." rows="1"></textarea>
+          <div class="chat-input-wrapper">
+            <textarea id="chat-input" data-i18n="chat.inputPlaceholder" data-i18n-attr="placeholder" placeholder="Message or / for commands..." rows="1"></textarea>
+            <div id="ghost-text" class="ghost-text"></div>
+          </div>
           <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
           <button id="attach-btn" class="attach-btn" data-i18n="chat.attachImages" data-i18n-attr="title" title="Attach images"
             aria-label="Attach images">&#x1F4CE;</button>
