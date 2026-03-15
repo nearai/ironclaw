@@ -137,9 +137,11 @@ pub async fn resolve_master_key() -> Option<String> {
     None
 }
 
-/// Create a `SecretsCrypto` from a hex key string.
+/// Create a `SecretsCrypto` from a master key string.
 ///
-/// Convenience wrapper that constructs the `SecretString` and handles errors.
+/// The key is typically hex-encoded (from `generate_master_key_hex` or
+/// the `SECRETS_MASTER_KEY` env var), but `SecretsCrypto::new` validates
+/// only key length, not encoding. Any sufficiently long string works.
 pub fn crypto_from_hex(hex: &str) -> Result<std::sync::Arc<SecretsCrypto>, SecretError> {
     let crypto = SecretsCrypto::new(secrecy::SecretString::from(hex.to_string()))?;
     Ok(std::sync::Arc::new(crypto))

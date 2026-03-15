@@ -281,6 +281,7 @@ impl SetupWizard {
         } else if db_config.libsql_path.is_some() {
             self.settings.libsql_path = db_config
                 .libsql_path
+                .as_ref()
                 .map(|p| p.to_string_lossy().to_string());
         }
         if let Ok(url) = std::env::var("LIBSQL_URL") {
@@ -310,11 +311,16 @@ impl SetupWizard {
             match raw.parse::<DatabaseBackend>() {
                 Ok(b) => b,
                 Err(_) => {
+                    let fallback = if POSTGRES_AVAILABLE {
+                        DatabaseBackend::Postgres
+                    } else {
+                        DatabaseBackend::LibSql
+                    };
                     print_info(&format!(
-                        "Unknown DATABASE_BACKEND '{}', defaulting to PostgreSQL",
-                        raw
+                        "Unknown DATABASE_BACKEND '{}', defaulting to {}",
+                        raw, fallback
                     ));
-                    DatabaseBackend::Postgres
+                    fallback
                 }
             }
         } else if POSTGRES_AVAILABLE && LIBSQL_AVAILABLE {

@@ -104,7 +104,7 @@ pub async fn connect_with_handles(
             Ok((Arc::new(backend) as Arc<dyn Database>, handles))
         }
         #[cfg(feature = "postgres")]
-        _ => {
+        crate::config::DatabaseBackend::Postgres => {
             let pg = postgres::PgBackend::new(config)
                 .await
                 .map_err(|e| DatabaseError::Pool(e.to_string()))?;
@@ -115,10 +115,11 @@ pub async fn connect_with_handles(
 
             Ok((Arc::new(pg) as Arc<dyn Database>, handles))
         }
-        #[cfg(not(feature = "postgres"))]
-        _ => Err(DatabaseError::Pool(
-            "No database backend available. Enable 'postgres' or 'libsql' feature.".to_string(),
-        )),
+        #[allow(unreachable_patterns)]
+        _ => Err(DatabaseError::Pool(format!(
+            "Database backend '{}' is not available. Rebuild with the appropriate feature flag.",
+            config.backend
+        ))),
     }
 }
 
@@ -161,7 +162,7 @@ pub async fn create_secrets_store(
             )))
         }
         #[cfg(feature = "postgres")]
-        _ => {
+        crate::config::DatabaseBackend::Postgres => {
             let pg = postgres::PgBackend::new(config)
                 .await
                 .map_err(|e| DatabaseError::Pool(e.to_string()))?;
@@ -172,11 +173,11 @@ pub async fn create_secrets_store(
                 crypto,
             )))
         }
-        #[cfg(not(feature = "postgres"))]
-        _ => Err(DatabaseError::Pool(
-            "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
-                .to_string(),
-        )),
+        #[allow(unreachable_patterns)]
+        _ => Err(DatabaseError::Pool(format!(
+            "Database backend '{}' is not available for secrets. Rebuild with the appropriate feature flag.",
+            config.backend
+        ))),
     }
 }
 
@@ -221,7 +222,7 @@ pub async fn connect_without_migrations(
             Ok((Arc::new(backend) as Arc<dyn Database>, handles))
         }
         #[cfg(feature = "postgres")]
-        _ => {
+        crate::config::DatabaseBackend::Postgres => {
             let pg = postgres::PgBackend::new(config)
                 .await
                 .map_err(|e| DatabaseError::Pool(e.to_string()))?;
@@ -233,10 +234,11 @@ pub async fn connect_without_migrations(
 
             Ok((Arc::new(pg) as Arc<dyn Database>, handles))
         }
-        #[cfg(not(feature = "postgres"))]
-        _ => Err(DatabaseError::Pool(
-            "No database backend available. Enable 'postgres' or 'libsql' feature.".to_string(),
-        )),
+        #[allow(unreachable_patterns)]
+        _ => Err(DatabaseError::Pool(format!(
+            "Database backend '{}' is not available. Rebuild with the appropriate feature flag.",
+            config.backend
+        ))),
     }
 }
 
