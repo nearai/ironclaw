@@ -1586,7 +1586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mark_completed_twice_returns_error() {
+    async fn test_mark_completed_twice_is_idempotent() {
         let worker = make_worker(vec![]).await;
 
         worker
@@ -1607,11 +1607,22 @@ mod tests {
             .unwrap();
         assert_eq!(ctx.state, JobState::Completed);
 
+        // Second mark_completed should succeed (idempotent) rather than
+        // erroring, matching the fix for the execution_loop / worker wrapper
+        // race condition.
         let result = worker.mark_completed().await;
         assert!(
-            result.is_err(),
-            "Completed → Completed transition should be rejected by state machine"
+            result.is_ok(),
+            "Completed -> Completed transition should be idempotent"
         );
+
+        // State should still be Completed
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
     }
 
     /// Build a Worker with the given approval context.
