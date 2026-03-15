@@ -383,16 +383,12 @@ function connectSSE() {
       addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
     }
     // Refresh extensions list so status indicators update
-    if (currentTab === 'settings' && currentSettingsSubtab === 'extensions') loadExtensions();
-    if (currentTab === 'settings' && currentSettingsSubtab === 'mcp') loadMcpServers();
-    if (currentTab === 'settings' && currentSettingsSubtab === 'channels') loadChannelsStatus();
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
     enableChatInput();
   });
 
   eventSource.addEventListener('extension_status', (e) => {
-    if (currentTab === 'settings' && currentSettingsSubtab === 'extensions') loadExtensions();
-    if (currentTab === 'settings' && currentSettingsSubtab === 'mcp') loadMcpServers();
-    if (currentTab === 'settings' && currentSettingsSubtab === 'channels') loadChannelsStatus();
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
   eventSource.addEventListener('image_generated', (e) => {
@@ -2403,7 +2399,7 @@ function renderMcpServerCard(entry, installedExt) {
     if (installedExt.needs_setup || (installedExt.has_auth && installedExt.authenticated)) {
       var configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
-      configBtn.textContent = installedExt.authenticated ? 'Reconfigure' : 'Configure';
+      configBtn.textContent = installedExt.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.configure');
       configBtn.addEventListener('click', function() { showConfigureModal(installedExt.name); });
       actions.appendChild(configBtn);
     }
@@ -5007,15 +5003,6 @@ function loadNetworkingSettings() {
     container.innerHTML = '<div class="empty-state">Failed to load settings: '
       + escapeHtml(err.message) + '</div>';
   });
-}
-
-function formatGroupName(name) {
-  return name.charAt(0).toUpperCase() + name.slice(1).replace(/_/g, ' ');
-}
-
-function formatSettingLabel(name) {
-  var s = name.replace(/_/g, ' ');
-  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 // --- Toasts ---

@@ -518,13 +518,11 @@ async fn async_main() -> anyhow::Result<()> {
             let active_model = components.llm.model_name().to_string();
             let mut enabled = channel_names.clone();
             enabled.push("gateway".into());
-            gw = gw.with_active_config(
-                ironclaw::channels::web::server::ActiveConfigSnapshot {
-                    llm_backend: config.llm.backend.to_string(),
-                    llm_model: active_model,
-                    enabled_channels: enabled,
-                },
-            );
+            gw = gw.with_active_config(ironclaw::channels::web::server::ActiveConfigSnapshot {
+                llm_backend: config.llm.backend.to_string(),
+                llm_model: active_model,
+                enabled_channels: enabled,
+            });
         }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
