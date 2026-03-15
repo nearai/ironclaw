@@ -575,10 +575,19 @@ impl Agent {
         // The greeting was already persisted to DB before start_all(), so
         // clients that connect after this point will see it via history.
         if let Some(id) = bootstrap_thread_id {
-            let (session, _) = self
+            // Use get_or_create_session (not resolve_thread) to avoid creating
+            // an orphan thread. Then insert the DB-sourced thread directly.
+            let session = self
                 .session_manager
-                .resolve_thread("default", "gateway", None)
+                .get_or_create_session("default")
                 .await;
+            {
+                use crate::agent::session::Thread;
+                let mut sess = session.lock().await;
+                let thread = Thread::with_id(id, sess.id);
+                sess.active_thread = Some(id);
+                sess.threads.entry(id).or_insert(thread);
+            }
             self.session_manager
                 .register_thread("default", "gateway", id, session)
                 .await;

@@ -955,10 +955,11 @@ fn merge_profile_section(existing: &str, new_content: &str) -> String {
     let delimited = wrap_profile_section(new_content);
 
     // Case 1: existing delimiters — replace the range.
-    if let (Some(begin), Some(end_start)) = (
-        existing.find(PROFILE_SECTION_BEGIN),
-        existing.find(PROFILE_SECTION_END),
-    ) {
+    // Search for END *after* BEGIN to avoid matching a stray END marker earlier in the file.
+    if let Some(begin) = existing.find(PROFILE_SECTION_BEGIN)
+        && let Some(end_offset) = existing[begin..].find(PROFILE_SECTION_END)
+    {
+        let end_start = begin + end_offset;
         let end = end_start + PROFILE_SECTION_END.len();
         let mut result = String::with_capacity(existing.len());
         result.push_str(&existing[..begin]);
@@ -1390,6 +1391,23 @@ mod tests {
         assert!(result.contains(PROFILE_SECTION_BEGIN));
         assert!(result.contains("actual profile"));
         assert!(!result.contains("The agent will fill this in"));
+    }
+
+    #[test]
+    fn test_merge_end_marker_must_follow_begin() {
+        // END marker appears before BEGIN — should not match as a valid range.
+        let existing = format!(
+            "Preamble\n{}\nstray end\n{}\nreal begin\n{}\nreal end\n{}",
+            PROFILE_SECTION_END,   // stray END first
+            "middle content",
+            PROFILE_SECTION_BEGIN, // BEGIN comes after
+            PROFILE_SECTION_END,   // proper END
+        );
+        let result = merge_profile_section(&existing, "replaced");
+        // The replacement should use the BEGIN..END pair, not the stray END.
+        assert!(result.contains("replaced"));
+        assert!(result.contains("Preamble"));
+        assert!(result.contains("stray end"));
     }
 
     // ── Fix 3: bootstrap_completed flag tests ──────────────────────

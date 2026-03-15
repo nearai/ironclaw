@@ -1192,8 +1192,8 @@ impl SetupWizard {
     async fn setup_nearai(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("nearai");
 
-        // Check if NEARAI_API_KEY is already provided via environment
-        if let Ok(existing) = std::env::var("NEARAI_API_KEY")
+        // Check if NEARAI_API_KEY is already provided via environment or runtime overlay
+        if let Some(existing) = crate::config::helpers::env_or_override("NEARAI_API_KEY")
             && !existing.is_empty()
         {
             print_info(&format!(
