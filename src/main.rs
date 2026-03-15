@@ -592,7 +592,9 @@ async fn async_main() -> anyhow::Result<()> {
         .await;
 
     // Clone the router for AgentDeps before we tuple is consumed.
-    let wasm_router = wasm_channel_runtime_state.as_ref().map(|state| Arc::clone(&state.2));
+    let wasm_router = wasm_channel_runtime_state
+        .as_ref()
+        .map(|state| Arc::clone(&state.2));
 
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager

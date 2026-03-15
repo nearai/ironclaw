@@ -142,7 +142,9 @@ mod router_tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None, None, None).await;
+        router
+            .register(channel, endpoints, None, None, None, None)
+            .await;
 
         // Channel exists
         assert!(router.get_channel_for_path("/webhook/temp").await.is_some());
@@ -174,7 +176,9 @@ mod router_tests {
                 require_secret: false,
             }];
 
-            router.register(channel, endpoints, None, None, None, None).await;
+            router
+                .register(channel, endpoints, None, None, None, None)
+                .await;
         }
 
         // Verify all channels are registered
@@ -483,11 +487,8 @@ mod hmac_signature_tests {
         };
 
         // Verify using the signature module
-        let result = ironclaw::channels::wasm::signature::verify_hmac_sha256(
-            secret,
-            &expected_sig,
-            body,
-        );
+        let result =
+            ironclaw::channels::wasm::signature::verify_hmac_sha256(secret, &expected_sig, body);
         assert!(result, "Valid signature should verify");
     }
 
@@ -509,11 +510,8 @@ mod hmac_signature_tests {
         };
 
         // Verify with wrong secret should fail
-        let result = ironclaw::channels::wasm::signature::verify_hmac_sha256(
-            wrong_secret,
-            &sig,
-            body,
-        );
+        let result =
+            ironclaw::channels::wasm::signature::verify_hmac_sha256(wrong_secret, &sig, body);
         assert!(!result, "Wrong secret should fail verification");
     }
 
@@ -535,11 +533,8 @@ mod hmac_signature_tests {
         };
 
         // Verify with tampered body should fail
-        let result = ironclaw::channels::wasm::signature::verify_hmac_sha256(
-            secret,
-            &sig,
-            tampered,
-        );
+        let result =
+            ironclaw::channels::wasm::signature::verify_hmac_sha256(secret, &sig, tampered);
         assert!(!result, "Tampered body should fail verification");
     }
 
@@ -553,7 +548,9 @@ mod hmac_signature_tests {
             secret, "invalid", body
         ));
         assert!(!ironclaw::channels::wasm::signature::verify_hmac_sha256(
-            secret, "sha256=not_hex!", body
+            secret,
+            "sha256=not_hex!",
+            body
         ));
         assert!(!ironclaw::channels::wasm::signature::verify_hmac_sha256(
             secret, "", body
@@ -584,7 +581,9 @@ mod hmac_signature_tests {
             .await;
 
         // Register HMAC secret separately (simulating setup.rs behavior)
-        router.register_hmac_secret("whatsapp", "my_app_secret").await;
+        router
+            .register_hmac_secret("whatsapp", "my_app_secret")
+            .await;
 
         // Verify HMAC secret is registered
         assert_eq!(

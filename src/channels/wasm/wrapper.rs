@@ -2141,14 +2141,15 @@ impl WasmChannel {
             }
 
             // Parse metadata JSON
-            let metadata: serde_json::Value = if let Ok(m) = serde_json::from_str::<serde_json::Value>(&emitted.metadata_json) {
-                msg = msg.with_metadata(m.clone());
-                // Store for broadcast routing (chat_id etc.)
-                self.update_broadcast_metadata(&emitted.metadata_json).await;
-                m
-            } else {
-                serde_json::Value::Null
-            };
+            let metadata: serde_json::Value =
+                if let Ok(m) = serde_json::from_str::<serde_json::Value>(&emitted.metadata_json) {
+                    msg = msg.with_metadata(m.clone());
+                    // Store for broadcast routing (chat_id etc.)
+                    self.update_broadcast_metadata(&emitted.metadata_json).await;
+                    m
+                } else {
+                    serde_json::Value::Null
+                };
 
             // Send to stream — no locks held across this await
             tracing::info!(
