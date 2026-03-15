@@ -459,6 +459,8 @@ pub struct ConfigureResult {
     pub message: String,
     /// Whether the extension was successfully activated after configuration.
     pub activated: bool,
+    /// Whether a restart is required for the new configuration to take effect.
+    pub restart_required: bool,
     /// OAuth authorization URL (if OAuth flow was started).
     pub auth_url: Option<String>,
 }
@@ -485,7 +487,7 @@ pub struct InstalledExtension {
     /// Tool names if active.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// Whether this extension has a setup schema (required_secrets) that can be configured.
+    /// Whether this extension has a setup schema (required_secrets/required_fields) that can be configured.
     #[serde(default)]
     pub needs_setup: bool,
     /// Whether this extension has an auth configuration (OAuth or manual token).

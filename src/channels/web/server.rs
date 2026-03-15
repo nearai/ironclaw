@@ -2152,7 +2152,7 @@ async fn extensions_setup_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    let secrets = ext_mgr
+    let setup = ext_mgr
         .get_setup_schema(&name)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -2168,7 +2168,8 @@ async fn extensions_setup_handler(
     Ok(Json(ExtensionSetupResponse {
         name,
         kind,
-        secrets,
+        secrets: setup.secrets,
+        fields: setup.fields,
     }))
 }
 
@@ -2182,7 +2183,7 @@ async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    match ext_mgr.configure(&name, &req.secrets).await {
+    match ext_mgr.configure(&name, &req.secrets, &req.fields).await {
         Ok(result) => {
             // Broadcast auth_completed so the chat UI can dismiss any in-progress
             // auth card or setup modal that was triggered by tool_auth/tool_activate.
@@ -2193,6 +2194,9 @@ async fn extensions_setup_submit_handler(
             });
             let mut resp = ActionResponse::ok(result.message);
             resp.activated = Some(result.activated);
+            if result.restart_required || !result.activated {
+                resp.needs_restart = Some(true);
+            }
             resp.auth_url = result.auth_url;
             Ok(Json(resp))
         }

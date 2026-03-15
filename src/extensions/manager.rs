@@ -56,6 +56,19 @@ struct ChannelRuntimeState {
     wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 }
 
+/// Setup schema returned to web UI for extension configuration.
+pub struct ExtensionSetupSchema {
+    pub secrets: Vec<crate::channels::web::types::SecretFieldInfo>,
+    pub fields: Vec<crate::channels::web::types::SetupFieldInfo>,
+}
+
+const ALLOWED_GLOBAL_SETUP_SETTING_PATHS: &[&str] = &[
+    "llm_backend",
+    "selected_model",
+    "ollama_base_url",
+    "openai_compatible_base_url",
+];
+
 /// Central manager for extension lifecycle operations.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
@@ -2716,6 +2729,46 @@ impl ExtensionManager {
             return ToolAuthState::NoAuth;
         };
 
+        let saved_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
+        let setup_is_complete = if let Some(setup) = &cap_file.setup {
+            let secrets_ready = futures::future::join_all(
+                setup
+                    .required_secrets
+                    .iter()
+                    .filter(|s| !s.optional)
+                    .filter(|s| !Self::is_auto_resolved_oauth_field(&s.name, &cap_file))
+                    .map(|s| self.secrets.exists(&self.user_id, &s.name)),
+            )
+            .await
+            .into_iter()
+            .all(|r| r.unwrap_or(false));
+
+            if !secrets_ready {
+                false
+            } else {
+                let mut fields_ready = true;
+                for field in &setup.required_fields {
+                    if field.optional {
+                        continue;
+                    }
+                    if !self
+                        .is_tool_setup_field_provided(name, field, &saved_fields)
+                        .await
+                    {
+                        fields_ready = false;
+                        break;
+                    }
+                }
+                fields_ready
+            }
+        } else {
+            true
+        };
+
+        if !setup_is_complete {
+            return ToolAuthState::NeedsSetup;
+        }
+
         // If the tool declares an auth section, the access token is the
         // authoritative signal — setup secrets (client_id/secret) are
         // intermediate and may be auto-resolved via builtins.
@@ -2738,27 +2791,15 @@ impl ExtensionManager {
             };
         }
 
-        // No auth section — fall back to checking setup.required_secrets.
+        // No auth section — fall back to checking setup.required_secrets/fields.
         let Some(setup) = &cap_file.setup else {
             return ToolAuthState::NoAuth;
         };
-        if setup.required_secrets.is_empty() {
+        if setup.required_secrets.is_empty() && setup.required_fields.is_empty() {
             return ToolAuthState::NoAuth;
         }
 
-        let all_provided = futures::future::join_all(
-            setup
-                .required_secrets
-                .iter()
-                .filter(|s| !s.optional)
-                .filter(|s| !Self::is_auto_resolved_oauth_field(&s.name, &cap_file))
-                .map(|s| self.secrets.exists(&self.user_id, &s.name)),
-        )
-        .await
-        .into_iter()
-        .all(|r| r.unwrap_or(false));
-
-        if all_provided {
+        if setup_is_complete {
             ToolAuthState::Ready
         } else {
             ToolAuthState::NeedsSetup
@@ -3627,6 +3668,102 @@ impl ExtensionManager {
         Ok(())
     }
 
+    fn setup_fields_setting_key(name: &str) -> String {
+        format!("extensions.{name}.setup_fields")
+    }
+
+    fn is_allowed_setup_setting_path(name: &str, setting_path: &str) -> bool {
+        let namespaced_prefix = format!("extensions.{name}.");
+        setting_path.starts_with(&namespaced_prefix)
+            || ALLOWED_GLOBAL_SETUP_SETTING_PATHS.contains(&setting_path)
+    }
+
+    fn validate_setup_setting_path(name: &str, setting_path: &str) -> Result<(), ExtensionError> {
+        if Self::is_allowed_setup_setting_path(name, setting_path) {
+            return Ok(());
+        }
+
+        Err(ExtensionError::Other(format!(
+            "Invalid setting_path '{}' for extension '{}': only 'extensions.{}.*' or approved settings may be written",
+            setting_path, name, name
+        )))
+    }
+
+    fn setting_value_is_present(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::String(s) => !s.trim().is_empty(),
+            serde_json::Value::Array(a) => !a.is_empty(),
+            serde_json::Value::Object(o) => !o.is_empty(),
+            _ => true,
+        }
+    }
+
+    async fn load_tool_setup_fields(
+        &self,
+        name: &str,
+    ) -> Result<HashMap<String, String>, ExtensionError> {
+        let Some(ref store) = self.store else {
+            return Ok(HashMap::new());
+        };
+
+        let key = Self::setup_fields_setting_key(name);
+        match store.get_setting(&self.user_id, &key).await {
+            Ok(Some(value)) => serde_json::from_value::<HashMap<String, String>>(value)
+                .map_err(|e| ExtensionError::Other(format!("Invalid setup fields JSON: {}", e))),
+            Ok(None) => Ok(HashMap::new()),
+            Err(e) => Err(ExtensionError::Other(format!(
+                "Failed to read setup fields for '{}': {}",
+                name, e
+            ))),
+        }
+    }
+
+    async fn save_tool_setup_fields(
+        &self,
+        name: &str,
+        fields: &HashMap<String, String>,
+    ) -> Result<(), ExtensionError> {
+        let store = self.store.as_ref().ok_or_else(|| {
+            ExtensionError::Other("Settings store unavailable for setup field persistence".into())
+        })?;
+        let key = Self::setup_fields_setting_key(name);
+        let value = serde_json::to_value(fields)
+            .map_err(|e| ExtensionError::Other(format!("Failed to encode setup fields: {}", e)))?;
+        store
+            .set_setting(&self.user_id, &key, &value)
+            .await
+            .map_err(|e| {
+                ExtensionError::Other(format!(
+                    "Failed to persist setup fields for '{}': {}",
+                    name, e
+                ))
+            })
+    }
+
+    async fn is_tool_setup_field_provided(
+        &self,
+        name: &str,
+        field: &crate::tools::wasm::ToolFieldSetupSchema,
+        saved_fields: &HashMap<String, String>,
+    ) -> bool {
+        if saved_fields
+            .get(&field.name)
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return true;
+        }
+
+        if let (Some(store), Some(setting_path)) = (&self.store, &field.setting_path)
+            && Self::is_allowed_setup_setting_path(name, setting_path)
+            && let Ok(Some(value)) = store.get_setting(&self.user_id, setting_path).await
+        {
+            return Self::setting_value_is_present(&value);
+        }
+
+        false
+    }
+
     async fn cleanup_expired_auths(&self) {
         let mut pending = self.pending_auth.write().await;
         pending.retain(|_, auth| {
@@ -3641,11 +3778,12 @@ impl ExtensionManager {
         });
     }
 
-    /// Get the setup schema for an extension (secret fields and their status).
+    /// Get the setup schema for an extension (secret/text fields and their status).
     pub async fn get_setup_schema(
         &self,
         name: &str,
-    ) -> Result<Vec<crate::channels::web::types::SecretFieldInfo>, ExtensionError> {
+    ) -> Result<ExtensionSetupSchema, ExtensionError> {
+        Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
         match kind {
             ExtensionKind::WasmChannel => {
@@ -3653,7 +3791,10 @@ impl ExtensionManager {
                     .wasm_channels_dir
                     .join(format!("{}.capabilities.json", name));
                 if !cap_path.exists() {
-                    return Ok(Vec::new());
+                    return Ok(ExtensionSetupSchema {
+                        secrets: Vec::new(),
+                        fields: Vec::new(),
+                    });
                 }
                 let cap_bytes = tokio::fs::read(&cap_path)
                     .await
@@ -3662,14 +3803,14 @@ impl ExtensionManager {
                     crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
                         .map_err(|e| ExtensionError::Other(e.to_string()))?;
 
-                let mut fields = Vec::new();
+                let mut secrets = Vec::new();
                 for secret in &cap_file.setup.required_secrets {
                     let provided = self
                         .secrets
                         .exists(&self.user_id, &secret.name)
                         .await
                         .unwrap_or(false);
-                    fields.push(crate::channels::web::types::SecretFieldInfo {
+                    secrets.push(crate::channels::web::types::SecretFieldInfo {
                         name: secret.name.clone(),
                         prompt: secret.prompt.clone(),
                         optional: secret.optional,
@@ -3677,17 +3818,25 @@ impl ExtensionManager {
                         auto_generate: secret.auto_generate.is_some(),
                     });
                 }
-                Ok(fields)
+                Ok(ExtensionSetupSchema {
+                    secrets,
+                    fields: Vec::new(),
+                })
             }
             ExtensionKind::WasmTool => {
                 let Some(cap_file) = self.load_tool_capabilities(name).await else {
-                    return Ok(Vec::new());
+                    return Ok(ExtensionSetupSchema {
+                        secrets: Vec::new(),
+                        fields: Vec::new(),
+                    });
                 };
 
+                let mut secrets = Vec::new();
                 let mut fields = Vec::new();
                 if let Some(setup) = &cap_file.setup {
+                    let saved_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
+
                     for secret in &setup.required_secrets {
-                        // Skip OAuth client_id/secret fields that resolve automatically
                         if Self::is_auto_resolved_oauth_field(&secret.name, &cap_file) {
                             continue;
                         }
@@ -3696,7 +3845,7 @@ impl ExtensionManager {
                             .exists(&self.user_id, &secret.name)
                             .await
                             .unwrap_or(false);
-                        fields.push(crate::channels::web::types::SecretFieldInfo {
+                        secrets.push(crate::channels::web::types::SecretFieldInfo {
                             name: secret.name.clone(),
                             prompt: secret.prompt.clone(),
                             optional: secret.optional,
@@ -3704,36 +3853,45 @@ impl ExtensionManager {
                             auto_generate: false,
                         });
                     }
+
+                    for field in &setup.required_fields {
+                        let provided = self
+                            .is_tool_setup_field_provided(name, field, &saved_fields)
+                            .await;
+                        fields.push(crate::channels::web::types::SetupFieldInfo {
+                            name: field.name.clone(),
+                            prompt: field.prompt.clone(),
+                            optional: field.optional,
+                            provided,
+                            input_type: field.input_type,
+                        });
+                    }
                 }
-                Ok(fields)
+                Ok(ExtensionSetupSchema { secrets, fields })
             }
-            _ => Ok(Vec::new()),
+            _ => Ok(ExtensionSetupSchema {
+                secrets: Vec::new(),
+                fields: Vec::new(),
+            }),
         }
     }
 
-    /// Save setup secrets for an extension, validating names against the capabilities schema.
-    ///
-    /// Configure secrets for an extension: validate, store, auto-generate, and activate.
-    ///
-    /// This is the single entrypoint for providing secrets to any extension.
-    /// Both the chat auth flow and the Extensions tab setup form call this method.
-    ///
-    /// - Validates tokens against `validation_endpoint` (if declared in capabilities)
-    /// - Stores secrets in the encrypted secrets store
-    /// - Auto-generates missing secrets (e.g., webhook keys)
-    /// - Activates the extension after configuration
+    /// Configure secrets and setup fields for an extension, then attempt activation.
     pub async fn configure(
         &self,
         name: &str,
         secrets: &std::collections::HashMap<String, String>,
+        fields: &std::collections::HashMap<String, String>,
     ) -> Result<ConfigureResult, ExtensionError> {
+        Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
 
-        // Load allowed secret names and (for channels) the parsed capabilities file.
-        // The capabilities file is parsed once here and reused for validation_endpoint
-        // and auto-generation below, avoiding redundant I/O + JSON parsing.
+        // Load allowed secret names and tool setup field definitions from capabilities.
         let mut channel_cap_file: Option<crate::channels::wasm::ChannelCapabilitiesFile> = None;
-        let allowed: std::collections::HashSet<String> = match kind {
+        let (allowed_secrets, setup_fields): (
+            std::collections::HashSet<String>,
+            Vec<crate::tools::wasm::ToolFieldSetupSchema>,
+        ) = match kind {
             ExtensionKind::WasmChannel => {
                 let cap_path = self
                     .wasm_channels_dir
@@ -3757,27 +3915,28 @@ impl ExtensionManager {
                     .map(|s| s.name.clone())
                     .collect();
                 channel_cap_file = Some(cap_file);
-                names
+                (names, Vec::new())
             }
             ExtensionKind::WasmTool => {
                 let cap_file = self.load_tool_capabilities(name).await.ok_or_else(|| {
                     ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
                 })?;
                 let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut required_fields = Vec::new();
                 if let Some(ref s) = cap_file.setup {
                     names.extend(s.required_secrets.iter().map(|s| s.name.clone()));
+                    required_fields = s.required_fields.clone();
                 }
-                // Also allow storing the auth token secret directly
                 if let Some(ref auth) = cap_file.auth {
                     names.insert(auth.secret_name.clone());
                 }
-                if names.is_empty() {
+                if names.is_empty() && required_fields.is_empty() {
                     return Err(ExtensionError::Other(format!(
-                        "Tool '{}' has no setup or auth schema — no secrets to configure",
+                        "Tool '{}' has no setup or auth schema — nothing to configure",
                         name
                     )));
                 }
-                names
+                (names, required_fields)
             }
             ExtensionKind::McpServer => {
                 let server = self
@@ -3786,18 +3945,26 @@ impl ExtensionManager {
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
                 let mut names = std::collections::HashSet::new();
                 names.insert(server.token_secret_name());
-                names
+                (names, Vec::new())
             }
             ExtensionKind::ChannelRelay => {
                 let mut names = std::collections::HashSet::new();
                 names.insert(format!("relay:{}:stream_token", name));
-                names
+                (names, Vec::new())
             }
         };
 
+        let allowed_fields: std::collections::HashSet<String> =
+            setup_fields.iter().map(|f| f.name.clone()).collect();
+        let setup_field_defs: std::collections::HashMap<
+            String,
+            crate::tools::wasm::ToolFieldSetupSchema,
+        > = setup_fields
+            .into_iter()
+            .map(|f| (f.name.clone(), f))
+            .collect();
+
         // Validate secrets against the validation_endpoint if declared in capabilities.
-        // The endpoint URL template uses {secret_name} placeholders that are
-        // substituted with the provided secret value before making the request.
         if let Some(ref cap_file) = channel_cap_file
             && let Some(ref endpoint_template) = cap_file.setup.validation_endpoint
             && let Some(secret_def) = cap_file
@@ -3812,7 +3979,6 @@ impl ExtensionManager {
                 let encoded =
                     url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
                 let url = endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
-                // SSRF defense: block private IPs, localhost, cloud metadata endpoints
                 crate::tools::builtin::skill_tools::validate_fetch_url(&url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
                 let resp = reqwest::Client::builder()
@@ -3822,7 +3988,6 @@ impl ExtensionManager {
                     .get(&url)
                     .send()
                     .await
-                    // Transport errors are infrastructure failures, not token issues
                     .map_err(|e| {
                         ExtensionError::Other(format!("Token validation request failed: {}", e))
                     })?;
@@ -3835,9 +4000,8 @@ impl ExtensionManager {
             }
         }
 
-        // Validate and store each submitted secret
         for (secret_name, secret_value) in secrets {
-            if !allowed.contains(secret_name.as_str()) {
+            if !allowed_secrets.contains(secret_name.as_str()) {
                 return Err(ExtensionError::Other(format!(
                     "Unknown secret '{}' for extension '{}'",
                     secret_name, name
@@ -3854,7 +4018,70 @@ impl ExtensionManager {
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
         }
 
-        // Auto-generate any missing secrets (channel-only feature)
+        let mut restart_required = false;
+        let mut stored_fields = self.load_tool_setup_fields(name).await.unwrap_or_default();
+
+        for (field_name, field_value) in fields {
+            if !allowed_fields.contains(field_name.as_str()) {
+                return Err(ExtensionError::Other(format!(
+                    "Unknown field '{}' for extension '{}'",
+                    field_name, name
+                )));
+            }
+            let trimmed = field_value.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            stored_fields.insert(field_name.clone(), trimmed.to_string());
+
+            if let Some(field_def) = setup_field_defs.get(field_name) {
+                if field_def.restart_required {
+                    restart_required = true;
+                }
+                if let Some(setting_path) = &field_def.setting_path {
+                    Self::validate_setup_setting_path(name, setting_path)?;
+                    let store = self.store.as_ref().ok_or_else(|| {
+                        ExtensionError::Other(
+                            "Settings store unavailable for setup field persistence".to_string(),
+                        )
+                    })?;
+                    store
+                        .set_setting(
+                            &self.user_id,
+                            setting_path,
+                            &serde_json::Value::String(trimmed.to_string()),
+                        )
+                        .await
+                        .map_err(|e| {
+                            ExtensionError::Other(format!(
+                                "Failed to set '{}' for extension '{}': {}",
+                                setting_path, name, e
+                            ))
+                        })?;
+                }
+            }
+        }
+
+        if !allowed_fields.is_empty() && !fields.is_empty() {
+            self.save_tool_setup_fields(name, &stored_fields).await?;
+        }
+
+        for field_def in setup_field_defs.values() {
+            if field_def.optional {
+                continue;
+            }
+            if !self
+                .is_tool_setup_field_provided(name, field_def, &stored_fields)
+                .await
+            {
+                return Err(ExtensionError::Other(format!(
+                    "Required field '{}' is missing for extension '{}'",
+                    field_def.name, name
+                )));
+            }
+        }
+
         if let Some(ref cap_file) = channel_cap_file {
             for secret_def in &cap_file.setup.required_secrets {
                 if let Some(ref auto_gen) = secret_def.auto_generate {
@@ -3888,13 +4115,9 @@ impl ExtensionManager {
             }
         }
 
-        // For tools, save and attempt auto-activation, then check auth.
         if kind == ExtensionKind::WasmTool {
             match self.activate_wasm_tool(name).await {
                 Ok(result) => {
-                    // Delete existing OAuth token so auth() starts a fresh flow.
-                    // Done AFTER activation succeeds to avoid losing tokens on failure.
-                    // This covers Reconfigure: user wants to re-auth (switch account, update creds).
                     if let Some(cap) = self.load_tool_capabilities(name).await
                         && let Some(ref auth_cfg) = cap.auth
                         && auth_cfg.oauth.is_some()
@@ -3916,11 +4139,7 @@ impl ExtensionManager {
                             .await;
                     }
 
-                    // Check if auth is needed (OAuth or manual token).
-                    // This is safe to call here — cancel-and-retry prevents port conflicts.
                     let mut auth_url = None;
-                    // Box::pin breaks the async recursion cycle:
-                    // auth() → auth_wasm_tool() → (OAuth) → configure() → auth()
                     if let Ok(auth_result) = Box::pin(self.auth(name)).await {
                         auth_url = auth_result.auth_url().map(String::from);
                     }
@@ -3938,6 +4157,7 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message,
                         activated: true,
+                        restart_required,
                         auth_url,
                     });
                 }
@@ -3950,23 +4170,22 @@ impl ExtensionManager {
                     return Ok(ConfigureResult {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
+                        restart_required,
                         auth_url: None,
                     });
                 }
             }
         }
 
-        // Activate the extension now that secrets are saved.
-        // Dispatch by kind — WasmTool was already handled above with an early return.
         let activate_result = match kind {
             ExtensionKind::WasmChannel => self.activate_wasm_channel(name).await,
             ExtensionKind::McpServer => self.activate_mcp(name).await,
             ExtensionKind::ChannelRelay => self.activate_channel_relay(name).await,
             ExtensionKind::WasmTool => {
-                // WasmTool is handled above and returns early; this branch is unreachable.
                 return Ok(ConfigureResult {
                     message: format!("Configuration saved for '{}'.", name),
                     activated: false,
+                    restart_required,
                     auth_url: None,
                 });
             }
@@ -3982,6 +4201,7 @@ impl ExtensionManager {
                         name, result.message
                     ),
                     activated: true,
+                    restart_required,
                     auth_url: None,
                 })
             }
@@ -4004,6 +4224,7 @@ impl ExtensionManager {
                         name, e
                     ),
                     activated: false,
+                    restart_required,
                     auth_url: None,
                 })
             }
@@ -4119,7 +4340,8 @@ impl ExtensionManager {
 
         let mut secrets = std::collections::HashMap::new();
         secrets.insert(secret_name, token.to_string());
-        self.configure(name, &secrets).await
+        self.configure(name, &secrets, &std::collections::HashMap::new())
+            .await
     }
 
     /// Read a capabilities.json file and revoke its credential mappings from
@@ -4556,11 +4778,16 @@ mod tests {
     // after startup (e.g. via the web UI) would fail with "WASM runtime not
     // available" because the ExtensionManager had `wasm_tool_runtime: None`.
 
+    async fn make_test_store() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
+        crate::testing::test_db().await
+    }
+
     /// Build a minimal ExtensionManager suitable for unit tests.
     fn make_test_manager_with_dirs(
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
         channels_dir: std::path::PathBuf,
+        store: Option<Arc<dyn crate::db::Database>>,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::mcp::process::McpProcessManager;
@@ -4587,7 +4814,7 @@ mod tests {
             channels_dir,
             None, // tunnel_url
             "test".to_string(),
-            None, // db
+            store,
             vec![],
         )
     }
@@ -4596,7 +4823,180 @@ mod tests {
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
-        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir)
+        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
+    }
+
+    fn write_test_tool(
+        dir: &std::path::Path,
+        name: &str,
+        capabilities_json: &str,
+    ) -> std::path::PathBuf {
+        let tools_dir = dir.join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+        std::fs::write(tools_dir.join(format!("{name}.wasm")), b"not-a-real-wasm").expect("wasm");
+        std::fs::write(
+            tools_dir.join(format!("{name}.capabilities.json")),
+            capabilities_json,
+        )
+        .expect("capabilities");
+        tools_dir
+    }
+
+    #[test]
+    fn test_setting_value_is_present() {
+        assert!(
+            !crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::Value::Null
+            )
+        );
+        assert!(
+            !crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!("   ")
+            )
+        );
+        assert!(
+            crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!("openai")
+            )
+        );
+        assert!(
+            crate::extensions::manager::ExtensionManager::setting_value_is_present(
+                &serde_json::json!(["x"])
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_tool_setup_field_provided_ignores_disallowed_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        store
+            .set_setting(
+                "test",
+                "nearai.session_token",
+                &serde_json::json!({"token":"secret"}),
+            )
+            .await
+            .expect("set disallowed setting");
+
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let field = crate::tools::wasm::ToolFieldSetupSchema {
+            name: "provider".to_string(),
+            prompt: "Provider".to_string(),
+            optional: false,
+            input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+            setting_path: Some("nearai.session_token".to_string()),
+            restart_required: false,
+        };
+
+        let provided = mgr
+            .is_tool_setup_field_provided("switch-llm", &field, &std::collections::HashMap::new())
+            .await;
+        assert!(
+            !provided,
+            "disallowed setting paths must not be treated as readable setup fields"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_writes_allowlisted_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "switch-llm",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "llm_backend",
+                            "prompt": "Provider",
+                            "setting_path": "llm_backend",
+                            "restart_required": true
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let channels_dir = dir.path().join("channels");
+
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("llm_backend".to_string(), "openai".to_string());
+
+        let result = mgr
+            .configure("switch-llm", &std::collections::HashMap::new(), &fields)
+            .await
+            .expect("save configuration");
+
+        assert!(
+            !result.activated,
+            "tool should not auto-activate without runtime"
+        );
+        assert!(
+            result.restart_required,
+            "backend switch should require restart"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", "llm_backend")
+                .await
+                .expect("get setting"),
+            Some(serde_json::json!("openai"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_disallowed_setting_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "evil-tool",
+            r#"{
+                "setup": {
+                    "required_fields": [
+                        {
+                            "name": "session",
+                            "prompt": "Session",
+                            "setting_path": "nearai.session_token"
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let channels_dir = dir.path().join("channels");
+
+        let mgr =
+            make_test_manager_with_dirs(None, tools_dir, channels_dir, Some(Arc::clone(&store)));
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("session".to_string(), "overwrite".to_string());
+
+        let err = match mgr
+            .configure("evil-tool", &std::collections::HashMap::new(), &fields)
+            .await
+        {
+            Ok(_) => panic!("disallowed setting_path should fail"),
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Invalid setting_path"),
+            "unexpected error message: {msg}"
+        );
+        assert_eq!(
+            store
+                .get_setting("test", "nearai.session_token")
+                .await
+                .expect("get disallowed setting"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -5181,7 +5581,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
-        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone());
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone(), None);
 
         let wasm_path = channels_dir.join("telegram.wasm");
         let cap_path = channels_dir.join("telegram.capabilities.json");
@@ -5606,7 +6006,9 @@ mod tests {
             "tok".to_string(),
         );
 
-        let result = mgr.configure("test-relay", &secrets).await;
+        let result = mgr
+            .configure("test-relay", &secrets, &std::collections::HashMap::new())
+            .await;
         assert!(
             result.is_ok(),
             "configure should return Ok: {:?}",

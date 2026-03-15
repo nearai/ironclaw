@@ -2645,16 +2645,18 @@ function removeExtension(name) {
 function showConfigureModal(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
-      if (!setup.secrets || setup.secrets.length === 0) {
+      const secrets = Array.isArray(setup.secrets) ? setup.secrets : [];
+      const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
+      if (secrets.length === 0 && setupFields.length === 0) {
         showToast('No configuration needed for ' + name, 'info');
         return;
       }
-      renderConfigureModal(name, setup.secrets);
+      renderConfigureModal(name, secrets, setupFields);
     })
     .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
 }
 
-function renderConfigureModal(name, secrets) {
+function renderConfigureModal(name, secrets, setupFields) {
   closeConfigureModal();
   const overlay = document.createElement('div');
   overlay.className = 'configure-overlay';
@@ -2716,7 +2718,46 @@ function renderConfigureModal(name, secrets) {
 
     field.appendChild(inputRow);
     form.appendChild(field);
-    fields.push({ name: secret.name, input: input });
+    fields.push({ kind: 'secret', name: secret.name, input: input });
+  }
+
+  for (const setupField of setupFields) {
+    const field = document.createElement('div');
+    field.className = 'configure-field';
+
+    const label = document.createElement('label');
+    label.textContent = setupField.prompt;
+    if (setupField.optional) {
+      const opt = document.createElement('span');
+      opt.className = 'field-optional';
+      opt.textContent = I18n.t('config.optional');
+      label.appendChild(opt);
+    }
+    field.appendChild(label);
+
+    const inputRow = document.createElement('div');
+    inputRow.className = 'configure-input-row';
+
+    const input = document.createElement('input');
+    input.type = setupField.input_type === 'password' ? 'password' : 'text';
+    input.name = setupField.name;
+    input.placeholder = setupField.provided ? I18n.t('config.alreadySet') : '';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitConfigureModal(name, fields);
+    });
+    inputRow.appendChild(input);
+
+    if (setupField.provided) {
+      const badge = document.createElement('span');
+      badge.className = 'field-provided';
+      badge.textContent = '\u2713';
+      badge.title = I18n.t('config.alreadyConfigured');
+      inputRow.appendChild(badge);
+    }
+
+    field.appendChild(inputRow);
+    form.appendChild(field);
+    fields.push({ kind: 'field', name: setupField.name, input: input });
   }
 
   modal.appendChild(form);
@@ -2745,9 +2786,16 @@ function renderConfigureModal(name, secrets) {
 
 function submitConfigureModal(name, fields) {
   const secrets = {};
+  const setupFields = {};
   for (const f of fields) {
-    if (f.input.value.trim()) {
-      secrets[f.name] = f.input.value.trim();
+    const value = f.input.value.trim();
+    if (!value) {
+      continue;
+    }
+    if (f.kind === 'secret') {
+      secrets[f.name] = value;
+    } else {
+      setupFields[f.name] = value;
     }
   }
 
@@ -2758,7 +2806,7 @@ function submitConfigureModal(name, fields) {
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
-    body: { secrets },
+    body: { secrets, fields: setupFields },
   })
     .then((res) => {
       if (res.success) {
@@ -2771,6 +2819,8 @@ function submitConfigureModal(name, fields) {
           showToast('Opening OAuth authorization for ' + name, 'info');
           openOAuthUrl(res.auth_url);
           loadExtensions();
+        } else if (res.needs_restart) {
+          showToast('Configured ' + name + '. Restart IronClaw to apply all changes.', 'info');
         }
         // For non-OAuth success: the server always broadcasts auth_completed SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
@@ -3698,7 +3748,7 @@ function formatRelativeTime(isoString) {
   const absDiff = Math.abs(diffMs);
   const future = diffMs < 0;
 
-  if (absDiff < 60000) 
+  if (absDiff < 60000)
     return future ? I18n.t('time.lessThan1MinuteFromNow') : I18n.t('time.lessThan1MinuteAgo');
   if (absDiff < 3600000) {
     const m = Math.floor(absDiff / 60000);
