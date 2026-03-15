@@ -18,7 +18,6 @@ use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
-use crate::channels::StatusUpdate;
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
@@ -31,6 +30,26 @@ use crate::safety::SafetyLayer;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+
+/// Static greeting persisted to DB and broadcast on first launch.
+///
+/// Sent before the LLM is involved so the user sees something immediately.
+/// The conversational onboarding (profile building, channel setup) happens
+/// organically in the subsequent turns driven by BOOTSTRAP.md.
+const BOOTSTRAP_GREETING: &str = "\
+Hey there! I'm excited to be your new assistant. Think of me as your always-on \
+chief of staff — here to help you stay on top of things and reclaim your time.\n\n\
+Here's what I can do for you right now:\n\n\
+**Task & Project Tracking** — Break big goals into steps, create jobs to track \
+progress, and remind you of what matters.\n\n\
+**Smart Routines** — Set up recurring tasks, daily briefings, monitoring and \
+alerts. Like \"Daily briefing at 9am\" or \"Prepare draft responses for every email.\"\n\n\
+**Persistent Memory** — I remember things across sessions — your preferences, \
+decisions, and important context — so we don't start from scratch every time.\n\n\
+**Talk to me where you are** — I can set up Telegram, Slack, Discord, or Signal \
+so I can message you directly on your preferred platforms.\n\n\
+To get started, what would you like to tackle first? And while we're getting \
+acquainted — what do you like to be called?";
 
 /// Collapse a tool output string into a single-line preview for display.
 pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
@@ -254,6 +273,32 @@ impl Agent {
 
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
+        // Proactive bootstrap: persist the static greeting to DB *before*
+        // starting channels so the first web client sees it via history.
+        let bootstrap_thread_id = if self
+            .workspace()
+            .is_some_and(|ws| ws.take_bootstrap_pending())
+        {
+            tracing::debug!(
+                "Fresh workspace detected — persisting static bootstrap greeting to DB"
+            );
+            if let Some(store) = self.store() {
+                let thread_id = store
+                    .get_or_create_assistant_conversation("default", "gateway")
+                    .await
+                    .ok();
+                if let Some(id) = thread_id {
+                    self.persist_assistant_response(id, "gateway", "default", BOOTSTRAP_GREETING)
+                        .await;
+                }
+                thread_id
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
 
@@ -538,77 +583,22 @@ impl Agent {
         // Extract engine ref for use in message loop
         let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
-        // Proactive bootstrap: if this is a freshly seeded workspace, send
-        // the greeting synchronously (persist-first so gateway sees it via history).
-        let bootstrap_pending = self
-            .workspace()
-            .is_some_and(|ws| ws.take_bootstrap_pending());
-        if bootstrap_pending {
-            tracing::debug!("Fresh workspace detected — sending bootstrap greeting");
+        // Bootstrap phase 2: register the thread in session manager and
+        // broadcast the greeting via SSE for any clients already connected.
+        // The greeting was already persisted to DB before start_all(), so
+        // clients that connect after this point will see it via history.
+        if let Some(id) = bootstrap_thread_id {
+            let (session, _) = self
+                .session_manager
+                .resolve_thread("default", "gateway", None)
+                .await;
+            self.session_manager
+                .register_thread("default", "gateway", id, session)
+                .await;
 
-            // Resolve the assistant thread early so we can emit a Thinking
-            // status before the LLM call — gateway clients that are already
-            // connected will see the spinner immediately.
-            let assistant_thread_id = if let Some(store) = self.store() {
-                store
-                    .get_or_create_assistant_conversation("default", "gateway")
-                    .await
-                    .ok()
-            } else {
-                None
-            };
-
-            // Emit a Thinking status to the gateway so the spinner appears
-            // while the LLM generates the greeting.
-            if let Some(tid) = &assistant_thread_id {
-                let meta = serde_json::json!({ "thread_id": tid.to_string() });
-                let _ = self
-                    .channels
-                    .send_status(
-                        "gateway",
-                        StatusUpdate::Thinking("Preparing your greeting…".into()),
-                        &meta,
-                    )
-                    .await;
-            }
-
-            let bootstrap_msg = IncomingMessage::new(
-                "default",
-                "gateway",
-                "Hello! I just set you up. Introduce yourself and help me get started.",
-            );
-            match self.handle_message(&bootstrap_msg).await {
-                Ok(Some(response)) if !response.is_empty() => {
-                    // Persist into the assistant thread and register it so
-                    // gateway clients see the greeting via history.
-                    if let Some(id) = assistant_thread_id {
-                        // Use the same (user_id, channel) that
-                        // get_or_create_assistant_conversation used, so
-                        // ensure_writable_conversation finds the right owner.
-                        self.persist_assistant_response(id, "gateway", "default", &response)
-                            .await;
-                        let (session, _) = self
-                            .session_manager
-                            .resolve_thread("default", "gateway", None)
-                            .await;
-                        self.session_manager
-                            .register_thread("default", "gateway", id, session)
-                            .await;
-                    }
-
-                    // Broadcast only to the gateway channel — CLI renders its
-                    // own welcome independently and doesn't need a ghost thread.
-                    let mut out = OutgoingResponse::text(response);
-                    out.thread_id = assistant_thread_id.map(|id| id.to_string());
-                    let _ = self.channels.broadcast("gateway", "default", out).await;
-                }
-                Ok(_) => {
-                    tracing::debug!("Bootstrap greeting produced no response");
-                }
-                Err(e) => {
-                    tracing::warn!("Bootstrap greeting failed: {}", e);
-                }
-            }
+            let mut out = OutgoingResponse::text(BOOTSTRAP_GREETING.to_string());
+            out.thread_id = Some(id.to_string());
+            let _ = self.channels.broadcast("gateway", "default", out).await;
         }
 
         // Main message loop

@@ -3189,25 +3189,11 @@ mark {
   width: 36px;
 }
 
-.thread-sidebar.collapsed .thread-sidebar-header span,
 .thread-sidebar.collapsed .thread-new-btn,
 .thread-sidebar.collapsed .thread-list,
 .thread-sidebar.collapsed .assistant-item,
 .thread-sidebar.collapsed .threads-section-header {
   display: none;
-}
-
-.thread-sidebar-header {
-  display: flex;
-  align-items: center;
-  padding: 10px 10px;
-  font-size: 13px;
-  font-weight: 600;
-  gap: 8px;
-}
-
-.thread-sidebar-header span {
-  flex: 1;
 }
 
 .thread-new-btn {
@@ -3267,12 +3253,15 @@ mark {
 }
 
 .threads-section-header {
+  display: flex;
+  align-items: center;
   padding: 10px 10px 4px;
   font-size: 11px;
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-secondary);
+  gap: 4px;
 }
 
 .thread-toggle-btn {
@@ -3745,7 +3734,6 @@ mark {
     width: 36px;
   }
 
-  .thread-sidebar .thread-sidebar-header span,
   .thread-sidebar .thread-new-btn,
   .thread-sidebar .thread-list,
   .thread-sidebar .assistant-item,
@@ -3762,7 +3750,6 @@ mark {
     z-index: 50;
   }
 
-  .thread-sidebar.expanded-mobile .thread-sidebar-header span,
   .thread-sidebar.expanded-mobile .thread-new-btn,
   .thread-sidebar.expanded-mobile .thread-list,
   .thread-sidebar.expanded-mobile .assistant-item,

@@ -189,27 +189,26 @@ impl SetupWizard {
                 }
             }
 
-            if std::env::var("NEARAI_API_KEY").is_ok()
+            if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+                && !api_key.is_empty()
                 && self.settings.llm_backend.as_deref() == Some("nearai")
             {
                 // NEARAI_API_KEY is set and backend auto-detected — skip interactive prompts
                 print_info("NEARAI_API_KEY found — using NEAR AI provider");
-                if let Ok(api_key) = std::env::var("NEARAI_API_KEY") {
-                    if let Ok(ctx) = self.init_secrets_context().await {
-                        let key = SecretString::from(api_key.clone());
-                        if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
-                            tracing::warn!(
-                                "Failed to persist NEARAI_API_KEY to secrets: {}",
-                                e
-                            );
-                        }
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(api_key.clone());
+                    if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                        tracing::warn!(
+                            "Failed to persist NEARAI_API_KEY to secrets: {}",
+                            e
+                        );
                     }
-                    self.llm_api_key = Some(SecretString::from(api_key));
                 }
+                self.llm_api_key = Some(SecretString::from(api_key));
                 if self.settings.selected_model.is_none() {
-                    self.settings.selected_model =
-                        Some("Qwen/Qwen3.5-122B-A10B".to_string());
-                    print_info("Using default model: Qwen/Qwen3.5-122B-A10B");
+                    let default = crate::llm::DEFAULT_MODEL;
+                    self.settings.selected_model = Some(default.to_string());
+                    print_info(&format!("Using default model: {default}"));
                 }
                 self.persist_after_step().await;
             } else {
@@ -1645,15 +1644,8 @@ impl SetupWizard {
         if backend == "nearai" {
             // NEAR AI: use existing provider list_models()
             let fetched = self.fetch_nearai_models().await;
-            let default_models: Vec<(String, String)> = vec![
-                (
-                    "Qwen/Qwen3.5-122B-A10B".into(),
-                    "Qwen 3.5 (default)".into(),
-                )
-            ];
-
             let models = if fetched.is_empty() {
-                default_models
+                crate::llm::default_models()
             } else {
                 fetched.iter().map(|m| (m.clone(), m.clone())).collect()
             };
