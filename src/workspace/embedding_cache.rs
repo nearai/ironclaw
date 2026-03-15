@@ -120,7 +120,7 @@ impl CachedEmbeddingProvider {
         }
     }
 
-    /// Evict the `k` oldest entries in a single O(n) pass.
+    /// Evict the `k` oldest entries in O(n) average time via partial selection.
     ///
     /// Used by `embed_batch` to avoid the O(n×m) cost of calling
     /// `evict_lru` per insert.
@@ -132,12 +132,13 @@ impl CachedEmbeddingProvider {
             cache.clear();
             return;
         }
-        // Collect keys with timestamps, partial-sort to find the k oldest.
+        // Partial selection: find the k oldest in O(n) average via
+        // select_nth_unstable_by_key, then remove the first k entries.
         let mut entries: Vec<([u8; 32], Instant)> = cache
             .iter()
             .map(|(key, entry)| (*key, entry.last_accessed))
             .collect();
-        entries.sort_unstable_by_key(|(_, t)| *t);
+        entries.select_nth_unstable_by_key(k - 1, |(_, t)| *t);
         for (key, _) in entries.into_iter().take(k) {
             cache.remove(&key);
         }
@@ -252,18 +253,23 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             "embedding batch: partial cache"
         );
 
-        // Store misses and assemble results.
-        // Batch eviction: compute how many entries must go, find the k-oldest
-        // in one O(n) pass, then insert all misses without per-insert eviction.
+        // Assemble results first (all misses, regardless of cache capacity).
+        for (orig_idx, emb) in miss_indices.iter().copied().zip(&new_embeddings) {
+            results[orig_idx] = Some(emb.clone());
+        }
+
+        // Cache the new embeddings, respecting max_entries.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            let need_to_evict =
-                (guard.len() + miss_indices.len()).saturating_sub(self.config.max_entries);
+            // When misses exceed capacity, clear and only cache the tail.
+            let cacheable = miss_indices.len().min(self.config.max_entries);
+            let skip = miss_indices.len() - cacheable;
+            let need_to_evict = (guard.len() + cacheable).saturating_sub(self.config.max_entries);
             if need_to_evict > 0 {
                 Self::evict_k_oldest(&mut guard, need_to_evict);
             }
             let now = Instant::now();
-            for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
+            for (&orig_idx, emb) in miss_indices[skip..].iter().zip(&new_embeddings[skip..]) {
                 guard.insert(
                     keys[orig_idx],
                     CacheEntry {
@@ -271,7 +277,6 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
                         last_accessed: now,
                     },
                 );
-                results[orig_idx] = Some(emb);
             }
         }
 
@@ -463,6 +468,22 @@ mod tests {
         assert_eq!(results[0], expected_a); // safety: test
         assert_eq!(results[1], expected_bb); // safety: test
         assert_eq!(results[2], expected_ccc); // safety: test
+    }
+
+    #[tokio::test]
+    async fn batch_exceeding_capacity_respects_max_entries() {
+        let inner = Arc::new(CountingMock::new(4, "test-model"));
+        let cached =
+            CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 3 });
+
+        // Batch with 5 misses but cache capacity is 3
+        let texts: Vec<String> = (0..5).map(|i| format!("text_{i}")).collect();
+        let results = cached.embed_batch(&texts).await.unwrap(); // safety: test
+
+        // All 5 results should be returned correctly
+        assert_eq!(results.len(), 5); // safety: test
+        // But cache should not exceed max_entries
+        assert!(cached.len() <= 3, "cache size {} exceeds max_entries 3", cached.len()); // safety: test
     }
 
     /// Mock embedding provider that fails the first N calls, then succeeds.
