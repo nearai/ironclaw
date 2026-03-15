@@ -2473,6 +2473,9 @@ async fn routines_toggle_handler(
         .update_routine(&routine)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(engine) = state.routine_engine.read().await.as_ref().cloned() {
+        engine.refresh_event_cache().await;
+    }
 
     Ok(Json(serde_json::json!({
         "status": if routine.enabled { "enabled" } else { "disabled" },
@@ -2498,6 +2501,9 @@ async fn routines_delete_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if deleted {
+        if let Some(engine) = state.routine_engine.read().await.as_ref().cloned() {
+            engine.refresh_event_cache().await;
+        }
         Ok(Json(serde_json::json!({
             "status": "deleted",
             "routine_id": routine_id,
