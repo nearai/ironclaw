@@ -29,9 +29,15 @@ I18n.register('zh-CN', {
   'tab.memory': '记忆',
   'tab.jobs': '任务',
   'tab.routines': '定时任务',
+  'tab.settings': '设置',
   'tab.extensions': '扩展',
   'tab.skills': '技能',
   'tab.logs': '日志',
+  'settings.inference': '推理',
+  'settings.agent': '代理',
+  'settings.channels': '频道',
+  'settings.networking': '网络',
+  'settings.mcp': 'MCP',
   
   // 状态
   'status.connected': '已连接',
@@ -131,10 +137,10 @@ I18n.register('zh-CN', {
   
   // 扩展标签页
   'extensions.installed': '已安装扩展',
-  'extensions.available': '可用 WASM 扩展',
-  'extensions.installWasm': '安装 WASM 扩展',
+  'extensions.available': '可用扩展',
+  'extensions.installWasm': '安装扩展',
   'extensions.noInstalled': '没有安装扩展',
-  'extensions.noAvailable': '没有其他可用的 WASM 扩展',
+  'extensions.noAvailable': '没有其他可用扩展',
   'extensions.loading': '加载中...',
   'extensions.install': '安装',
   'extensions.installing': '安装中...',
@@ -156,13 +162,8 @@ I18n.register('zh-CN', {
   'mcp.addCustom': '添加自定义 MCP 服务器',
   'mcp.add': '添加',
   'mcp.addedSuccess': '已添加 MCP 服务器 {name}',
-  
-  // 注册工具
-  'tools.registered': '注册工具',
-  'tools.name': '名称',
-  'tools.description': '描述',
-  'tools.empty': '没有注册工具',
-  
+
+
   // 技能标签页
   'skills.installed': '已安装技能',
   'skills.noInstalled': '没有安装技能',
@@ -302,6 +303,7 @@ I18n.register('zh-CN', {
   
   // 通用
   'common.loading': '加载中...',
+  'common.loadFailed': '加载失败',
   'common.noData': '暂无数据',
   'common.search': '搜索',
   'common.add': '添加',
@@ -348,4 +350,154 @@ I18n.register('zh-CN', {
   'config.autoGenerate': '如果为空则自动生成',
   'config.save': '保存',
   'config.cancel': '取消',
+
+  // 设置工具栏
+  'settings.export': '导出',
+  'settings.import': '导入',
+  'settings.searchPlaceholder': '搜索设置...',
+  'settings.exportSuccess': '设置已导出',
+  'settings.importSuccess': '设置导入成功',
+  'settings.importFailed': '导入失败: {message}',
+  'settings.restartRequired': '需要重启才能使更改生效。',
+  'settings.restartNow': '立即重启',
+  'settings.noMatchingSettings': '没有匹配 "{query}" 的设置',
+
+  'settings.noSettings': '未找到设置',
+
+  // 设置分组
+  'cfg.group.llm': 'LLM 提供商',
+  'cfg.group.embeddings': '嵌入向量',
+  'cfg.group.agent': '代理',
+  'cfg.group.heartbeat': '心跳',
+  'cfg.group.sandbox': '沙箱',
+  'cfg.group.routines': '定时任务',
+  'cfg.group.safety': '安全',
+  'cfg.group.skills': '技能',
+  'cfg.group.search': '搜索',
+  'cfg.group.tunnel': '隧道',
+  'cfg.group.gateway': '网关',
+
+  // 推理设置
+  'cfg.llm_backend.label': '后端',
+  'cfg.llm_backend.desc': 'LLM 推理提供商',
+  'cfg.selected_model.label': '模型',
+  'cfg.selected_model.desc': '所选后端的模型名称或 ID',
+  'cfg.ollama_base_url.label': 'Ollama URL',
+  'cfg.ollama_base_url.desc': 'Ollama API 基础 URL',
+  'cfg.openai_compatible_base_url.label': 'OpenAI 兼容 URL',
+  'cfg.openai_compatible_base_url.desc': 'OpenAI 兼容 API 基础 URL',
+  'cfg.bedrock_region.label': 'Bedrock 区域',
+  'cfg.bedrock_region.desc': 'Bedrock 的 AWS 区域',
+  'cfg.bedrock_cross_region.label': '跨区域',
+  'cfg.bedrock_cross_region.desc': '启用跨区域推理',
+  'cfg.bedrock_profile.label': 'AWS 配置文件',
+  'cfg.bedrock_profile.desc': 'Bedrock 认证的 AWS 配置文件',
+  'cfg.embeddings_enabled.label': '启用',
+  'cfg.embeddings_enabled.desc': '启用向量嵌入以支持记忆搜索',
+  'cfg.embeddings_provider.label': '提供商',
+  'cfg.embeddings_provider.desc': '嵌入向量 API 提供商',
+  'cfg.embeddings_model.label': '模型',
+  'cfg.embeddings_model.desc': '嵌入向量模型名称',
+
+  // 代理设置
+  'cfg.agent_name.label': '名称',
+  'cfg.agent_name.desc': '代理显示名称',
+  'cfg.agent_max_parallel_jobs.label': '最大并行任务数',
+  'cfg.agent_max_parallel_jobs.desc': '最大并发后台任务数',
+  'cfg.agent_job_timeout.label': '任务超时',
+  'cfg.agent_job_timeout.desc': '每个任务的最大持续时间（秒）',
+  'cfg.agent_max_tool_iterations.label': '最大工具迭代次数',
+  'cfg.agent_max_tool_iterations.desc': '每轮最大工具调用次数',
+  'cfg.agent_use_planning.label': '规划',
+  'cfg.agent_use_planning.desc': '执行前启用多步规划',
+  'cfg.agent_auto_approve.label': '自动批准工具',
+  'cfg.agent_auto_approve.desc': '跳过工具调用的手动审批',
+  'cfg.agent_timezone.label': '时区',
+  'cfg.agent_timezone.desc': '默认时区（IANA）',
+  'cfg.agent_session_idle.label': '会话空闲超时',
+  'cfg.agent_session_idle.desc': '空闲会话过期前的秒数',
+  'cfg.agent_stuck_threshold.label': '卡住阈值',
+  'cfg.agent_stuck_threshold.desc': '任务被认为卡住前的秒数',
+  'cfg.agent_max_repair.label': '最大修复尝试次数',
+  'cfg.agent_max_repair.desc': '卡住任务的自动恢复尝试次数',
+  'cfg.agent_max_cost.label': '每日最大费用',
+  'cfg.agent_max_cost.desc': '每日 LLM 支出上限（美分，0 = 无限制）',
+  'cfg.agent_max_actions.label': '每小时最大操作数',
+  'cfg.agent_max_actions.desc': '每小时工具调用速率限制（0 = 无限制）',
+  'cfg.agent_allow_local.label': '允许本地工具',
+  'cfg.agent_allow_local.desc': '启用本地文件系统工具执行',
+
+  // 心跳设置
+  'cfg.heartbeat_enabled.label': '启用',
+  'cfg.heartbeat_enabled.desc': '运行定期后台检查',
+  'cfg.heartbeat_interval.label': '间隔',
+  'cfg.heartbeat_interval.desc': '心跳间隔秒数（默认：1800）',
+  'cfg.heartbeat_notify_channel.label': '通知频道',
+  'cfg.heartbeat_notify_channel.desc': '发送心跳发现的频道',
+  'cfg.heartbeat_notify_user.label': '通知用户',
+  'cfg.heartbeat_notify_user.desc': '要通知的用户 ID',
+  'cfg.heartbeat_quiet_start.label': '静默时段开始',
+  'cfg.heartbeat_quiet_start.desc': '停止心跳的小时（0-23）',
+  'cfg.heartbeat_quiet_end.label': '静默时段结束',
+  'cfg.heartbeat_quiet_end.desc': '恢复心跳的小时（0-23）',
+  'cfg.heartbeat_timezone.label': '时区',
+  'cfg.heartbeat_timezone.desc': '静默时段的时区（IANA）',
+
+  // 沙箱设置
+  'cfg.sandbox_enabled.label': '启用',
+  'cfg.sandbox_enabled.desc': '启用 Docker 沙箱以运行后台任务',
+  'cfg.sandbox_policy.label': '策略',
+  'cfg.sandbox_policy.desc': '沙箱安全策略',
+  'cfg.sandbox_timeout.label': '超时',
+  'cfg.sandbox_timeout.desc': '最大任务持续时间（秒）',
+  'cfg.sandbox_memory.label': '内存限制',
+  'cfg.sandbox_memory.desc': '容器内存限制（MB）',
+  'cfg.sandbox_image.label': 'Docker 镜像',
+  'cfg.sandbox_image.desc': '沙箱任务的容器镜像',
+
+  // 定时任务设置
+  'cfg.routines_max_concurrent.label': '最大并发数',
+  'cfg.routines_max_concurrent.desc': '同时运行的最大定时任务数',
+  'cfg.routines_cooldown.label': '默认冷却时间',
+  'cfg.routines_cooldown.desc': '定时任务触发间的最小秒数',
+
+  // 安全设置
+  'cfg.safety_max_output.label': '最大输出长度',
+  'cfg.safety_max_output.desc': '每次响应的最大输出令牌数',
+  'cfg.safety_injection_check.label': '注入检查',
+  'cfg.safety_injection_check.desc': '启用提示注入检测',
+
+  // 技能设置
+  'cfg.skills_max_active.label': '最大活跃技能数',
+  'cfg.skills_max_active.desc': '同时活跃的最大技能数',
+  'cfg.skills_max_tokens.label': '最大上下文令牌数',
+  'cfg.skills_max_tokens.desc': '技能提示的令牌预算',
+
+  // 搜索设置
+  'cfg.search_fusion.label': '融合策略',
+  'cfg.search_fusion.desc': '混合搜索排名方法',
+
+  // 网络设置
+  'cfg.tunnel_provider.label': '提供商',
+  'cfg.tunnel_provider.desc': '公网 URL 隧道提供商',
+  'cfg.tunnel_public_url.label': '公网 URL',
+  'cfg.tunnel_public_url.desc': '静态公网 URL（不使用隧道提供商时）',
+  'cfg.gateway_rate_limit.label': '速率限制',
+  'cfg.gateway_rate_limit.desc': '每分钟最大聊天消息数',
+  'cfg.gateway_max_connections.label': '最大连接数',
+  'cfg.gateway_max_connections.desc': '最大同时 SSE/WS 连接数',
+
+  // 频道子标签
+  'channels.builtin': '内置频道',
+  'channels.messaging': '消息频道',
+  'channels.webGateway': 'Web 网关',
+  'channels.webGatewayDesc': '基于浏览器的聊天界面',
+  'channels.httpWebhook': 'HTTP Webhook',
+  'channels.httpWebhookDesc': '用于外部集成的传入 webhook 端点',
+  'channels.cli': 'CLI',
+  'channels.cliDesc': '使用 Ratatui 的终端 UI',
+  'channels.repl': 'REPL',
+  'channels.replDesc': '用于测试的简单读取-求值-打印循环',
+  'channels.configureVia': '通过 {env} 配置',
+  'channels.runWith': '运行命令: {cmd}',
 });
