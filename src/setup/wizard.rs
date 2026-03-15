@@ -294,28 +294,31 @@ impl SetupWizard {
     }
 
     /// Step 1: Database connection.
+    ///
+    /// Determines the backend at runtime (env var, interactive selection, or
+    /// compile-time default) and runs the appropriate configuration flow.
     async fn step_database(&mut self) -> Result<(), SetupError> {
-        // When both features are compiled, let the user choose.
-        // If DATABASE_BACKEND is already set in the environment, respect it.
-        #[cfg(all(feature = "postgres", feature = "libsql"))]
-        {
-            // Check if a backend is already pinned via env var
-            let env_backend = std::env::var("DATABASE_BACKEND").ok();
+        use crate::config::{DatabaseBackend, DatabaseConfig};
 
-            if let Some(ref backend) = env_backend {
-                if backend == "libsql" || backend == "turso" || backend == "sqlite" {
-                    return self.step_database_libsql().await;
-                }
-                if backend != "postgres" && backend != "postgresql" {
+        const POSTGRES_AVAILABLE: bool = cfg!(feature = "postgres");
+        const LIBSQL_AVAILABLE: bool = cfg!(feature = "libsql");
+
+        // Determine backend from env var, interactive selection, or default.
+        let env_backend = std::env::var("DATABASE_BACKEND").ok();
+
+        let backend = if let Some(ref raw) = env_backend {
+            match raw.parse::<DatabaseBackend>() {
+                Ok(b) => b,
+                Err(_) => {
                     print_info(&format!(
                         "Unknown DATABASE_BACKEND '{}', defaulting to PostgreSQL",
-                        backend
+                        raw
                     ));
+                    DatabaseBackend::Postgres
                 }
-                return self.step_database_postgres().await;
             }
-
-            // Interactive selection
+        } else if POSTGRES_AVAILABLE && LIBSQL_AVAILABLE {
+            // Both features compiled — offer interactive selection.
             let pre_selected = self.settings.database_backend.as_deref().map(|b| match b {
                 "libsql" | "turso" | "sqlite" => 1,
                 _ => 0,
@@ -341,94 +344,82 @@ impl SetupWizard {
                 self.settings.libsql_url = None;
             }
 
-            match choice {
-                1 => return self.step_database_libsql().await,
-                _ => return self.step_database_postgres().await,
+            if choice == 1 {
+                DatabaseBackend::LibSql
+            } else {
+                DatabaseBackend::Postgres
             }
-        }
+        } else if LIBSQL_AVAILABLE {
+            DatabaseBackend::LibSql
+        } else {
+            // Only postgres (or neither, but that won't compile anyway).
+            DatabaseBackend::Postgres
+        };
 
-        #[cfg(all(feature = "postgres", not(feature = "libsql")))]
-        {
-            return self.step_database_postgres().await;
-        }
+        // --- Postgres flow ---
+        if backend == DatabaseBackend::Postgres {
+            self.settings.database_backend = Some("postgres".to_string());
 
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
-            return self.step_database_libsql().await;
-        }
-    }
+            let existing_url = std::env::var("DATABASE_URL")
+                .ok()
+                .or_else(|| self.settings.database_url.clone());
 
-    /// Step 1 (postgres): Database connection via PostgreSQL URL.
-    #[cfg(feature = "postgres")]
-    async fn step_database_postgres(&mut self) -> Result<(), SetupError> {
-        use crate::config::DatabaseConfig;
+            if let Some(ref url) = existing_url {
+                let display_url = mask_password_in_url(url);
+                print_info(&format!("Existing database URL: {}", display_url));
 
-        self.settings.database_backend = Some("postgres".to_string());
-
-        let existing_url = std::env::var("DATABASE_URL")
-            .ok()
-            .or_else(|| self.settings.database_url.clone());
-
-        if let Some(ref url) = existing_url {
-            let display_url = mask_password_in_url(url);
-            print_info(&format!("Existing database URL: {}", display_url));
-
-            if confirm("Use this database?", true).map_err(SetupError::Io)? {
-                let config = DatabaseConfig::from_postgres_url(url, 5);
-                if let Err(e) = self.test_database_connection(&config).await {
-                    print_error(&format!("Connection failed: {}", e));
-                    print_info("Let's configure a new database URL.");
-                } else {
-                    print_success("Database connection successful");
-                    self.settings.database_url = Some(url.clone());
-                    return Ok(());
-                }
-            }
-        }
-
-        println!();
-        print_info("Enter your PostgreSQL connection URL.");
-        print_info("Format: postgres://user:password@host:port/database");
-        println!();
-
-        loop {
-            let url = input("Database URL").map_err(SetupError::Io)?;
-
-            if url.is_empty() {
-                print_error("Database URL is required.");
-                continue;
-            }
-
-            print_info("Testing connection...");
-            let config = DatabaseConfig::from_postgres_url(&url, 5);
-            match self.test_database_connection(&config).await {
-                Ok(()) => {
-                    print_success("Database connection successful");
-
-                    if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
-                        self.run_migrations().await?;
+                if confirm("Use this database?", true).map_err(SetupError::Io)? {
+                    let config = DatabaseConfig::from_postgres_url(url, 5);
+                    if let Err(e) = self.test_database_connection(&config).await {
+                        print_error(&format!("Connection failed: {}", e));
+                        print_info("Let's configure a new database URL.");
+                    } else {
+                        print_success("Database connection successful");
+                        self.settings.database_url = Some(url.clone());
+                        return Ok(());
                     }
-
-                    self.settings.database_url = Some(url);
-                    return Ok(());
                 }
-                Err(e) => {
-                    print_error(&format!("Connection failed: {}", e));
-                    if !confirm("Try again?", true).map_err(SetupError::Io)? {
-                        return Err(SetupError::Database(
-                            "Database connection failed".to_string(),
-                        ));
+            }
+
+            println!();
+            print_info("Enter your PostgreSQL connection URL.");
+            print_info("Format: postgres://user:password@host:port/database");
+            println!();
+
+            loop {
+                let url = input("Database URL").map_err(SetupError::Io)?;
+
+                if url.is_empty() {
+                    print_error("Database URL is required.");
+                    continue;
+                }
+
+                print_info("Testing connection...");
+                let config = DatabaseConfig::from_postgres_url(&url, 5);
+                match self.test_database_connection(&config).await {
+                    Ok(()) => {
+                        print_success("Database connection successful");
+
+                        if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
+                            self.run_migrations().await?;
+                        }
+
+                        self.settings.database_url = Some(url);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        print_error(&format!("Connection failed: {}", e));
+                        if !confirm("Try again?", true).map_err(SetupError::Io)? {
+                            return Err(SetupError::Database(
+                                "Database connection failed".to_string(),
+                            ));
+                        }
                     }
                 }
             }
         }
-    }
 
-    /// Step 1 (libsql): Database connection via local file or Turso remote replica.
-    #[cfg(feature = "libsql")]
-    async fn step_database_libsql(&mut self) -> Result<(), SetupError> {
-        use crate::config::DatabaseConfig;
-
+        // --- libSQL flow ---
         self.settings.database_backend = Some("libsql".to_string());
 
         let default_path = crate::config::default_libsql_path();
@@ -720,15 +711,15 @@ impl SetupWizard {
     /// standard path. Falls back to the interactive `step_database()` only when
     /// just the postgres feature is compiled (can't auto-default postgres).
     async fn auto_setup_database(&mut self) -> Result<(), SetupError> {
-        use crate::config::DatabaseConfig;
+        use crate::config::{DatabaseBackend, DatabaseConfig};
 
-        // If DATABASE_URL or LIBSQL_PATH already set, respect existing config
-        #[cfg(feature = "postgres")]
+        const LIBSQL_AVAILABLE: bool = cfg!(feature = "libsql");
+
         let env_backend = std::env::var("DATABASE_BACKEND").ok();
 
-        #[cfg(feature = "postgres")]
+        // If DATABASE_BACKEND=postgres and DATABASE_URL exists: connect+migrate
         if let Some(ref backend) = env_backend
-            && (backend == "postgres" || backend == "postgresql")
+            && let Ok(DatabaseBackend::Postgres) = backend.parse::<DatabaseBackend>()
         {
             if let Ok(url) = std::env::var("DATABASE_URL") {
                 print_info("Using existing PostgreSQL configuration");
@@ -743,8 +734,10 @@ impl SetupWizard {
             return self.step_database().await;
         }
 
-        #[cfg(feature = "postgres")]
-        if let Ok(url) = std::env::var("DATABASE_URL") {
+        // If DATABASE_URL exists (no explicit backend): connect+migrate as postgres
+        if env_backend.is_none()
+            && let Ok(url) = std::env::var("DATABASE_URL")
+        {
             print_info("Using existing PostgreSQL configuration");
             let config = DatabaseConfig::from_postgres_url(&url, 5);
             self.test_database_connection(&config).await?;
@@ -754,9 +747,8 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // Auto-default to libsql if the feature is compiled
-        #[cfg(feature = "libsql")]
-        {
+        // Auto-default to libsql if available
+        if LIBSQL_AVAILABLE {
             self.settings.database_backend = Some("libsql".to_string());
 
             let existing_path = std::env::var("LIBSQL_PATH")
@@ -790,10 +782,7 @@ impl SetupWizard {
         }
 
         // Only postgres feature compiled — can't auto-default, use interactive
-        #[allow(unreachable_code)]
-        {
-            self.step_database().await
-        }
+        self.step_database().await
     }
 
     /// Auto-setup security with zero prompts (quick mode).
@@ -2645,7 +2634,6 @@ impl Default for SetupWizard {
 }
 
 /// Mask password in a database URL for display.
-#[cfg(feature = "postgres")]
 fn mask_password_in_url(url: &str) -> String {
     // URL format: scheme://user:password@host/database
     // Find "://" to locate start of credentials
@@ -2974,7 +2962,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "postgres")]
     fn test_mask_password_in_url() {
         assert_eq!(
             mask_password_in_url("postgres://user:secret@localhost/db"),
