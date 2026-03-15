@@ -303,6 +303,7 @@ I18n.register('zh-CN', {
   
   // 通用
   'common.loading': '加载中...',
+  'common.loadFailed': '加载失败',
   'common.noData': '暂无数据',
   'common.search': '搜索',
   'common.add': '添加',

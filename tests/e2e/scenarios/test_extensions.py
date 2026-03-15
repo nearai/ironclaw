@@ -109,6 +109,15 @@ async def go_to_extensions(page):
     ).first.wait_for(state="visible", timeout=8000)
 
 
+async def go_to_channels(page):
+    """Navigate to Settings > Channels subtab and wait for content."""
+    await page.locator(SEL["tab_button"].format(tab="settings")).click()
+    await page.locator(SEL["settings_subtab"].format(subtab="channels")).click()
+    await page.locator(SEL["settings_subpanel"].format(subtab="channels")).wait_for(
+        state="visible", timeout=5000
+    )
+
+
 async def go_to_mcp(page):
     """Navigate to Settings > MCP subtab and wait for content."""
     await page.locator(SEL["tab_button"].format(tab="settings")).click()
@@ -275,8 +284,8 @@ async def test_mcp_server_installed_auth_dot(page):
 async def _load_wasm_channel(page, activation_status, activation_error=None):
     ext = {**_WASM_CHANNEL, "activation_status": activation_status, "activation_error": activation_error}
     await mock_ext_apis(page, installed=[ext])
-    await go_to_extensions(page)
-    card = page.locator(SEL["ext_card_installed"]).first
+    await go_to_channels(page)
+    card = page.locator(SEL["channels_ext_card"]).first
     await card.wait_for(state="visible", timeout=5000)
     return card
 
@@ -422,9 +431,9 @@ async def test_install_wasm_channel_triggers_configure(page):
 
     await page.route("**/api/extensions/test-channel/setup", handle_channel_setup)
     await page.route("**/api/extensions/install", handle_channel_install)
-    await go_to_extensions(page)
+    await go_to_channels(page)
 
-    install_btn = page.locator(SEL["available_wasm_list"]).locator(SEL["ext_install_btn"]).first
+    install_btn = page.locator(SEL["channels_ext_card"]).locator(SEL["ext_install_btn"]).first
     await install_btn.wait_for(state="visible", timeout=5000)
     await install_btn.click()
 
@@ -499,12 +508,13 @@ async def test_remove_installed_extension_confirmed(page):
     # Override for subsequent calls
     await page.route("**/api/extensions*", handle_ext_empty)
 
-    # Auto-accept confirm dialog
-    await page.evaluate("window.confirm = () => true")
-
     card = page.locator(SEL["ext_card_installed"]).first
     await card.wait_for(state="visible", timeout=5000)
     await card.locator(SEL["ext_remove_btn"]).click()
+
+    # Confirm via custom modal
+    await page.locator(SEL["confirm_modal"]).wait_for(state="visible", timeout=5000)
+    await page.locator(SEL["confirm_modal_btn"]).click()
 
     # Card should disappear
     await page.wait_for_function(
@@ -519,12 +529,13 @@ async def test_remove_cancelled_keeps_card(page):
     await mock_ext_apis(page, installed=[_WASM_TOOL])
     await go_to_extensions(page)
 
-    # Reject the confirm dialog
-    await page.evaluate("window.confirm = () => false")
-
     card = page.locator(SEL["ext_card_installed"]).first
     await card.wait_for(state="visible", timeout=5000)
     await card.locator(SEL["ext_remove_btn"]).click()
+
+    # Cancel via custom modal
+    await page.locator(SEL["confirm_modal"]).wait_for(state="visible", timeout=5000)
+    await page.locator(SEL["confirm_modal_cancel"]).click()
 
     assert await page.locator(SEL["ext_card_installed"]).count() >= 1, "Card should remain after cancel"
 

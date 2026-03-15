@@ -1212,7 +1212,7 @@ function handleAuthCompleted(data) {
   if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
     addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
   }
-  if (currentTab === 'extensions') loadExtensions();
+  if (currentTab === 'settings') refreshCurrentSettingsTab();
   enableChatInput();
 }
 
@@ -4812,10 +4812,10 @@ function loadMcpServers() {
     }
 
     if (mcpList.children.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+      mcpList.innerHTML = '<div class="empty-state">' + I18n.t('mcp.noServers') + '</div>';
     }
   }).catch(function(err) {
-    mcpList.innerHTML = '<div class="empty-state">Failed to load MCP servers: '
+    mcpList.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
       + escapeHtml(err.message) + '</div>';
   });
 }
@@ -4863,7 +4863,7 @@ function loadChannelsStatus() {
     builtinList.appendChild(renderBuiltinChannelCard(
       'CLI',
       'Terminal UI with Ratatui',
-      enabledChannels.indexOf('repl') !== -1,
+      enabledChannels.indexOf('cli') !== -1,
       'Run with: ironclaw run --cli'
     ));
 
@@ -5168,8 +5168,9 @@ function exportSettings() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    showToast(I18n.t('settings.exportSuccess'), 'success');
   }).catch(function(err) {
-    showToast('Export failed: ' + err.message, 'error');
+    showToast(I18n.t('settings.importFailed', { message: err.message }), 'error');
   });
 }
 
@@ -5187,13 +5188,13 @@ function importSettings() {
           method: 'POST',
           body: data,
         }).then(function() {
-          showToast('Settings imported successfully', 'success');
+          showToast(I18n.t('settings.importSuccess'), 'success');
           loadSettingsSubtab(currentSettingsSubtab);
         }).catch(function(err) {
-          showToast('Import failed: ' + err.message, 'error');
+          showToast(I18n.t('settings.importFailed', { message: err.message }), 'error');
         });
       } catch (e) {
-        showToast('Invalid JSON file', 'error');
+        showToast(I18n.t('settings.importFailed', { message: e.message }), 'error');
       }
     };
     reader.readAsText(input.files[0]);
@@ -5213,7 +5214,7 @@ document.getElementById('settings-search-input').addEventListener('input', funct
     var text = row.textContent.toLowerCase();
     if (query === '' || text.indexOf(query) !== -1) {
       row.classList.remove('search-hidden');
-      visibleCount++;
+      if (!row.classList.contains('hidden')) visibleCount++;
     } else {
       row.classList.add('search-hidden');
     }

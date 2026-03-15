@@ -303,6 +303,7 @@ I18n.register('en', {
   
   // Common
   'common.loading': 'Loading...',
+  'common.loadFailed': 'Failed to load',
   'common.noData': 'No data',
   'common.search': 'Search',
   'common.add': 'Add',

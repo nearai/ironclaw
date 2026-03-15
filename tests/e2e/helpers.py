@@ -91,6 +91,12 @@ SEL = {
     "ext_stepper":              ".ext-stepper",
     "stepper_step":             ".stepper-step",
     "stepper_circle":           ".stepper-circle",
+    # Confirm modal (custom, replaces window.confirm)
+    "confirm_modal":            "#confirm-modal",
+    "confirm_modal_btn":        "#confirm-modal-btn",
+    "confirm_modal_cancel":     "#confirm-modal-cancel-btn",
+    # Channels subtab – cards
+    "channels_ext_card":        "#settings-channels-content .ext-card",
     # Toast notifications
     "toast":                    ".toast",
     "toast_success":            ".toast.toast-success",
