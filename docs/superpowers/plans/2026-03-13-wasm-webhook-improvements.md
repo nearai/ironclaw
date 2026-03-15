@@ -12,7 +12,7 @@
 **Target Branch:** New branch from `upstream/main`
 
 **Prerequisites:**
-- Latest migration in upstream/main is **V11** → new migration must be **V12**
+- Latest migration in upstream/main is **V12** → new migration must be **V13**
 - Current `router.register()` has 4 params → will add 2 new params (backward compatible)
 - `register_hmac_secret()` already exists in router
 
@@ -36,7 +36,7 @@ src/db/
     └── webhook_dedup.rs  # libSQL-specific dedup module
 
 migrations/
-└── V12__webhook_dedup.sql  # Dedup table migration (V11 is latest in upstream)
+└── V13__webhook_dedup.sql  # Dedup table migration (V12 is latest in upstream)
 
 wit/
 └── channel.wit           # Add on_message_persisted callback
@@ -417,14 +417,14 @@ Adds three new webhook configuration fields:
 **Files:**
 - Modify: `src/db/mod.rs`
 - Modify: `src/db/postgres.rs`
-- Create: `migrations/V12__webhook_dedup.sql` (V12 because V11 is latest in upstream)
+- Create: `migrations/V13__webhook_dedup.sql` (V13 because V12 is latest in upstream)
 
 **Context:** WhatsApp retries webhooks up to 7 days on 5xx errors. Need atomic deduplication to prevent duplicate message processing.
 
 - [ ] **Step 1: Create migration file**
 
 ```sql
--- migrations/V12__webhook_dedup.sql
+-- migrations/V13__webhook_dedup.sql
 -- Webhook message deduplication table
 -- Prevents duplicate processing when channels retry on errors
 
@@ -610,7 +610,7 @@ Expected: All 3 tests pass
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/db/mod.rs src/db/postgres.rs migrations/V12__webhook_dedup.sql
+git add src/db/mod.rs src/db/postgres.rs migrations/V13__webhook_dedup.sql
 git commit -m "feat(db): add webhook message deduplication store
 
 Adds WebhookDedupStore trait and PostgreSQL implementation.

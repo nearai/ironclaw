@@ -897,9 +897,6 @@ mod tests {
         }"#;
 
         let cap: ChannelCapabilitiesFile = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            cap.webhook_message_id_json_pointer(),
-            Some("/message_id")
-        );
+        assert_eq!(cap.webhook_message_id_json_pointer(), Some("/message_id"));
     }
 }
