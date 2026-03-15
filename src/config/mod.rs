@@ -5,6 +5,7 @@
 //! in startup). Everything else comes from env vars, the DB settings
 //! table, or auto-detection.
 
+mod a2a;
 mod agent;
 mod builder;
 mod channels;
@@ -32,6 +33,7 @@ use crate::error::ConfigError;
 use crate::settings::Settings;
 
 // Re-export all public types so `crate::config::FooConfig` continues to work.
+pub use self::a2a::A2aConfig;
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
@@ -100,6 +102,9 @@ pub struct Config {
     /// Channel-relay integration (Slack via external relay service).
     /// Present only when both `CHANNEL_RELAY_URL` and `CHANNEL_RELAY_API_KEY` are set.
     pub relay: Option<RelayConfig>,
+    /// A2A bridge configuration for connecting to remote agents.
+    /// Present only when `A2A_ENABLED=true`.
+    pub a2a: Option<A2aConfig>,
 }
 
 impl Config {
@@ -174,6 +179,7 @@ impl Config {
             search: WorkspaceSearchConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
             relay: None,
+            a2a: None,
         }
     }
 
@@ -329,6 +335,7 @@ impl Config {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
             relay: RelayConfig::from_env(),
+            a2a: A2aConfig::resolve()?,
         })
     }
 }

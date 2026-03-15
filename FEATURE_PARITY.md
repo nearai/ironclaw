@@ -224,6 +224,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | suppressToolErrors config | ✅ | ❌ | Hide tool errors from user |
 | Intent-first tool display | ✅ | ❌ | Details and exec summaries |
 | Transcript file size in status | ✅ | ❌ | Show size in session status |
+| A2A (Agent-to-Agent) bridge | ❌ | ✅ | Google A2A protocol (JSON-RPC 2.0 + SSE), configurable tool name/endpoint |
 
 ### Owner: _Unassigned_
 
