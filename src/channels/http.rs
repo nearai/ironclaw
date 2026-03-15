@@ -404,13 +404,38 @@ async fn process_authenticated_request(
     state: Arc<HttpChannelState>,
     req: WebhookRequest,
 ) -> axum::response::Response {
-    let _ = req.user_id.as_ref().map(|user_id| {
-        tracing::debug!(
-            provided_user_id = %user_id,
-            configured_owner_id = %state.user_id,
-            "HTTP webhook request provided user_id; using it as sender_id while keeping the configured owner scope"
-        );
-    });
+    let normalized_user_id = req
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|user_id| !user_id.is_empty());
+
+    match (req.user_id.as_deref(), normalized_user_id) {
+        (Some(raw_user_id), Some(user_id)) if raw_user_id != user_id => {
+            tracing::debug!(
+                provided_user_id = %raw_user_id,
+                normalized_sender_id = %user_id,
+                configured_owner_id = %state.user_id,
+                "HTTP webhook request provided user_id; trimming and using it as sender_id while keeping the configured owner scope"
+            );
+        }
+        (Some(user_id), Some(_)) => {
+            tracing::debug!(
+                provided_user_id = %user_id,
+                configured_owner_id = %state.user_id,
+                "HTTP webhook request provided user_id; using it as sender_id while keeping the configured owner scope"
+            );
+        }
+        (Some(raw_user_id), None) => {
+            tracing::debug!(
+                provided_user_id = %raw_user_id,
+                configured_owner_id = %state.user_id,
+                "HTTP webhook request provided a blank user_id; falling back to the configured owner scope for sender_id"
+            );
+        }
+        (None, None) => {}
+        (None, Some(_)) => unreachable!("normalized user_id requires a raw user_id"),
+    }
 
     if req.content.len() > MAX_CONTENT_BYTES {
         return (
@@ -516,7 +541,7 @@ async fn process_authenticated_request(
         Vec::new()
     };
 
-    let sender_id = req.user_id.clone().unwrap_or_else(|| state.user_id.clone());
+    let sender_id = normalized_user_id.unwrap_or(&state.user_id).to_string();
     let mut msg = IncomingMessage::new("http", &state.user_id, &req.content)
         .with_owner_id(&state.user_id)
         .with_sender_id(sender_id)
@@ -686,6 +711,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{HeaderValue, Request};
     use secrecy::SecretString;
+    use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
     use super::*;
@@ -822,6 +848,70 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn webhook_blank_user_id_falls_back_to_owner_scope() {
+        let secret = "test-secret-123";
+        let channel = test_channel(Some(secret));
+        let mut stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body = serde_json::json!({
+            "content": "hello",
+            "user_id": "   "
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let signature = compute_signature(secret, &body_bytes);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-hub-signature-256", signature)
+            .body(Body::from(body_bytes))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("timed out waiting for webhook message")
+            .expect("stream should yield a webhook message");
+        assert_eq!(msg.sender_id, "http");
+        assert_eq!(msg.owner_id, "http");
+    }
+
+    #[tokio::test]
+    async fn webhook_user_id_is_trimmed_before_becoming_sender_id() {
+        let secret = "test-secret-123";
+        let channel = test_channel(Some(secret));
+        let mut stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body = serde_json::json!({
+            "content": "hello",
+            "user_id": "  alice  "
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let signature = compute_signature(secret, &body_bytes);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .header("x-hub-signature-256", signature)
+            .body(Body::from(body_bytes))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("timed out waiting for webhook message")
+            .expect("stream should yield a webhook message");
+        assert_eq!(msg.sender_id, "alice");
+        assert_eq!(msg.owner_id, "http");
     }
 
     /// Regression test for issue #869: RwLock read guard was held across
