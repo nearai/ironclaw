@@ -89,6 +89,8 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
+    - name: Validate panic checker parser logic
+      run: python3 scripts/check_no_panics.py --self-test
     - name: Check for .unwrap(), .expect(), assert!() in production code
       run: |
         BASE="${{ github.event.pull_request.base.sha }}"
