@@ -5153,6 +5153,7 @@ document.getElementById('confirm-modal-btn').addEventListener('click', function(
   if (_confirmModalCallback) _confirmModalCallback();
   closeConfirmModal();
 });
+document.getElementById('confirm-modal-cancel-btn').addEventListener('click', closeConfirmModal);
 
 // --- Settings Import/Export ---
 

@@ -43,12 +43,13 @@ SEL = {
     "approval_always_btn": ".approval-actions button.always",
     "approval_deny_btn": ".approval-actions button.deny",
     "approval_resolved": ".approval-resolved",
-    # Extensions tab – sections
+    # Settings subtabs
+    "settings_subtab":          '.settings-subtab[data-settings-subtab="{subtab}"]',
+    "settings_subpanel":        "#settings-{subtab}",
+    # Extensions section
     "extensions_list":          "#extensions-list",
     "available_wasm_list":      "#available-wasm-list",
     "mcp_servers_list":         "#mcp-servers-list",
-    "tools_tbody":              "#tools-tbody",
-    "tools_empty":              "#tools-empty",
     # Extensions tab – cards
     "ext_card_installed":       "#extensions-list .ext-card",
     "ext_card_available":       "#available-wasm-list .ext-card.ext-available",
@@ -97,7 +98,7 @@ SEL = {
     "toast_info":               ".toast.toast-info",
 }
 
-TABS = ["chat", "memory", "jobs", "routines", "extensions", "skills"]
+TABS = ["chat", "memory", "jobs", "routines", "settings"]
 
 # Auth token used across all tests
 AUTH_TOKEN = "e2e-test-token"

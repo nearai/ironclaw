@@ -4,11 +4,18 @@ import pytest
 from helpers import SEL
 
 
+async def go_to_skills(page):
+    """Navigate to Settings > Skills subtab."""
+    await page.locator(SEL["tab_button"].format(tab="settings")).click()
+    await page.locator(SEL["settings_subtab"].format(subtab="skills")).click()
+    await page.locator(SEL["settings_subpanel"].format(subtab="skills")).wait_for(
+        state="visible", timeout=5000
+    )
+
+
 async def test_skills_tab_visible(page):
-    """Skills tab shows the search interface."""
-    await page.locator(SEL["tab_button"].format(tab="skills")).click()
-    panel = page.locator(SEL["tab_panel"].format(tab="skills"))
-    await panel.wait_for(state="visible", timeout=5000)
+    """Skills subtab shows the search interface."""
+    await go_to_skills(page)
 
     search_input = page.locator(SEL["skill_search_input"])
     assert await search_input.is_visible(), "Skills search input not visible"
@@ -16,7 +23,7 @@ async def test_skills_tab_visible(page):
 
 async def test_skills_search(page):
     """Search ClawHub for skills and verify results appear."""
-    await page.locator(SEL["tab_button"].format(tab="skills")).click()
+    await go_to_skills(page)
 
     search_input = page.locator(SEL["skill_search_input"])
     await search_input.fill("markdown")
@@ -35,7 +42,7 @@ async def test_skills_search(page):
 
 async def test_skills_install_and_remove(page):
     """Install a skill from search results, then remove it."""
-    await page.locator(SEL["tab_button"].format(tab="skills")).click()
+    await go_to_skills(page)
 
     # Search
     search_input = page.locator(SEL["skill_search_input"])
