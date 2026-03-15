@@ -415,7 +415,19 @@ impl CreateJobTool {
             // loop stops consuming from inject_tx the send will fail and the
             // monitor terminates. No JoinHandle is retained.
             if let (Some(etx), Some(itx)) = (&self.event_tx, &self.inject_tx) {
-                crate::agent::job_monitor::spawn_job_monitor(job_id, etx.subscribe(), itx.clone());
+                if let Some(route) = monitor_route_from_ctx(ctx) {
+                    crate::agent::job_monitor::spawn_job_monitor(
+                        job_id,
+                        etx.subscribe(),
+                        itx.clone(),
+                        route,
+                    );
+                } else {
+                    tracing::debug!(
+                        job_id = %job_id,
+                        "Skipping job monitor injection due to missing route metadata"
+                    );
+                }
             }
 
             let result = serde_json::json!({
@@ -678,6 +690,31 @@ fn resolve_project_dir(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| project_id.to_string());
     Ok((canonical_dir, browse_id))
+}
+
+fn monitor_route_from_ctx(ctx: &JobContext) -> Option<crate::agent::job_monitor::JobMonitorRoute> {
+    let channel = ctx
+        .metadata
+        .get("notify_channel")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let user_id = ctx
+        .metadata
+        .get("notify_user")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&ctx.user_id)
+        .to_string();
+    let thread_id = ctx
+        .metadata
+        .get("notify_thread_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Some(crate::agent::job_monitor::JobMonitorRoute {
+        channel,
+        user_id,
+        thread_id,
+    })
 }
 
 #[async_trait]
