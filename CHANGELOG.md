@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.18.0...ironclaw-v0.19.0) - 2026-03-15
+
+### Added
+
+- *(ci)* include commit history in staging promotion PRs ([#952](https://github.com/nearai/ironclaw/pull/952))
+- *(tools)* add reusable sensitive JSON redaction helper ([#457](https://github.com/nearai/ironclaw/pull/457))
+- configurable hybrid search fusion strategy ([#234](https://github.com/nearai/ironclaw/pull/234))
+- *(cli)* add cron subcommand for managing scheduled routines ([#1017](https://github.com/nearai/ironclaw/pull/1017))
+- adds context-llm tool support ([#616](https://github.com/nearai/ironclaw/pull/616))
+- *(web-chat)* add hover copy button for user/assistant messages ([#948](https://github.com/nearai/ironclaw/pull/948))
+- add Slack approval buttons for tool execution in DMs ([#796](https://github.com/nearai/ironclaw/pull/796))
+- enhance HTTP tool parameter parsing ([#911](https://github.com/nearai/ironclaw/pull/911))
+- *(routines)* enable tool access in lightweight routine execution ([#257](https://github.com/nearai/ironclaw/pull/257)) ([#730](https://github.com/nearai/ironclaw/pull/730))
+- add MiniMax as a built-in LLM provider ([#940](https://github.com/nearai/ironclaw/pull/940))
+- *(cli)* add `ironclaw channels list` subcommand ([#933](https://github.com/nearai/ironclaw/pull/933))
+- *(cli)* add `ironclaw skills list/search/info` subcommands ([#918](https://github.com/nearai/ironclaw/pull/918))
+- add cargo-deny for supply chain safety ([#834](https://github.com/nearai/ironclaw/pull/834))
+- *(setup)* display ASCII art banner during onboarding ([#851](https://github.com/nearai/ironclaw/pull/851))
+- *(extensions)* unify auth and configure into single entrypoint ([#677](https://github.com/nearai/ironclaw/pull/677))
+- *(i18n)* Add internationalization support with Chinese and English translations ([#929](https://github.com/nearai/ironclaw/pull/929))
+- Import OpenClaw memory, history and settings ([#903](https://github.com/nearai/ironclaw/pull/903))
+
+### Fixed
+
+- *(registry)* bump versions for github, web-search, and discord extensions
+- *(ci)* checkout promotion PR head for metadata refresh ([#1097](https://github.com/nearai/ironclaw/pull/1097))
+- *(ci)* add missing attachments field and crates/ dir to Dockerfiles ([#1100](https://github.com/nearai/ironclaw/pull/1100))
+- *(registry)* bump telegram channel version for capabilities change ([#1064](https://github.com/nearai/ironclaw/pull/1064))
+- *(ci)* repair staging promotion workflow behavior ([#1091](https://github.com/nearai/ironclaw/pull/1091))
+- *(wasm)* address #1086 review followups -- description hint and coercion safety ([#1092](https://github.com/nearai/ironclaw/pull/1092))
+- *(ci)* repair staging-ci workflow parsing ([#1090](https://github.com/nearai/ironclaw/pull/1090))
+- *(extensions)* fix lifecycle bugs + comprehensive E2E tests ([#1070](https://github.com/nearai/ironclaw/pull/1070))
+- add tool_info schema discovery for WASM tools ([#1086](https://github.com/nearai/ironclaw/pull/1086))
+- resolve bug_bash UX/logging issues (#1054 #1055 #1058) ([#1072](https://github.com/nearai/ironclaw/pull/1072))
+- *(http)* fail closed when webhook secret is missing at runtime ([#1075](https://github.com/nearai/ironclaw/pull/1075))
+- *(service)* set CLI_ENABLED=false in macOS launchd plist ([#1079](https://github.com/nearai/ironclaw/pull/1079))
+- relax approval requirements for low-risk tools ([#922](https://github.com/nearai/ironclaw/pull/922))
+- *(web)* make approval requests appear without page reload ([#996](https://github.com/nearai/ironclaw/pull/996)) ([#1073](https://github.com/nearai/ironclaw/pull/1073))
+- *(routines)* run cron checks immediately on ticker startup ([#1066](https://github.com/nearai/ironclaw/pull/1066))
+- *(web)* recompute cron next_fire_at when re-enabling routines ([#1080](https://github.com/nearai/ironclaw/pull/1080))
+- *(memory)* reject absolute filesystem paths with corrective routing ([#934](https://github.com/nearai/ironclaw/pull/934))
+- remove all inline event handlers for CSP script-src compliance ([#1063](https://github.com/nearai/ironclaw/pull/1063))
+- *(mcp)* include OAuth state parameter in authorization URLs ([#1049](https://github.com/nearai/ironclaw/pull/1049))
+- *(mcp)* open MCP OAuth in same browser as gateway ([#951](https://github.com/nearai/ironclaw/pull/951))
+- *(deploy)* harden production container and bootstrap security ([#1014](https://github.com/nearai/ironclaw/pull/1014))
+- release lock guards before awaiting channel send ([#869](https://github.com/nearai/ironclaw/pull/869)) ([#1003](https://github.com/nearai/ironclaw/pull/1003))
+- *(registry)* use versioned artifact URLs and checksums for all WASM manifests ([#1007](https://github.com/nearai/ironclaw/pull/1007))
+- *(setup)* preserve model selection on provider re-run ([#679](https://github.com/nearai/ironclaw/pull/679)) ([#987](https://github.com/nearai/ironclaw/pull/987))
+- *(mcp)* attach session manager for non-OAuth HTTP clients ([#793](https://github.com/nearai/ironclaw/pull/793)) ([#986](https://github.com/nearai/ironclaw/pull/986))
+- *(security)* migrate webhook auth to HMAC-SHA256 signature header ([#970](https://github.com/nearai/ironclaw/pull/970))
+- *(security)* make unsafe env::set_var calls safe with explicit invariants ([#968](https://github.com/nearai/ironclaw/pull/968))
+- *(security)* require explicit SANDBOX_ALLOW_FULL_ACCESS to enable FullAccess policy ([#967](https://github.com/nearai/ironclaw/pull/967))
+- *(security)* add Content-Security-Policy header to web gateway ([#966](https://github.com/nearai/ironclaw/pull/966))
+- *(test)* stabilize openai compat oversized-body regression ([#839](https://github.com/nearai/ironclaw/pull/839))
+- *(ci)* disambiguate WASM bundle filenames to prevent tool/channel collision ([#964](https://github.com/nearai/ironclaw/pull/964))
+- *(setup)* validate channel credentials during setup ([#684](https://github.com/nearai/ironclaw/pull/684))
+- drain tunnel pipes to prevent zombie process ([#735](https://github.com/nearai/ironclaw/pull/735))
+- *(mcp)* header safety validation and Authorization conflict bug from #704 ([#752](https://github.com/nearai/ironclaw/pull/752))
+- *(agent)* block thread_id-based context pollution across users ([#760](https://github.com/nearai/ironclaw/pull/760))
+- *(mcp)* stdio/unix transports skip initialize handshake ([#890](https://github.com/nearai/ironclaw/pull/890)) ([#935](https://github.com/nearai/ironclaw/pull/935))
+- *(setup)* drain residual events and filter key kind in onboard prompts ([#937](https://github.com/nearai/ironclaw/pull/937)) ([#949](https://github.com/nearai/ironclaw/pull/949))
+- *(security)* load WASM tool description and schema from capabilities.json ([#520](https://github.com/nearai/ironclaw/pull/520))
+- *(security)* resolve DNS once and reuse for SSRF validation to prevent rebinding ([#518](https://github.com/nearai/ironclaw/pull/518))
+- *(security)* replace regex HTML sanitizer with DOMPurify to prevent XSS ([#510](https://github.com/nearai/ironclaw/pull/510))
+- *(ci)* improve Claude Code review reliability ([#955](https://github.com/nearai/ironclaw/pull/955))
+- *(ci)* run gated test jobs during staging CI ([#956](https://github.com/nearai/ironclaw/pull/956))
+- *(ci)* prevent staging-ci tag failure and chained PR auto-close ([#900](https://github.com/nearai/ironclaw/pull/900))
+- *(ci)* WASM WIT compat sqlite3 duplicate symbol conflict ([#953](https://github.com/nearai/ironclaw/pull/953))
+- resolve deferred review items from PRs #883, #848, #788 ([#915](https://github.com/nearai/ironclaw/pull/915))
+- *(web)* improve UX readability and accessibility in chat UI ([#910](https://github.com/nearai/ironclaw/pull/910))
+
+### Other
+
+- Fix subagent monitor events being treated as user input ([#1173](https://github.com/nearai/ironclaw/pull/1173))
+- periodic sync main into staging (resolved conflicts) ([#1098](https://github.com/nearai/ironclaw/pull/1098))
+- fix formatting in cli/mod.rs and mcp/auth.rs ([#1071](https://github.com/nearai/ironclaw/pull/1071))
+- Expose the shared agent session manager via AppComponents ([#532](https://github.com/nearai/ironclaw/pull/532))
+- *(agent)* remove unnecessary Worker re-export ([#923](https://github.com/nearai/ironclaw/pull/923))
+- Fix UTF-8 unsafe truncation in WASM emit_message ([#1015](https://github.com/nearai/ironclaw/pull/1015))
+- extract safety module into ironclaw_safety crate ([#1024](https://github.com/nearai/ironclaw/pull/1024))
+- Add Z.AI provider support for GLM-5 ([#938](https://github.com/nearai/ironclaw/pull/938))
+- *(html_to_markdown)* refresh golden files after renderer bump ([#1016](https://github.com/nearai/ironclaw/pull/1016))
+- Migrate GitHub webhook normalization into github tool ([#758](https://github.com/nearai/ironclaw/pull/758))
+- Fix systemctl unit ([#472](https://github.com/nearai/ironclaw/pull/472))
+- add Russian localization (README.ru.md) ([#850](https://github.com/nearai/ironclaw/pull/850))
+- Add generic host-verified /webhook/tools/{tool} ingress ([#757](https://github.com/nearai/ironclaw/pull/757))
+
 ## [0.18.0](https://github.com/nearai/ironclaw/compare/v0.17.0...v0.18.0) - 2026-03-11
 
 ### Other
