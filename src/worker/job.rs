@@ -196,7 +196,7 @@ impl Worker {
                         .get("session_id")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
-                    fallback: data.get("fallback_deliverable").cloned(),
+                    fallback_deliverable: data.get("fallback_deliverable").cloned(),
                 }),
                 _ => None,
             };

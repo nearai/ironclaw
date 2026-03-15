@@ -211,7 +211,7 @@ mod tests {
                     job_id: job_id.to_string(),
                     status: "completed".to_string(),
                     session_id: None,
-                    fallback: None,
+                    fallback_deliverable: None,
                 },
             ))
             .unwrap();

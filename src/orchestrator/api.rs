@@ -338,7 +338,7 @@ async fn job_event_handler(
             // Sandbox containers don't yet emit fallback data in their event payloads.
             // This field is forward-compatible infrastructure for when container workers
             // gain context/memory tracking capabilities.
-            fallback: payload.data.get("fallback_deliverable").cloned(),
+            fallback_deliverable: payload.data.get("fallback_deliverable").cloned(),
         },
         _ => SseEvent::JobStatus {
             job_id: job_id_str,
