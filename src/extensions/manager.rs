@@ -248,9 +248,9 @@ fn telegram_message_matches_verification_code(text: &str, code: &str) -> bool {
     trimmed == code
         || trimmed == format!("/start {code}")
         || trimmed
-            .strip_prefix("/start ")
-            .map(|payload| payload.trim() == code)
-            .unwrap_or(false)
+            .split_whitespace()
+            .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+            .any(|token| token == code)
 }
 
 /// Central manager for extension lifecycle operations.
@@ -6849,6 +6849,13 @@ mod tests {
         require(
             telegram_message_matches_verification_code("/start iclaw-7qk2m9", "iclaw-7qk2m9"),
             "/start payload should match",
+        )?;
+        require(
+            telegram_message_matches_verification_code(
+                "Hi! My code is: iclaw-7qk2m9",
+                "iclaw-7qk2m9",
+            ),
+            "conversational message containing the code should match",
         )?;
         require(
             !telegram_message_matches_verification_code("/start something-else", "iclaw-7qk2m9"),
