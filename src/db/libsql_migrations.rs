@@ -45,6 +45,10 @@ CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity);
 
+-- Composite index for find_conversation_by_user_channel query
+CREATE INDEX IF NOT EXISTS idx_conversations_user_channel_activity
+    ON conversations(user_id, channel, last_activity DESC);
+
 -- Partial unique indexes to prevent duplicate singleton conversations.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_routine
 ON conversations (user_id, json_extract(metadata, '$.routine_id'))

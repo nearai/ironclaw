@@ -565,6 +565,43 @@ impl ConversationStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(found.is_some())
     }
+
+    async fn find_conversation_by_user_channel(
+        &self,
+        user_id: &str,
+        channel: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = ?1 AND channel = ?2
+                ORDER BY last_activity DESC
+                LIMIT 1
+                "#,
+                params![user_id, channel],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => {
+                let id_str: String = row
+                    .get(0)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                id_str
+                    .parse()
+                    .map(Some)
+                    .map_err(|_| DatabaseError::Serialization("Invalid UUID".to_string()))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]

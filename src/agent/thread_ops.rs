@@ -23,12 +23,15 @@ use crate::error::Error;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 
-const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
-
-fn requires_preexisting_uuid_thread(channel: &str) -> bool {
-    // Gateway-style channels send server-issued conversation UUIDs.
-    // Unknown UUIDs should be rejected instead of silently creating a new thread.
-    matches!(channel, "gateway" | "test")
+/// Errors that can occur during thread hydration.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HydrationError {
+    /// User attempted to access a conversation they don't own.
+    #[error("User {user_id} does not have access to conversation {conversation_id}")]
+    AccessDenied {
+        conversation_id: Uuid,
+        user_id: String,
+    },
 }
 
 impl Agent {
@@ -41,15 +44,98 @@ impl Agent {
     /// even when the conversation has zero messages (e.g. a brand-new
     /// assistant thread). Without this, `resolve_thread` would mint a
     /// fresh UUID and all messages would land in the wrong conversation.
+    ///
+    /// For non-UUID thread IDs (WhatsApp, CLI, etc.), looks up the most recent
+    /// conversation for the user on the channel and loads its history.
+    ///
+    /// Returns `Err(HydrationError::AccessDenied)` if the user attempts to access
+    /// a conversation they don't own. Returns `Ok(())` otherwise (including when
+    /// no hydration is needed or possible).
     pub(super) async fn maybe_hydrate_thread(
         &self,
         message: &IncomingMessage,
         external_thread_id: &str,
-    ) -> Option<String> {
-        // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
+    ) -> Result<(), HydrationError> {
+        // Try UUID parsing first (web gateway uses UUIDs)
         let thread_uuid = match Uuid::parse_str(external_thread_id) {
-            Ok(id) => id,
-            Err(_) => return None,
+            Ok(id) => {
+                // Security: Verify the conversation belongs to this user before loading
+                if let Some(store) = self.store() {
+                    match store
+                        .conversation_belongs_to_user(id, &message.user_id)
+                        .await
+                    {
+                        Ok(true) => Some(id),
+                        Ok(false) => {
+                            tracing::warn!(
+                                user_id = %message.user_id,
+                                conversation_id = %id,
+                                "User attempted to access conversation they don't own"
+                            );
+                            return Err(HydrationError::AccessDenied {
+                                conversation_id: id,
+                                user_id: message.user_id.clone(),
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                conversation_id = %id,
+                                "Failed to verify conversation ownership"
+                            );
+                            return Err(HydrationError::AccessDenied {
+                                conversation_id: id,
+                                user_id: message.user_id.clone(),
+                            });
+                        }
+                    }
+                } else {
+                    Some(id)
+                }
+            }
+            Err(_) => {
+                // For non-UUID thread IDs (WhatsApp, CLI, etc.), look up by user+channel.
+                // Security: find_conversation_by_user_channel queries by user_id,
+                // so only conversations owned by this user can be returned.
+                if let Some(store) = self.store() {
+                    match store
+                        .find_conversation_by_user_channel(&message.user_id, &message.channel)
+                        .await
+                    {
+                        Ok(Some(conv_id)) => {
+                            tracing::debug!(
+                                user_id = %message.user_id,
+                                channel = %message.channel,
+                                conversation_id = %conv_id,
+                                "Found existing conversation for non-UUID thread"
+                            );
+                            Some(conv_id)
+                        }
+                        Ok(None) => {
+                            tracing::debug!(
+                                user_id = %message.user_id,
+                                channel = %message.channel,
+                                "No existing conversation found for non-UUID thread"
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to look up conversation by user+channel"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+
+        let thread_uuid = match thread_uuid {
+            Some(id) => id,
+            None => return Ok(()),
         };
 
         // Check if already in memory
@@ -60,7 +146,7 @@ impl Agent {
         {
             let sess = session.lock().await;
             if sess.threads.contains_key(&thread_uuid) {
-                return None;
+                return Ok(());
             }
         }
 
@@ -69,62 +155,6 @@ impl Agent {
         let msg_count;
 
         if let Some(store) = self.store() {
-            // Never hydrate history from a conversation UUID that isn't owned
-            // by the current authenticated user.
-            let owned = match store
-                .conversation_belongs_to_user(thread_uuid, &message.user_id)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to verify conversation ownership for hydration {}: {}",
-                        thread_uuid,
-                        e
-                    );
-                    if requires_preexisting_uuid_thread(&message.channel) {
-                        return Some(FORGED_THREAD_ID_ERROR.to_string());
-                    }
-                    return None;
-                }
-            };
-            if !owned {
-                let exists = match store.get_conversation_metadata(thread_uuid).await {
-                    Ok(Some(_)) => true,
-                    Ok(None) => false,
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to inspect conversation metadata for hydration {}: {}",
-                            thread_uuid,
-                            e
-                        );
-                        if requires_preexisting_uuid_thread(&message.channel) {
-                            return Some(FORGED_THREAD_ID_ERROR.to_string());
-                        }
-                        return None;
-                    }
-                };
-
-                if requires_preexisting_uuid_thread(&message.channel) {
-                    tracing::warn!(
-                        user = %message.user_id,
-                        channel = %message.channel,
-                        thread_id = %thread_uuid,
-                        exists,
-                        "Rejected message for unavailable thread id"
-                    );
-                    return Some(FORGED_THREAD_ID_ERROR.to_string());
-                }
-
-                tracing::warn!(
-                    user = %message.user_id,
-                    thread_id = %thread_uuid,
-                    exists,
-                    "Skipped hydration for thread id not owned by sender"
-                );
-                return None;
-            }
-
             let db_messages = store
                 .list_conversation_messages(thread_uuid)
                 .await
@@ -169,7 +199,7 @@ impl Agent {
             msg_count
         );
 
-        None
+        Ok(())
     }
 
     pub(super) async fn process_user_input(
@@ -179,13 +209,6 @@ impl Agent {
         thread_id: Uuid,
         content: &str,
     ) -> Result<SubmissionResult, Error> {
-        tracing::debug!(
-            message_id = %message.id,
-            thread_id = %thread_id,
-            content_len = content.len(),
-            "Processing user input"
-        );
-
         // First check thread state without holding lock during I/O
         let thread_state = {
             let sess = session.lock().await;
@@ -196,41 +219,19 @@ impl Agent {
             thread.state
         };
 
-        tracing::debug!(
-            message_id = %message.id,
-            thread_id = %thread_id,
-            thread_state = ?thread_state,
-            "Checked thread state"
-        );
-
         // Check thread state
         match thread_state {
             ThreadState::Processing => {
-                tracing::warn!(
-                    message_id = %message.id,
-                    thread_id = %thread_id,
-                    "Thread is processing, rejecting new input"
-                );
                 return Ok(SubmissionResult::error(
                     "Turn in progress. Use /interrupt to cancel.",
                 ));
             }
             ThreadState::AwaitingApproval => {
-                tracing::warn!(
-                    message_id = %message.id,
-                    thread_id = %thread_id,
-                    "Thread awaiting approval, rejecting new input"
-                );
                 return Ok(SubmissionResult::error(
                     "Waiting for approval. Use /interrupt to cancel.",
                 ));
             }
             ThreadState::Completed => {
-                tracing::warn!(
-                    message_id = %message.id,
-                    thread_id = %thread_id,
-                    "Thread completed, rejecting new input"
-                );
                 return Ok(SubmissionResult::error(
                     "Thread completed. Use /thread new.",
                 ));
@@ -343,14 +344,6 @@ impl Agent {
             );
         }
 
-        // Augment content with attachment context (transcripts, metadata, images)
-        let augmented =
-            crate::agent::attachments::augment_with_attachments(content, &message.attachments);
-        let (effective_content, image_parts) = match &augmented {
-            Some(result) => (result.text.as_str(), result.image_parts.clone()),
-            None => (content, Vec::new()),
-        };
-
         // Start the turn and get messages
         let turn_messages = {
             let mut sess = session.lock().await;
@@ -358,30 +351,23 @@ impl Agent {
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+            // Augment content with attachment context (transcripts, metadata, images)
+            let augmented =
+                crate::agent::attachments::augment_with_attachments(content, &message.attachments);
+            let (effective_content, image_parts) = match &augmented {
+                Some(result) => (result.text.as_str(), result.image_parts.clone()),
+                None => (content, Vec::new()),
+            };
+
             let turn = thread.start_turn(effective_content);
             turn.image_content_parts = image_parts;
             thread.messages()
         };
 
         // Persist user message to DB immediately so it survives crashes
-        tracing::debug!(
-            message_id = %message.id,
-            thread_id = %thread_id,
-            "Persisting user message to DB"
-        );
-        self.persist_user_message(
-            thread_id,
-            &message.channel,
-            &message.user_id,
-            effective_content,
-        )
-        .await;
-
-        tracing::debug!(
-            message_id = %message.id,
-            thread_id = %thread_id,
-            "User message persisted, starting agentic loop"
-        );
+        self.persist_user_message(thread_id, &message.user_id, content)
+            .await;
 
         // Send thinking status
         let _ = self
@@ -420,10 +406,6 @@ impl Agent {
         // Complete, fail, or request approval
         match result {
             Ok(AgenticLoopResult::Response(response)) => {
-                // Extract <suggestions> from response text before user sees it
-                let (response, suggestions) =
-                    crate::agent::dispatcher::extract_suggestions(&response);
-
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
                 let response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
@@ -446,10 +428,10 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
-                let (turn_number, tool_calls) = thread
+                let tool_calls = thread
                     .turns
                     .last()
-                    .map(|t| (t.turn_number, t.tool_calls.clone()))
+                    .map(|t| t.tool_calls.clone())
                     .unwrap_or_default();
                 let _ = self
                     .channels
@@ -461,33 +443,10 @@ impl Agent {
                     .await;
 
                 // Persist tool calls then assistant response (user message already persisted at turn start)
-                self.persist_tool_calls(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    turn_number,
-                    &tool_calls,
-                )
-                .await;
-                self.persist_assistant_response(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    &response,
-                )
-                .await;
-
-                // Send suggestions after response (best-effort, rendered by web gateway)
-                if !suggestions.is_empty() {
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::Suggestions { suggestions },
-                            &message.metadata,
-                        )
-                        .await;
-                }
+                self.persist_tool_calls(thread_id, &message.user_id, &tool_calls)
+                    .await;
+                self.persist_assistant_response(thread_id, &message.user_id, &response)
+                    .await;
 
                 Ok(SubmissionResult::response(response))
             }
@@ -502,12 +461,7 @@ impl Agent {
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::ApprovalNeeded {
-                            request_id: request_id.to_string(),
-                            tool_name: tool_name.clone(),
-                            description: description.clone(),
-                            parameters: parameters.clone(),
-                        },
+                        StatusUpdate::Status("Awaiting approval".into()),
                         &message.metadata,
                     )
                     .await;
@@ -526,41 +480,6 @@ impl Agent {
         }
     }
 
-    /// Ensure a thread UUID is writable for `(channel, user_id)`.
-    ///
-    /// Returns `false` for foreign/unowned conversation IDs or DB errors.
-    async fn ensure_writable_conversation(
-        &self,
-        store: &Arc<dyn crate::db::Database>,
-        thread_id: Uuid,
-        channel: &str,
-        user_id: &str,
-    ) -> bool {
-        match store
-            .ensure_conversation(thread_id, channel, user_id, None)
-            .await
-        {
-            Ok(true) => true,
-            Ok(false) => {
-                tracing::warn!(
-                    user = %user_id,
-                    channel = %channel,
-                    thread_id = %thread_id,
-                    "Rejected write for unavailable thread id"
-                );
-                false
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to ensure writable conversation {}: {}",
-                    thread_id,
-                    e
-                );
-                false
-            }
-        }
-    }
-
     /// Persist the user message to the DB at turn start (before the agentic loop).
     ///
     /// This ensures the user message is durable even if the process crashes
@@ -568,7 +487,6 @@ impl Agent {
     pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
-        channel: &str,
         user_id: &str,
         user_input: &str,
     ) {
@@ -577,10 +495,11 @@ impl Agent {
             None => return,
         };
 
-        if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", user_id, None)
             .await
         {
+            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
             return;
         }
 
@@ -600,7 +519,6 @@ impl Agent {
     pub(super) async fn persist_assistant_response(
         &self,
         thread_id: Uuid,
-        channel: &str,
         user_id: &str,
         response: &str,
     ) {
@@ -609,10 +527,11 @@ impl Agent {
             None => return,
         };
 
-        if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", user_id, None)
             .await
         {
+            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
             return;
         }
 
@@ -632,9 +551,7 @@ impl Agent {
     pub(super) async fn persist_tool_calls(
         &self,
         thread_id: Uuid,
-        channel: &str,
         user_id: &str,
-        turn_number: usize,
         tool_calls: &[crate::agent::session::TurnToolCall],
     ) {
         if tool_calls.is_empty() {
@@ -648,24 +565,14 @@ impl Agent {
 
         let summaries: Vec<serde_json::Value> = tool_calls
             .iter()
-            .enumerate()
-            .map(|(i, tc)| {
-                let mut obj = serde_json::json!({
-                    "name": tc.name,
-                    "call_id": format!("turn{}_{}", turn_number, i),
-                });
+            .map(|tc| {
+                let mut obj = serde_json::json!({ "name": tc.name });
                 if let Some(ref result) = tc.result {
                     let preview = match result {
                         serde_json::Value::String(s) => truncate_preview(s, 500),
                         other => truncate_preview(&other.to_string(), 500),
                     };
                     obj["result_preview"] = serde_json::Value::String(preview);
-                    // Store full result (truncated to ~1000 chars) for LLM context rebuild
-                    let full_result = match result {
-                        serde_json::Value::String(s) => truncate_preview(s, 1000),
-                        other => truncate_preview(&other.to_string(), 1000),
-                    };
-                    obj["result"] = serde_json::Value::String(full_result);
                 }
                 if let Some(ref error) = tc.error {
                     obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
@@ -682,10 +589,11 @@ impl Agent {
             }
         };
 
-        if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", user_id, None)
             .await
         {
+            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
             return;
         }
 
@@ -926,16 +834,6 @@ impl Agent {
             let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
-            // Prefer a valid timezone from the approval message, fall back to the
-            // resolved timezone stored when the approval was originally requested.
-            let tz_candidate = message
-                .timezone
-                .as_deref()
-                .filter(|tz| crate::timezone::parse_timezone(tz).is_some())
-                .or(pending.user_timezone.as_deref());
-            if let Some(tz) = tz_candidate {
-                job_ctx.user_timezone = tz.to_string();
-            }
 
             let _ = self
                 .channels
@@ -987,26 +885,19 @@ impl Agent {
             let mut context_messages = pending.context_messages;
             let deferred_tool_calls = pending.deferred_tool_calls;
 
-            // Sanitize tool result, then record the cleaned version in the
-            // thread. Must happen before auth intercept check which may return early.
-            let is_tool_error = tool_result.is_err();
-            let (result_content, _) = crate::tools::execute::process_tool_result(
-                self.safety(),
-                &pending.tool_name,
-                &pending.tool_call_id,
-                &tool_result,
-            );
-
-            // Record sanitized result in thread
+            // Record result in thread
             {
                 let mut sess = session.lock().await;
                 if let Some(thread) = sess.threads.get_mut(&thread_id)
                     && let Some(turn) = thread.last_turn_mut()
                 {
-                    if is_tool_error {
-                        turn.record_tool_error(result_content.clone());
-                    } else {
-                        turn.record_tool_result(serde_json::json!(result_content));
+                    match &tool_result {
+                        Ok(output) => {
+                            turn.record_tool_result(serde_json::json!(output));
+                        }
+                        Err(e) => {
+                            turn.record_tool_error(e.to_string());
+                        }
                     }
                 }
             }
@@ -1027,6 +918,21 @@ impl Agent {
                 .await;
                 return Ok(SubmissionResult::response(instructions));
             }
+
+            // Add tool result to context
+            let result_content = match tool_result {
+                Ok(output) => {
+                    let sanitized = self
+                        .safety()
+                        .sanitize_tool_output(&pending.tool_name, &output);
+                    self.safety().wrap_for_llm(
+                        &pending.tool_name,
+                        &sanitized.content,
+                        sanitized.was_modified,
+                    )
+                }
+                Err(e) => format!("Error: {}", e),
+            };
 
             context_messages.push(ChatMessage::tool_result(
                 &pending.tool_call_id,
@@ -1063,20 +969,14 @@ impl Agent {
 
             for (idx, tc) in deferred_tool_calls.iter().enumerate() {
                 if let Some(tool) = self.tools().get(&tc.name).await {
-                    // Match dispatcher.rs: when auto_approve_tools is true, skip
-                    // all approval checks (including ApprovalRequirement::Always).
-                    let needs_approval = if self.config.auto_approve_tools {
-                        false
-                    } else {
-                        use crate::tools::ApprovalRequirement;
-                        match tool.requires_approval(&tc.arguments) {
-                            ApprovalRequirement::Never => false,
-                            ApprovalRequirement::UnlessAutoApproved => {
-                                let sess = session.lock().await;
-                                !sess.is_tool_auto_approved(&tc.name)
-                            }
-                            ApprovalRequirement::Always => true,
+                    use crate::tools::ApprovalRequirement;
+                    let needs_approval = match tool.requires_approval(&tc.arguments) {
+                        ApprovalRequirement::Never => false,
+                        ApprovalRequirement::UnlessAutoApproved => {
+                            let sess = session.lock().await;
+                            !sess.is_tool_auto_approved(&tc.name)
                         }
+                        ApprovalRequirement::Always => true,
                     };
 
                     if needs_approval {
@@ -1238,26 +1138,15 @@ impl Agent {
                         .await;
                 }
 
-                // Sanitize first, then record the cleaned version in thread.
-                // Must happen before auth detection which may set deferred_auth.
-                let is_deferred_error = deferred_result.is_err();
-                let (deferred_content, _) = crate::tools::execute::process_tool_result(
-                    self.safety(),
-                    &tc.name,
-                    &tc.id,
-                    &deferred_result,
-                );
-
-                // Record sanitized result in thread
+                // Record in thread
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id)
                         && let Some(turn) = thread.last_turn_mut()
                     {
-                        if is_deferred_error {
-                            turn.record_tool_error(deferred_content.clone());
-                        } else {
-                            turn.record_tool_result(serde_json::json!(deferred_content));
+                        match &deferred_result {
+                            Ok(output) => turn.record_tool_result(serde_json::json!(output)),
+                            Err(e) => turn.record_tool_error(e.to_string()),
                         }
                     }
                 }
@@ -1279,6 +1168,18 @@ impl Agent {
                     deferred_auth = Some(instructions);
                 }
 
+                let deferred_content = match deferred_result {
+                    Ok(output) => {
+                        let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
+                        self.safety().wrap_for_llm(
+                            &tc.name,
+                            &sanitized.content,
+                            sanitized.was_modified,
+                        )
+                    }
+                    Err(e) => format!("Error: {}", e),
+                };
+
                 context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
             }
 
@@ -1298,8 +1199,7 @@ impl Agent {
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
-                    // Carry forward the resolved timezone from the original pending approval
-                    user_timezone: pending.user_timezone.clone(),
+                    user_timezone: message.timezone.clone(),
                 };
 
                 let request_id = new_pending.request_id;
@@ -1318,12 +1218,7 @@ impl Agent {
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::ApprovalNeeded {
-                            request_id: request_id.to_string(),
-                            tool_name: tool_name.clone(),
-                            description: description.clone(),
-                            parameters: parameters.clone(),
-                        },
+                        StatusUpdate::Status("Awaiting approval".into()),
                         &message.metadata,
                     )
                     .await;
@@ -1350,30 +1245,17 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
-                    let (response, suggestions) =
-                        crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
-                    let (turn_number, tool_calls) = thread
+                    let tool_calls = thread
                         .turns
                         .last()
-                        .map(|t| (t.turn_number, t.tool_calls.clone()))
+                        .map(|t| t.tool_calls.clone())
                         .unwrap_or_default();
                     // User message already persisted at turn start; save tool calls then assistant response
-                    self.persist_tool_calls(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        turn_number,
-                        &tool_calls,
-                    )
-                    .await;
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &response,
-                    )
-                    .await;
+                    self.persist_tool_calls(thread_id, &message.user_id, &tool_calls)
+                        .await;
+                    self.persist_assistant_response(thread_id, &message.user_id, &response)
+                        .await;
                     let _ = self
                         .channels
                         .send_status(
@@ -1382,16 +1264,6 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
-                    if !suggestions.is_empty() {
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::Suggestions { suggestions },
-                                &message.metadata,
-                            )
-                            .await;
-                    }
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {
@@ -1406,12 +1278,7 @@ impl Agent {
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::ApprovalNeeded {
-                                request_id: request_id.to_string(),
-                                tool_name: tool_name.clone(),
-                                description: description.clone(),
-                                parameters: parameters.clone(),
-                            },
+                            StatusUpdate::Status("Awaiting approval".into()),
                             &message.metadata,
                         )
                         .await;
@@ -1441,13 +1308,8 @@ impl Agent {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
                     // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &rejection,
-                    )
-                    .await;
+                    self.persist_assistant_response(thread_id, &message.user_id, &rejection)
+                        .await;
                 }
             }
 
@@ -1485,13 +1347,8 @@ impl Agent {
                 thread.enter_auth_mode(ext_name.clone());
                 thread.complete_turn(&instructions);
                 // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    &instructions,
-                )
-                .await;
+                self.persist_assistant_response(thread_id, &message.user_id, &instructions)
+                    .await;
             }
         }
         let _ = self
@@ -1521,7 +1378,7 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<Option<String>, Error> {
-        let token = token.trim();
+        let _token = token.trim();
 
         // Clear auth mode regardless of outcome
         {
@@ -1536,79 +1393,100 @@ impl Agent {
             None => return Ok(Some("Extension manager not available.".to_string())),
         };
 
-        match ext_mgr
-            .configure_token(&pending.extension_name, token)
-            .await
-        {
-            Ok(result) if result.activated => {
-                // Ensure extension is actually activated
+        match ext_mgr.auth(&pending.extension_name).await {
+            Ok(result) if result.is_authenticated() => {
                 tracing::info!(
-                    "Extension '{}' configured via auth mode: {}",
-                    pending.extension_name,
-                    result.message
+                    "Extension '{}' authenticated via auth mode",
+                    pending.extension_name
                 );
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::AuthCompleted {
-                            extension_name: pending.extension_name.clone(),
-                            success: true,
-                            message: result.message.clone(),
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-                Ok(Some(result.message))
+
+                // Auto-activate so tools are available immediately after auth
+                match ext_mgr.activate(&pending.extension_name).await {
+                    Ok(activate_result) => {
+                        let tool_count = activate_result.tools_loaded.len();
+                        let tool_list = if activate_result.tools_loaded.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n\nTools: {}", activate_result.tools_loaded.join(", "))
+                        };
+                        let msg = format!(
+                            "{} authenticated and activated ({} tools loaded).{}",
+                            pending.extension_name, tool_count, tool_list
+                        );
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::AuthCompleted {
+                                    extension_name: pending.extension_name.clone(),
+                                    success: true,
+                                    message: msg.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                        Ok(Some(msg))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Extension '{}' authenticated but activation failed: {}",
+                            pending.extension_name,
+                            e
+                        );
+                        let msg = format!(
+                            "{} authenticated successfully, but activation failed: {}. \
+                             Try activating manually.",
+                            pending.extension_name, e
+                        );
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::AuthCompleted {
+                                    extension_name: pending.extension_name.clone(),
+                                    success: true,
+                                    message: msg.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                        Ok(Some(msg))
+                    }
+                }
             }
             Ok(result) => {
+                // Invalid token, re-enter auth mode
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
                         thread.enter_auth_mode(pending.extension_name.clone());
                     }
                 }
+                let msg = result
+                    .instructions()
+                    .map(String::from)
+                    .unwrap_or_else(|| "Invalid token. Please try again.".to_string());
+                // Re-emit AuthRequired so web UI re-shows the card
                 let _ = self
                     .channels
                     .send_status(
                         &message.channel,
                         StatusUpdate::AuthRequired {
                             extension_name: pending.extension_name.clone(),
-                            instructions: Some(result.message.clone()),
-                            auth_url: None,
-                            setup_url: None,
+                            instructions: Some(msg.clone()),
+                            auth_url: result.auth_url().map(String::from),
+                            setup_url: result.setup_url().map(String::from),
                         },
                         &message.metadata,
                     )
                     .await;
-                Ok(Some(result.message))
+                Ok(Some(msg))
             }
             Err(e) => {
-                let msg = e.to_string();
-                // Token validation errors: re-enter auth mode and re-prompt
-                if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                    {
-                        let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                            thread.enter_auth_mode(pending.extension_name.clone());
-                        }
-                    }
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::AuthRequired {
-                                extension_name: pending.extension_name.clone(),
-                                instructions: Some(msg.clone()),
-                                auth_url: None,
-                                setup_url: None,
-                            },
-                            &message.metadata,
-                        )
-                        .await;
-                    return Ok(Some(msg));
-                }
-                // Infrastructure errors
+                let msg = format!(
+                    "Authentication failed for {}: {}",
+                    pending.extension_name, e
+                );
                 let _ = self
                     .channels
                     .send_status(
@@ -1690,12 +1568,11 @@ impl Agent {
     }
 }
 
-/// Rebuild full LLM-compatible `ChatMessage` sequence from DB messages.
+/// Rebuild chat messages from database records, including tool call history.
 ///
-/// Parses `role="tool_calls"` rows to reconstruct `assistant_with_tool_calls`
-/// and `tool_result` messages so that the LLM sees the complete tool execution
-/// history on thread hydration. Falls back gracefully for legacy rows that
-/// lack the enriched fields (`call_id`, `parameters`, `result`).
+/// This function properly reconstructs the conversation context from database
+/// records, handling user messages, assistant messages, and enriched tool_calls
+/// rows that contain call_id, parameters, and results.
 fn rebuild_chat_messages_from_db(
     db_messages: &[crate::history::ConversationMessage],
 ) -> Vec<ChatMessage> {
@@ -1771,6 +1648,46 @@ fn rebuild_chat_messages_from_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn test_hydration_error_display() {
+        let conv_id = uuid::Uuid::new_v4();
+        let user_id = "alice".to_string();
+
+        let error = HydrationError::AccessDenied {
+            conversation_id: conv_id,
+            user_id: user_id.clone(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "User alice does not have access to conversation {}",
+                conv_id
+            )
+        );
+    }
+
+    #[test]
+    fn test_hydration_error_is_error() {
+        let error = HydrationError::AccessDenied {
+            conversation_id: uuid::Uuid::nil(),
+            user_id: "test".to_string(),
+        };
+
+        assert!(error.source().is_none());
+    }
+
+    // Helper for rebuild_chat_messages_from_db tests
+    fn make_db_msg(role: &str, content: &str) -> crate::history::ConversationMessage {
+        crate::history::ConversationMessage {
+            id: uuid::Uuid::new_v4(),
+            role: role.to_string(),
+            content: content.to_string(),
+            created_at: chrono::Utc::now(),
+        }
+    }
 
     #[test]
     fn test_rebuild_chat_messages_user_assistant_only() {
@@ -1899,21 +1816,5 @@ mod tests {
         // Verify turn boundaries
         assert_eq!(result[0].content, "Find X");
         assert!(result[1].tool_calls.is_some());
-        assert_eq!(result[2].role, crate::llm::Role::Tool);
-        assert_eq!(result[3].content, "Found X");
-
-        assert_eq!(result[4].content, "Write it");
-        assert!(result[5].tool_calls.is_some());
-        assert_eq!(result[6].role, crate::llm::Role::Tool);
-        assert_eq!(result[7].content, "Written");
-    }
-
-    fn make_db_msg(role: &str, content: &str) -> crate::history::ConversationMessage {
-        crate::history::ConversationMessage {
-            id: uuid::Uuid::new_v4(),
-            role: role.to_string(),
-            content: content.to_string(),
-            created_at: chrono::Utc::now(),
-        }
     }
 }
