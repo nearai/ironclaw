@@ -32,7 +32,9 @@ use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::{ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry};
+use crate::tools::{
+    ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry, prepare_tool_params,
+};
 use crate::workspace::Workspace;
 
 enum EventMatcher {
@@ -1118,13 +1120,14 @@ async fn execute_routine_tool(
         .get(&tc.name)
         .await
         .ok_or_else(|| format!("Tool '{}' not found", tc.name))?;
+    let normalized_params = prepare_tool_params(tool.as_ref(), &tc.arguments);
 
     // Check approval requirement: only allow Never tools in lightweight routines.
     // UnlessAutoApproved and Always tools are blocked to prevent prompt injection attacks.
     // Lightweight routines can be triggered by external events and may process untrusted data,
     // making them vulnerable to prompt injection that could trick the LLM into calling
     // sensitive tools. Blocking these tools entirely is the safest approach.
-    match tool.requires_approval(&tc.arguments) {
+    match tool.requires_approval(&normalized_params) {
         ApprovalRequirement::Never => {}
         ApprovalRequirement::UnlessAutoApproved | ApprovalRequirement::Always => {
             return Err(format!(
@@ -1136,7 +1139,10 @@ async fn execute_routine_tool(
     }
 
     // Validate tool parameters
-    let validation = ctx.safety.validator().validate_tool_params(&tc.arguments);
+    let validation = ctx
+        .safety
+        .validator()
+        .validate_tool_params(&normalized_params);
     if !validation.is_valid {
         let details = validation
             .errors
@@ -1151,7 +1157,7 @@ async fn execute_routine_tool(
     let timeout = tool.execution_timeout();
     let start = std::time::Instant::now();
     let result = tokio::time::timeout(timeout, async {
-        tool.execute(tc.arguments.clone(), job_ctx).await
+        tool.execute(normalized_params.clone(), job_ctx).await
     })
     .await;
     let elapsed = start.elapsed();
