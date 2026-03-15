@@ -682,10 +682,7 @@ mod advanced {
     /// before the user sends any message (no LLM call needed).
     #[tokio::test]
     async fn bootstrap_greeting_fires() {
-        let rig = TestRigBuilder::new()
-            .with_bootstrap()
-            .build()
-            .await;
+        let rig = TestRigBuilder::new().with_bootstrap().build().await;
 
         // The static bootstrap greeting should arrive without us sending any
         // message and without an LLM call.

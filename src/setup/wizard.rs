@@ -198,10 +198,7 @@ impl SetupWizard {
                 if let Ok(ctx) = self.init_secrets_context().await {
                     let key = SecretString::from(api_key.clone());
                     if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
-                        tracing::warn!(
-                            "Failed to persist NEARAI_API_KEY to secrets: {}",
-                            e
-                        );
+                        tracing::warn!("Failed to persist NEARAI_API_KEY to secrets: {}", e);
                     }
                 }
                 self.llm_api_key = Some(SecretString::from(api_key));
