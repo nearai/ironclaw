@@ -195,7 +195,7 @@ impl ExtensionManifest {
             Some(other) if other.starts_with("oauth_pre_configured:") => {
                 let setup_url = other
                     .strip_prefix("oauth_pre_configured:")
-                    .unwrap_or_default()
+                    .unwrap_or("")
                     .to_string();
                 AuthHint::OAuthPreConfigured {
                     setup_url,
