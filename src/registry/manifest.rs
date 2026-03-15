@@ -197,9 +197,7 @@ impl ExtensionManifest {
                     .strip_prefix("oauth_pre_configured:")
                     .unwrap_or("")
                     .to_string();
-                AuthHint::OAuthPreConfigured {
-                    setup_url,
-                }
+                AuthHint::OAuthPreConfigured { setup_url }
             }
             _ => AuthHint::Dcr,
         };
