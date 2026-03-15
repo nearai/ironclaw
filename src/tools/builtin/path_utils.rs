@@ -7,6 +7,28 @@ use std::path::{Path, PathBuf};
 
 use crate::tools::tool::ToolError;
 
+/// Detect paths that are clearly local filesystem references, not workspace-memory docs.
+///
+/// Examples:
+/// - `/Users/.../file.md` (Unix absolute)
+/// - `C:\Users\...` or `D:/work/...` (Windows absolute)
+/// - `~/notes.md` (home expansion shorthand)
+pub fn looks_like_filesystem_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+
+    if Path::new(path).is_absolute() || path.starts_with("~/") {
+        return true;
+    }
+
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
 ///
 /// This is critical for security: `std::fs::canonicalize` only works on paths that exist,

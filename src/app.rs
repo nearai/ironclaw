@@ -290,6 +290,9 @@ impl AppBuilder {
             Arc::new(ToolRegistry::new())
         };
         tools.register_builtin_tools();
+        if self.config.agent.allow_local_tools {
+            tools.register_open_file_tool();
+        }
         tools.register_tool_info();
 
         if let Some(ref ss) = self.secrets_store {
@@ -311,6 +314,7 @@ impl AppBuilder {
             }
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
+            tools.register_tool_approval_tool(db.clone());
             Some(ws)
         } else {
             None
@@ -360,9 +364,7 @@ impl AppBuilder {
         }
 
         // Register builder tool if enabled
-        if self.config.builder.enabled
-            && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
-        {
+        if self.config.builder.enabled && self.config.agent.allow_local_tools {
             tools
                 .register_builder_tool(llm.clone(), Some(self.config.builder.to_builder_config()))
                 .await;
@@ -653,8 +655,8 @@ impl AppBuilder {
 
         // register_builder_tool() already calls register_dev_tools() internally,
         // so only register them here when the builder didn't already do it.
-        let builder_registered_dev_tools = self.config.builder.enabled
-            && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled);
+        let builder_registered_dev_tools =
+            self.config.builder.enabled && self.config.agent.allow_local_tools;
         if self.config.agent.allow_local_tools && !builder_registered_dev_tools {
             tools.register_dev_tools();
         }
