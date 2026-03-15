@@ -600,6 +600,22 @@ document.getElementById('chat-input').addEventListener('paste', (e) => {
   }
 });
 
+const chatMessagesEl = document.getElementById('chat-messages');
+chatMessagesEl.addEventListener('copy', (e) => {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) return;
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+  if (!anchorNode || !focusNode) return;
+  if (!chatMessagesEl.contains(anchorNode) || !chatMessagesEl.contains(focusNode)) return;
+  const text = selection.toString();
+  if (!text || !e.clipboardData) return;
+  // Force plain-text clipboard output so dark-theme styling never leaks on paste.
+  e.preventDefault();
+  e.clipboardData.clearData();
+  e.clipboardData.setData('text/plain', text);
+});
+
 function addGeneratedImage(dataUrl, path) {
   const container = document.getElementById('chat-messages');
   const card = document.createElement('div');
@@ -1759,7 +1775,10 @@ chatInput.addEventListener('keydown', (e) => {
     }
   }
 
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  // Safari fires compositionend before keydown, so e.isComposing is already false
+  // when Enter confirms IME input. keyCode 229 (VK_PROCESS) catches this case.
+  // See https://bugs.webkit.org/show_bug.cgi?id=165004
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     hideSlashAutocomplete();
     sendMessage();
