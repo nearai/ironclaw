@@ -421,7 +421,7 @@ impl Agent {
         match result {
             Ok(AgenticLoopResult::Response(response)) => {
                 // Extract <suggestions> from response text before user sees it
-                let (response, _suggestions) =
+                let (response, suggestions) =
                     crate::agent::dispatcher::extract_suggestions(&response);
 
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
@@ -466,6 +466,18 @@ impl Agent {
                 self.persist_assistant_response(thread_id, &message.user_id, &response)
                     .await;
 
+                // Send suggestions after response (best-effort, rendered by web gateway)
+                if !suggestions.is_empty() {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Suggestions { suggestions },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
                 Ok(SubmissionResult::response(response))
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
@@ -479,7 +491,12 @@ impl Agent {
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::Status("Awaiting approval".into()),
+                        StatusUpdate::ApprovalNeeded {
+                            request_id: request_id.to_string(),
+                            tool_name: tool_name.clone(),
+                            description: description.clone(),
+                            parameters: parameters.clone(),
+                        },
                         &message.metadata,
                     )
                     .await;
@@ -1237,7 +1254,12 @@ impl Agent {
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::Status("Awaiting approval".into()),
+                        StatusUpdate::ApprovalNeeded {
+                            request_id: request_id.to_string(),
+                            tool_name: tool_name.clone(),
+                            description: description.clone(),
+                            parameters: parameters.clone(),
+                        },
                         &message.metadata,
                     )
                     .await;
@@ -1264,6 +1286,10 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
+                    // Extract <suggestions> from response text before user sees it
+                    let (response, suggestions) =
+                        crate::agent::dispatcher::extract_suggestions(&response);
+
                     thread.complete_turn(&response);
                     let tool_calls = thread
                         .turns
@@ -1283,6 +1309,16 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
+                    if !suggestions.is_empty() {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Suggestions { suggestions },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {
@@ -1297,7 +1333,12 @@ impl Agent {
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::Status("Awaiting approval".into()),
+                            StatusUpdate::ApprovalNeeded {
+                                request_id: request_id.to_string(),
+                                tool_name: tool_name.clone(),
+                                description: description.clone(),
+                                parameters: parameters.clone(),
+                            },
                             &message.metadata,
                         )
                         .await;
