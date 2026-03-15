@@ -189,13 +189,38 @@ impl SetupWizard {
                 }
             }
 
-            print_step(1, 2, "Inference Provider");
-            self.step_inference_provider().await?;
-            self.persist_after_step().await;
+            if std::env::var("NEARAI_API_KEY").is_ok()
+                && self.settings.llm_backend.as_deref() == Some("nearai")
+            {
+                // NEARAI_API_KEY is set and backend auto-detected — skip interactive prompts
+                print_info("NEARAI_API_KEY found — using NEAR AI provider");
+                if let Ok(api_key) = std::env::var("NEARAI_API_KEY") {
+                    if let Ok(ctx) = self.init_secrets_context().await {
+                        let key = SecretString::from(api_key.clone());
+                        if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                            tracing::warn!(
+                                "Failed to persist NEARAI_API_KEY to secrets: {}",
+                                e
+                            );
+                        }
+                    }
+                    self.llm_api_key = Some(SecretString::from(api_key));
+                }
+                if self.settings.selected_model.is_none() {
+                    self.settings.selected_model =
+                        Some("Qwen/Qwen3.5-122B-A10B".to_string());
+                    print_info("Using default model: Qwen/Qwen3.5-122B-A10B");
+                }
+                self.persist_after_step().await;
+            } else {
+                print_step(1, 2, "Inference Provider");
+                self.step_inference_provider().await?;
+                self.persist_after_step().await;
 
-            print_step(2, 2, "Model Selection");
-            self.step_model_selection().await?;
-            self.persist_after_step().await;
+                print_step(2, 2, "Model Selection");
+                self.step_model_selection().await?;
+                self.persist_after_step().await;
+            }
         } else {
             let total_steps = 9;
 
@@ -1622,19 +1647,9 @@ impl SetupWizard {
             let fetched = self.fetch_nearai_models().await;
             let default_models: Vec<(String, String)> = vec![
                 (
-                    "zai-org/GLM-latest".into(),
-                    "GLM Latest (default, fast)".into(),
-                ),
-                (
-                    "anthropic::claude-sonnet-4-20250514".into(),
-                    "Claude Sonnet 4 (best quality)".into(),
-                ),
-                (
-                    "openai::gpt-5.3-codex".into(),
-                    "GPT-5.3 Codex (flagship)".into(),
-                ),
-                ("openai::gpt-5.2".into(), "GPT-5.2".into()),
-                ("openai::gpt-4o".into(), "GPT-4o".into()),
+                    "Qwen/Qwen3.5-122B-A10B".into(),
+                    "Qwen 3.5 (default)".into(),
+                )
             ];
 
             let models = if fetched.is_empty() {
