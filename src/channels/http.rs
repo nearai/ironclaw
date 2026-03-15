@@ -269,21 +269,25 @@ async fn webhook_handler(
     let mut fallback_req = None;
     {
         let webhook_secret = state.webhook_secret.read().await;
-        let Some(expected_secret) = webhook_secret.as_ref() else {
+        if webhook_secret.is_none() {
+            // No secret configured — reject all requests. This guards against
+            // the secret being cleared at runtime via update_secret(None).
+            // The start() method also prevents startup without a secret, but
+            // this is defense-in-depth for the SIGHUP hot-swap path.
             return (
-                StatusCode::UNAUTHORIZED,
+                StatusCode::SERVICE_UNAVAILABLE,
                 Json(WebhookResponse {
                     message_id: Uuid::nil(),
                     status: "error".to_string(),
-                    response: Some(
-                        "Webhook authentication required: HTTP webhook secret is not configured."
-                            .to_string(),
-                    ),
+                    response: Some("Webhook authentication not configured".to_string()),
                 }),
             )
                 .into_response();
-        };
-        let expected_secret = expected_secret.expose_secret();
+        }
+        let expected_secret = webhook_secret
+            .as_ref()
+            .expect("checked is_none above")
+            .expose_secret();
 
         match headers.get("x-ironclaw-signature") {
             Some(raw_signature) => match raw_signature.to_str() {
@@ -1205,5 +1209,35 @@ mod tests {
         let secret = "my-secret";
         let body = b"test body content";
         assert!(!verify_hmac_signature(secret, body, "sha256=not-hex!"));
+    }
+
+    /// Regression test for issue #1033: when the webhook secret is cleared at
+    /// runtime via update_secret(None), subsequent requests must be rejected
+    /// instead of being processed without authentication.
+    #[tokio::test]
+    async fn webhook_rejects_when_secret_cleared_at_runtime() {
+        let channel = test_channel(Some("initial-secret"));
+        let _stream = channel.start().await.unwrap();
+
+        // Clear the secret at runtime (simulates a bad SIGHUP config reload)
+        channel.update_secret(None).await;
+
+        let app = channel.routes();
+        let body = serde_json::json!({
+            "content": "hello"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "requests must be rejected when webhook secret is cleared at runtime"
+        );
     }
 }

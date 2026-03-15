@@ -199,9 +199,13 @@ impl Tool for RoutineCreateTool {
                             "event trigger requires 'event_pattern'".to_string(),
                         )
                     })?;
-                // Validate regex
-                regex::Regex::new(pattern)
-                    .map_err(|e| ToolError::InvalidParameters(format!("invalid regex: {e}")))?;
+                // Validate regex with size limit to prevent ReDoS (issue #825)
+                regex::RegexBuilder::new(pattern)
+                    .size_limit(64 * 1024)
+                    .build()
+                    .map_err(|e| {
+                        ToolError::InvalidParameters(format!("invalid or too complex regex: {e}"))
+                    })?;
                 let channel = params
                     .get("event_channel")
                     .and_then(|v| v.as_str())
