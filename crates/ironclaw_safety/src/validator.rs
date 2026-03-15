@@ -540,11 +540,8 @@ mod tests {
         #[test]
         fn zwsp_not_counted_as_whitespace() {
             let validator = Validator::new();
-            // 200 chars of ZWSP (\u{200B}) — char::is_whitespace() returns
-            // false for ZWSP, so whitespace ratio should be ~0, not ~1.
             let input = "\u{200B}".repeat(200);
             let result = validator.validate(&input);
-            // Should NOT warn about high whitespace ratio
             assert!(
                 !result.warnings.iter().any(|w| w.contains("whitespace")),
                 "ZWSP should not count as whitespace (char::is_whitespace returns false)"
@@ -554,8 +551,6 @@ mod tests {
         #[test]
         fn zwnj_not_counted_as_whitespace() {
             let validator = Validator::new();
-            // 200 chars of ZWNJ (\u{200C}) — char::is_whitespace() returns
-            // false for ZWNJ, same as ZWSP.
             let input = "\u{200C}".repeat(200);
             let result = validator.validate(&input);
             assert!(
@@ -567,11 +562,8 @@ mod tests {
         #[test]
         fn zwnj_in_forbidden_pattern() {
             let validator = Validator::new().forbid_pattern("evil");
-            // ZWNJ inserted into "evil": "ev\u{200C}il"
             let input = "some text ev\u{200C}il command here";
             let result = validator.validate_non_empty_input(input, "test");
-            // to_lowercase() preserves ZWNJ. The substring "evil" is broken
-            // by ZWNJ so forbidden pattern check should NOT match.
             assert!(
                 result.is_valid,
                 "ZWNJ breaks forbidden pattern substring match — known bypass"
@@ -581,8 +573,6 @@ mod tests {
         #[test]
         fn zwj_not_counted_as_whitespace() {
             let validator = Validator::new();
-            // 200 chars of ZWJ (\u{200D}) — char::is_whitespace() returns
-            // false for ZWJ.
             let input = "\u{200D}".repeat(200);
             let result = validator.validate(&input);
             assert!(
@@ -594,7 +584,6 @@ mod tests {
         #[test]
         fn actual_whitespace_padding_attack() {
             let validator = Validator::new();
-            // 95% spaces + 5% text, >100 chars — should trigger whitespace warning
             let input = format!("{}{}", " ".repeat(190), "real content");
             assert!(input.len() > 100);
             let result = validator.validate(&input);
@@ -606,20 +595,12 @@ mod tests {
 
         #[test]
         fn combining_diacriticals_in_repetition() {
-            // "a" + combining accent repeated — each visual char is 2 code points
             let input = "a\u{0301}".repeat(30);
-            // has_excessive_repetition checks char-by-char; alternating 'a' and
-            // combining char means max_repeat stays at 1 — should NOT trigger
             assert!(!has_excessive_repetition(&input));
         }
 
         #[test]
         fn base_char_plus_50_distinct_combining_diacriticals() {
-            // Single base char followed by 50 DIFFERENT combining diacriticals.
-            // Each combining mark is a distinct code point, so max_repeat stays
-            // at 1 throughout — should NOT trigger excessive repetition.
-            // This matches issue #1025: "combining marks are distinct chars,
-            // so this should NOT trigger."
             let combining_marks: Vec<char> =
                 (0x0300u32..=0x0331).filter_map(char::from_u32).collect();
             assert!(combining_marks.len() >= 50);
@@ -633,13 +614,9 @@ mod tests {
 
         #[test]
         fn multibyte_chars_at_max_length_boundary() {
-            // Validator uses input.len() (byte length) for max_length check.
-            // A 3-byte CJK char at the boundary: the string is over the limit
-            // in bytes even though char count is under.
             let max_len = 100;
             let validator = Validator::new().with_max_length(max_len);
 
-            // 34 CJK chars × 3 bytes = 102 bytes > max_len of 100
             let input = "中".repeat(34);
             assert_eq!(input.len(), 102);
             let result = validator.validate(&input);
@@ -655,7 +632,6 @@ mod tests {
                 "should produce TooLong error"
             );
 
-            // 33 CJK chars × 3 bytes = 99 bytes < max_len of 100
             let input = "中".repeat(33);
             assert_eq!(input.len(), 99);
             let result = validator.validate(&input);
@@ -670,7 +646,6 @@ mod tests {
 
         #[test]
         fn four_byte_emoji_at_max_length_boundary() {
-            // 4-byte emoji at the boundary: 25 emojis = 100 bytes exactly
             let max_len = 100;
             let validator = Validator::new().with_max_length(max_len);
 
@@ -685,7 +660,6 @@ mod tests {
                 "exactly 100 bytes should not exceed max_length=100"
             );
 
-            // 26 emojis = 104 bytes > 100
             let input = "🔑".repeat(26);
             assert_eq!(input.len(), 104);
             let result = validator.validate(&input);
@@ -700,7 +674,6 @@ mod tests {
 
         #[test]
         fn single_codepoint_emoji_repetition() {
-            // Same emoji repeated 25 times — should trigger excessive repetition
             let input = "😀".repeat(25);
             assert!(
                 has_excessive_repetition(&input),
@@ -711,13 +684,6 @@ mod tests {
         #[test]
         fn multibyte_input_whitespace_ratio_uses_len_not_chars() {
             let validator = Validator::new();
-            // Key insight: whitespace_ratio divides char count by byte length
-            // (input.len()), not char count. With 3-byte chars, the ratio is
-            // artificially low. This documents the behavior.
-            //
-            // 50 spaces (50 bytes) + 50 "中" chars (150 bytes) = 200 bytes total
-            // char-based whitespace count = 50, input.len() = 200
-            // ratio = 50/200 = 0.25 (not high)
             let input = format!("{}{}", " ".repeat(50), "中".repeat(50));
             let result = validator.validate(&input);
             assert!(
@@ -729,10 +695,8 @@ mod tests {
         #[test]
         fn rtl_override_in_forbidden_pattern() {
             let validator = Validator::new().forbid_pattern("evil");
-            // RTL override before "evil"
             let input = "some text \u{202E}evil command here";
             let result = validator.validate_non_empty_input(input, "test");
-            // to_lowercase() preserves RTL char; "evil" substring is still present
             assert!(
                 !result.is_valid,
                 "RTL override should not prevent forbidden pattern detection"
@@ -750,7 +714,6 @@ mod tests {
                     char::from(byte)
                 );
                 let _result = validator.validate(&input);
-                // Primary assertion: no panic
             }
         }
 
@@ -767,9 +730,7 @@ mod tests {
 
         #[test]
         fn control_chars_in_repetition_check() {
-            // Control char repeated 25 times
             let input = "\x07".repeat(55);
-            // Should not panic; may or may not trigger repetition warning
             let _ = has_excessive_repetition(&input);
         }
     }
