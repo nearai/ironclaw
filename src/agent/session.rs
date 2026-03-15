@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -92,8 +92,11 @@ impl Session {
             None => self.create_thread(),
             Some(id) => {
                 if self.threads.contains_key(&id) {
-                    // Safe: contains_key confirmed the entry exists.
-                    self.threads.get_mut(&id).unwrap()
+                    // Entry existence confirmed by contains_key above.
+                    // get_mut borrows self.threads mutably, so we can't
+                    // combine the check and access into if-let without
+                    // conflicting with the self.create_thread() fallback.
+                    self.threads.get_mut(&id).unwrap() // safety: contains_key guard above
                 } else {
                     // Stale active_thread ID: create a new thread, which
                     // updates self.active_thread to the new thread's ID.
@@ -132,6 +135,12 @@ pub enum ThreadState {
 
 /// Pending auth token request.
 ///
+/// Auth mode TTL — must stay in sync with
+/// `crate::cli::oauth_defaults::OAUTH_FLOW_EXPIRY` (5 minutes / 300 s).
+/// Defined separately to avoid a session→cli module dependency.
+const AUTH_MODE_TTL_SECS: i64 = 300;
+const AUTH_MODE_TTL: TimeDelta = TimeDelta::seconds(AUTH_MODE_TTL_SECS);
+
 /// When `tool_auth` returns `awaiting_token`, the thread enters auth mode.
 /// The next user message is intercepted before entering the normal pipeline
 /// (no logging, no turn creation, no history) and routed directly to the
@@ -140,6 +149,16 @@ pub enum ThreadState {
 pub struct PendingAuth {
     /// Extension name to authenticate.
     pub extension_name: String,
+    /// When this auth mode was entered. Used for TTL expiry.
+    #[serde(default = "Utc::now")]
+    pub created_at: DateTime<Utc>,
+}
+
+impl PendingAuth {
+    /// Returns `true` if this auth mode has exceeded the TTL.
+    pub fn is_expired(&self) -> bool {
+        Utc::now() - self.created_at > AUTH_MODE_TTL
+    }
 }
 
 /// Pending tool approval request stored on a thread.
@@ -295,7 +314,10 @@ impl Thread {
     /// Enter auth mode: next user message will be routed directly to
     /// the credential store, bypassing the normal pipeline entirely.
     pub fn enter_auth_mode(&mut self, extension_name: String) {
-        self.pending_auth = Some(PendingAuth { extension_name });
+        self.pending_auth = Some(PendingAuth {
+            extension_name,
+            created_at: Utc::now(),
+        });
         self.updated_at = Utc::now();
     }
 
@@ -684,15 +706,16 @@ mod tests {
 
     #[test]
     fn test_enter_auth_mode() {
+        let before = Utc::now();
         let mut thread = Thread::new(Uuid::new_v4());
         assert!(thread.pending_auth.is_none());
 
         thread.enter_auth_mode("telegram".to_string());
         assert!(thread.pending_auth.is_some());
-        assert_eq!(
-            thread.pending_auth.as_ref().unwrap().extension_name,
-            "telegram"
-        );
+        let pending = thread.pending_auth.as_ref().unwrap();
+        assert_eq!(pending.extension_name, "telegram");
+        assert!(pending.created_at >= before);
+        assert!(!pending.is_expired());
     }
 
     #[test]
@@ -702,8 +725,9 @@ mod tests {
 
         let pending = thread.take_pending_auth();
         assert!(pending.is_some());
-        assert_eq!(pending.unwrap().extension_name, "notion");
-
+        let pending = pending.unwrap();
+        assert_eq!(pending.extension_name, "notion");
+        assert!(!pending.is_expired());
         // Should be cleared after take
         assert!(thread.pending_auth.is_none());
         assert!(thread.take_pending_auth().is_none());
@@ -717,10 +741,25 @@ mod tests {
         let json = serde_json::to_string(&thread).expect("should serialize");
         assert!(json.contains("pending_auth"));
         assert!(json.contains("openai"));
+        assert!(json.contains("created_at"));
 
         let restored: Thread = serde_json::from_str(&json).expect("should deserialize");
         assert!(restored.pending_auth.is_some());
-        assert_eq!(restored.pending_auth.unwrap().extension_name, "openai");
+        let pending = restored.pending_auth.unwrap();
+        assert_eq!(pending.extension_name, "openai");
+        assert!(!pending.is_expired());
+    }
+
+    #[test]
+    fn test_pending_auth_expiry() {
+        let mut pending = PendingAuth {
+            extension_name: "test".to_string(),
+            created_at: Utc::now(),
+        };
+        assert!(!pending.is_expired());
+        // Backdate beyond the TTL
+        pending.created_at = Utc::now() - AUTH_MODE_TTL - TimeDelta::seconds(1);
+        assert!(pending.is_expired());
     }
 
     #[test]

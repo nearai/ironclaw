@@ -397,6 +397,10 @@ impl Channel for GatewayChannel {
             StatusUpdate::ImageGenerated { data_url, path } => SseEvent::ImageGenerated {
                 data_url,
                 path,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::Suggestions { suggestions } => SseEvent::Suggestions {
+                suggestions,
                 thread_id,
             },
         };

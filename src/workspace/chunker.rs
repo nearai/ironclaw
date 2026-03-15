@@ -92,8 +92,9 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
         let chunk_words = &words[start..end];
 
         // Don't create tiny trailing chunks, merge with previous
-        if chunk_words.len() < config.min_chunk_size && !chunks.is_empty() {
-            let last = chunks.pop().unwrap();
+        if chunk_words.len() < config.min_chunk_size
+            && let Some(last) = chunks.pop()
+        {
             let combined = format!("{} {}", last, chunk_words.join(" "));
             chunks.push(combined);
             break;

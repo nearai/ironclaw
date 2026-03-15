@@ -330,7 +330,11 @@ impl CreateJobTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let jm = self.job_manager.as_ref().expect("sandbox deps required");
+        let jm = self.job_manager.as_ref().ok_or_else(|| {
+            ToolError::ExecutionFailed(
+                "Sandbox execution requires a configured job manager (container runtime not available)".to_string(),
+            )
+        })?;
 
         let job_id = Uuid::new_v4();
         let (project_dir, browse_id) = resolve_project_dir(explicit_dir, job_id)?;
@@ -1379,6 +1383,31 @@ mod tests {
         // Without sandbox: default timeout
         let tool = CreateJobTool::new(Arc::clone(&manager));
         assert_eq!(tool.execution_timeout(), Duration::from_secs(30)); // safety: test
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_without_job_manager_returns_error() {
+        let manager = Arc::new(ContextManager::new(5));
+        // Create tool without sandbox deps — job_manager is None.
+        let tool = CreateJobTool::new(manager);
+        assert!(!tool.sandbox_enabled());
+
+        let result = tool
+            .execute_sandbox(
+                "test task",
+                None,
+                false,
+                JobMode::Worker,
+                vec![],
+                &JobContext::default(),
+            )
+            .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ToolError::ExecutionFailed(_)),
+            "expected ExecutionFailed, got: {err:?}"
+        );
     }
 
     #[tokio::test]

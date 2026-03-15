@@ -152,6 +152,30 @@ pub async fn run_agentic_loop(
         // Call LLM
         let output = delegate.call_llm(reasoning, reason_ctx, iteration).await?;
 
+        match &output.result {
+            RespondResult::Text(text) => {
+                tracing::debug!(
+                    iteration,
+                    len = text.len(),
+                    has_suggestions = text.contains("<suggestions>"),
+                    response = %text,
+                    "LLM text response"
+                );
+            }
+            RespondResult::ToolCalls {
+                tool_calls,
+                content,
+            } => {
+                let names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+                tracing::debug!(
+                    iteration,
+                    tools = ?names,
+                    has_content = content.is_some(),
+                    "LLM tool_calls response"
+                );
+            }
+        }
+
         match output.result {
             RespondResult::Text(text) => {
                 // Tool intent nudge: if the LLM says "let me search..." without

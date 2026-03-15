@@ -19,6 +19,8 @@ let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
+let authFlowPending = false;
+let _ghostSuggestion = '';
 
 // --- Slash Commands ---
 
@@ -286,7 +288,16 @@ function connectSSE() {
       if (data.thread_id) debouncedLoadThreads();
       return;
     }
+    clearSuggestionChips();
     showActivityThinking(data.message);
+  });
+
+  eventSource.addEventListener('suggestions', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    if (data.suggestions && data.suggestions.length > 0) {
+      showSuggestionChips(data.suggestions);
+    }
   });
 
   eventSource.addEventListener('tool_started', (e) => {
@@ -423,10 +434,66 @@ function isCurrentThread(threadId) {
   return threadId === currentThreadId;
 }
 
+// --- Suggestion Chips ---
+
+function showSuggestionChips(suggestions) {
+  // Clear previous chips/ghost without restoring placeholder (we'll set it below)
+  _ghostSuggestion = '';
+  const container = document.getElementById('suggestion-chips');
+  container.innerHTML = '';
+  const ghost = document.getElementById('ghost-text');
+  ghost.style.display = 'none';
+  const wrapper = document.querySelector('.chat-input-wrapper');
+  if (wrapper) wrapper.classList.remove('has-ghost');
+
+  _ghostSuggestion = suggestions[0] || '';
+  const input = document.getElementById('chat-input');
+  suggestions.forEach(text => {
+    const chip = document.createElement('button');
+    chip.className = 'suggestion-chip';
+    chip.textContent = text;
+    chip.addEventListener('click', () => {
+      input.value = text;
+      clearSuggestionChips();
+      autoResizeTextarea(input);
+      input.focus();
+      sendMessage();
+    });
+    container.appendChild(chip);
+  });
+  container.style.display = 'flex';
+  // Show first suggestion as ghost text in the input so user knows Tab works
+  if (_ghostSuggestion && input.value === '') {
+    ghost.textContent = _ghostSuggestion;
+    ghost.style.display = 'block';
+    input.closest('.chat-input-wrapper').classList.add('has-ghost');
+  }
+}
+
+function clearSuggestionChips() {
+  _ghostSuggestion = '';
+  const container = document.getElementById('suggestion-chips');
+  if (container) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+  }
+  const ghost = document.getElementById('ghost-text');
+  if (ghost) ghost.style.display = 'none';
+  const wrapper = document.querySelector('.chat-input-wrapper');
+  if (wrapper) wrapper.classList.remove('has-ghost');
+}
+
 // --- Chat ---
 
 function sendMessage() {
+  clearSuggestionChips();
   const input = document.getElementById('chat-input');
+  if (authFlowPending) {
+    showToast('Complete the auth step before sending chat messages.', 'info');
+    const tokenField = document.querySelector('.auth-card .auth-token-input input');
+    if (tokenField) tokenField.focus();
+    return;
+  }
   if (!currentThreadId) {
     console.warn('sendMessage: no thread selected, ignoring');
     return;
@@ -455,7 +522,7 @@ function sendMessage() {
 }
 
 function enableChatInput() {
-  if (currentThreadIsReadOnly) return;
+  if (currentThreadIsReadOnly || authFlowPending) return;
   const input = document.getElementById('chat-input');
   const btn = document.getElementById('send-btn');
   if (input) {
@@ -538,6 +605,22 @@ document.getElementById('chat-input').addEventListener('paste', (e) => {
       if (file) handleImageFiles([file]);
     }
   }
+});
+
+const chatMessagesEl = document.getElementById('chat-messages');
+chatMessagesEl.addEventListener('copy', (e) => {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) return;
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+  if (!anchorNode || !focusNode) return;
+  if (!chatMessagesEl.contains(anchorNode) || !chatMessagesEl.contains(focusNode)) return;
+  const text = selection.toString();
+  if (!text || !e.clipboardData) return;
+  // Force plain-text clipboard output so dark-theme styling never leaks on paste.
+  e.preventDefault();
+  e.clipboardData.clearData();
+  e.clipboardData.setData('text/plain', text);
 });
 
 function addGeneratedImage(dataUrl, path) {
@@ -1122,6 +1205,7 @@ function showJobCard(data) {
 // --- Auth card ---
 
 function handleAuthRequired(data) {
+  setAuthFlowPending(true, data.instructions);
   if (data.auth_url) {
     // OAuth flow: show the global auth prompt with an OAuth button + optional token paste field.
     showAuthCard(data);
@@ -1133,10 +1217,17 @@ function handleAuthRequired(data) {
 }
 
 function handleAuthCompleted(data) {
-  // Dismiss only the matching extension's UI so unrelated setup work is not interrupted.
+  showToast(data.message, data.success ? 'success' : 'error');
+  // Dismiss only the matching extension's UI so stale prompts are cleared.
   removeAuthCard(data.extension_name);
   closeConfigureModal(data.extension_name);
-  showToast(data.message, data.success ? 'success' : 'error');
+  if (!data.success) {
+    setAuthFlowPending(false);
+    if (currentTab === 'extensions') loadExtensions();
+    enableChatInput();
+    return;
+  }
+  setAuthFlowPending(false);
   if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
     addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
   }
@@ -1316,6 +1407,7 @@ function cancelAuth(extensionName) {
     body: { extension_name: extensionName },
   }).catch(() => {});
   removeAuthCard(extensionName);
+  setAuthFlowPending(false);
   enableChatInput();
 }
 
@@ -1333,7 +1425,26 @@ function showAuthCardError(extensionName, message) {
   }
 }
 
+function setAuthFlowPending(pending, instructions) {
+  authFlowPending = !!pending;
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('send-btn');
+  if (!input || !btn) return;
+  if (authFlowPending) {
+    input.disabled = true;
+    btn.disabled = true;
+    input.placeholder = instructions || 'Complete extension auth to continue chatting';
+    return;
+  }
+  if (!currentThreadIsReadOnly) {
+    input.disabled = false;
+    btn.disabled = false;
+    input.placeholder = I18n.t('chat.inputPlaceholder');
+  }
+}
+
 function loadHistory(before) {
+  clearSuggestionChips();
   let historyUrl = '/api/chat/history?limit=50';
   if (currentThreadId) {
     historyUrl += '&thread_id=' + encodeURIComponent(currentThreadId);
@@ -1629,6 +1740,7 @@ function switchToAssistant() {
 }
 
 function switchThread(threadId) {
+  clearSuggestionChips();
   finalizeActivityGroup();
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
@@ -1661,6 +1773,15 @@ chatInput.addEventListener('keydown', (e) => {
   const acEl = document.getElementById('slash-autocomplete');
   const acVisible = acEl && acEl.style.display !== 'none';
 
+  // Accept first suggestion with Tab (plain Tab only, not Shift+Tab)
+  if (e.key === 'Tab' && !e.shiftKey && !acVisible && _ghostSuggestion && chatInput.value === '') {
+    e.preventDefault();
+    chatInput.value = _ghostSuggestion;
+    clearSuggestionChips();
+    autoResizeTextarea(chatInput);
+    return;
+  }
+
   if (acVisible) {
     const items = acEl.querySelectorAll('.slash-ac-item');
     if (e.key === 'ArrowDown') {
@@ -1688,7 +1809,10 @@ chatInput.addEventListener('keydown', (e) => {
     }
   }
 
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  // Safari fires compositionend before keydown, so e.isComposing is already false
+  // when Enter confirms IME input. keyCode 229 (VK_PROCESS) catches this case.
+  // See https://bugs.webkit.org/show_bug.cgi?id=165004
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     hideSlashAutocomplete();
     sendMessage();
@@ -1697,6 +1821,16 @@ chatInput.addEventListener('keydown', (e) => {
 chatInput.addEventListener('input', () => {
   autoResizeTextarea(chatInput);
   filterSlashCommands(chatInput.value);
+  const ghost = document.getElementById('ghost-text');
+  const wrapper = chatInput.closest('.chat-input-wrapper');
+  if (chatInput.value !== '') {
+    ghost.style.display = 'none';
+    wrapper.classList.remove('has-ghost');
+  } else if (_ghostSuggestion) {
+    ghost.textContent = _ghostSuggestion;
+    ghost.style.display = 'block';
+    wrapper.classList.add('has-ghost');
+  }
 });
 chatInput.addEventListener('blur', () => {
   // Small delay so mousedown on autocomplete item fires first
@@ -3454,10 +3588,13 @@ function renderRoutinesList(routines) {
 
     const toggleLabel = r.enabled ? 'Disable' : 'Enable';
     const toggleClass = r.enabled ? 'btn-cancel' : 'btn-restart';
+    const triggerTitle = (r.trigger_type === 'cron' && r.trigger_raw)
+      ? ' title="' + escapeHtml(r.trigger_raw) + '"'
+      : '';
 
     return '<tr class="routine-row" data-action="open-routine" data-id="' + escapeHtml(r.id) + '">'
       + '<td>' + escapeHtml(r.name) + '</td>'
-      + '<td>' + escapeHtml(r.trigger_summary) + '</td>'
+      + '<td' + triggerTitle + '>' + escapeHtml(r.trigger_summary) + '</td>'
       + '<td>' + escapeHtml(r.action_type) + '</td>'
       + '<td>' + formatRelativeTime(r.last_run_at) + '</td>'
       + '<td>' + formatRelativeTime(r.next_fire_at) + '</td>'
@@ -3525,8 +3662,23 @@ function renderRoutineDetail(routine) {
   }
 
   // Trigger config
-  html += '<div class="job-description"><h3>Trigger</h3>'
-    + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
+  if (routine.trigger_type === 'cron') {
+    const summary = routine.trigger_summary || 'cron';
+    const raw = routine.trigger_raw || '';
+    const timezone = routine.trigger && routine.trigger.timezone ? String(routine.trigger.timezone) : '';
+    html += '<div class="job-description"><h3>Trigger</h3>'
+      + '<div class="job-description-body"><strong>' + escapeHtml(summary) + '</strong></div>';
+    if (raw) {
+      html += '<div class="job-meta-item">'
+        + '<span class="job-meta-label">Raw</span>'
+        + '<span class="job-meta-value">' + escapeHtml(raw + (timezone ? ' (' + timezone + ')' : '')) + '</span>'
+        + '</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="job-description"><h3>Trigger</h3>'
+      + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
+  }
 
   // Action config
   html += '<div class="job-description"><h3>Action</h3>'

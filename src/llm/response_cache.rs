@@ -548,6 +548,7 @@ mod tests {
             model: None,
             max_tokens: None,
             temperature: None,
+            stop_sequences: None,
             tool_choice: None,
             metadata: Default::default(),
         };
