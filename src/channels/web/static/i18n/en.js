@@ -330,6 +330,8 @@ I18n.register('en', {
   
   // Extensions
   'ext.active': 'Active',
+  'ext.inactive': 'Inactive',
+  'ext.builtin': 'Built-in',
   'ext.remove': 'Remove',
   'ext.install': 'Install',
   'ext.installing': 'Installing...',
@@ -356,12 +358,17 @@ I18n.register('en', {
   'settings.import': 'Import',
   'settings.searchPlaceholder': 'Search settings...',
   'settings.exportSuccess': 'Settings exported',
+  'settings.exportFailed': 'Export failed: {message}',
   'settings.importSuccess': 'Settings imported successfully',
   'settings.importFailed': 'Import failed: {message}',
   'settings.restartRequired': 'Restart required for changes to take effect.',
   'settings.restartNow': 'Restart Now',
   'settings.noMatchingSettings': 'No settings matching "{query}"',
   'settings.noSettings': 'No settings found',
+  'settings.saved': 'Saved',
+  'settings.envValue': 'env: {value}',
+  'settings.envDefault': 'env default',
+  'settings.useEnvDefault': 'use env default',
 
   // Settings groups
   'cfg.group.llm': 'LLM Provider',

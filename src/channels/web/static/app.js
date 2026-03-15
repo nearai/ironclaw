@@ -4543,7 +4543,7 @@ function loadInferenceSettings() {
     container.innerHTML = '';
     renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, activeValues);
   }).catch(function(err) {
-    container.innerHTML = '<div class="empty-state">Failed to load settings: '
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
       + escapeHtml(err.message) + '</div>';
   });
 }
@@ -4561,7 +4561,7 @@ function loadStructuredSettings(containerId, settingsDefs) {
     container.innerHTML = '';
     renderStructuredSettingsInto(container, settingsDefs, settings, {});
   }).catch(function(err) {
-    container.innerHTML = '<div class="empty-state">Failed to load settings: '
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
       + escapeHtml(err.message) + '</div>';
   });
 }
@@ -4655,7 +4655,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
   inputWrap.style.gap = '8px';
 
   var ariaLabel = I18n.t(def.label) + (def.description ? '. ' + I18n.t(def.description) : '');
-  var placeholderText = activeValue ? 'env: ' + activeValue : (def.placeholder || 'env default');
+  var placeholderText = activeValue ? I18n.t('settings.envValue', { value: activeValue }) : (def.placeholder || I18n.t('settings.envDefault'));
 
   if (def.type === 'boolean') {
     var cb = document.createElement('input');
@@ -4671,7 +4671,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
     sel.setAttribute('aria-label', ariaLabel);
     var emptyOpt = document.createElement('option');
     emptyOpt.value = '';
-    emptyOpt.textContent = activeValue ? '\u2014 env: ' + activeValue + ' \u2014' : '\u2014 use env default \u2014';
+    emptyOpt.textContent = activeValue ? '\u2014 ' + I18n.t('settings.envValue', { value: activeValue }) + ' \u2014' : '\u2014 ' + I18n.t('settings.useEnvDefault') + ' \u2014';
     if (!value && value !== false && value !== 0) emptyOpt.selected = true;
     sel.appendChild(emptyOpt);
     for (var oi = 0; oi < def.options.length; oi++) {
@@ -4726,7 +4726,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
 
   var saved = document.createElement('span');
   saved.className = 'settings-saved-indicator';
-  saved.textContent = '\u2713 Saved';
+  saved.textContent = '\u2713 ' + I18n.t('settings.saved');
   saved.setAttribute('data-key', def.key);
   saved.setAttribute('role', 'status');
   saved.setAttribute('aria-live', 'polite');
@@ -4937,12 +4937,12 @@ function renderBuiltinChannelCard(name, description, active, detail) {
 
   var kindEl = document.createElement('span');
   kindEl.className = 'ext-kind kind-builtin';
-  kindEl.textContent = 'Built-in';
+  kindEl.textContent = I18n.t('ext.builtin');
   header.appendChild(kindEl);
 
   var statusDot = document.createElement('span');
   statusDot.className = 'ext-auth-dot ' + (active ? 'authed' : 'unauthed');
-  statusDot.title = active ? 'Active' : 'Inactive';
+  statusDot.title = active ? I18n.t('ext.active') : I18n.t('ext.inactive');
   header.appendChild(statusDot);
 
   card.appendChild(header);
@@ -4963,7 +4963,7 @@ function renderBuiltinChannelCard(name, description, active, detail) {
   actions.className = 'ext-actions';
   var label = document.createElement('span');
   label.className = 'ext-active-label';
-  label.textContent = active ? 'Active' : 'Inactive';
+  label.textContent = active ? I18n.t('ext.active') : I18n.t('ext.inactive');
   actions.appendChild(label);
   card.appendChild(actions);
 
@@ -4999,7 +4999,7 @@ function loadNetworkingSettings() {
     container.innerHTML = '';
     renderStructuredSettingsInto(container, NETWORKING_SETTINGS, settings, {});
   }).catch(function(err) {
-    container.innerHTML = '<div class="empty-state">Failed to load settings: '
+    container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
       + escapeHtml(err.message) + '</div>';
   });
 }
@@ -5169,7 +5169,7 @@ function exportSettings() {
     URL.revokeObjectURL(url);
     showToast(I18n.t('settings.exportSuccess'), 'success');
   }).catch(function(err) {
-    showToast(I18n.t('settings.importFailed', { message: err.message }), 'error');
+    showToast(I18n.t('settings.exportFailed', { message: err.message }), 'error');
   });
 }
 

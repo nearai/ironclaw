@@ -330,6 +330,8 @@ I18n.register('zh-CN', {
   
   // 扩展
   'ext.active': '已激活',
+  'ext.inactive': '未激活',
+  'ext.builtin': '内置',
   'ext.remove': '移除',
   'ext.install': '安装',
   'ext.installing': '安装中...',
@@ -356,13 +358,17 @@ I18n.register('zh-CN', {
   'settings.import': '导入',
   'settings.searchPlaceholder': '搜索设置...',
   'settings.exportSuccess': '设置已导出',
+  'settings.exportFailed': '导出失败: {message}',
   'settings.importSuccess': '设置导入成功',
   'settings.importFailed': '导入失败: {message}',
   'settings.restartRequired': '需要重启才能使更改生效。',
   'settings.restartNow': '立即重启',
   'settings.noMatchingSettings': '没有匹配 "{query}" 的设置',
-
   'settings.noSettings': '未找到设置',
+  'settings.saved': '已保存',
+  'settings.envValue': '环境变量: {value}',
+  'settings.envDefault': '使用环境变量默认值',
+  'settings.useEnvDefault': '使用环境变量默认值',
 
   // 设置分组
   'cfg.group.llm': 'LLM 提供商',
