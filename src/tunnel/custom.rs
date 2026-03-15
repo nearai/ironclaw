@@ -27,6 +27,7 @@ pub struct CustomTunnel {
     url_pattern: Option<String>,
     proc: SharedProcess,
     url: SharedUrl,
+    http_client: reqwest::Client,
 }
 
 impl CustomTunnel {
@@ -41,6 +42,10 @@ impl CustomTunnel {
             url_pattern,
             proc: new_shared_process(),
             url: new_shared_url(),
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 }
@@ -140,9 +145,9 @@ impl Tunnel for CustomTunnel {
 
     async fn health_check(&self) -> bool {
         if let Some(ref url) = self.health_url {
-            return reqwest::Client::new()
+            return self
+                .http_client
                 .get(url)
-                .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await
                 .is_ok();
