@@ -296,20 +296,26 @@ async fn job_event_handler(
                 .unwrap_or("")
                 .to_string(),
         },
-        "tool_use" => SseEvent::JobToolUse {
-            job_id: job_id_str,
-            tool_name: payload
-                .data
-                .get("tool_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            input: payload
-                .data
-                .get("input")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        },
+        "tool_use" => {
+            // Redact raw parameters from worker-reported tool_use events
+            // before broadcasting via SSE. Workers are untrusted and may
+            // include sensitive data (API keys, passwords, PII) in the
+            // input payload. We replace it with a placeholder to prevent
+            // leaking secrets to the web UI.
+            let redacted_input = serde_json::json!({
+                "_note": "parameters redacted for security"
+            });
+            SseEvent::JobToolUse {
+                job_id: job_id_str,
+                tool_name: payload
+                    .data
+                    .get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                input: redacted_input,
+            }
+        }
         "tool_result" => SseEvent::JobToolResult {
             job_id: job_id_str,
             tool_name: payload
@@ -470,10 +476,11 @@ async fn tool_call_handler(
         format!("Programmatic tool call from job {}", job_id),
     );
     // Do not trust client-provided nesting_depth — a malicious worker
-    // could always send 0 to bypass the limit. PTC calls from workers
-    // are inherently at depth >= 1 (container -> orchestrator). Use the
-    // client value but floor it at 1.
-    ctx.tool_nesting_depth = req.nesting_depth.max(1);
+    // could send any value to bypass the limit. The orchestrator must
+    // increment the depth server-side: each hop through the orchestrator
+    // adds 1. This way even if a worker always sends 0, the depth still
+    // increases with each real nesting level.
+    ctx.tool_nesting_depth = req.nesting_depth.saturating_add(1);
 
     // Emit tool_use SSE event with redacted parameters to avoid leaking
     // sensitive data (API keys, passwords, PII) to the web UI.
@@ -1345,5 +1352,109 @@ mod tests {
 
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn tool_call_nesting_depth_incremented_server_side() {
+        // A worker sending nesting_depth=4 should get depth=5 after the
+        // orchestrator increments it. With MAX_NESTING_DEPTH=5, this
+        // should be rejected (depth >= max).
+        let (state, _) = test_state_with_executor(false);
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        let router = OrchestratorApi::router(state);
+
+        let payload = serde_json::json!({
+            "tool_name": "echo",
+            "parameters": {"message": "hello"},
+            "nesting_depth": 4,
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/tools/call", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false);
+        assert!(
+            json["error"]
+                .as_str()
+                .map(|s| s.to_lowercase().contains("nesting"))
+                .unwrap_or(false),
+            "error should mention nesting depth, got: {:?}",
+            json["error"]
+        );
+    }
+
+    #[tokio::test]
+    async fn job_event_tool_use_redacts_input() {
+        // Worker-reported tool_use events must have their input redacted
+        // before SSE broadcast to prevent leaking sensitive parameters.
+        let (tx, mut rx) = broadcast::channel(16);
+        let token_store = TokenStore::new();
+        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let state = OrchestratorState {
+            llm: Arc::new(StubLlm::default()),
+            job_manager: Arc::new(jm),
+            token_store: token_store.clone(),
+            job_event_tx: Some(tx),
+            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
+            store: None,
+            secrets_store: None,
+            user_id: "default".to_string(),
+            tool_executor: None,
+        };
+
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+        let router = OrchestratorApi::router(state);
+
+        // Worker sends a tool_use event with sensitive data in input
+        let payload = serde_json::json!({
+            "event_type": "tool_use",
+            "data": {
+                "tool_name": "shell",
+                "input": {"command": "curl -H 'Authorization: Bearer sk-secret-key' https://api.example.com"}
+            }
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/event", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (_recv_id, event) = rx.recv().await.unwrap();
+        match event {
+            SseEvent::JobToolUse {
+                tool_name, input, ..
+            } => {
+                assert_eq!(tool_name, "shell");
+                // The input must be redacted, not the raw worker payload
+                assert!(
+                    input.get("_note").is_some(),
+                    "input should be redacted placeholder, got: {}",
+                    input
+                );
+                assert!(
+                    !input.to_string().contains("sk-secret-key"),
+                    "input must not contain sensitive data"
+                );
+            }
+            other => panic!("Expected JobToolUse, got {:?}", other),
+        }
     }
 }
