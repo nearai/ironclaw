@@ -1,4 +1,9 @@
 //! Augment user message content with structured attachment context.
+//!
+//! NOTE: This module is prepared for future use but not yet wired into the
+//! agent pipeline. The code is tested and ready for integration.
+
+#![allow(dead_code)]
 
 use base64::Engine;
 

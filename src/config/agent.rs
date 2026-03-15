@@ -31,6 +31,12 @@ pub struct AgentConfig {
     pub default_timezone: String,
     /// Maximum tokens per job (0 = unlimited).
     pub max_tokens_per_job: u64,
+    /// Whether message batching is enabled (default: true).
+    pub batching_enabled: bool,
+    /// Time window for batching in milliseconds (default: 5000).
+    pub batching_window_ms: u64,
+    /// Maximum messages per batch (default: 5).
+    pub batching_max_messages: usize,
 }
 
 impl AgentConfig {
@@ -53,6 +59,9 @@ impl AgentConfig {
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
             max_tokens_per_job: 0,
+            batching_enabled: false,
+            batching_window_ms: 5000,
+            batching_max_messages: 5,
         }
     }
 
@@ -112,6 +121,9 @@ impl AgentConfig {
                 "AGENT_MAX_TOKENS_PER_JOB",
                 settings.agent.max_tokens_per_job,
             )?,
+            batching_enabled: parse_bool_env("BATCHING_ENABLED", true)?,
+            batching_window_ms: parse_optional_env("BATCHING_WINDOW_MS", 5000)?,
+            batching_max_messages: parse_optional_env("BATCHING_MAX_MESSAGES", 5)?,
         })
     }
 }

@@ -265,6 +265,16 @@ pub trait ConversationStore: Send + Sync {
         conversation_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError>;
+    /// Find the most recent conversation for a user on a channel.
+    ///
+    /// Used for channels like WhatsApp that don't have explicit thread IDs.
+    /// Returns the most recently active conversation UUID, or None if no
+    /// conversation exists.
+    async fn find_conversation_by_user_channel(
+        &self,
+        user_id: &str,
+        channel: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
 }
 
 #[async_trait]
