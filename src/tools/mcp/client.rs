@@ -57,6 +57,11 @@ pub struct McpClient {
 
     /// Custom headers to include in every request.
     custom_headers: HashMap<String, String>,
+
+    /// Ensures the MCP initialize handshake runs exactly once.
+    /// Uses `OnceCell` to serialize concurrent callers so only one
+    /// actually sends the request; subsequent calls return immediately.
+    initialized: tokio::sync::OnceCell<InitializeResult>,
 }
 
 impl McpClient {
@@ -79,6 +84,7 @@ impl McpClient {
             user_id: "default".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
+            initialized: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -101,6 +107,7 @@ impl McpClient {
             user_id: "default".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
+            initialized: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -108,20 +115,24 @@ impl McpClient {
     ///
     /// Use this when you have an `McpServerConfig` with custom headers but no OAuth.
     /// The config must use HTTP transport (the default); for stdio/UDS use `new_with_transport`.
-    pub fn new_with_config(config: McpServerConfig) -> Self {
-        assert!(
-            matches!(
-                config.effective_transport(),
-                crate::tools::mcp::config::EffectiveTransport::Http
-            ),
-            "new_with_config only supports HTTP transport; use new_with_transport for stdio/UDS"
-        );
+    ///
+    /// Returns an error if the config uses a non-HTTP transport.
+    pub fn new_with_config(config: McpServerConfig) -> Result<Self, ToolError> {
+        if !matches!(
+            config.effective_transport(),
+            crate::tools::mcp::config::EffectiveTransport::Http
+        ) {
+            return Err(ToolError::InvalidParameters(
+                "new_with_config only supports HTTP transport; use new_with_transport for stdio/UDS"
+                    .to_string(),
+            ));
+        }
         let transport = Arc::new(HttpMcpTransport::new(
             config.url.clone(),
             config.name.clone(),
         ));
 
-        Self {
+        Ok(Self {
             transport,
             server_url: config.url.clone(),
             server_name: config.name.clone(),
@@ -131,8 +142,9 @@ impl McpClient {
             secrets: None,
             user_id: "default".to_string(),
             custom_headers: config.headers.clone(),
+            initialized: tokio::sync::OnceCell::new(),
             server_config: Some(config),
-        }
+        })
     }
 
     /// Create a new authenticated MCP client.
@@ -162,6 +174,7 @@ impl McpClient {
             user_id: user_id.into(),
             server_config: Some(config),
             custom_headers,
+            initialized: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -197,7 +210,14 @@ impl McpClient {
             user_id: user_id.into(),
             server_config,
             custom_headers,
+            initialized: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// Attach a session manager for Streamable HTTP session tracking.
+    pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
+        self.session_manager = Some(session_manager);
+        self
     }
 
     /// Get the server name.
@@ -208,6 +228,11 @@ impl McpClient {
     /// Get the server URL.
     pub fn server_url(&self) -> &str {
         &self.server_url
+    }
+
+    /// Whether this client has a session manager attached.
+    pub fn has_session_manager(&self) -> bool {
+        self.session_manager.is_some()
     }
 
     /// Get the next request ID.
@@ -237,9 +262,19 @@ impl McpClient {
     }
 
     /// Build the headers map for a request (auth, session-id, custom headers).
+    ///
+    /// Custom headers are applied first. OAuth token injection is skipped if the
+    /// user has explicitly configured an Authorization header, so user-provided
+    /// credentials are never silently overwritten.
     async fn build_request_headers(&self) -> Result<HashMap<String, String>, ToolError> {
         let mut headers = self.custom_headers.clone();
-        if let Some(token) = self.get_access_token().await? {
+
+        // Only inject OAuth token if the user hasn't set a custom Authorization header.
+        let has_custom_auth = self
+            .custom_headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"));
+        if !has_custom_auth && let Some(token) = self.get_access_token().await? {
             headers.insert("Authorization".to_string(), format!("Bearer {}", token));
         }
         if let Some(ref session_manager) = self.session_manager
@@ -306,47 +341,64 @@ impl McpClient {
     }
 
     /// Initialize the connection to the MCP server.
+    ///
+    /// Uses `OnceCell` to guarantee that exactly one caller performs the
+    /// handshake, even under concurrent access. Subsequent calls return
+    /// immediately.
     pub async fn initialize(&self) -> Result<InitializeResult, ToolError> {
-        if let Some(ref session_manager) = self.session_manager
-            && session_manager.is_initialized(&self.server_name).await
-        {
-            return Ok(InitializeResult::default());
-        }
-        if let Some(ref session_manager) = self.session_manager {
-            session_manager
-                .get_or_create(&self.server_name, &self.server_url)
-                .await;
-        }
+        let result = self
+            .initialized
+            .get_or_try_init(|| async {
+                if let Some(ref session_manager) = self.session_manager
+                    && session_manager.is_initialized(&self.server_name).await
+                {
+                    return Ok(InitializeResult::default());
+                }
+                if let Some(ref session_manager) = self.session_manager {
+                    session_manager
+                        .get_or_create(&self.server_name, &self.server_url)
+                        .await;
+                }
 
-        let request = McpRequest::initialize(self.next_request_id());
-        let response = self.send_request(request).await?;
+                let request = McpRequest::initialize(self.next_request_id());
+                let response = self.send_request(request).await?;
 
-        if let Some(error) = response.error {
-            return Err(ToolError::ExternalService(format!(
-                "MCP initialization error: {} (code {})",
-                error.message, error.code
-            )));
-        }
+                if let Some(error) = response.error {
+                    return Err(ToolError::ExternalService(format!(
+                        "MCP initialization error: {} (code {})",
+                        error.message, error.code
+                    )));
+                }
 
-        let result: InitializeResult = response
-            .result
-            .ok_or_else(|| {
-                ToolError::ExternalService("No result in initialize response".to_string())
+                let init_result: InitializeResult = response
+                    .result
+                    .ok_or_else(|| {
+                        ToolError::ExternalService("No result in initialize response".to_string())
+                    })
+                    .and_then(|r| {
+                        serde_json::from_value(r).map_err(|e| {
+                            ToolError::ExternalService(format!("Invalid initialize result: {}", e))
+                        })
+                    })?;
+
+                if let Some(ref session_manager) = self.session_manager {
+                    session_manager.mark_initialized(&self.server_name).await;
+                }
+
+                let notification = McpRequest::initialized_notification();
+                if let Err(e) = self.send_request(notification).await {
+                    tracing::debug!(
+                        "Failed to send initialized notification to '{}': {}",
+                        self.server_name,
+                        e
+                    );
+                }
+
+                Ok(init_result)
             })
-            .and_then(|r| {
-                serde_json::from_value(r).map_err(|e| {
-                    ToolError::ExternalService(format!("Invalid initialize result: {}", e))
-                })
-            })?;
+            .await?;
 
-        if let Some(ref session_manager) = self.session_manager {
-            session_manager.mark_initialized(&self.server_name).await;
-        }
-
-        let notification = McpRequest::initialized_notification();
-        let _ = self.send_request(notification).await;
-
-        Ok(result)
+        Ok(result.clone())
     }
 
     /// List available tools from the MCP server.
@@ -354,9 +406,7 @@ impl McpClient {
         if let Some(tools) = self.tools_cache.read().await.as_ref() {
             return Ok(tools.clone());
         }
-        if self.session_manager.is_some() {
-            self.initialize().await?;
-        }
+        self.initialize().await?;
 
         let request = McpRequest::list_tools(self.next_request_id());
         let response = self.send_request(request).await?;
@@ -386,9 +436,7 @@ impl McpClient {
         name: &str,
         arguments: serde_json::Value,
     ) -> Result<CallToolResult, ToolError> {
-        if self.session_manager.is_some() {
-            self.initialize().await?;
-        }
+        self.initialize().await?;
 
         let request = McpRequest::call_tool(self.next_request_id(), name, arguments);
         let response = self.send_request(request).await?;
@@ -439,6 +487,11 @@ impl McpClient {
     }
 }
 
+/// Clone the client, resetting the tools cache and initialization state.
+/// The cloned client shares the same transport and session manager, so
+/// re-initialization will short-circuit via the session manager check if
+/// the source was already initialized. The `next_id` counter is copied
+/// so that cloned clients continue with monotonically increasing IDs.
 impl Clone for McpClient {
     fn clone(&self) -> Self {
         Self {
@@ -452,6 +505,7 @@ impl Clone for McpClient {
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
+            initialized: tokio::sync::OnceCell::new(),
         }
     }
 }
@@ -490,6 +544,12 @@ impl Tool for McpToolWrapper {
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+
+        // Strip top-level null values before forwarding — LLMs often emit
+        // `"field": null` for optional params, but many MCP servers reject
+        // explicit nulls for fields that should simply be absent.
+        let params = strip_top_level_nulls(params);
+
         let result = self.client.call_tool(&self.tool.name, params).await?;
         let content: String = result
             .content
@@ -516,9 +576,22 @@ impl Tool for McpToolWrapper {
     }
 }
 
-/// Sanitize an HTTP error response body for safe display.
+/// Remove top-level keys whose value is JSON null from an object.
 ///
-/// Detects full HTML error pages (containing `<html` or `<!DOCTYPE`) and
+/// LLMs frequently emit `"field": null` for optional parameters.  Many MCP
+/// servers (e.g. Notion) treat an explicit `null` as an invalid value for
+/// optional fields that should simply be absent.  Stripping these before
+/// forwarding avoids 400-class rejections from strict servers.
+fn strip_top_level_nulls(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let filtered = map.into_iter().filter(|(_, v)| !v.is_null()).collect();
+            serde_json::Value::Object(filtered)
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,7 +728,7 @@ mod tests {
         headers.insert("X-Custom".to_string(), "value".to_string());
 
         let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
-        let client = McpClient::new_with_config(config.clone());
+        let client = McpClient::new_with_config(config.clone()).expect("HTTP config should work");
 
         assert_eq!(client.server_name(), "test");
         assert_eq!(client.server_url(), "http://localhost:8080");
@@ -667,12 +740,23 @@ mod tests {
     #[test]
     fn test_new_with_config_no_headers() {
         let config = McpServerConfig::new("bare", "http://localhost:9090");
-        let client = McpClient::new_with_config(config);
+        let client = McpClient::new_with_config(config).expect("HTTP config should work");
 
         assert_eq!(client.server_name(), "bare");
         assert!(client.custom_headers.is_empty());
         assert!(client.secrets.is_none());
         assert!(client.session_manager.is_none());
+    }
+
+    #[test]
+    fn test_with_session_manager() {
+        let client = McpClient::new("http://localhost:8080");
+        assert!(!client.has_session_manager());
+
+        let session_manager = Arc::new(McpSessionManager::new());
+        let client = client.with_session_manager(session_manager);
+
+        assert!(client.has_session_manager());
     }
 
     #[test]
@@ -775,13 +859,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_http_transport_skips_401_retry() {
-        let response = McpResponse {
+        // initialize response, then notification ack (consumed but ignored),
+        // then list_tools response
+        let init_response = McpResponse {
             jsonrpc: "2.0".to_string(),
             id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
             result: Some(serde_json::json!({"tools": []})),
             error: None,
         };
-        let transport = Arc::new(MockTransport::new(false, vec![response]));
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![init_response, notification_ack, list_response],
+        ));
         let client = McpClient::new_with_transport(
             "test-stdio",
             transport.clone(),
@@ -794,7 +899,8 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 0);
         let headers = transport.recorded_headers();
-        assert_eq!(headers.len(), 1);
+        // 3 sends: initialize + notifications/initialized + list_tools
+        assert_eq!(headers.len(), 3);
         assert!(!headers[0].contains_key("Authorization"));
         assert!(!headers[0].contains_key("Mcp-Session-Id"));
     }
@@ -805,5 +911,206 @@ mod tests {
         assert!(http_transport.supports_http_features());
         let mock_non_http = MockTransport::new(false, vec![]);
         assert!(!mock_non_http.supports_http_features());
+    }
+
+    /// Regression test for issue #890: stdio clients must auto-initialize
+    /// even without a session manager, and the second call should be idempotent.
+    #[tokio::test]
+    async fn test_stdio_client_auto_initializes_without_session_manager() {
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![init_response, notification_ack],
+        ));
+        let client = McpClient::new_with_transport(
+            "test-stdio",
+            transport.clone(),
+            None, // no session manager
+            None,
+            "default",
+            None,
+        );
+
+        // First call should send initialize + notification
+        let result = client.initialize().await;
+        assert!(result.is_ok());
+        assert_eq!(transport.recorded_headers().len(), 2);
+
+        // Second call should be a no-op (idempotent via local flag)
+        let result2 = client.initialize().await;
+        assert!(result2.is_ok());
+        assert_eq!(transport.recorded_headers().len(), 2); // no additional sends
+    }
+
+    #[test]
+    fn test_strip_top_level_nulls_removes_null_fields() {
+        let input = serde_json::json!({
+            "query": "search term",
+            "sort": null,
+            "filter": null,
+            "page_size": 10
+        });
+        let result = strip_top_level_nulls(input);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj["query"], "search term");
+        assert_eq!(obj["page_size"], 10);
+        assert!(!obj.contains_key("sort"));
+        assert!(!obj.contains_key("filter"));
+    }
+
+    #[test]
+    fn test_strip_top_level_nulls_preserves_non_objects() {
+        let input = serde_json::json!("just a string");
+        let result = strip_top_level_nulls(input.clone());
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_strip_top_level_nulls_preserves_nested_nulls() {
+        let input = serde_json::json!({
+            "outer": { "inner": null },
+            "top_null": null
+        });
+        let result = strip_top_level_nulls(input);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert!(obj["outer"]["inner"].is_null());
+    }
+
+    // --- Issue 1 regression: new_with_config rejects non-HTTP transport ---
+
+    #[test]
+    fn test_new_with_config_rejects_stdio_transport() {
+        let config = McpServerConfig::new_stdio(
+            "stdio-server",
+            "echo",
+            vec!["hello".to_string()],
+            HashMap::new(),
+        );
+        let result = McpClient::new_with_config(config);
+        let err = result
+            .err()
+            .expect("stdio config must be rejected")
+            .to_string();
+        assert!(
+            err.contains("new_with_config only supports HTTP"),
+            "error should explain the restriction: {}",
+            err
+        );
+    }
+
+    // --- Issue 13: McpToolWrapper unit tests ---
+
+    fn make_test_mcp_tool(destructive: bool) -> McpTool {
+        use crate::tools::mcp::protocol::McpToolAnnotations;
+        McpTool {
+            name: "do_thing".to_string(),
+            description: "Does a thing".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": {"type": "string"}
+                }
+            }),
+            annotations: if destructive {
+                Some(McpToolAnnotations {
+                    destructive_hint: true,
+                    side_effects_hint: false,
+                    read_only_hint: false,
+                    execution_time_hint: None,
+                })
+            } else {
+                None
+            },
+        }
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_name_is_prefixed() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__myserver__do_thing".to_string(),
+            client,
+        };
+        assert_eq!(wrapper.name(), "mcp__myserver__do_thing");
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_description() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        assert_eq!(wrapper.description(), "Does a thing");
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_parameters_schema() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        let schema = wrapper.parameters_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["input"].is_object());
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_requires_sanitization() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        assert!(
+            wrapper.requires_sanitization(),
+            "MCP tools should always require sanitization"
+        );
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_approval_destructive() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(true),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        let approval = wrapper.requires_approval(&serde_json::json!({}));
+        assert_eq!(approval, ApprovalRequirement::UnlessAutoApproved);
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_approval_non_destructive() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        let approval = wrapper.requires_approval(&serde_json::json!({}));
+        assert_eq!(approval, ApprovalRequirement::Never);
     }
 }

@@ -209,25 +209,26 @@ env-var mode or skipped secrets.
 | Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 | OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
-| OpenRouter¹ | API key | `llm_compatible_api_key` | `LLM_API_KEY` |
-| OpenAI-compatible¹ | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+| OpenRouter | API key | `llm_openrouter_api_key` | `OPENROUTER_API_KEY` |
+| OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
 | AWS Bedrock | AWS credentials (IAM, SSO, instance roles) | - | - |
 
-¹ OpenRouter and OpenAI-compatible share the same secret name and env var because
-OpenRouter is stored as `llm_backend = "openai_compatible"` under the hood.
-Switching between them overwrites the same credential slot.
+**OpenRouter** is a standalone registry provider (`providers.json` id `"openrouter"`)
+with its own secret name and env var. It is **not** stored as `openai_compatible`.
 
-**OpenRouter** (`setup_openrouter`):
-- Pre-configured OpenAI-compatible preset with base URL `https://openrouter.ai/api/v1`
-- Delegates to `setup_api_key_provider()` with a display name override ("OpenRouter")
-- Sets `llm_backend = "openai_compatible"` and `openai_compatible_base_url` automatically
-- Clears `selected_model` so Step 4 prompts for a model name (manual text input, no API-based model fetching)
+**OpenRouter** (`setup.kind = "api_key"` in `providers.json`):
+- Standalone provider with base URL `https://openrouter.ai/api/v1`
+- Delegates to `setup_api_key_provider()` with display name "OpenRouter"
+- API key is required (`api_key_required: true`)
+- Default model: `openai/gpt-4o`
 
 **API-key providers** (`setup_api_key_provider`):
 1. Check env var → if set, ask to reuse, persist to secrets store
 2. Otherwise prompt for key entry via `secret_input()`
 3. Store encrypted in secrets via `init_secrets_context()`
 4. **Cache key in `self.llm_api_key`** for model fetching in Step 4
+5. Preserve `selected_model` on a same-backend re-run; clear it only when
+   switching to a different backend
 
 **NEAR AI** (`setup_nearai`):
 - Calls `session_manager.ensure_authenticated()` which shows the auth menu:

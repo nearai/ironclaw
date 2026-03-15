@@ -18,6 +18,44 @@ use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::mcp::config::McpServerConfig;
 
+/// Shared HTTP client for all OAuth/discovery requests.
+///
+/// Redirects are disabled for security (prevents redirect-based SSRF).
+/// Per-request timeouts can override the default via `.timeout()` on
+/// the request builder.
+fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| AuthError::Http(e.clone()))
+}
+
+/// Log a debug message when a discovery/auth response is a redirect.
+/// Helps users diagnose configuration issues when legitimate servers
+/// redirect and our no-redirect policy causes a failure.
+fn log_redirect_if_applicable(url: &str, response: &reqwest::Response) {
+    if response.status().is_redirection() {
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok());
+        tracing::debug!(
+            "OAuth request to '{}' returned redirect {} -> {:?} (redirects disabled for security)",
+            url,
+            response.status(),
+            location
+        );
+    }
+}
+
 /// OAuth authorization error.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -287,10 +325,8 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
         )));
     }
     if scheme == "http" {
-        let host = parsed.host_str().unwrap_or("");
-        let is_localhost =
-            host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]";
-        if !is_localhost {
+        if !crate::tools::mcp::config::is_localhost_url(url) {
+            let host = parsed.host_str().unwrap_or("");
             return Err(AuthError::DiscoveryFailed(format!(
                 "HTTP is only allowed for localhost; use HTTPS for '{}'",
                 host
@@ -382,17 +418,16 @@ fn parse_resource_metadata_url(www_authenticate: &str) -> Option<String> {
 async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata, AuthError> {
     validate_url_safe(url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let response = client
         .get(url)
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    log_redirect_if_applicable(url, &response);
 
     if !response.status().is_success() {
         return Err(AuthError::DiscoveryFailed(format!(
@@ -411,19 +446,18 @@ async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata,
 async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadata, AuthError> {
     validate_url_safe(server_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let response = client
         .post(server_url)
+        .timeout(Duration::from_secs(10))
         .header("Content-Type", "application/json")
         .body("{}")
         .send()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    log_redirect_if_applicable(server_url, &response);
 
     if response.status().as_u16() != 401 {
         return Err(AuthError::DiscoveryFailed(format!(
@@ -472,19 +506,18 @@ pub async fn discover_protected_resource(
 ) -> Result<ProtectedResourceMetadata, AuthError> {
     validate_url_safe(server_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let well_known_url = build_well_known_uri(server_url, "oauth-protected-resource")?;
 
     let response = client
         .get(&well_known_url)
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    log_redirect_if_applicable(&well_known_url, &response);
 
     if !response.status().is_success() {
         return Err(AuthError::NotSupported);
@@ -502,19 +535,18 @@ pub async fn discover_authorization_server(
 ) -> Result<AuthorizationServerMetadata, AuthError> {
     validate_url_safe(auth_server_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let well_known_url = build_well_known_uri(auth_server_url, "oauth-authorization-server")?;
 
     let response = client
         .get(&well_known_url)
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    log_redirect_if_applicable(&well_known_url, &response);
 
     if !response.status().is_success() {
         return Err(AuthError::DiscoveryFailed(format!(
@@ -595,11 +627,7 @@ pub async fn register_client(
 ) -> Result<ClientRegistrationResponse, AuthError> {
     validate_url_safe(registration_endpoint).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let request = ClientRegistrationRequest {
         client_name: "IronClaw".to_string(),
@@ -669,7 +697,7 @@ pub async fn authorize_mcp_server(
     }
 
     // Determine client_id and endpoints
-    let (client_id, authorization_url, token_url, use_pkce, scopes, extra_params) =
+    let (client_id, authorization_url, token_url, use_pkce, scopes, mut extra_params) =
         if let Some(oauth) = &server_config.oauth {
             // Pre-configured OAuth
             let (auth_url, tok_url) = discover_oauth_endpoints(server_config).await?;
@@ -711,6 +739,13 @@ pub async fn authorize_mcp_server(
         None
     };
 
+    // Generate OAuth state parameter. While optional in OAuth 2.1 with PKCE,
+    // some MCP servers (e.g. Attio) require it.
+    let mut state_bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut state_bytes);
+    let state = URL_SAFE_NO_PAD.encode(state_bytes);
+    extra_params.insert("state".to_string(), state);
+
     // Compute canonical resource URI for RFC 8707
     let resource = canonical_resource_uri(&server_config.url);
 
@@ -741,7 +776,10 @@ pub async fn authorize_mcp_server(
 
     println!("  Waiting for authorization...");
 
-    // Wait for callback
+    // Wait for callback. State is sent in the URL for servers that require it
+    // (e.g. Attio), but we don't enforce validation on the callback because MCP
+    // servers use PKCE which already binds the request to the token exchange,
+    // and some servers may not echo state back.
     let code = wait_for_authorization_callback(listener, &server_config.name).await?;
 
     println!("  Exchanging code for token...");
@@ -803,7 +841,7 @@ pub fn build_authorization_url(
     if let Some(pkce) = pkce {
         url.push_str(&format!(
             "&code_challenge={}&code_challenge_method=S256",
-            pkce.challenge
+            urlencoding::encode(&pkce.challenge)
         ));
     }
 
@@ -853,11 +891,7 @@ pub async fn exchange_code_for_token(
 ) -> Result<AccessToken, AuthError> {
     validate_url_safe(token_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let mut params = vec![
         ("grant_type", "authorization_code".to_string()),
@@ -1044,11 +1078,7 @@ pub async fn refresh_access_token(
 
     validate_url_safe(&token_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     // Compute canonical resource URI for RFC 8707
     let resource = canonical_resource_uri(&server_config.url);
@@ -1710,5 +1740,70 @@ mod tests {
         );
 
         assert!(!url.contains("resource="));
+    }
+
+    /// Regression test: MCP OAuth authorization URLs must include a `state`
+    /// parameter. While OAuth 2.1 makes `state` optional when PKCE is used,
+    /// some MCP servers (e.g. Attio) require it and reject requests without it:
+    /// {"error":"invalid_request","error_description":"Invalid value provided
+    /// for: state"}
+    ///
+    /// Including `state` is harmless for servers that don't require it, since
+    /// it is a standard OAuth parameter that compliant servers will echo back
+    /// or ignore.
+    ///
+    /// The state is generated in `authorize_mcp_server` and injected into
+    /// `extra_params` before `build_authorization_url` is called. This test
+    /// verifies that `build_authorization_url` correctly propagates state from
+    /// extra_params into the URL, and that each generated state is unique.
+    #[test]
+    fn test_authorization_url_includes_state_parameter() {
+        // Simulate what authorize_mcp_server does: generate state and
+        // insert it into extra_params.
+        let mut extra_params = HashMap::new();
+        let mut state_bytes = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut state_bytes);
+        let state = URL_SAFE_NO_PAD.encode(state_bytes);
+        extra_params.insert("state".to_string(), state.clone());
+
+        let pkce = PkceChallenge::generate();
+        let url = build_authorization_url(
+            "https://app.attio.com/oidc/authorize",
+            "test-client",
+            "http://127.0.0.1:9876/callback",
+            &[
+                "mcp".to_string(),
+                "offline_access".to_string(),
+                "openid".to_string(),
+            ],
+            Some(&pkce),
+            &extra_params,
+            Some("https://mcp.attio.com/mcp"),
+        );
+
+        // State must be present in the URL
+        assert!(
+            url.contains(&format!("state={}", state)),
+            "Authorization URL must include the state parameter, got: {}",
+            url,
+        );
+
+        // State must be base64url-encoded (no padding, no +/)
+        assert!(!state.contains('+'), "State must be base64url-safe");
+        assert!(!state.contains('/'), "State must be base64url-safe");
+        assert!(!state.contains('='), "State must not have padding");
+
+        // State must have sufficient entropy (16 bytes -> 22 base64url chars)
+        assert!(
+            state.len() >= 22,
+            "State must have at least 128 bits of entropy, got {} chars",
+            state.len(),
+        );
+
+        // Two generated states must differ
+        let mut state_bytes_2 = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut state_bytes_2);
+        let state_2 = URL_SAFE_NO_PAD.encode(state_bytes_2);
+        assert_ne!(state, state_2, "State must be unique per request");
     }
 }

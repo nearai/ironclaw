@@ -242,6 +242,14 @@ pub enum SseEvent {
         thread_id: Option<String>,
     },
 
+    /// Suggested follow-up messages for the user.
+    #[serde(rename = "suggestions")]
+    Suggestions {
+        suggestions: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
     /// Extension activation status change (WASM channels).
     #[serde(rename = "extension_status")]
     ExtensionStatus {
@@ -707,6 +715,7 @@ impl WsServerMessage {
             SseEvent::JobStatus { .. } => "job_status",
             SseEvent::JobResult { .. } => "job_result",
             SseEvent::ImageGenerated { .. } => "image_generated",
+            SseEvent::Suggestions { .. } => "suggestions",
             SseEvent::ExtensionStatus { .. } => "extension_status",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
@@ -733,6 +742,60 @@ pub struct RoutineInfo {
     pub run_count: u64,
     pub consecutive_failures: u32,
     pub status: String,
+}
+
+impl RoutineInfo {
+    /// Convert a `Routine` to the trimmed `RoutineInfo` for list display.
+    pub fn from_routine(r: &crate::agent::routine::Routine) -> Self {
+        let (trigger_type, trigger_summary) = match &r.trigger {
+            crate::agent::routine::Trigger::Cron { schedule, .. } => {
+                ("cron".to_string(), format!("cron: {}", schedule))
+            }
+            crate::agent::routine::Trigger::Event {
+                pattern, channel, ..
+            } => {
+                let ch = channel.as_deref().unwrap_or("any");
+                ("event".to_string(), format!("on {} /{}/", ch, pattern))
+            }
+            crate::agent::routine::Trigger::SystemEvent {
+                source, event_type, ..
+            } => (
+                "system_event".to_string(),
+                format!("event: {}.{}", source, event_type),
+            ),
+            crate::agent::routine::Trigger::Manual => {
+                ("manual".to_string(), "manual only".to_string())
+            }
+        };
+
+        let action_type = match &r.action {
+            crate::agent::routine::RoutineAction::Lightweight { .. } => "lightweight",
+            crate::agent::routine::RoutineAction::FullJob { .. } => "full_job",
+        };
+
+        let status = if !r.enabled {
+            "disabled"
+        } else if r.consecutive_failures > 0 {
+            "failing"
+        } else {
+            "active"
+        };
+
+        RoutineInfo {
+            id: r.id,
+            name: r.name.clone(),
+            description: r.description.clone(),
+            enabled: r.enabled,
+            trigger_type,
+            trigger_summary,
+            action_type: action_type.to_string(),
+            last_run_at: r.last_run_at.map(|dt| dt.to_rfc3339()),
+            next_fire_at: r.next_fire_at.map(|dt| dt.to_rfc3339()),
+            run_count: r.run_count,
+            consecutive_failures: r.consecutive_failures,
+            status: status.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

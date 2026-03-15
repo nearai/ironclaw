@@ -24,7 +24,7 @@ pub fn floor_char_boundary(s: &str, pos: usize) -> usize {
 pub fn llm_signals_completion(response: &str) -> bool {
     let lower = response.to_lowercase();
 
-    // Superset of phrases from agent/worker.rs and worker/runtime.rs.
+    // Superset of phrases from worker/job.rs and worker/container.rs.
     let positive_phrases = [
         "job is complete",
         "job is done",

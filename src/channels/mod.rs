@@ -30,6 +30,7 @@
 mod channel;
 mod http;
 mod manager;
+pub mod relay;
 mod repl;
 mod signal;
 pub mod wasm;
@@ -37,10 +38,10 @@ pub mod web;
 mod webhook_server;
 
 pub use channel::{
-    AttachmentKind, Channel, IncomingAttachment, IncomingMessage, MessageStream, OutgoingResponse,
-    StatusUpdate,
+    AttachmentKind, Channel, ChannelSecretUpdater, IncomingAttachment, IncomingMessage,
+    MessageStream, OutgoingResponse, StatusUpdate,
 };
-pub use http::HttpChannel;
+pub use http::{HttpChannel, HttpChannelState};
 pub use manager::ChannelManager;
 pub use repl::ReplChannel;
 pub use signal::SignalChannel;

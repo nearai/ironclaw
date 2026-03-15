@@ -19,6 +19,7 @@ let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
+let _ghostSuggestion = '';
 
 // --- Slash Commands ---
 
@@ -55,7 +56,7 @@ let _activityThinking = null;
 function authenticate() {
   token = document.getElementById('token-input').value.trim();
   if (!token) {
-    document.getElementById('auth-error').textContent = 'Token required';
+    document.getElementById('auth-error').textContent = I18n.t('auth.errorRequired');
     return;
   }
 
@@ -89,7 +90,7 @@ function authenticate() {
       sessionStorage.removeItem('ironclaw_token');
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('app').style.display = 'none';
-      document.getElementById('auth-error').textContent = 'Invalid token';
+      document.getElementById('auth-error').textContent = I18n.t('auth.errorInvalid');
     });
 }
 
@@ -144,7 +145,7 @@ let restartEnabled = false; // Track if restart is available in this deployment
 
 function triggerRestart() {
   if (!currentThreadId) {
-    alert('Please start a conversation first');
+    alert(I18n.t('error.startConversation'));
     return;
   }
 
@@ -155,7 +156,7 @@ function triggerRestart() {
 
 function confirmRestart() {
   if (!currentThreadId) {
-    alert('Please start a conversation first');
+    alert(I18n.t('error.startConversation'));
     return;
   }
 
@@ -190,7 +191,7 @@ function confirmRestart() {
     })
     .catch((err) => {
       console.error('[confirmRestart] Restart request failed:', err);
-      addMessage('system', 'Restart failed: ' + err.message);
+      addMessage('system', I18n.t('error.restartFailed', { message: err.message }));
       isRestarting = false;
       restartBtn.disabled = false;
       if (restartIcon) restartIcon.classList.remove('spinning');
@@ -234,7 +235,7 @@ function connectSSE() {
 
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
-    document.getElementById('sse-status').textContent = 'Connected';
+    document.getElementById('sse-status').textContent = I18n.t('status.connected');
 
     // If we were restarting, close the modal and reset button now that server is back
     if (isRestarting) {
@@ -256,7 +257,7 @@ function connectSSE() {
 
   eventSource.onerror = () => {
     document.getElementById('sse-dot').classList.add('disconnected');
-    document.getElementById('sse-status').textContent = 'Reconnecting...';
+    document.getElementById('sse-status').textContent = I18n.t('status.reconnecting');
   };
 
   eventSource.addEventListener('response', (e) => {
@@ -286,7 +287,16 @@ function connectSSE() {
       if (data.thread_id) debouncedLoadThreads();
       return;
     }
+    clearSuggestionChips();
     showActivityThinking(data.message);
+  });
+
+  eventSource.addEventListener('suggestions', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    if (data.suggestions && data.suggestions.length > 0) {
+      showSuggestionChips(data.suggestions);
+    }
   });
 
   eventSource.addEventListener('tool_started', (e) => {
@@ -342,31 +352,27 @@ function connectSSE() {
 
   eventSource.addEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
-    showApproval(data);
+    const hasThread = !!data.thread_id;
+    const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
+
+    if (forCurrentThread) {
+      showApproval(data);
+    } else {
+      // Keep thread list fresh when approval is requested in a background thread.
+      unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+      debouncedLoadThreads();
+    }
+
+    // Extension setup flows can surface approvals while user is on Extensions tab.
+    if (currentTab === 'extensions') loadExtensions();
   });
 
   eventSource.addEventListener('auth_required', (e) => {
-    const data = JSON.parse(e.data);
-    if (data.auth_url) {
-      // OAuth flow: show the auth card with an OAuth button + optional token paste field.
-      showAuthCard(data);
-    } else {
-      // Setup flow: fetch the extension's credential schema and show the multi-field
-      // configure modal (the same UI used by the Extensions tab "Setup" button).
-      showConfigureModal(data.extension_name);
-    }
+    handleAuthRequired(JSON.parse(e.data));
   });
 
   eventSource.addEventListener('auth_completed', (e) => {
-    const data = JSON.parse(e.data);
-    // Dismiss whichever UI path was active: auth card (OAuth) or configure modal (setup).
-    removeAuthCard(data.extension_name);
-    closeConfigureModal();
-    showToast(data.message, data.success ? 'success' : 'error');
-    // Refresh extensions list so status indicators update
-    if (currentTab === 'extensions') loadExtensions();
-    enableChatInput();
+    handleAuthCompleted(JSON.parse(e.data));
   });
 
   eventSource.addEventListener('extension_status', (e) => {
@@ -427,9 +433,59 @@ function isCurrentThread(threadId) {
   return threadId === currentThreadId;
 }
 
+// --- Suggestion Chips ---
+
+function showSuggestionChips(suggestions) {
+  // Clear previous chips/ghost without restoring placeholder (we'll set it below)
+  _ghostSuggestion = '';
+  const container = document.getElementById('suggestion-chips');
+  container.innerHTML = '';
+  const ghost = document.getElementById('ghost-text');
+  ghost.style.display = 'none';
+  const wrapper = document.querySelector('.chat-input-wrapper');
+  if (wrapper) wrapper.classList.remove('has-ghost');
+
+  _ghostSuggestion = suggestions[0] || '';
+  const input = document.getElementById('chat-input');
+  suggestions.forEach(text => {
+    const chip = document.createElement('button');
+    chip.className = 'suggestion-chip';
+    chip.textContent = text;
+    chip.addEventListener('click', () => {
+      input.value = text;
+      clearSuggestionChips();
+      autoResizeTextarea(input);
+      input.focus();
+      sendMessage();
+    });
+    container.appendChild(chip);
+  });
+  container.style.display = 'flex';
+  // Show first suggestion as ghost text in the input so user knows Tab works
+  if (_ghostSuggestion && input.value === '') {
+    ghost.textContent = _ghostSuggestion;
+    ghost.style.display = 'block';
+    input.closest('.chat-input-wrapper').classList.add('has-ghost');
+  }
+}
+
+function clearSuggestionChips() {
+  _ghostSuggestion = '';
+  const container = document.getElementById('suggestion-chips');
+  if (container) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+  }
+  const ghost = document.getElementById('ghost-text');
+  if (ghost) ghost.style.display = 'none';
+  const wrapper = document.querySelector('.chat-input-wrapper');
+  if (wrapper) wrapper.classList.remove('has-ghost');
+}
+
 // --- Chat ---
 
 function sendMessage() {
+  clearSuggestionChips();
   const input = document.getElementById('chat-input');
   if (!currentThreadId) {
     console.warn('sendMessage: no thread selected, ignoring');
@@ -464,7 +520,7 @@ function enableChatInput() {
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = false;
-    input.placeholder = 'Message or / for commands...';
+    input.placeholder = I18n.t('chat.inputPlaceholder');
   }
   if (btn) btn.disabled = false;
 }
@@ -670,32 +726,26 @@ function renderMarkdown(text) {
     // Sanitize HTML output to prevent XSS from tool output or LLM responses.
     html = sanitizeRenderedHtml(html);
     // Inject copy buttons into <pre> blocks
-    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" onclick="copyCodeBlock(this)">Copy</button>');
+    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" data-action="copy-code">Copy</button>');
     return html;
   }
   return escapeHtml(text);
 }
 
-// Strip dangerous HTML elements and attributes from rendered markdown.
-// This prevents XSS from tool output or prompt injection in LLM responses.
+// Sanitize rendered HTML using DOMPurify to prevent XSS from tool output
+// or prompt injection in LLM responses. DOMPurify is a DOM-based sanitizer
+// that handles all known bypass vectors (SVG onload, newline-split event
+// handlers, mutation XSS, etc.) unlike the regex approach it replaces.
 function sanitizeRenderedHtml(html) {
-  html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-  html = html.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '');
-  html = html.replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '');
-  html = html.replace(/<embed\b[^>]*\/?>/gi, '');
-  html = html.replace(/<form\b[^>]*>[\s\S]*?<\/form>/gi, '');
-  html = html.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
-  html = html.replace(/<link\b[^>]*\/?>/gi, '');
-  html = html.replace(/<base\b[^>]*\/?>/gi, '');
-  html = html.replace(/<meta\b[^>]*\/?>/gi, '');
-  // Remove event handler attributes (onclick, onerror, onload, etc.)
-  html = html.replace(/\s+on\w+\s*=\s*"[^"]*"/gi, '');
-  html = html.replace(/\s+on\w+\s*=\s*'[^']*'/gi, '');
-  html = html.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
-  // Remove javascript: and data: URLs in href/src attributes
-  html = html.replace(/(href|src|action)\s*=\s*["']?\s*javascript\s*:/gi, '$1="');
-  html = html.replace(/(href|src|action)\s*=\s*["']?\s*data\s*:/gi, '$1="');
-  return html;
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(html, {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ['style', 'script'],
+      FORBID_ATTR: ['style', 'onerror', 'onload']
+    });
+  }
+  // DOMPurify not available (CDN unreachable) — return empty string rather than unsanitized HTML
+  return '';
 }
 
 function copyCodeBlock(btn) {
@@ -703,21 +753,30 @@ function copyCodeBlock(btn) {
   const code = pre.querySelector('code');
   const text = code ? code.textContent : pre.textContent;
   navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = 'Copied!';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+    btn.textContent = I18n.t('btn.copied');
+    setTimeout(() => { btn.textContent = I18n.t('btn.copy'); }, 1500);
+  });
+}
+
+function copyMessage(btn) {
+  const message = btn.closest('.message');
+  if (!message) return;
+  const text = message.getAttribute('data-copy-text')
+    || message.getAttribute('data-raw')
+    || message.textContent
+    || '';
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+  }).catch(() => {
+    btn.textContent = 'Failed';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
   });
 }
 
 function addMessage(role, content) {
   const container = document.getElementById('chat-messages');
-  const div = document.createElement('div');
-  div.className = 'message ' + role;
-  if (role === 'user') {
-    div.textContent = content;
-  } else {
-    div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
-  }
+  const div = createMessageElement(role, content);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
@@ -729,7 +788,11 @@ function appendToLastAssistant(chunk) {
     const last = messages[messages.length - 1];
     const raw = (last.getAttribute('data-raw') || '') + chunk;
     last.setAttribute('data-raw', raw);
-    last.innerHTML = renderMarkdown(raw);
+    last.setAttribute('data-copy-text', raw);
+    const content = last.querySelector('.message-content');
+    if (content) {
+      content.innerHTML = renderMarkdown(raw);
+    }
     container.scrollTop = container.scrollHeight;
   } else {
     addMessage('assistant', chunk);
@@ -983,7 +1046,26 @@ function finalizeActivityGroup() {
   _activeToolCards = {};
 }
 
+function humanizeToolName(rawName) {
+  if (!rawName) return '';
+  return String(rawName)
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/^tool([a-zA-Z])/, 'tool $1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shouldShowChannelConnectedMessage(extensionName, success) {
+  if (!success || !extensionName) return false;
+  return String(extensionName).toLowerCase().includes('telegram');
+}
+
 function showApproval(data) {
+  // Avoid duplicate cards on reconnect/history refresh.
+  const existing = document.querySelector('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
+  if (existing) return;
+
   const container = document.getElementById('chat-messages');
   const card = document.createElement('div');
   card.className = 'approval-card';
@@ -991,12 +1073,12 @@ function showApproval(data) {
 
   const header = document.createElement('div');
   header.className = 'approval-header';
-  header.textContent = 'Tool requires approval';
+  header.textContent = I18n.t('approval.title');
   card.appendChild(header);
 
   const toolName = document.createElement('div');
   toolName.className = 'approval-tool-name';
-  toolName.textContent = data.tool_name;
+  toolName.textContent = humanizeToolName(data.tool_name);
   card.appendChild(toolName);
 
   if (data.description) {
@@ -1009,7 +1091,7 @@ function showApproval(data) {
   if (data.parameters) {
     const paramsToggle = document.createElement('button');
     paramsToggle.className = 'approval-params-toggle';
-    paramsToggle.textContent = 'Show parameters';
+    paramsToggle.textContent = I18n.t('approval.showParams');
     const paramsBlock = document.createElement('pre');
     paramsBlock.className = 'approval-params';
     paramsBlock.textContent = data.parameters;
@@ -1017,7 +1099,7 @@ function showApproval(data) {
     paramsToggle.addEventListener('click', () => {
       const visible = paramsBlock.style.display !== 'none';
       paramsBlock.style.display = visible ? 'none' : 'block';
-      paramsToggle.textContent = visible ? 'Show parameters' : 'Hide parameters';
+      paramsToggle.textContent = visible ? I18n.t('approval.showParams') : I18n.t('approval.hideParams');
     });
     card.appendChild(paramsToggle);
     card.appendChild(paramsBlock);
@@ -1028,17 +1110,17 @@ function showApproval(data) {
 
   const approveBtn = document.createElement('button');
   approveBtn.className = 'approve';
-  approveBtn.textContent = 'Approve';
+  approveBtn.textContent = I18n.t('approval.approve');
   approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
 
   const alwaysBtn = document.createElement('button');
   alwaysBtn.className = 'always';
-  alwaysBtn.textContent = 'Always';
+  alwaysBtn.textContent = I18n.t('approval.always');
   alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
 
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
-  denyBtn.textContent = 'Deny';
+  denyBtn.textContent = I18n.t('approval.deny');
   denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
 
   actions.appendChild(approveBtn);
@@ -1065,7 +1147,7 @@ function showJobCard(data) {
 
   const title = document.createElement('div');
   title.className = 'job-card-title';
-  title.textContent = data.title || 'Sandbox Job';
+  title.textContent = data.title || I18n.t('sandbox.job');
   info.appendChild(title);
 
   const id = document.createElement('div');
@@ -1077,7 +1159,7 @@ function showJobCard(data) {
 
   const viewBtn = document.createElement('button');
   viewBtn.className = 'job-card-view';
-  viewBtn.textContent = 'View Job';
+  viewBtn.textContent = I18n.t('jobs.viewJob');
   viewBtn.addEventListener('click', () => {
     switchTab('jobs');
     openJobDetail(data.job_id);
@@ -1089,7 +1171,7 @@ function showJobCard(data) {
     browseBtn.className = 'job-card-browse';
     browseBtn.href = data.browse_url;
     browseBtn.target = '_blank';
-    browseBtn.textContent = 'Browse';
+    browseBtn.textContent = I18n.t('jobs.browse');
     card.appendChild(browseBtn);
   }
 
@@ -1099,18 +1181,76 @@ function showJobCard(data) {
 
 // --- Auth card ---
 
-function showAuthCard(data) {
-  // Remove any existing card for this extension first
-  removeAuthCard(data.extension_name);
+function handleAuthRequired(data) {
+  if (data.auth_url) {
+    // OAuth flow: show the global auth prompt with an OAuth button + optional token paste field.
+    showAuthCard(data);
+  } else {
+    // Setup flow: fetch the extension's credential schema and show the multi-field
+    // configure modal (the same UI used by the Extensions tab "Setup" button).
+    showConfigureModal(data.extension_name);
+  }
+}
 
-  const container = document.getElementById('chat-messages');
+function handleAuthCompleted(data) {
+  // Dismiss only the matching extension's UI so unrelated setup work is not interrupted.
+  removeAuthCard(data.extension_name);
+  closeConfigureModal(data.extension_name);
+  showToast(data.message, data.success ? 'success' : 'error');
+  if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
+    addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
+  }
+  if (currentTab === 'extensions') loadExtensions();
+  enableChatInput();
+}
+
+function queryByDataAttribute(selector, attributeName, attributeValue) {
+  if (typeof attributeValue !== 'string') return document.querySelector(selector);
+
+  if (window.CSS && typeof window.CSS.escape === 'function') {
+    return document.querySelector(
+      selector + '[' + attributeName + '="' + window.CSS.escape(attributeValue) + '"]'
+    );
+  }
+
+  const candidates = document.querySelectorAll(selector);
+  for (const candidate of candidates) {
+    if (candidate.getAttribute(attributeName) === attributeValue) return candidate;
+  }
+  return null;
+}
+
+function getAuthOverlay(extensionName) {
+  return queryByDataAttribute('.auth-overlay', 'data-extension-name', extensionName);
+}
+
+function getAuthCard(extensionName) {
+  return queryByDataAttribute('.auth-card', 'data-extension-name', extensionName);
+}
+
+function getConfigureOverlay(extensionName) {
+  return queryByDataAttribute('.configure-overlay', 'data-extension-name', extensionName);
+}
+
+function showAuthCard(data) {
+  // Keep a single global auth prompt so the experience is consistent across tabs.
+  const existing = getAuthOverlay();
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'auth-overlay';
+  overlay.setAttribute('data-extension-name', data.extension_name);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) cancelAuth(data.extension_name);
+  });
+
   const card = document.createElement('div');
-  card.className = 'auth-card';
+  card.className = 'auth-card auth-modal';
   card.setAttribute('data-extension-name', data.extension_name);
 
   const header = document.createElement('div');
   header.className = 'auth-header';
-  header.textContent = 'Authentication required for ' + data.extension_name;
+  header.textContent = I18n.t('authRequired.title', {name: data.extension_name});
   card.appendChild(header);
 
   if (data.instructions) {
@@ -1126,7 +1266,7 @@ function showAuthCard(data) {
   if (data.auth_url) {
     const oauthBtn = document.createElement('button');
     oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = 'Authenticate with ' + data.extension_name;
+    oauthBtn.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
     oauthBtn.addEventListener('click', () => {
       openOAuthUrl(data.auth_url);
     });
@@ -1137,7 +1277,7 @@ function showAuthCard(data) {
     const setupLink = document.createElement('a');
     setupLink.href = data.setup_url;
     setupLink.target = '_blank';
-    setupLink.textContent = 'Get your token';
+    setupLink.textContent = I18n.t('authRequired.getToken');
     links.appendChild(setupLink);
   }
 
@@ -1151,7 +1291,9 @@ function showAuthCard(data) {
 
   const tokenInput = document.createElement('input');
   tokenInput.type = 'password';
-  tokenInput.placeholder = data.instructions || 'Paste your API key or token';
+  tokenInput.placeholder = data.instructions
+    || I18n.t('auth.extensionTokenPlaceholder')
+    || I18n.t('auth.tokenPlaceholder');
   tokenInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
   });
@@ -1170,33 +1312,42 @@ function showAuthCard(data) {
 
   const submitBtn = document.createElement('button');
   submitBtn.className = 'auth-submit';
-  submitBtn.textContent = 'Submit';
+  submitBtn.textContent = I18n.t('btn.submit');
   submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = I18n.t('btn.cancel');
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
 
   actions.appendChild(submitBtn);
   actions.appendChild(cancelBtn);
   card.appendChild(actions);
 
-  container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
   tokenInput.focus();
 }
 
 function removeAuthCard(extensionName) {
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
-  if (card) card.remove();
+  const overlay = getAuthOverlay(extensionName);
+  if (overlay) {
+    overlay.remove();
+    return;
+  }
+  const card = getAuthCard(extensionName);
+  if (card) {
+    const parentOverlay = card.closest('.auth-overlay');
+    if (parentOverlay) parentOverlay.remove();
+    else card.remove();
+  }
 }
 
 function submitAuthToken(extensionName, tokenValue) {
   if (!tokenValue || !tokenValue.trim()) return;
 
   // Disable submit button while in flight
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
+  const card = getAuthCard(extensionName);
   if (card) {
     const btns = card.querySelectorAll('button');
     btns.forEach((b) => { b.disabled = true; });
@@ -1207,8 +1358,10 @@ function submitAuthToken(extensionName, tokenValue) {
     body: { extension_name: extensionName, token: tokenValue.trim() },
   }).then((result) => {
     if (result.success) {
+      // Close immediately for responsiveness; the authoritative success UX
+      // (toast + extensions refresh) still comes from auth_completed SSE.
       removeAuthCard(extensionName);
-      addMessage('system', result.message);
+      enableChatInput();
     } else {
       showAuthCardError(extensionName, result.message);
     }
@@ -1227,7 +1380,7 @@ function cancelAuth(extensionName) {
 }
 
 function showAuthCardError(extensionName, message) {
-  const card = document.querySelector('.auth-card[data-extension-name="' + extensionName + '"]');
+  const card = getAuthCard(extensionName);
   if (!card) return;
   // Re-enable buttons
   const btns = card.querySelectorAll('button');
@@ -1241,6 +1394,7 @@ function showAuthCardError(extensionName, message) {
 }
 
 function loadHistory(before) {
+  clearSuggestionChips();
   let historyUrl = '/api/chat/history?limit=50';
   if (currentThreadId) {
     historyUrl += '&thread_id=' + encodeURIComponent(currentThreadId);
@@ -1314,12 +1468,31 @@ function loadHistory(before) {
 function createMessageElement(role, content) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
-  if (role === 'user') {
-    div.textContent = content;
+
+  if (role === 'assistant' || role === 'user') {
+    div.classList.add('has-copy');
+    div.setAttribute('data-copy-text', content);
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'message-copy-btn';
+    copyBtn.type = 'button';
+    copyBtn.setAttribute('aria-label', 'Copy message');
+    copyBtn.textContent = 'Copy';
+    copyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      copyMessage(copyBtn);
+    });
+    div.appendChild(copyBtn);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'message-content';
+  if (role === 'user' || role === 'system') {
+    body.textContent = content;
   } else {
     div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
+    body.innerHTML = renderMarkdown(content);
   }
+  div.appendChild(body);
   return div;
 }
 
@@ -1517,6 +1690,7 @@ function switchToAssistant() {
 }
 
 function switchThread(threadId) {
+  clearSuggestionChips();
   finalizeActivityGroup();
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
@@ -1548,6 +1722,15 @@ const chatInput = document.getElementById('chat-input');
 chatInput.addEventListener('keydown', (e) => {
   const acEl = document.getElementById('slash-autocomplete');
   const acVisible = acEl && acEl.style.display !== 'none';
+
+  // Accept first suggestion with Tab (plain Tab only, not Shift+Tab)
+  if (e.key === 'Tab' && !e.shiftKey && !acVisible && _ghostSuggestion && chatInput.value === '') {
+    e.preventDefault();
+    chatInput.value = _ghostSuggestion;
+    clearSuggestionChips();
+    autoResizeTextarea(chatInput);
+    return;
+  }
 
   if (acVisible) {
     const items = acEl.querySelectorAll('.slash-ac-item');
@@ -1585,6 +1768,16 @@ chatInput.addEventListener('keydown', (e) => {
 chatInput.addEventListener('input', () => {
   autoResizeTextarea(chatInput);
   filterSlashCommands(chatInput.value);
+  const ghost = document.getElementById('ghost-text');
+  const wrapper = chatInput.closest('.chat-input-wrapper');
+  if (chatInput.value !== '') {
+    ghost.style.display = 'none';
+    wrapper.classList.remove('has-ghost');
+  } else if (_ghostSuggestion) {
+    ghost.textContent = _ghostSuggestion;
+    ghost.style.display = 'block';
+    wrapper.classList.add('has-ghost');
+  }
 });
 chatInput.addEventListener('blur', () => {
   // Small delay so mousedown on autocomplete item fires first
@@ -1690,22 +1883,25 @@ function renderNodes(nodes, container, depth) {
     const row = document.createElement('div');
     row.className = 'tree-row';
     row.style.paddingLeft = (depth * 16 + 8) + 'px';
+    row.tabIndex = 0;
+    row.setAttribute('role', 'treeitem');
 
     if (node.is_dir) {
+      row.setAttribute('aria-expanded', node.expanded ? 'true' : 'false');
       const arrow = document.createElement('span');
       arrow.className = 'expand-arrow' + (node.expanded ? ' expanded' : '');
       arrow.textContent = '\u25B6';
-      arrow.addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleExpand(node);
-      });
       row.appendChild(arrow);
 
       const label = document.createElement('span');
       label.className = 'tree-label dir';
       label.textContent = node.name;
-      label.addEventListener('click', () => toggleExpand(node));
       row.appendChild(label);
+
+      row.addEventListener('click', () => toggleExpand(node));
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(node); }
+      });
     } else {
       const spacer = document.createElement('span');
       spacer.className = 'expand-arrow-spacer';
@@ -1714,8 +1910,12 @@ function renderNodes(nodes, container, depth) {
       const label = document.createElement('span');
       label.className = 'tree-label file';
       label.textContent = node.name;
-      label.addEventListener('click', () => readMemoryFile(node.path));
       row.appendChild(label);
+
+      row.addEventListener('click', () => readMemoryFile(node.path));
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); readMemoryFile(node.path); }
+      });
     }
 
     container.appendChild(row);
@@ -1816,13 +2016,11 @@ function saveMemoryEdit() {
 
 function buildBreadcrumb(path) {
   const parts = path.split('/');
-  let html = '<a onclick="loadMemoryTree()">workspace</a>';
+  let html = '<a data-action="breadcrumb-root" href="#">workspace</a>';
   let current = '';
   for (const part of parts) {
     current += (current ? '/' : '') + part;
-    // Store the path in data-path (HTML-escaped) and read it back via this.dataset.path
-    // to avoid single-quote injection in inline JS string literals.
-    html += ' / <a onclick="readMemoryFile(this.dataset.path)" data-path="' + escapeHtml(current) + '">' + escapeHtml(part) + '</a>';
+    html += ' / <a data-action="breadcrumb-file" data-path="' + escapeHtml(current) + '" href="#">' + escapeHtml(part) + '</a>';
   }
   return html;
 }
@@ -1960,7 +2158,7 @@ function prependLogEntry(entry) {
 function toggleLogsPause() {
   logsPaused = !logsPaused;
   const btn = document.getElementById('logs-pause-btn');
-  btn.textContent = logsPaused ? 'Resume' : 'Pause';
+  btn.textContent = logsPaused ? I18n.t('logs.resume') : I18n.t('logs.pause');
 
   if (!logsPaused) {
     // Flush buffer: oldest-first + prepend naturally puts newest at top
@@ -2032,7 +2230,7 @@ function loadExtensions() {
   ]).then(([extData, toolData, registryData]) => {
     // Render installed extensions
     if (extData.extensions.length === 0) {
-      extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
+      extList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noInstalled') + '</div>';
     } else {
       extList.innerHTML = '';
       for (const ext of extData.extensions) {
@@ -2046,7 +2244,7 @@ function loadExtensions() {
 
     // Available WASM extensions
     if (wasmEntries.length === 0) {
-      wasmList.innerHTML = '<div class="empty-state">No additional WASM extensions available</div>';
+      wasmList.innerHTML = '<div class="empty-state">' + I18n.t('extensions.noAvailable') + '</div>';
     } else {
       wasmList.innerHTML = '';
       for (const entry of wasmEntries) {
@@ -2056,7 +2254,7 @@ function loadExtensions() {
 
     // MCP servers (show both installed and uninstalled)
     if (mcpEntries.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+      mcpList.innerHTML = '<div class="empty-state">' + I18n.t('mcp.noServers') + '</div>';
     } else {
       mcpList.innerHTML = '';
       for (const entry of mcpEntries) {
@@ -2121,18 +2319,22 @@ function renderAvailableExtensionCard(entry) {
 
   const installBtn = document.createElement('button');
   installBtn.className = 'btn-ext install';
-  installBtn.textContent = 'Install';
+  installBtn.textContent = I18n.t('extensions.install');
   installBtn.addEventListener('click', function() {
     installBtn.disabled = true;
-    installBtn.textContent = 'Installing...';
+    installBtn.textContent = I18n.t('extensions.installing');
     apiFetch('/api/extensions/install', {
       method: 'POST',
       body: { name: entry.name, kind: entry.kind },
     }).then(function(res) {
       if (res.success) {
-        showToast('Installed ' + entry.display_name, 'success');
+        showToast(I18n.t('extensions.installedSuccess', {name: entry.display_name}), 'success');
         // OAuth popup if auth started during install (builtin creds)
         if (res.auth_url) {
+          showAuthCard({
+            extension_name: entry.name,
+            auth_url: res.auth_url,
+          });
           showToast('Opening authentication for ' + entry.display_name, 'info');
           openOAuthUrl(res.auth_url);
         }
@@ -2194,39 +2396,39 @@ function renderMcpServerCard(entry, installedExt) {
     if (!installedExt.active) {
       var activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      activateBtn.textContent = I18n.t('common.activate');
       activateBtn.addEventListener('click', function() { activateExtension(installedExt.name); });
       actions.appendChild(activateBtn);
     } else {
       var activeLabel = document.createElement('span');
       activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
+      activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
     }
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
-    removeBtn.textContent = 'Remove';
+    removeBtn.textContent = I18n.t('ext.remove');
     removeBtn.addEventListener('click', function() { removeExtension(installedExt.name); });
     actions.appendChild(removeBtn);
   } else {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
-    installBtn.textContent = 'Install';
+    installBtn.textContent = I18n.t('ext.install');
     installBtn.addEventListener('click', function() {
       installBtn.disabled = true;
-      installBtn.textContent = 'Installing...';
+      installBtn.textContent = I18n.t('ext.installing');
       apiFetch('/api/extensions/install', {
         method: 'POST',
         body: { name: entry.name, kind: entry.kind },
       }).then(function(res) {
         if (res.success) {
-          showToast('Installed ' + entry.display_name, 'success');
+          showToast(I18n.t('extensions.installedSuccess', { name: entry.display_name }), 'success');
         } else {
-          showToast('Install: ' + (res.message || 'unknown error'), 'error');
+          showToast(I18n.t('ext.install') + ': ' + (res.message || 'unknown error'), 'error');
         }
         loadExtensions();
       }).catch(function(err) {
-        showToast('Install failed: ' + err.message, 'error');
+        showToast(I18n.t('ext.installFailed', { message: err.message }), 'error');
         loadExtensions();
       });
     });
@@ -2240,7 +2442,7 @@ function renderMcpServerCard(entry, installedExt) {
 function createReconfigureButton(extName) {
   var btn = document.createElement('button');
   btn.className = 'btn-ext configure';
-  btn.textContent = 'Reconfigure';
+  btn.textContent = I18n.t('ext.reconfigure');
   btn.addEventListener('click', function() { showConfigureModal(extName); });
   return btn;
 }
@@ -2324,13 +2526,13 @@ function renderExtensionCard(ext) {
     if (status === 'active') {
       var activeLabel = document.createElement('span');
       activeLabel.className = 'ext-active-label';
-      activeLabel.textContent = 'Active';
+      activeLabel.textContent = I18n.t('ext.active');
       actions.appendChild(activeLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'pairing') {
       var pairingLabel = document.createElement('span');
       pairingLabel.className = 'ext-pairing-label';
-      pairingLabel.textContent = 'Awaiting Pairing';
+      pairingLabel.textContent = I18n.t('status.awaitingPairing');
       actions.appendChild(pairingLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'failed') {
@@ -2339,7 +2541,7 @@ function renderExtensionCard(ext) {
       // installed or configured: show Setup button
       var setupBtn = document.createElement('button');
       setupBtn.className = 'btn-ext configure';
-      setupBtn.textContent = 'Setup';
+      setupBtn.textContent = I18n.t('ext.setup');
       setupBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
       actions.appendChild(setupBtn);
     }
@@ -2347,14 +2549,14 @@ function renderExtensionCard(ext) {
     // WASM tools / MCP servers
     const activeLabel = document.createElement('span');
     activeLabel.className = 'ext-active-label';
-    activeLabel.textContent = ext.active ? 'Active' : 'Installed';
+    activeLabel.textContent = ext.active ? I18n.t('ext.active') : I18n.t('status.installed');
     actions.appendChild(activeLabel);
 
-    // MCP servers may be installed but inactive — show Activate button
-    if (ext.kind === 'mcp_server' && !ext.active) {
+    // MCP servers and channel-relay extensions may be installed but inactive — show Activate button
+    if ((ext.kind === 'mcp_server' || ext.kind === 'channel_relay') && !ext.active) {
       const activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      activateBtn.textContent = I18n.t('common.activate');
       activateBtn.addEventListener('click', () => activateExtension(ext.name));
       actions.appendChild(activateBtn);
     }
@@ -2366,7 +2568,7 @@ function renderExtensionCard(ext) {
     if (ext.needs_setup || (ext.has_auth && ext.authenticated)) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
-      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
+      configBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.configure');
       configBtn.addEventListener('click', () => showConfigureModal(ext.name));
       actions.appendChild(configBtn);
     }
@@ -2374,7 +2576,7 @@ function renderExtensionCard(ext) {
 
   const removeBtn = document.createElement('button');
   removeBtn.className = 'btn-ext remove';
-  removeBtn.textContent = 'Remove';
+  removeBtn.textContent = I18n.t('ext.remove');
   removeBtn.addEventListener('click', () => removeExtension(ext.name));
   actions.appendChild(removeBtn);
 
@@ -2398,6 +2600,10 @@ function activateExtension(name) {
       if (res.success) {
         // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
         if (res.auth_url) {
+          showAuthCard({
+            extension_name: name,
+            auth_url: res.auth_url,
+          });
           showToast('Opening authentication for ' + name, 'info');
           openOAuthUrl(res.auth_url);
         }
@@ -2406,6 +2612,10 @@ function activateExtension(name) {
       }
 
       if (res.auth_url) {
+        showAuthCard({
+          extension_name: name,
+          auth_url: res.auth_url,
+        });
         showToast('Opening authentication for ' + name, 'info');
         openOAuthUrl(res.auth_url);
       } else if (res.awaiting_token) {
@@ -2419,17 +2629,17 @@ function activateExtension(name) {
 }
 
 function removeExtension(name) {
-  if (!confirm('Remove extension "' + name + '"?')) return;
+  if (!confirm(I18n.t('ext.confirmRemove', { name: name }))) return;
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
     .then((res) => {
       if (!res.success) {
-        showToast('Remove failed: ' + res.message, 'error');
+        showToast(I18n.t('ext.removeFailed', { message: res.message }), 'error');
       } else {
-        showToast('Removed ' + name, 'success');
+        showToast(I18n.t('ext.removed', { name: name }), 'success');
       }
       loadExtensions();
     })
-    .catch((err) => showToast('Remove failed: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
 }
 
 function showConfigureModal(name) {
@@ -2448,6 +2658,7 @@ function renderConfigureModal(name, secrets) {
   closeConfigureModal();
   const overlay = document.createElement('div');
   overlay.className = 'configure-overlay';
+  overlay.setAttribute('data-extension-name', name);
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) closeConfigureModal();
   });
@@ -2456,7 +2667,7 @@ function renderConfigureModal(name, secrets) {
   modal.className = 'configure-modal';
 
   const header = document.createElement('h3');
-  header.textContent = 'Configure ' + name;
+  header.textContent = I18n.t('config.title', { name: name });
   modal.appendChild(header);
 
   const form = document.createElement('div');
@@ -2472,7 +2683,7 @@ function renderConfigureModal(name, secrets) {
     if (secret.optional) {
       const opt = document.createElement('span');
       opt.className = 'field-optional';
-      opt.textContent = ' (optional)';
+      opt.textContent = I18n.t('config.optional');
       label.appendChild(opt);
     }
     field.appendChild(label);
@@ -2483,7 +2694,7 @@ function renderConfigureModal(name, secrets) {
     const input = document.createElement('input');
     input.type = 'password';
     input.name = secret.name;
-    input.placeholder = secret.provided ? '(already set — leave empty to keep)' : '';
+    input.placeholder = secret.provided ? I18n.t('config.alreadySet') : '';
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') submitConfigureModal(name, fields);
     });
@@ -2493,13 +2704,13 @@ function renderConfigureModal(name, secrets) {
       const badge = document.createElement('span');
       badge.className = 'field-provided';
       badge.textContent = '\u2713';
-      badge.title = 'Already configured';
+      badge.title = I18n.t('config.alreadyConfigured');
       inputRow.appendChild(badge);
     }
     if (secret.auto_generate && !secret.provided) {
       const hint = document.createElement('span');
       hint.className = 'field-autogen';
-      hint.textContent = 'Auto-generated if empty';
+      hint.textContent = I18n.t('config.autoGenerate');
       inputRow.appendChild(hint);
     }
 
@@ -2515,13 +2726,13 @@ function renderConfigureModal(name, secrets) {
 
   const submitBtn = document.createElement('button');
   submitBtn.className = 'btn-ext activate';
-  submitBtn.textContent = 'Save';
+  submitBtn.textContent = I18n.t('config.save');
   submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
   actions.appendChild(submitBtn);
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'btn-ext remove';
-  cancelBtn.textContent = 'Cancel';
+  cancelBtn.textContent = I18n.t('config.cancel');
   cancelBtn.addEventListener('click', closeConfigureModal);
   actions.appendChild(cancelBtn);
 
@@ -2541,7 +2752,8 @@ function submitConfigureModal(name, fields) {
   }
 
   // Disable buttons to prevent double-submit
-  var btns = document.querySelectorAll('.configure-actions button');
+  const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
+  var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];
   btns.forEach(function(b) { b.disabled = true; });
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
@@ -2552,8 +2764,10 @@ function submitConfigureModal(name, fields) {
       if (res.success) {
         closeConfigureModal();
         if (res.auth_url) {
-          // OAuth flow started — open consent popup. The auth_completed SSE will
-          // not arrive immediately (it fires after OAuth callback), so show a toast now.
+          showAuthCard({
+            extension_name: name,
+            auth_url: res.auth_url,
+          });
           showToast('Opening OAuth authorization for ' + name, 'info');
           openOAuthUrl(res.auth_url);
           loadExtensions();
@@ -2572,8 +2786,9 @@ function submitConfigureModal(name, fields) {
     });
 }
 
-function closeConfigureModal() {
-  const existing = document.querySelector('.configure-overlay');
+function closeConfigureModal(extensionName) {
+  if (typeof extensionName !== 'string') extensionName = null;
+  const existing = getConfigureOverlay(extensionName);
   if (existing) existing.remove();
 }
 
@@ -2761,11 +2976,11 @@ function loadJobs() {
 
 function renderJobsSummary(s) {
   document.getElementById('jobs-summary').innerHTML = ''
-    + summaryCard('Total', s.total, '')
-    + summaryCard('In Progress', s.in_progress, 'active')
-    + summaryCard('Completed', s.completed, 'completed')
-    + summaryCard('Failed', s.failed, 'failed')
-    + summaryCard('Stuck', s.stuck, 'stuck');
+    + summaryCard(I18n.t('jobs.summary.total'), s.total, '')
+    + summaryCard(I18n.t('jobs.summary.inProgress'), s.in_progress, 'active')
+    + summaryCard(I18n.t('jobs.summary.completed'), s.completed, 'completed')
+    + summaryCard(I18n.t('jobs.summary.failed'), s.failed, 'failed')
+    + summaryCard(I18n.t('jobs.summary.stuck'), s.stuck, 'stuck');
 }
 
 function summaryCard(label, count, cls) {
@@ -2792,11 +3007,11 @@ function renderJobsList(jobs) {
 
     let actionBtns = '';
     if (job.state === 'pending' || job.state === 'in_progress') {
-      actionBtns = '<button class="btn-cancel" onclick="event.stopPropagation(); cancelJob(\'' + job.id + '\')">Cancel</button>';
+      actionBtns = '<button class="btn-cancel" data-action="cancel-job" data-id="' + escapeHtml(job.id) + '">Cancel</button>';
     }
     // Retry is only shown in the detail view where can_restart is available.
 
-    return '<tr class="job-row" onclick="openJobDetail(\'' + job.id + '\')">'
+    return '<tr class="job-row" data-action="open-job" data-id="' + escapeHtml(job.id) + '">'
       + '<td title="' + escapeHtml(job.id) + '">' + shortId + '</td>'
       + '<td>' + escapeHtml(job.title) + '</td>'
       + '<td><span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span></td>'
@@ -2859,12 +3074,12 @@ function renderJobDetail(job) {
   const header = document.createElement('div');
   header.className = 'job-detail-header';
 
-  let headerHtml = '<button class="btn-back" onclick="closeJobDetail()">&larr; Back</button>'
+  let headerHtml = '<button class="btn-back" data-action="close-job-detail">&larr; Back</button>'
     + '<h2>' + escapeHtml(job.title) + '</h2>'
     + '<span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span>';
 
   if ((job.state === 'failed' || job.state === 'interrupted') && job.can_restart === true) {
-    headerHtml += '<button class="btn-restart" onclick="restartJob(\'' + job.id + '\')">Retry</button>';
+    headerHtml += '<button class="btn-restart" data-action="restart-job" data-id="' + escapeHtml(job.id) + '">Retry</button>';
   }
   if (job.browse_url) {
     headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">Browse Files</a>';
@@ -3295,11 +3510,11 @@ function loadRoutines() {
 
 function renderRoutinesSummary(s) {
   document.getElementById('routines-summary').innerHTML = ''
-    + summaryCard('Total', s.total, '')
-    + summaryCard('Enabled', s.enabled, 'active')
-    + summaryCard('Disabled', s.disabled, '')
-    + summaryCard('Failing', s.failing, 'failed')
-    + summaryCard('Runs Today', s.runs_today, 'completed');
+    + summaryCard(I18n.t('routines.summary.total'), s.total, '')
+    + summaryCard(I18n.t('routines.summary.enabled'), s.enabled, 'active')
+    + summaryCard(I18n.t('routines.summary.disabled'), s.disabled, '')
+    + summaryCard(I18n.t('routines.summary.failing'), s.failing, 'failed')
+    + summaryCard(I18n.t('routines.summary.runsToday'), s.runs_today, 'completed');
 }
 
 function renderRoutinesList(routines) {
@@ -3321,7 +3536,7 @@ function renderRoutinesList(routines) {
     const toggleLabel = r.enabled ? 'Disable' : 'Enable';
     const toggleClass = r.enabled ? 'btn-cancel' : 'btn-restart';
 
-    return '<tr class="routine-row" onclick="openRoutineDetail(\'' + r.id + '\')">'
+    return '<tr class="routine-row" data-action="open-routine" data-id="' + escapeHtml(r.id) + '">'
       + '<td>' + escapeHtml(r.name) + '</td>'
       + '<td>' + escapeHtml(r.trigger_summary) + '</td>'
       + '<td>' + escapeHtml(r.action_type) + '</td>'
@@ -3330,9 +3545,9 @@ function renderRoutinesList(routines) {
       + '<td>' + r.run_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(r.status) + '</span></td>'
       + '<td>'
-      + '<button class="' + toggleClass + '" onclick="event.stopPropagation(); toggleRoutine(\'' + r.id + '\')">' + toggleLabel + '</button> '
-      + '<button class="btn-restart" onclick="event.stopPropagation(); triggerRoutine(\'' + r.id + '\')">Run</button> '
-      + '<button class="btn-cancel" onclick="event.stopPropagation(); deleteRoutine(\'' + r.id + '\', \'' + escapeHtml(r.name) + '\')">Delete</button>'
+      + '<button class="' + toggleClass + '" data-action="toggle-routine" data-id="' + escapeHtml(r.id) + '">' + toggleLabel + '</button> '
+      + '<button class="btn-restart" data-action="trigger-routine" data-id="' + escapeHtml(r.id) + '">Run</button> '
+      + '<button class="btn-cancel" data-action="delete-routine" data-id="' + escapeHtml(r.id) + '" data-name="' + escapeHtml(r.name) + '">Delete</button>'
       + '</td>'
       + '</tr>';
   }).join('');
@@ -3368,7 +3583,7 @@ function renderRoutineDetail(routine) {
     : 'active';
 
   let html = '<div class="job-detail-header">'
-    + '<button class="btn-back" onclick="closeRoutineDetail()">&larr; Back</button>'
+    + '<button class="btn-back" data-action="close-routine-detail">&larr; Back</button>'
     + '<h2>' + escapeHtml(routine.name) + '</h2>'
     + '<span class="badge ' + statusClass + '">' + escapeHtml(statusLabel) + '</span>'
     + '</div>';
@@ -3415,7 +3630,7 @@ function renderRoutineDetail(routine) {
         + '<td>' + formatDate(run.completed_at) + '</td>'
         + '<td><span class="badge ' + runStatusClass + '">' + escapeHtml(run.status) + '</span></td>'
         + '<td>' + escapeHtml(run.result_summary || '-')
-          + (run.job_id ? ' <a href="#" onclick="event.preventDefault(); switchTab(\'jobs\'); openJobDetail(\'' + run.job_id + '\')">[view job]</a>' : '')
+          + (run.job_id ? ' <a href="#" data-action="view-run-job" data-id="' + escapeHtml(run.job_id) + '">[view job]</a>' : '')
           + '</td>'
         + '<td>' + (run.tokens_used != null ? run.tokens_used : '-') + '</td>'
         + '</tr>';
@@ -3465,17 +3680,18 @@ function formatRelativeTime(isoString) {
   const absDiff = Math.abs(diffMs);
   const future = diffMs < 0;
 
-  if (absDiff < 60000) return future ? 'in <1m' : '<1m ago';
+  if (absDiff < 60000) 
+    return future ? I18n.t('time.lessThan1MinuteFromNow') : I18n.t('time.lessThan1MinuteAgo');
   if (absDiff < 3600000) {
     const m = Math.floor(absDiff / 60000);
-    return future ? 'in ' + m + 'm' : m + 'm ago';
+    return future ? I18n.t('time.minutesFromNow', { n: m }) : I18n.t('time.minutesAgo', { n: m });
   }
   if (absDiff < 86400000) {
     const h = Math.floor(absDiff / 3600000);
-    return future ? 'in ' + h + 'h' : h + 'h ago';
+    return future ? I18n.t('time.hoursFromNow', { n: h }) : I18n.t('time.hoursAgo', { n: h });
   }
   const days = Math.floor(absDiff / 86400000);
-  return future ? 'in ' + days + 'd' : days + 'd ago';
+  return future ? I18n.t('time.daysFromNow', { n: days }) : I18n.t('time.daysAgo', { n: days });
 }
 
 // --- Gateway status widget ---
@@ -3525,18 +3741,18 @@ function fetchGatewayStatus() {
     }
 
     // Connection info
-    html += '<div class="gw-section-label">Connections</div>';
-    html += '<div class="gw-stat"><span>SSE</span><span>' + (data.sse_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>WebSocket</span><span>' + (data.ws_connections || 0) + '</span></div>';
-    html += '<div class="gw-stat"><span>Uptime</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
+    html += '<div class="gw-section-label">' + I18n.t('dashboard.connections') + '</div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.sse') + '</span><span>' + (data.sse_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.websocket') + '</span><span>' + (data.ws_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>' + I18n.t('dashboard.uptime') + '</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
 
     // Cost tracker
     if (data.daily_cost != null) {
       html += '<div class="gw-divider"></div>';
-      html += '<div class="gw-section-label">Cost Today</div>';
-      html += '<div class="gw-stat"><span>Spent</span><span>' + formatCost(data.daily_cost) + '</span></div>';
+      html += '<div class="gw-section-label">' + I18n.t('dashboard.costToday') + '</div>';
+      html += '<div class="gw-stat"><span>' + I18n.t('dashboard.spent') + '</span><span>' + formatCost(data.daily_cost) + '</span></div>';
       if (data.actions_this_hour != null) {
-        html += '<div class="gw-stat"><span>Actions/hr</span><span>' + data.actions_this_hour + '</span></div>';
+        html += '<div class="gw-stat"><span>' + I18n.t('dashboard.actionsPerHour') + '</span><span>' + data.actions_this_hour + '</span></div>';
       }
     }
 
@@ -3657,7 +3873,7 @@ function renderTeePopover(report) {
     + '<div class="tee-field"><div class="tee-field-label">VM Config</div>'
     + '<div class="tee-field-value">' + escapeHtml(vmConfig) + '</div></div>'
     + '<div class="tee-popover-actions">'
-    + '<button class="tee-btn-copy" onclick="copyTeeReport()">Copy Full Report</button></div>';
+    + '<button class="tee-btn-copy" data-action="copy-tee-report">Copy Full Report</button></div>';
 }
 
 function copyTeeReport() {
@@ -3744,7 +3960,7 @@ function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   apiFetch('/api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
-      skillsList.innerHTML = '<div class="empty-state">No skills installed</div>';
+      skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
       return;
     }
     skillsList.innerHTML = '';
@@ -3752,7 +3968,7 @@ function loadSkills() {
       skillsList.appendChild(renderSkillCard(data.skills[i]));
     }
   }).catch(function(err) {
-    skillsList.innerHTML = '<div class="empty-state">Failed to load skills: ' + escapeHtml(err.message) + '</div>';
+    skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.loadFailed', {message: escapeHtml(err.message)}) + '</div>';
   });
 }
 
@@ -3789,7 +4005,7 @@ function renderSkillCard(skill) {
   if (skill.keywords && skill.keywords.length > 0) {
     var kw = document.createElement('div');
     kw.className = 'ext-keywords';
-    kw.textContent = 'Activates on: ' + skill.keywords.join(', ');
+    kw.textContent = I18n.t('skills.activatesOn') + ': ' + skill.keywords.join(', ');
     card.appendChild(kw);
   }
 
@@ -3800,7 +4016,7 @@ function renderSkillCard(skill) {
   if (skill.trust.toLowerCase() !== 'trusted') {
     var removeBtn = document.createElement('button');
     removeBtn.className = 'btn-ext remove';
-    removeBtn.textContent = 'Remove';
+    removeBtn.textContent = I18n.t('skills.remove');
     removeBtn.addEventListener('click', function() { removeSkill(skill.name); });
     actions.appendChild(removeBtn);
   }
@@ -3815,7 +4031,7 @@ function searchClawHub() {
   if (!query) return;
 
   var resultsDiv = document.getElementById('skill-search-results');
-  resultsDiv.innerHTML = '<div class="empty-state">Searching...</div>';
+  resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.searching') + '</div>';
 
   apiFetch('/api/skills/search', {
     method: 'POST',
@@ -3831,7 +4047,7 @@ function searchClawHub() {
       warning.style.borderLeft = '3px solid #f0ad4e';
       warning.style.paddingLeft = '12px';
       warning.style.marginBottom = '16px';
-      warning.textContent = 'Could not reach ClawHub registry: ' + data.catalog_error;
+      warning.textContent = I18n.t('skills.registryError', {message: data.catalog_error});
       resultsDiv.appendChild(warning);
     }
 
@@ -3863,10 +4079,10 @@ function searchClawHub() {
     }
 
     if (resultsDiv.children.length === 0) {
-      resultsDiv.innerHTML = '<div class="empty-state">No skills found for "' + escapeHtml(query) + '"</div>';
+      resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.noResults', {query: escapeHtml(query)}) + '</div>';
     }
   }).catch(function(err) {
-    resultsDiv.innerHTML = '<div class="empty-state">Search failed: ' + escapeHtml(err.message) + '</div>';
+    resultsDiv.innerHTML = '<div class="empty-state">' + I18n.t('skills.searchFailed', {message: escapeHtml(err.message)}) + '</div>';
   });
 }
 
@@ -3960,17 +4176,17 @@ function renderCatalogSkillCard(entry, installedNames) {
   if (isInstalled) {
     var label = document.createElement('span');
     label.className = 'ext-active-label';
-    label.textContent = 'Installed';
+    label.textContent = I18n.t('status.installed');
     actions.appendChild(label);
   } else {
     var installBtn = document.createElement('button');
     installBtn.className = 'btn-ext install';
-    installBtn.textContent = 'Install';
+    installBtn.textContent = I18n.t('extensions.install');
     installBtn.addEventListener('click', (function(s, btn) {
       return function() {
         if (!confirm('Install skill "' + s + '" from ClawHub?')) return;
         btn.disabled = true;
-        btn.textContent = 'Installing...';
+        btn.textContent = I18n.t('extensions.installing');
         installSkill(s, null, btn);
       };
     })(slug, installBtn));
@@ -4012,7 +4228,7 @@ function installSkill(nameOrSlug, url, btn) {
     body: body,
   }).then(function(res) {
     if (res.success) {
-      showToast('Installed skill "' + nameOrSlug + '"', 'success');
+      showToast(I18n.t('skills.installedSuccess', {name: nameOrSlug}), 'success');
     } else {
       showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
     }
@@ -4025,19 +4241,19 @@ function installSkill(nameOrSlug, url, btn) {
 }
 
 function removeSkill(name) {
-  if (!confirm('Remove skill "' + name + '"?')) return;
+  if (!confirm(I18n.t('skills.confirmRemove', { name: name }))) return;
   apiFetch('/api/skills/' + encodeURIComponent(name), {
     method: 'DELETE',
     headers: { 'X-Confirm-Action': 'true' },
   }).then(function(res) {
     if (res.success) {
-      showToast('Removed skill "' + name + '"', 'success');
+      showToast(I18n.t('skills.removed', { name: name }), 'success');
     } else {
-      showToast('Remove failed: ' + (res.message || 'unknown error'), 'error');
+      showToast(I18n.t('skills.removeFailed', { message: res.message || 'unknown error' }), 'error');
     }
     loadSkills();
   }).catch(function(err) {
-    showToast('Remove failed: ' + err.message, 'error');
+    showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
   });
 }
 
@@ -4139,3 +4355,94 @@ function formatDate(isoString) {
   const d = new Date(isoString);
   return d.toLocaleString();
 }
+
+// --- Event Listener Registration (CSP-safe, no inline handlers) ---
+
+document.getElementById('auth-connect-btn').addEventListener('click', () => authenticate());
+document.getElementById('restart-overlay').addEventListener('click', () => cancelRestart());
+document.getElementById('restart-close-btn').addEventListener('click', () => cancelRestart());
+document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());
+document.getElementById('restart-confirm-btn').addEventListener('click', () => confirmRestart());
+document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
+document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
+document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
+document.getElementById('assistant-thread').addEventListener('click', () => switchToAssistant());
+document.getElementById('send-btn').addEventListener('click', () => sendMessage());
+document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
+document.getElementById('memory-save-btn').addEventListener('click', () => saveMemoryEdit());
+document.getElementById('memory-cancel-btn').addEventListener('click', () => cancelMemoryEdit());
+document.getElementById('logs-server-level').addEventListener('change', (e) => setServerLogLevel(e.target.value));
+document.getElementById('logs-pause-btn').addEventListener('click', () => toggleLogsPause());
+document.getElementById('logs-clear-btn').addEventListener('click', () => clearLogs());
+document.getElementById('wasm-install-btn').addEventListener('click', () => installWasmExtension());
+document.getElementById('mcp-add-btn').addEventListener('click', () => addMcpServer());
+document.getElementById('skill-search-btn').addEventListener('click', () => searchClawHub());
+document.getElementById('skill-install-btn').addEventListener('click', () => installSkillFromForm());
+
+// --- Delegated Event Handlers (for dynamically generated HTML) ---
+
+document.addEventListener('click', function(e) {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+
+  switch (action) {
+    case 'copy-code':
+      copyCodeBlock(el);
+      break;
+    case 'breadcrumb-root':
+      e.preventDefault();
+      loadMemoryTree();
+      break;
+    case 'breadcrumb-file':
+      e.preventDefault();
+      readMemoryFile(el.dataset.path);
+      break;
+    case 'cancel-job':
+      e.stopPropagation();
+      cancelJob(el.dataset.id);
+      break;
+    case 'open-job':
+      openJobDetail(el.dataset.id);
+      break;
+    case 'close-job-detail':
+      closeJobDetail();
+      break;
+    case 'restart-job':
+      restartJob(el.dataset.id);
+      break;
+    case 'open-routine':
+      openRoutineDetail(el.dataset.id);
+      break;
+    case 'toggle-routine':
+      e.stopPropagation();
+      toggleRoutine(el.dataset.id);
+      break;
+    case 'trigger-routine':
+      e.stopPropagation();
+      triggerRoutine(el.dataset.id);
+      break;
+    case 'delete-routine':
+      e.stopPropagation();
+      deleteRoutine(el.dataset.id, el.dataset.name);
+      break;
+    case 'close-routine-detail':
+      closeRoutineDetail();
+      break;
+    case 'view-run-job':
+      e.preventDefault();
+      switchTab('jobs');
+      openJobDetail(el.dataset.id);
+      break;
+    case 'copy-tee-report':
+      copyTeeReport();
+      break;
+    case 'switch-language':
+      if (typeof switchLanguage === 'function') switchLanguage(el.dataset.lang);
+      break;
+  }
+});
+
+document.getElementById('language-btn').addEventListener('click', function() {
+  if (typeof toggleLanguageMenu === 'function') toggleLanguageMenu();
+});

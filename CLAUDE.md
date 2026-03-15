@@ -33,9 +33,16 @@ Key traits for extensibility: `Database`, `Channel`, `Tool`, `LlmProvider`, `Suc
 
 All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurrent access.
 
+## Extracted Crates
+
+Safety logic lives in `crates/ironclaw_safety/`. The `src/safety/mod.rs` shim re-exports everything for backward compatibility, but **new code should import from `ironclaw_safety` directly** (e.g. `use ironclaw_safety::SafetyLayer`). When touching a file that still uses `crate::safety::*`, migrate its imports to `ironclaw_safety::*`.
+
 ## Project Structure
 
 ```
+crates/
+└── ironclaw_safety/    # Extracted: prompt injection, validation, leak detection, policy
+
 src/
 ├── lib.rs              # Library root, module declarations
 ├── main.rs             # Entry point, CLI args, startup
@@ -99,16 +106,12 @@ src/
 │   └── job_manager.rs  # Container lifecycle (create, stop, cleanup)
 │
 ├── worker/             # Runs inside Docker containers
-│   ├── runtime.rs      # Worker execution loop (tool calls, LLM)
+│   ├── container.rs    # Container worker runtime (ContainerDelegate + shared agentic loop)
+│   ├── job.rs          # Background job worker (JobDelegate + shared agentic loop)
 │   ├── claude_bridge.rs # Claude Code bridge (spawns claude CLI)
 │   └── proxy_llm.rs    # LlmProvider that proxies through orchestrator
 │
-├── safety/             # Prompt injection defense
-│   ├── sanitizer.rs    # Pattern detection, content escaping
-│   ├── validator.rs    # Input validation (length, encoding, patterns)
-│   ├── policy.rs       # PolicyRule system with severity/actions
-│   ├── leak_detector.rs # Secret detection (API keys, tokens, etc.)
-│   └── credential_detect.rs # HTTP request credential detection
+├── safety/             # Re-export shim for crates/ironclaw_safety (see Extracted Crates)
 │
 ├── llm/                # Multi-provider LLM integration — see src/llm/CLAUDE.md
 │

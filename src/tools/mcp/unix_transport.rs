@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::tools::mcp::protocol::{McpRequest, McpResponse};
-use crate::tools::mcp::transport::{McpTransport, spawn_jsonrpc_reader, write_jsonrpc_line};
+use crate::tools::mcp::transport::{McpTransport, spawn_jsonrpc_reader, stream_transport_send};
 use crate::tools::tool::ToolError;
 
 /// MCP transport that communicates over a Unix domain socket.
@@ -91,49 +91,14 @@ impl McpTransport for UnixMcpTransport {
         request: &McpRequest,
         _headers: &HashMap<String, String>,
     ) -> Result<McpResponse, ToolError> {
-        let (tx, rx) = oneshot::channel();
-
-        // Register the pending response handler before writing the request,
-        // so we don't miss a fast response from the server.
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(request.id.unwrap_or(0), tx);
-        }
-
-        // Write the request to the socket.
-        {
-            let mut writer = self.writer.lock().await;
-            if let Err(e) = write_jsonrpc_line(&mut *writer, request).await {
-                // Remove the pending entry on write failure.
-                let mut pending = self.pending.lock().await;
-                pending.remove(&request.id.unwrap_or(0));
-                return Err(e);
-            }
-        }
-
-        // Wait for the response with a timeout.
-        let timeout = Duration::from_secs(30);
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => {
-                // Sender was dropped (reader task ended). Clean up pending entry.
-                let mut pending = self.pending.lock().await;
-                pending.remove(&request.id.unwrap_or(0));
-                Err(ToolError::ExternalService(format!(
-                    "[{}] MCP server closed connection before responding to request {:?}",
-                    self.server_name, request.id
-                )))
-            }
-            Err(_) => {
-                // Timeout: remove the pending entry.
-                let mut pending = self.pending.lock().await;
-                pending.remove(&request.id.unwrap_or(0));
-                Err(ToolError::ExternalService(format!(
-                    "[{}] Timeout waiting for response to request {:?} after {:?}",
-                    self.server_name, request.id, timeout
-                )))
-            }
-        }
+        stream_transport_send(
+            &self.writer,
+            &self.pending,
+            request,
+            &self.server_name,
+            Duration::from_secs(30),
+        )
+        .await
     }
 
     async fn shutdown(&self) -> Result<(), ToolError> {

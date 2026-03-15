@@ -18,7 +18,7 @@ use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
-use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
+use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
@@ -738,6 +738,18 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+        // Log at info level only for tracking without exposing PII (user_id can be a phone number)
+        tracing::info!(message_id = %message.id, "Processing message");
+
+        // Log sensitive details at debug level for troubleshooting
+        tracing::debug!(
+            message_id = %message.id,
+            user_id = %message.user_id,
+            channel = %message.channel,
+            thread_id = ?message.thread_id,
+            "Message details"
+        );
+
         // Set message tool context for this turn (current channel and target)
         // For Signal, use signal_target from metadata (group:ID or phone number),
         // otherwise fall back to user_id
@@ -753,7 +765,7 @@ impl Agent {
 
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
-        tracing::debug!(
+        tracing::trace!(
             "[agent_loop] Parsed submission: {:?}",
             std::any::type_name_of_val(&submission)
         );
@@ -786,10 +798,21 @@ impl Agent {
 
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(ref external_thread_id) = message.thread_id {
-            self.maybe_hydrate_thread(message, external_thread_id).await;
+            tracing::trace!(
+                message_id = %message.id,
+                thread_id = %external_thread_id,
+                "Hydrating thread from DB"
+            );
+            if let Some(rejection) = self.maybe_hydrate_thread(message, external_thread_id).await {
+                return Ok(Some(format!("Error: {}", rejection)));
+            }
         }
 
         // Resolve session and thread
+        tracing::debug!(
+            message_id = %message.id,
+            "Resolving session and thread"
+        );
         let (session, thread_id) = self
             .session_manager
             .resolve_thread(
@@ -798,6 +821,11 @@ impl Agent {
                 message.thread_id.as_deref(),
             )
             .await;
+        tracing::debug!(
+            message_id = %message.id,
+            thread_id = %thread_id,
+            "Resolved session and thread"
+        );
 
         // Auth mode interception: if the thread is awaiting a token, route
         // the message directly to the credential store. Nothing touches
@@ -827,7 +855,7 @@ impl Agent {
             }
         }
 
-        tracing::debug!(
+        tracing::trace!(
             "Received message from {} on {} ({} chars)",
             message.user_id,
             message.channel,
@@ -908,29 +936,10 @@ impl Agent {
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
-            SubmissionResult::NeedApproval {
-                request_id,
-                tool_name,
-                description,
-                parameters,
-            } => {
-                // Each channel renders the approval prompt via send_status.
-                // Web gateway shows an inline card, REPL prints a formatted prompt, etc.
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ApprovalNeeded {
-                            request_id: request_id.to_string(),
-                            tool_name,
-                            description,
-                            parameters,
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-
-                // Empty string signals the caller to skip respond() (no duplicate text)
+            SubmissionResult::NeedApproval { .. } => {
+                // ApprovalNeeded status was already sent by thread_ops.rs before
+                // returning this result. Empty string signals the caller to skip
+                // respond() (no duplicate text).
                 Ok(Some(String::new()))
             }
         }

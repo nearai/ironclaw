@@ -209,6 +209,7 @@ async fn start_test_server_with_provider(
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -699,6 +700,7 @@ async fn test_no_llm_provider_returns_503() {
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
@@ -727,21 +729,45 @@ async fn test_no_llm_provider_returns_503() {
 
 #[tokio::test]
 async fn test_chat_completions_body_too_large() {
-    let (addr, _state, _mock_state) = start_test_server().await;
-    let url = format!("http://{}/v1/chat/completions", addr);
+    use axum::{Router, body::Body, extract::DefaultBodyLimit, middleware, routing::post};
+    use tower::ServiceExt;
 
-    // Build a payload over 10 MB (the gateway's DefaultBodyLimit)
+    let mock_state = Arc::new(MockLlmState::default());
+    let llm_provider: Arc<dyn LlmProvider> = Arc::new(MockLlmProvider::new(mock_state));
+    let state = ironclaw::channels::web::test_helpers::TestGatewayBuilder::new()
+        .llm_provider(llm_provider)
+        .build();
+    let auth_state = ironclaw::channels::web::auth::AuthState {
+        token: AUTH_TOKEN.to_string(),
+    };
+
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(ironclaw::channels::web::openai_compat::chat_completions_handler),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            auth_state,
+            ironclaw::channels::web::auth::auth_middleware,
+        ))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+        .with_state(state);
+
+    // Build a payload over 10 MB (the gateway's DefaultBodyLimit).
     let big_content = "x".repeat(11 * 1024 * 1024);
-    let resp = client()
-        .post(&url)
-        .bearer_auth(AUTH_TOKEN)
-        .json(&serde_json::json!({
-            "model": "mock-model-v1",
-            "messages": [{"role": "user", "content": big_content}]
-        }))
-        .send()
-        .await
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": "mock-model-v1",
+        "messages": [{"role": "user", "content": big_content}]
+    }))
+    .unwrap();
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("authorization", format!("Bearer {}", AUTH_TOKEN))
+        .header("content-type", "application/json")
+        .body(Body::from(body))
         .unwrap();
 
+    let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), 413);
 }

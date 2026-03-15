@@ -46,14 +46,14 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Bonjour/mDNS discovery | ✅ | ❌ | |
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status + /healthz + /readyz, with channel-backed readiness probes |
-| `doctor` diagnostics | ✅ | ❌ | |
+| `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
 | Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies |
 | APNs push pipeline | ✅ | ❌ | Wake disconnected iOS nodes via push |
 | Oversized payload guard | ✅ | 🚧 | HTTP webhook has 64KB body limit + Content-Length check; no chat.history cap |
-| Pre-prompt context diagnostics | ✅ | ❌ | Context size logging before prompt |
+| Pre-prompt context diagnostics | ✅ | 🚧 | Token breakdown logged before LLM call (conversational dispatcher path); other LLM entry points not yet covered |
 
 ### Owner: _Unassigned_
 
@@ -159,23 +159,23 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `tui` | ✅ | ✅ | - | Ratatui TUI |
 | `config` | ✅ | ✅ | - | Read/write config plus validate/path helpers |
 | `backup` | ✅ | ❌ | P3 | Create/verify local backup archives |
-| `channels` | ✅ | ❌ | P2 | Channel management |
+| `channels` | ✅ | 🚧 | P2 | `list` implemented; `enable`/`disable`/`status` deferred pending config source unification |
 | `models` | ✅ | 🚧 | - | Model selector in TUI |
 | `status` | ✅ | ✅ | - | System status (enriched session details) |
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing (shows subagent models) |
 | `memory` | ✅ | ✅ | - | Memory search CLI |
-| `skills` | ✅ | ✅ | - | Skills tools + web API endpoints (install, list, activate) |
+| `skills` | ✅ | ✅ | - | CLI subcommands (list, search, info) + agent tools + web API endpoints |
 | `pairing` | ✅ | ✅ | - | list/approve, account selector |
 | `nodes` | ✅ | ❌ | P3 | Device management, remove/clear flows |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
 | `hooks` | ✅ | ✅ | P2 | Lifecycle hooks |
-| `cron` | ✅ | ❌ | P2 | Scheduled jobs (model/thinking fields in edit) |
+| `cron` | ✅ | 🚧 | P2 | list/create/edit/enable/disable/delete/history; TODO: `cron run`, model/thinking fields |
 | `webhooks` | ✅ | ❌ | P3 | Webhook config |
 | `message send` | ✅ | ❌ | P2 | Send to channels |
 | `browser` | ✅ | ❌ | P3 | Browser automation |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
-| `doctor` | ✅ | ❌ | P2 | Diagnostics |
+| `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
 | `logs` | ✅ | ❌ | P3 | Query logs |
 | `update` | ✅ | ❌ | P3 | Self-update |
 | `completion` | ✅ | ✅ | - | Shell completion |
@@ -245,7 +245,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
 | MiniMax | ✅ | ❌ | P3 | Regional endpoint selection |
-| GLM-5 | ✅ | ❌ | P3 | |
+| GLM-5 | ✅ | ✅ | P3 | Via Z.AI provider (`zai`) using OpenAI-compatible chat completions |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
 | llama.cpp (native) | ❌ | 🔮 | P3 | Rust bindings |
 
@@ -440,6 +440,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `before_agent_start` hook | ✅ | ❌ | P2 | Model/provider override |
 | `before_message_write` hook | ✅ | ❌ | P2 | Pre-write interception |
 | `onMessage` hook | ✅ | ✅ | - | Routines with event trigger |
+| Structured system-event routines | ✅ | ✅ | P2 | `system_event` trigger + `event_emit` tool for event-driven automation |
 | `onSessionStart` hook | ✅ | ✅ | P2 | |
 | `onSessionEnd` hook | ✅ | ✅ | P2 | |
 | `transcribeAudio` hook | ✅ | ❌ | P3 | |
@@ -558,7 +559,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Media handling (images, PDFs)
 - ✅ Ollama/local model support (via rig::providers::ollama)
 - ❌ Configuration hot-reload
-- ❌ Webhook trigger endpoint in web gateway
+- ✅ Tool-driven webhook ingress (`/webhook/tools/{tool}` -> host-verified + tool-normalized `system_event` routines)
 - ❌ Channel health monitor with auto-restart
 - ❌ Partial output preservation on abort
 

@@ -15,6 +15,7 @@ configurations.
 | io.net | `ionet` | `IONET_API_KEY` | Intelligence API |
 | Mistral | `mistral` | `MISTRAL_API_KEY` | Mistral models |
 | Yandex AI Studio | `yandex` | `YANDEX_API_KEY` | YandexGPT models |
+| MiniMax | `minimax` | `MINIMAX_API_KEY` | MiniMax-M2.5 models |
 | Cloudflare Workers AI | `cloudflare` | `CLOUDFLARE_API_KEY` | Access to Workers AI |
 | Ollama | `ollama` | No | Local inference |
 | AWS Bedrock | `bedrock` | AWS credentials | Native Converse API |
@@ -71,6 +72,25 @@ OLLAMA_MODEL=llama3.2
 ```
 
 Pull a model first: `ollama pull llama3.2`
+
+---
+
+## MiniMax
+
+[MiniMax](https://platform.minimax.io) provides high-performance language models with 204,800 token context windows.
+
+```env
+LLM_BACKEND=minimax
+MINIMAX_API_KEY=...
+```
+
+Available models: `MiniMax-M2.5` (default), `MiniMax-M2.5-highspeed`
+
+To use the China mainland endpoint, set:
+
+```env
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1
+```
 
 ---
 
