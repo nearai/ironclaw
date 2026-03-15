@@ -1398,7 +1398,7 @@ mod tests {
         // END marker appears before BEGIN — should not match as a valid range.
         let existing = format!(
             "Preamble\n{}\nstray end\n{}\nreal begin\n{}\nreal end\n{}",
-            PROFILE_SECTION_END,   // stray END first
+            PROFILE_SECTION_END, // stray END first
             "middle content",
             PROFILE_SECTION_BEGIN, // BEGIN comes after
             PROFILE_SECTION_END,   // proper END
