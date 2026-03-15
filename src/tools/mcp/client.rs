@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
@@ -58,9 +58,10 @@ pub struct McpClient {
     /// Custom headers to include in every request.
     custom_headers: HashMap<String, String>,
 
-    /// Whether the MCP initialize handshake has completed.
-    /// Used as a local idempotency guard when no session_manager is present.
-    initialized: AtomicBool,
+    /// Ensures the MCP initialize handshake runs exactly once.
+    /// Uses `OnceCell` to serialize concurrent callers so only one
+    /// actually sends the request; subsequent calls return immediately.
+    initialized: tokio::sync::OnceCell<InitializeResult>,
 }
 
 impl McpClient {
@@ -83,7 +84,7 @@ impl McpClient {
             user_id: "default".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
-            initialized: AtomicBool::new(false),
+            initialized: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -106,7 +107,7 @@ impl McpClient {
             user_id: "default".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
-            initialized: AtomicBool::new(false),
+            initialized: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -114,20 +115,24 @@ impl McpClient {
     ///
     /// Use this when you have an `McpServerConfig` with custom headers but no OAuth.
     /// The config must use HTTP transport (the default); for stdio/UDS use `new_with_transport`.
-    pub fn new_with_config(config: McpServerConfig) -> Self {
-        assert!(
-            matches!(
-                config.effective_transport(),
-                crate::tools::mcp::config::EffectiveTransport::Http
-            ),
-            "new_with_config only supports HTTP transport; use new_with_transport for stdio/UDS"
-        );
+    ///
+    /// Returns an error if the config uses a non-HTTP transport.
+    pub fn new_with_config(config: McpServerConfig) -> Result<Self, ToolError> {
+        if !matches!(
+            config.effective_transport(),
+            crate::tools::mcp::config::EffectiveTransport::Http
+        ) {
+            return Err(ToolError::InvalidParameters(
+                "new_with_config only supports HTTP transport; use new_with_transport for stdio/UDS"
+                    .to_string(),
+            ));
+        }
         let transport = Arc::new(HttpMcpTransport::new(
             config.url.clone(),
             config.name.clone(),
         ));
 
-        Self {
+        Ok(Self {
             transport,
             server_url: config.url.clone(),
             server_name: config.name.clone(),
@@ -137,9 +142,9 @@ impl McpClient {
             secrets: None,
             user_id: "default".to_string(),
             custom_headers: config.headers.clone(),
-            initialized: AtomicBool::new(false),
+            initialized: tokio::sync::OnceCell::new(),
             server_config: Some(config),
-        }
+        })
     }
 
     /// Create a new authenticated MCP client.
@@ -169,7 +174,7 @@ impl McpClient {
             user_id: user_id.into(),
             server_config: Some(config),
             custom_headers,
-            initialized: AtomicBool::new(false),
+            initialized: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -205,7 +210,7 @@ impl McpClient {
             user_id: user_id.into(),
             server_config,
             custom_headers,
-            initialized: AtomicBool::new(false),
+            initialized: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -270,7 +275,10 @@ impl McpClient {
             .keys()
             .any(|k| k.eq_ignore_ascii_case("authorization"));
         if !has_custom_auth && let Some(token) = self.get_access_token().await? {
-            headers.insert("Authorization".to_string(), format!("Bearer {}", token));
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                headers.insert("Authorization".to_string(), format!("Bearer {}", trimmed));
+            }
         }
         if let Some(ref session_manager) = self.session_manager
             && let Some(session_id) = session_manager.get_session_id(&self.server_name).await
@@ -297,7 +305,12 @@ impl McpClient {
             match result {
                 Ok(response) => return Ok(response),
                 Err(ToolError::ExternalService(ref msg))
-                    if msg.contains("401") || msg.contains("Unauthorized") =>
+                    if msg.contains("401")
+                        || msg.contains("Unauthorized")
+                        || (msg.contains("400") && {
+                            let lower = msg.to_ascii_lowercase();
+                            lower.contains("authorization") || lower.contains("authenticate")
+                        }) =>
                 {
                     if attempt == 0
                         && let Some(ref secrets) = self.secrets
@@ -336,53 +349,64 @@ impl McpClient {
     }
 
     /// Initialize the connection to the MCP server.
+    ///
+    /// Uses `OnceCell` to guarantee that exactly one caller performs the
+    /// handshake, even under concurrent access. Subsequent calls return
+    /// immediately.
     pub async fn initialize(&self) -> Result<InitializeResult, ToolError> {
-        // Fast path: already initialized (local flag or session manager)
-        if self.initialized.load(Ordering::Relaxed) {
-            return Ok(InitializeResult::default());
-        }
-        if let Some(ref session_manager) = self.session_manager
-            && session_manager.is_initialized(&self.server_name).await
-        {
-            self.initialized.store(true, Ordering::Relaxed);
-            return Ok(InitializeResult::default());
-        }
-        if let Some(ref session_manager) = self.session_manager {
-            session_manager
-                .get_or_create(&self.server_name, &self.server_url)
-                .await;
-        }
+        let result = self
+            .initialized
+            .get_or_try_init(|| async {
+                if let Some(ref session_manager) = self.session_manager
+                    && session_manager.is_initialized(&self.server_name).await
+                {
+                    return Ok(InitializeResult::default());
+                }
+                if let Some(ref session_manager) = self.session_manager {
+                    session_manager
+                        .get_or_create(&self.server_name, &self.server_url)
+                        .await;
+                }
 
-        let request = McpRequest::initialize(self.next_request_id());
-        let response = self.send_request(request).await?;
+                let request = McpRequest::initialize(self.next_request_id());
+                let response = self.send_request(request).await?;
 
-        if let Some(error) = response.error {
-            return Err(ToolError::ExternalService(format!(
-                "MCP initialization error: {} (code {})",
-                error.message, error.code
-            )));
-        }
+                if let Some(error) = response.error {
+                    return Err(ToolError::ExternalService(format!(
+                        "MCP initialization error: {} (code {})",
+                        error.message, error.code
+                    )));
+                }
 
-        let result: InitializeResult = response
-            .result
-            .ok_or_else(|| {
-                ToolError::ExternalService("No result in initialize response".to_string())
+                let init_result: InitializeResult = response
+                    .result
+                    .ok_or_else(|| {
+                        ToolError::ExternalService("No result in initialize response".to_string())
+                    })
+                    .and_then(|r| {
+                        serde_json::from_value(r).map_err(|e| {
+                            ToolError::ExternalService(format!("Invalid initialize result: {}", e))
+                        })
+                    })?;
+
+                if let Some(ref session_manager) = self.session_manager {
+                    session_manager.mark_initialized(&self.server_name).await;
+                }
+
+                let notification = McpRequest::initialized_notification();
+                if let Err(e) = self.send_request(notification).await {
+                    tracing::debug!(
+                        "Failed to send initialized notification to '{}': {}",
+                        self.server_name,
+                        e
+                    );
+                }
+
+                Ok(init_result)
             })
-            .and_then(|r| {
-                serde_json::from_value(r).map_err(|e| {
-                    ToolError::ExternalService(format!("Invalid initialize result: {}", e))
-                })
-            })?;
+            .await?;
 
-        if let Some(ref session_manager) = self.session_manager {
-            session_manager.mark_initialized(&self.server_name).await;
-        }
-        self.initialized.store(true, Ordering::Relaxed);
-
-        let notification = McpRequest::initialized_notification();
-        let _ = self.send_request(notification).await;
-
-        Ok(result)
+        Ok(result.clone())
     }
 
     /// List available tools from the MCP server.
@@ -471,6 +495,11 @@ impl McpClient {
     }
 }
 
+/// Clone the client, resetting the tools cache and initialization state.
+/// The cloned client shares the same transport and session manager, so
+/// re-initialization will short-circuit via the session manager check if
+/// the source was already initialized. The `next_id` counter is copied
+/// so that cloned clients continue with monotonically increasing IDs.
 impl Clone for McpClient {
     fn clone(&self) -> Self {
         Self {
@@ -484,7 +513,7 @@ impl Clone for McpClient {
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
-            initialized: AtomicBool::new(self.initialized.load(Ordering::Relaxed)),
+            initialized: tokio::sync::OnceCell::new(),
         }
     }
 }
@@ -707,7 +736,7 @@ mod tests {
         headers.insert("X-Custom".to_string(), "value".to_string());
 
         let config = McpServerConfig::new("test", "http://localhost:8080").with_headers(headers);
-        let client = McpClient::new_with_config(config.clone());
+        let client = McpClient::new_with_config(config.clone()).expect("HTTP config should work");
 
         assert_eq!(client.server_name(), "test");
         assert_eq!(client.server_url(), "http://localhost:8080");
@@ -719,7 +748,7 @@ mod tests {
     #[test]
     fn test_new_with_config_no_headers() {
         let config = McpServerConfig::new("bare", "http://localhost:9090");
-        let client = McpClient::new_with_config(config);
+        let client = McpClient::new_with_config(config).expect("HTTP config should work");
 
         assert_eq!(client.server_name(), "bare");
         assert!(client.custom_headers.is_empty());
@@ -970,5 +999,258 @@ mod tests {
         let obj = result.as_object().unwrap();
         assert_eq!(obj.len(), 1);
         assert!(obj["outer"]["inner"].is_null());
+    }
+
+    // --- Issue 1 regression: new_with_config rejects non-HTTP transport ---
+
+    #[test]
+    fn test_new_with_config_rejects_stdio_transport() {
+        let config = McpServerConfig::new_stdio(
+            "stdio-server",
+            "echo",
+            vec!["hello".to_string()],
+            HashMap::new(),
+        );
+        let result = McpClient::new_with_config(config);
+        let err = result
+            .err()
+            .expect("stdio config must be rejected")
+            .to_string();
+        assert!(
+            err.contains("new_with_config only supports HTTP"),
+            "error should explain the restriction: {}",
+            err
+        );
+    }
+
+    // --- Issue 13: McpToolWrapper unit tests ---
+
+    fn make_test_mcp_tool(destructive: bool) -> McpTool {
+        use crate::tools::mcp::protocol::McpToolAnnotations;
+        McpTool {
+            name: "do_thing".to_string(),
+            description: "Does a thing".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": {"type": "string"}
+                }
+            }),
+            annotations: if destructive {
+                Some(McpToolAnnotations {
+                    destructive_hint: true,
+                    side_effects_hint: false,
+                    read_only_hint: false,
+                    execution_time_hint: None,
+                })
+            } else {
+                None
+            },
+        }
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_name_is_prefixed() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__myserver__do_thing".to_string(),
+            client,
+        };
+        assert_eq!(wrapper.name(), "mcp__myserver__do_thing");
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_description() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        assert_eq!(wrapper.description(), "Does a thing");
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_parameters_schema() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        let schema = wrapper.parameters_schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["input"].is_object());
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_requires_sanitization() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        assert!(
+            wrapper.requires_sanitization(),
+            "MCP tools should always require sanitization"
+        );
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_approval_destructive() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(true),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        let approval = wrapper.requires_approval(&serde_json::json!({}));
+        assert_eq!(approval, ApprovalRequirement::UnlessAutoApproved);
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_approval_non_destructive() {
+        let client = Arc::new(McpClient::new("http://localhost:8080"));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "mcp__s__do_thing".to_string(),
+            client,
+        };
+        let approval = wrapper.requires_approval(&serde_json::json!({}));
+        assert_eq!(approval, ApprovalRequirement::Never);
+    }
+
+    // Regression test: empty/whitespace-only tokens must not produce a
+    // malformed `Authorization: Bearer ` header (GitHub MCP returns 400
+    // "Authorization header is badly formatted" in this case).
+    #[tokio::test]
+    async fn test_build_headers_skips_empty_token() {
+        use crate::secrets::{CreateSecretParams, DecryptedSecret, Secret, SecretError, SecretRef};
+        use uuid::Uuid;
+
+        // In-memory secrets store that returns a whitespace-only string for the token.
+        struct EmptyTokenStore;
+        #[async_trait]
+        impl crate::secrets::SecretsStore for EmptyTokenStore {
+            async fn create(
+                &self,
+                _user_id: &str,
+                _params: CreateSecretParams,
+            ) -> Result<Secret, SecretError> {
+                unimplemented!()
+            }
+            async fn get(&self, _user_id: &str, _name: &str) -> Result<Secret, SecretError> {
+                unimplemented!()
+            }
+            async fn get_decrypted(
+                &self,
+                _user_id: &str,
+                _name: &str,
+            ) -> Result<DecryptedSecret, SecretError> {
+                DecryptedSecret::from_bytes(b"   ".to_vec())
+            }
+            async fn exists(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+            async fn delete(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+            async fn list(&self, _user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
+                Ok(Vec::new())
+            }
+            async fn record_usage(&self, _secret_id: Uuid) -> Result<(), SecretError> {
+                Ok(())
+            }
+            async fn is_accessible(
+                &self,
+                _user_id: &str,
+                _secret_name: &str,
+                _allowed_secrets: &[String],
+            ) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+        }
+
+        let config = McpServerConfig::new("github", "https://api.githubcopilot.com/mcp/");
+        let session_manager = Arc::new(McpSessionManager::new());
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(EmptyTokenStore);
+
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+
+        let headers = client.build_request_headers().await.unwrap(); // safety: test
+        assert!(
+            // safety: test
+            !headers.contains_key("Authorization"),
+            "Empty/whitespace token must not produce an Authorization header, got: {:?}",
+            headers.get("Authorization")
+        );
+    }
+
+    // Regression test: tokens with leading/trailing whitespace must be trimmed
+    // before being used in the Authorization header.
+    #[tokio::test]
+    async fn test_build_headers_trims_token() {
+        use crate::secrets::{CreateSecretParams, DecryptedSecret, Secret, SecretError, SecretRef};
+        use uuid::Uuid;
+
+        struct PaddedTokenStore;
+        #[async_trait]
+        impl crate::secrets::SecretsStore for PaddedTokenStore {
+            async fn create(
+                &self,
+                _user_id: &str,
+                _params: CreateSecretParams,
+            ) -> Result<Secret, SecretError> {
+                unimplemented!()
+            }
+            async fn get(&self, _user_id: &str, _name: &str) -> Result<Secret, SecretError> {
+                unimplemented!()
+            }
+            async fn get_decrypted(
+                &self,
+                _user_id: &str,
+                _name: &str,
+            ) -> Result<DecryptedSecret, SecretError> {
+                DecryptedSecret::from_bytes(b"  gho_abc123  \n".to_vec())
+            }
+            async fn exists(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+            async fn delete(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+            async fn list(&self, _user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
+                Ok(Vec::new())
+            }
+            async fn record_usage(&self, _secret_id: Uuid) -> Result<(), SecretError> {
+                Ok(())
+            }
+            async fn is_accessible(
+                &self,
+                _user_id: &str,
+                _secret_name: &str,
+                _allowed_secrets: &[String],
+            ) -> Result<bool, SecretError> {
+                Ok(true)
+            }
+        }
+
+        let config = McpServerConfig::new("github", "https://api.githubcopilot.com/mcp/");
+        let session_manager = Arc::new(McpSessionManager::new());
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(PaddedTokenStore);
+
+        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user");
+
+        let headers = client.build_request_headers().await.unwrap(); // safety: test
+        assert_eq!(
+            // safety: test
+            headers.get("Authorization").unwrap(), // safety: test
+            "Bearer gho_abc123",
+            "Token must be trimmed before use in Authorization header"
+        );
     }
 }

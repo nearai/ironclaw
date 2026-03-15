@@ -837,19 +837,16 @@ impl Settings {
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
         let parts: Vec<&str> = path.split('.').collect();
-        if parts.is_empty() {
-            return Err("Empty path".to_string());
-        }
+        let (final_key, parent_parts) =
+            parts.split_last().ok_or_else(|| "Empty path".to_string())?;
 
         // Navigate to parent and set the final key
         let mut current = &mut json;
-        for part in &parts[..parts.len() - 1] {
+        for part in parent_parts {
             current = current
                 .get_mut(*part)
                 .ok_or_else(|| format!("Path not found: {}", path))?;
         }
-
-        let final_key = parts.last().unwrap();
         let obj = current
             .as_object_mut()
             .ok_or_else(|| format!("Parent is not an object: {}", path))?;

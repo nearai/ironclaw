@@ -104,6 +104,20 @@ jobs:
       - name: Instantiation test (host linker compatibility)
         run: cargo test --all-features wit_compat -- --nocapture
 
+  bench-compile:
+    name: Benchmark Compilation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - name: Compile benchmarks
+        run: cargo bench --all-features --no-run
+
   docker-build:
     name: Docker Build
     if: >
@@ -135,7 +149,7 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check]
+    needs: [tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
     steps:
       - run: |
           # Unit tests must always pass
@@ -144,13 +158,14 @@ jobs:
             exit 1
           fi
           # Gated jobs: must pass on promotion PRs / push, skipped on developer PRs
-          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check; do
+          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check bench-compile; do
             case "$job" in
               telegram-tests) result="${{ needs.telegram-tests.result }}" ;;
               wasm-wit-compat) result="${{ needs.wasm-wit-compat.result }}" ;;
               docker-build) result="${{ needs.docker-build.result }}" ;;
               windows-build) result="${{ needs.windows-build.result }}" ;;
               version-check) result="${{ needs.version-check.result }}" ;;
+              bench-compile) result="${{ needs.bench-compile.result }}" ;;
             esac
             if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
               echo "$job failed"

@@ -526,23 +526,33 @@ async fn oauth_callback_handler(
             .get("error_description")
             .cloned()
             .unwrap_or_else(|| error.clone());
+        clear_auth_mode(&state).await;
         return oauth_error_page(&description);
     }
 
     let state_param = match params.get("state") {
         Some(s) if !s.is_empty() => s.clone(),
-        _ => return oauth_error_page("IronClaw"),
+        _ => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     let code = match params.get("code") {
         Some(c) if !c.is_empty() => c.clone(),
-        _ => return oauth_error_page("IronClaw"),
+        _ => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     // Look up the pending flow by CSRF state (atomic remove prevents replay)
     let ext_mgr = match state.extension_manager.as_ref() {
         Some(mgr) => mgr,
-        None => return oauth_error_page("IronClaw"),
+        None => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     // Strip instance prefix from state for registry lookup.
@@ -563,6 +573,7 @@ async fn oauth_callback_handler(
                 lookup_key = %lookup_key,
                 "OAuth callback received with unknown or expired state"
             );
+            clear_auth_mode(&state).await;
             return oauth_error_page("IronClaw");
         }
     };
@@ -581,6 +592,7 @@ async fn oauth_callback_handler(
                 message: "OAuth flow expired. Please try again.".to_string(),
             });
         }
+        clear_auth_mode(&state).await;
         return oauth_error_page(&flow.display_name);
     }
 
@@ -689,6 +701,10 @@ async fn oauth_callback_handler(
             );
         }
     }
+
+    // Clear auth mode regardless of outcome so the next user message goes
+    // through to the LLM instead of being intercepted as a token.
+    clear_auth_mode(&state).await;
 
     // After successful OAuth, auto-activate the extension so it moves
     // from "Installed (Authenticate)" → "Active" without a second click.
@@ -2183,6 +2199,10 @@ async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
+    // Clear auth mode regardless of outcome so the next user message goes
+    // through to the LLM instead of being intercepted as a token.
+    clear_auth_mode(&state).await;
+
     match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
             // Broadcast completion status so chat UI can dismiss success cases while
@@ -2351,12 +2371,16 @@ async fn routines_detail_handler(
             job_id: run.job_id,
         })
         .collect();
+    let routine_info = RoutineInfo::from_routine(&routine);
 
     Ok(Json(RoutineDetailResponse {
         id: routine.id,
         name: routine.name.clone(),
         description: routine.description.clone(),
         enabled: routine.enabled,
+        trigger_type: routine_info.trigger_type,
+        trigger_raw: routine_info.trigger_raw,
+        trigger_summary: routine_info.trigger_summary,
         trigger: serde_json::to_value(&routine.trigger).unwrap_or_default(),
         action: serde_json::to_value(&routine.action).unwrap_or_default(),
         guardrails: serde_json::to_value(&routine.guardrails).unwrap_or_default(),

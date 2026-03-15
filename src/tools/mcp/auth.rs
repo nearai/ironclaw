@@ -18,8 +18,46 @@ use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::mcp::config::McpServerConfig;
 
+/// Shared HTTP client for all OAuth/discovery requests.
+///
+/// Redirects are disabled for security (prevents redirect-based SSRF).
+/// Per-request timeouts can override the default via `.timeout()` on
+/// the request builder.
+fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, AuthError>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| AuthError::Http(e.to_string()))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// Log a debug message when a discovery/auth response is a redirect.
+/// Helps users diagnose configuration issues when legitimate servers
+/// redirect and our no-redirect policy causes a failure.
+fn log_redirect_if_applicable(url: &str, response: &reqwest::Response) {
+    if response.status().is_redirection() {
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok());
+        tracing::debug!(
+            "OAuth request to '{}' returned redirect {} -> {:?} (redirects disabled for security)",
+            url,
+            response.status(),
+            location
+        );
+    }
+}
+
 /// OAuth authorization error.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AuthError {
     #[error("Server does not support OAuth authorization")]
     NotSupported,
@@ -287,10 +325,8 @@ async fn validate_url_safe(url: &str) -> Result<(), AuthError> {
         )));
     }
     if scheme == "http" {
-        let host = parsed.host_str().unwrap_or("");
-        let is_localhost =
-            host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "[::1]";
-        if !is_localhost {
+        if !crate::tools::mcp::config::is_localhost_url(url) {
+            let host = parsed.host_str().unwrap_or("");
             return Err(AuthError::DiscoveryFailed(format!(
                 "HTTP is only allowed for localhost; use HTTPS for '{}'",
                 host
@@ -382,17 +418,16 @@ fn parse_resource_metadata_url(www_authenticate: &str) -> Option<String> {
 async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata, AuthError> {
     validate_url_safe(url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let response = client
         .get(url)
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    log_redirect_if_applicable(url, &response);
 
     if !response.status().is_success() {
         return Err(AuthError::DiscoveryFailed(format!(
@@ -408,26 +443,34 @@ async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata,
 }
 
 /// Try to discover OAuth metadata via 401 challenge response.
+///
+/// Also accepts 400 responses, since some servers return 400 for
+/// unauthenticated requests.  In practice the 400 path rarely yields a
+/// `WWW-Authenticate` header (GitHub's MCP does not), so discovery
+/// typically falls through to strategy 2 (RFC 9728) or 3 (direct).
 async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadata, AuthError> {
     validate_url_safe(server_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let response = client
         .post(server_url)
+        .timeout(Duration::from_secs(10))
         .header("Content-Type", "application/json")
         .body("{}")
         .send()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
 
-    if response.status().as_u16() != 401 {
+    log_redirect_if_applicable(server_url, &response);
+
+    let status = response.status().as_u16();
+
+    // Accept 401 (standard) and 400 (some servers like GitHub MCP use this).
+    // In both cases, look for WWW-Authenticate header with discovery metadata.
+    if status != 401 && status != 400 {
         return Err(AuthError::DiscoveryFailed(format!(
-            "Expected 401, got {}",
+            "Expected 401 or 400, got {}",
             response.status()
         )));
     }
@@ -437,7 +480,7 @@ async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadat
         .get("WWW-Authenticate")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| {
-            AuthError::DiscoveryFailed("No WWW-Authenticate header in 401 response".to_string())
+            AuthError::DiscoveryFailed(format!("No WWW-Authenticate header in {} response", status))
         })?;
 
     let resource_metadata_url = parse_resource_metadata_url(www_auth).ok_or_else(|| {
@@ -472,19 +515,18 @@ pub async fn discover_protected_resource(
 ) -> Result<ProtectedResourceMetadata, AuthError> {
     validate_url_safe(server_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let well_known_url = build_well_known_uri(server_url, "oauth-protected-resource")?;
 
     let response = client
         .get(&well_known_url)
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    log_redirect_if_applicable(&well_known_url, &response);
 
     if !response.status().is_success() {
         return Err(AuthError::NotSupported);
@@ -502,19 +544,18 @@ pub async fn discover_authorization_server(
 ) -> Result<AuthorizationServerMetadata, AuthError> {
     validate_url_safe(auth_server_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let well_known_url = build_well_known_uri(auth_server_url, "oauth-authorization-server")?;
 
     let response = client
         .get(&well_known_url)
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    log_redirect_if_applicable(&well_known_url, &response);
 
     if !response.status().is_success() {
         return Err(AuthError::DiscoveryFailed(format!(
@@ -595,11 +636,7 @@ pub async fn register_client(
 ) -> Result<ClientRegistrationResponse, AuthError> {
     validate_url_safe(registration_endpoint).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let request = ClientRegistrationRequest {
         client_name: "IronClaw".to_string(),
@@ -813,7 +850,7 @@ pub fn build_authorization_url(
     if let Some(pkce) = pkce {
         url.push_str(&format!(
             "&code_challenge={}&code_challenge_method=S256",
-            pkce.challenge
+            urlencoding::encode(&pkce.challenge)
         ));
     }
 
@@ -863,11 +900,7 @@ pub async fn exchange_code_for_token(
 ) -> Result<AccessToken, AuthError> {
     validate_url_safe(token_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     let mut params = vec![
         ("grant_type", "authorization_code".to_string()),
@@ -1054,11 +1087,7 @@ pub async fn refresh_access_token(
 
     validate_url_safe(&token_url).await?;
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| AuthError::Http(e.to_string()))?;
+    let client = oauth_http_client()?;
 
     // Compute canonical resource URI for RFC 8707
     let resource = canonical_resource_uri(&server_config.url);
@@ -1488,6 +1517,17 @@ mod tests {
                 "AuthError display mismatch for {:?}",
                 error
             );
+        }
+    }
+
+    #[test]
+    fn test_auth_error_clone_preserves_http_variant_and_payload() {
+        let original = AuthError::Http("builder failed".to_string());
+        let cloned = original.clone();
+
+        match cloned {
+            AuthError::Http(message) => assert_eq!(message, "builder failed"), // safety: test assertion in #[cfg(test)] module; not production panic path
+            other => panic!("expected AuthError::Http variant, got {other:?}"),
         }
     }
 
