@@ -248,12 +248,14 @@ impl ExtensionManager {
         self.tunnel_url
             .as_ref()
             .filter(|u| !u.is_empty())
-            .and_then(|raw| url::Url::parse(raw).ok())
-            .and_then(|u| u.host_str().map(String::from))
-            .filter(|host| !oauth_defaults::is_loopback_host(host))
-            .map(|_| {
-                let base = self.tunnel_url.as_ref().unwrap().trim_end_matches('/');
-                format!("{}/oauth/callback", base)
+            .and_then(|raw| {
+                let url = url::Url::parse(raw).ok()?;
+                let host = url.host_str().map(String::from)?;
+                if oauth_defaults::is_loopback_host(&host) {
+                    return None;
+                }
+                let base = raw.trim_end_matches('/');
+                Some(format!("{}/oauth/callback", base))
             })
     }
 
@@ -1309,8 +1311,12 @@ impl ExtensionManager {
         match fallback_decision(&primary_result, &entry.fallback_source) {
             FallbackDecision::Return => primary_result,
             FallbackDecision::TryFallback => {
-                let primary_err = primary_result.unwrap_err();
-                let fallback = entry.fallback_source.as_ref().unwrap();
+                // TryFallback guarantees primary is Err and fallback_source is Some.
+                let (primary_err, fallback) = match (primary_result, entry.fallback_source.as_ref())
+                {
+                    (Err(e), Some(f)) => (e, f),
+                    (other, _) => return other,
+                };
                 tracing::info!(
                     extension = %entry.name,
                     primary_error = %primary_err,
