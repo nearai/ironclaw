@@ -91,10 +91,18 @@ pub struct SignalConfig {
 }
 
 impl ChannelsConfig {
-    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &Settings, tunnel_enabled: bool) -> Result<Self, ConfigError> {
         let http = if optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some() {
+            // When a tunnel is configured, default to loopback since external
+            // traffic arrives through the tunnel. Without a tunnel the webhook
+            // server needs to accept connections from the network directly.
+            let default_host = if tunnel_enabled {
+                "127.0.0.1"
+            } else {
+                "0.0.0.0"
+            };
             Some(HttpConfig {
-                host: optional_env("HTTP_HOST")?.unwrap_or_else(|| "0.0.0.0".to_string()),
+                host: optional_env("HTTP_HOST")?.unwrap_or_else(|| default_host.to_string()),
                 port: parse_optional_env("HTTP_PORT", 8080)?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
                 user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
@@ -352,6 +360,69 @@ mod tests {
         assert_eq!(cfg.wasm_channel_owner_ids.get("telegram"), Some(&12345));
         assert_eq!(cfg.wasm_channel_owner_ids.get("slack"), Some(&67890));
         assert!(!cfg.wasm_channels_enabled);
+    }
+
+    /// When a tunnel is active and HTTP_HOST is not explicitly set, the
+    /// webhook server should default to loopback to avoid unnecessary exposure.
+    #[test]
+    fn http_host_defaults_to_loopback_with_tunnel() {
+        // Set HTTP_PORT to trigger HttpConfig creation, but leave HTTP_HOST unset
+        // so the default kicks in.
+        unsafe {
+            std::env::set_var("HTTP_PORT", "9999");
+            std::env::remove_var("HTTP_HOST");
+        }
+        let settings = crate::settings::Settings::default();
+        let cfg = ChannelsConfig::resolve(&settings, true).unwrap();
+        unsafe {
+            std::env::remove_var("HTTP_PORT");
+        }
+        let http = cfg.http.expect("HttpConfig should be present");
+        assert_eq!(
+            http.host, "127.0.0.1",
+            "tunnel active should default to loopback"
+        );
+        assert_eq!(http.port, 9999);
+    }
+
+    /// Without a tunnel, the webhook server defaults to 0.0.0.0 so external
+    /// services can reach it directly.
+    #[test]
+    fn http_host_defaults_to_all_interfaces_without_tunnel() {
+        unsafe {
+            std::env::set_var("HTTP_PORT", "9998");
+            std::env::remove_var("HTTP_HOST");
+        }
+        let settings = crate::settings::Settings::default();
+        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
+        unsafe {
+            std::env::remove_var("HTTP_PORT");
+        }
+        let http = cfg.http.expect("HttpConfig should be present");
+        assert_eq!(
+            http.host, "0.0.0.0",
+            "no tunnel should default to all interfaces"
+        );
+    }
+
+    /// An explicit HTTP_HOST always wins regardless of tunnel state.
+    #[test]
+    fn explicit_http_host_overrides_tunnel_default() {
+        unsafe {
+            std::env::set_var("HTTP_PORT", "9997");
+            std::env::set_var("HTTP_HOST", "192.168.1.50");
+        }
+        let settings = crate::settings::Settings::default();
+        let cfg = ChannelsConfig::resolve(&settings, true).unwrap();
+        unsafe {
+            std::env::remove_var("HTTP_PORT");
+            std::env::remove_var("HTTP_HOST");
+        }
+        let http = cfg.http.expect("HttpConfig should be present");
+        assert_eq!(
+            http.host, "192.168.1.50",
+            "explicit host should override tunnel default"
+        );
     }
 
     #[test]
