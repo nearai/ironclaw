@@ -170,6 +170,36 @@ impl DatabaseConfig {
         })
     }
 
+    /// Create a config from a raw PostgreSQL URL (for wizard/testing).
+    pub fn from_postgres_url(url: &str, pool_size: usize) -> Self {
+        Self {
+            backend: DatabaseBackend::Postgres,
+            url: SecretString::from(url.to_string()),
+            pool_size,
+            ssl_mode: SslMode::from_env(),
+            libsql_path: None,
+            libsql_url: None,
+            libsql_auth_token: None,
+        }
+    }
+
+    /// Create a config for a libSQL database (for wizard/testing).
+    pub fn from_libsql_path(
+        path: &str,
+        turso_url: Option<&str>,
+        turso_token: Option<&str>,
+    ) -> Self {
+        Self {
+            backend: DatabaseBackend::LibSql,
+            url: SecretString::from("unused://libsql".to_string()),
+            pool_size: 1,
+            ssl_mode: SslMode::default(),
+            libsql_path: Some(PathBuf::from(path)),
+            libsql_url: turso_url.map(String::from),
+            libsql_auth_token: turso_token.map(|t| SecretString::from(t.to_string())),
+        }
+    }
+
     /// Get the database URL (exposes the secret).
     pub fn url(&self) -> &str {
         self.url.expose_secret()

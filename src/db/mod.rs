@@ -180,6 +180,126 @@ pub async fn create_secrets_store(
     }
 }
 
+// ==================== Wizard / testing helpers ====================
+
+/// Issues found during PostgreSQL prerequisite validation.
+#[derive(Debug)]
+pub enum PgDiagnostic {
+    /// PostgreSQL version is too old.
+    VersionTooOld { found: String, minimum: u32 },
+    /// pgvector extension is not available.
+    PgVectorMissing { pg_major_version: u32 },
+}
+
+/// Connect to the database WITHOUT running migrations.
+///
+/// Returns both the `Database` trait object and backend-specific handles.
+/// Used by the wizard to test connectivity before committing — call
+/// [`Database::run_migrations`] on the returned trait object when ready.
+pub async fn connect_without_migrations(
+    config: &crate::config::DatabaseConfig,
+) -> Result<(Arc<dyn Database>, DatabaseHandles), DatabaseError> {
+    let mut handles = DatabaseHandles::default();
+
+    match config.backend {
+        #[cfg(feature = "libsql")]
+        crate::config::DatabaseBackend::LibSql => {
+            use secrecy::ExposeSecret as _;
+
+            let default_path = crate::config::default_libsql_path();
+            let db_path = config.libsql_path.as_deref().unwrap_or(&default_path);
+
+            let backend = if let Some(ref url) = config.libsql_url {
+                let token = config.libsql_auth_token.as_ref().ok_or_else(|| {
+                    DatabaseError::Pool(
+                        "LIBSQL_AUTH_TOKEN required when LIBSQL_URL is set".to_string(),
+                    )
+                })?;
+                libsql::LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+                    .await
+                    .map_err(|e| DatabaseError::Pool(e.to_string()))?
+            } else {
+                libsql::LibSqlBackend::new_local(db_path)
+                    .await
+                    .map_err(|e| DatabaseError::Pool(e.to_string()))?
+            };
+
+            handles.libsql_db = Some(backend.shared_db());
+
+            Ok((Arc::new(backend) as Arc<dyn Database>, handles))
+        }
+        #[cfg(feature = "postgres")]
+        _ => {
+            let pg = postgres::PgBackend::new(config)
+                .await
+                .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+
+            handles.pg_pool = Some(pg.pool());
+
+            Ok((Arc::new(pg) as Arc<dyn Database>, handles))
+        }
+        #[cfg(not(feature = "postgres"))]
+        _ => Err(DatabaseError::Pool(
+            "No database backend available. Enable 'postgres' or 'libsql' feature.".to_string(),
+        )),
+    }
+}
+
+/// Validate PostgreSQL prerequisites (version >= 15, pgvector available).
+///
+/// Returns an empty vec if everything is fine.
+#[cfg(feature = "postgres")]
+pub async fn validate_postgres(
+    pool: &deadpool_postgres::Pool,
+) -> Result<Vec<PgDiagnostic>, DatabaseError> {
+    let mut diagnostics = Vec::new();
+
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| DatabaseError::Pool(format!("Failed to connect: {}", e)))?;
+
+    // Check PostgreSQL server version (need 15+ for pgvector).
+    let version_row = client
+        .query_one("SHOW server_version", &[])
+        .await
+        .map_err(|e| DatabaseError::Query(format!("Failed to query server version: {}", e)))?;
+    let version_str: &str = version_row.get(0);
+    let major_version = version_str
+        .split('.')
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    const MIN_PG_MAJOR_VERSION: u32 = 15;
+
+    if major_version < MIN_PG_MAJOR_VERSION {
+        diagnostics.push(PgDiagnostic::VersionTooOld {
+            found: version_str.to_string(),
+            minimum: MIN_PG_MAJOR_VERSION,
+        });
+    }
+
+    // Check if pgvector extension is available.
+    let pgvector_row = client
+        .query_opt(
+            "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'",
+            &[],
+        )
+        .await
+        .map_err(|e| {
+            DatabaseError::Query(format!("Failed to check pgvector availability: {}", e))
+        })?;
+
+    if pgvector_row.is_none() {
+        diagnostics.push(PgDiagnostic::PgVectorMissing {
+            pg_major_version: major_version,
+        });
+    }
+
+    Ok(diagnostics)
+}
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
