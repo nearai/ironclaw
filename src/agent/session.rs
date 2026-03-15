@@ -708,7 +708,12 @@ mod tests {
         assert!(thread.pending_auth.is_none());
 
         thread.enter_auth_mode("telegram".to_string());
-        assert!(thread.pending_auth.is_some());        let pending = thread.pending_auth.as_ref().unwrap();        assert_eq!(pending.extension_name, "telegram");        assert!(pending.created_at >= before);        assert!(!pending.is_expired());    }
+        assert!(thread.pending_auth.is_some());
+        let pending = thread.pending_auth.as_ref().unwrap();
+        assert_eq!(pending.extension_name, "telegram");
+        assert!(pending.created_at >= before);
+        assert!(!pending.is_expired());
+    }
 
     #[test]
     fn test_take_pending_auth() {
@@ -716,7 +721,10 @@ mod tests {
         thread.enter_auth_mode("notion".to_string());
 
         let pending = thread.take_pending_auth();
-        assert!(pending.is_some());        let pending = pending.unwrap();        assert_eq!(pending.extension_name, "notion");        assert!(!pending.is_expired());
+        assert!(pending.is_some());
+        let pending = pending.unwrap();
+        assert_eq!(pending.extension_name, "notion");
+        assert!(!pending.is_expired());
         // Should be cleared after take
         assert!(thread.pending_auth.is_none());
         assert!(thread.take_pending_auth().is_none());
@@ -731,8 +739,13 @@ mod tests {
         assert!(json.contains("pending_auth"));
         assert!(json.contains("openai"));
         assert!(json.contains("created_at"));
+
         let restored: Thread = serde_json::from_str(&json).expect("should deserialize");
-        assert!(restored.pending_auth.is_some());        let pending = restored.pending_auth.unwrap();        assert_eq!(pending.extension_name, "openai");        assert!(!pending.is_expired());    }
+        assert!(restored.pending_auth.is_some());
+        let pending = restored.pending_auth.unwrap();
+        assert_eq!(pending.extension_name, "openai");
+        assert!(!pending.is_expired());
+    }
 
     #[test]
     fn test_pending_auth_expiry() {
@@ -743,7 +756,8 @@ mod tests {
         assert!(!pending.is_expired());
         // Backdate beyond the TTL
         pending.created_at = Utc::now() - AUTH_MODE_TTL - TimeDelta::seconds(1);
-        assert!(pending.is_expired());    }
+        assert!(pending.is_expired());
+    }
 
     #[test]
     fn test_pending_auth_default_none() {
