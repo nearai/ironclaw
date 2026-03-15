@@ -106,7 +106,7 @@ pub(crate) fn routine_create_parameters_schema() -> serde_json::Value {
             },
             "notify_user": {
                 "type": "string",
-                "description": "User or destination to notify, for example a username or chat ID."
+                "description": "Optional explicit user or destination to notify, for example a username or chat ID. Omit it to use the configured owner's last-seen target for that channel."
             },
             "timezone": {
                 "type": "string",
@@ -387,8 +387,7 @@ impl Tool for RoutineCreateTool {
                 user: params
                     .get("notify_user")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("default")
-                    .to_string(),
+                    .map(String::from),
                 ..NotifyConfig::default()
             },
             last_run_at: None,

@@ -333,7 +333,11 @@ impl HeartbeatRunner {
             return;
         };
 
-        let user_id = self.config.notify_user_id.as_deref().unwrap_or("default");
+        let user_id = self
+            .config
+            .notify_user_id
+            .as_deref()
+            .unwrap_or_else(|| self.workspace.user_id());
 
         // Persist to heartbeat conversation and get thread_id
         let thread_id = if let Some(ref store) = self.store {
@@ -362,6 +366,7 @@ impl HeartbeatRunner {
             attachments: Vec::new(),
             metadata: serde_json::json!({
                 "source": "heartbeat",
+                "owner_id": self.workspace.user_id(),
             }),
         };
 

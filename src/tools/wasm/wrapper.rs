@@ -841,13 +841,7 @@ impl Tool for WasmToolWrapper {
         // Pre-resolve host credentials from secrets store (async, before blocking task).
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
-        //
-        // BUG FIX: ExtensionManager stores OAuth tokens under user_id "default"
-        // (hardcoded at construction in app.rs), but this was previously looking
-        // them up under ctx.user_id — which could be a Telegram user ID, web
-        // gateway user, etc. — causing credential resolution to silently fail.
-        // Must match the storage key until per-user credential isolation is added.
-        let credential_user_id = "default";
+        let credential_user_id = &ctx.user_id;
         let host_credentials = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
@@ -1165,6 +1159,13 @@ async fn resolve_host_credentials(
         let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
             Ok(s) => Some(s),
             Err(e) => {
+                tracing::trace!(
+                    user_id = %user_id,
+                    secret_name = %mapping.secret_name,
+                    error = %e,
+                    "No matching host credential resolved for WASM tool in the requested scope"
+                );
+
                 // If lookup fails and we're not already looking up "default", try "default" as fallback
                 if user_id != "default" {
                     tracing::debug!(
@@ -1685,6 +1686,54 @@ mod tests {
         let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].host_patterns, vec!["www.googleapis.com"]);
+        assert_eq!(
+            result[0].headers.get("Authorization"),
+            Some(&format!("Bearer {TEST_GOOGLE_OAUTH_TOKEN}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_owner_scope_bearer() {
+        use std::collections::HashMap;
+
+        use crate::context::JobContext;
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+        let ctx = JobContext::with_user("owner-scope", "owner-scope test", "owner-scope test");
+
+        store
+            .create(
+                &ctx.user_id,
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_TOKEN),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = resolve_host_credentials(&caps, Some(&store), &ctx.user_id, None).await;
+        assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
             Some(&format!("Bearer {TEST_GOOGLE_OAUTH_TOKEN}"))

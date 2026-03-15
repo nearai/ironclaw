@@ -84,6 +84,7 @@ pub struct SetupConfig {
 pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
+    owner_id: String,
     session_manager: Option<Arc<SessionManager>>,
     /// Database pool (created during setup, postgres only).
     #[cfg(feature = "postgres")]
@@ -98,11 +99,20 @@ pub struct SetupWizard {
 }
 
 impl SetupWizard {
-    /// Create a new setup wizard.
-    pub fn new() -> Self {
+    fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
+    fn fallback_with_default_owner(
+        config: SetupConfig,
+        settings: Settings,
+        error: &crate::error::ConfigError,
+    ) -> Self {
+        tracing::warn!("Falling back to default owner scope for setup wizard: {error}");
         Self {
-            config: SetupConfig::default(),
-            settings: Settings::default(),
+            config,
+            settings,
+            owner_id: "default".to_string(),
             session_manager: None,
             #[cfg(feature = "postgres")]
             db_pool: None,
@@ -113,11 +123,15 @@ impl SetupWizard {
         }
     }
 
-    /// Create a wizard with custom configuration.
-    pub fn with_config(config: SetupConfig) -> Self {
-        Self {
+    fn from_bootstrap_settings(
+        config: SetupConfig,
+        settings: Settings,
+    ) -> Result<Self, crate::error::ConfigError> {
+        let owner_id = crate::config::resolve_owner_id(&settings)?;
+        Ok(Self {
             config,
-            settings: Settings::default(),
+            settings,
+            owner_id,
             session_manager: None,
             #[cfg(feature = "postgres")]
             db_pool: None,
@@ -125,7 +139,31 @@ impl SetupWizard {
             db_backend: None,
             secrets_crypto: None,
             llm_api_key: None,
-        }
+        })
+    }
+
+    /// Create a new setup wizard.
+    pub fn new() -> Self {
+        let settings = crate::config::load_bootstrap_settings(None).unwrap_or_default();
+        Self::from_bootstrap_settings(SetupConfig::default(), settings.clone()).unwrap_or_else(
+            |e| Self::fallback_with_default_owner(SetupConfig::default(), settings, &e),
+        )
+    }
+
+    /// Create a wizard with custom configuration.
+    pub fn with_config(config: SetupConfig) -> Self {
+        let settings = crate::config::load_bootstrap_settings(None).unwrap_or_default();
+        Self::from_bootstrap_settings(config.clone(), settings.clone())
+            .unwrap_or_else(|e| Self::fallback_with_default_owner(config, settings, &e))
+    }
+
+    /// Create a wizard with custom configuration and bootstrap TOML overlay.
+    pub fn try_with_config_and_toml(
+        config: SetupConfig,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<Self, crate::error::ConfigError> {
+        let settings = crate::config::load_bootstrap_settings(toml_path)?;
+        Self::from_bootstrap_settings(config, settings)
     }
 
     /// Set the session manager (for reusing existing auth).
@@ -295,7 +333,7 @@ impl SetupWizard {
         // may not be persisted in the settings map.
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());
-            if let Ok(map) = store.get_all_settings("default").await {
+            if let Ok(map) = store.get_all_settings(self.owner_id()).await {
                 self.settings = Settings::from_db_map(&map);
                 self.settings.database_backend = Some("postgres".to_string());
                 self.settings.database_url = Some(url);
@@ -329,7 +367,7 @@ impl SetupWizard {
         // may not be persisted in the settings map.
         if let Some(ref db) = self.db_backend {
             use crate::db::SettingsStore as _;
-            if let Ok(map) = db.get_all_settings("default").await {
+            if let Ok(map) = db.get_all_settings(self.owner_id()).await {
                 self.settings = Settings::from_db_map(&map);
                 self.settings.database_backend = Some("libsql".to_string());
                 self.settings.libsql_path = Some(path);
@@ -1883,23 +1921,23 @@ impl SetupWizard {
             #[cfg(feature = "libsql")]
             "libsql" | "turso" | "sqlite" => {
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
                 // Fallback to postgres if libsql store creation returned None
                 #[cfg(feature = "postgres")]
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
             }
             #[cfg(feature = "postgres")]
             _ => {
                 if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
                 // Fallback to libsql if postgres store creation returned None
                 #[cfg(feature = "libsql")]
                 if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
+                    return Ok(SecretsContext::from_store(store, self.owner_id()));
                 }
             }
             #[cfg(not(feature = "postgres"))]
@@ -2491,7 +2529,7 @@ impl SetupWizard {
             if let Some(ref pool) = self.db_pool {
                 let store = crate::history::Store::from_pool(pool.clone());
                 store
-                    .set_all_settings("default", &db_map)
+                    .set_all_settings(self.owner_id(), &db_map)
                     .await
                     .map_err(|e| {
                         SetupError::Database(format!("Failed to save settings to database: {}", e))
@@ -2509,7 +2547,7 @@ impl SetupWizard {
             if let Some(ref backend) = self.db_backend {
                 use crate::db::SettingsStore as _;
                 backend
-                    .set_all_settings("default", &db_map)
+                    .set_all_settings(self.owner_id(), &db_map)
                     .await
                     .map_err(|e| {
                         SetupError::Database(format!("Failed to save settings to database: {}", e))
@@ -2702,7 +2740,7 @@ impl SetupWizard {
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());
             if let Err(e) = store
-                .set_setting("default", "nearai.session_token", &value)
+                .set_setting(self.owner_id(), "nearai.session_token", &value)
                 .await
             {
                 tracing::debug!("Could not persist session token to postgres: {}", e);
@@ -2716,7 +2754,7 @@ impl SetupWizard {
         if let Some(ref backend) = self.db_backend {
             use crate::db::SettingsStore as _;
             if let Err(e) = backend
-                .set_setting("default", "nearai.session_token", &value)
+                .set_setting(self.owner_id(), "nearai.session_token", &value)
                 .await
             {
                 tracing::debug!("Could not persist session token to libsql: {}", e);
@@ -2762,7 +2800,7 @@ impl SetupWizard {
         let loaded = if !loaded {
             if let Some(ref pool) = self.db_pool {
                 let store = crate::history::Store::from_pool(pool.clone());
-                match store.get_all_settings("default").await {
+                match store.get_all_settings(self.owner_id()).await {
                     Ok(db_map) if !db_map.is_empty() => {
                         let existing = Settings::from_db_map(&db_map);
                         self.settings.merge_from(&existing);
@@ -2786,7 +2824,7 @@ impl SetupWizard {
         let loaded = if !loaded {
             if let Some(ref backend) = self.db_backend {
                 use crate::db::SettingsStore as _;
-                match backend.get_all_settings("default").await {
+                match backend.get_all_settings(self.owner_id()).await {
                     Ok(db_map) if !db_map.is_empty() => {
                         let existing = Settings::from_db_map(&db_map);
                         self.settings.merge_from(&existing);
@@ -3636,6 +3674,8 @@ async fn install_selected_bundled_channels(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    #[cfg(unix)]
+    use std::ffi::OsString;
 
     use tempfile::tempdir;
 
@@ -3659,6 +3699,52 @@ mod tests {
         };
         let wizard = SetupWizard::with_config(config);
         assert!(wizard.config.skip_auth);
+    }
+
+    #[test]
+    fn test_wizard_owner_id_uses_resolved_env_scope() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _owner = EnvGuard::set("IRONCLAW_OWNER_ID", " wizard-owner ");
+
+        let wizard = SetupWizard::new();
+        assert_eq!(wizard.owner_id(), "wizard-owner"); // safety: test-only assertion
+    }
+
+    #[test]
+    fn test_wizard_owner_id_uses_toml_scope() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _owner = EnvGuard::clear("IRONCLAW_OWNER_ID");
+        let dir = tempdir().unwrap(); // safety: test-only tempdir setup
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "owner_id = \"toml-owner\"\n").unwrap(); // safety: test-only fixture write
+
+        let wizard = SetupWizard::try_with_config_and_toml(Default::default(), Some(&path))
+            .expect("wizard should load owner_id from TOML"); // safety: test-only assertion
+        assert_eq!(wizard.owner_id(), "toml-owner"); // safety: test-only assertion
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_try_with_config_and_toml_propagates_invalid_owner_env() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("IRONCLAW_OWNER_ID");
+        unsafe {
+            std::env::set_var("IRONCLAW_OWNER_ID", OsString::from_vec(vec![0x66, 0x80]));
+        }
+
+        let result = SetupWizard::try_with_config_and_toml(Default::default(), None);
+
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("IRONCLAW_OWNER_ID", value);
+            } else {
+                std::env::remove_var("IRONCLAW_OWNER_ID");
+            }
+        }
+
+        assert!(result.is_err()); // safety: test-only assertion
     }
 
     #[test]
@@ -3706,12 +3792,12 @@ mod tests {
             return;
         }
 
-        let dir = tempdir().unwrap();
+        let dir = tempdir().unwrap(); // safety: test-only tempdir setup
         let installed = HashSet::<String>::new();
 
         install_missing_bundled_channels(dir.path(), &installed)
             .await
-            .unwrap();
+            .unwrap(); // safety: test-only assertion
 
         assert!(dir.path().join("telegram.wasm").exists());
         assert!(dir.path().join("telegram.capabilities.json").exists());
@@ -3813,7 +3899,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_discover_wasm_channels_empty_dir() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().unwrap(); // safety: test-only tempdir setup
         let channels = discover_wasm_channels(dir.path()).await;
         assert!(channels.is_empty());
     }

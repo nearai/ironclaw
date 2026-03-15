@@ -113,6 +113,9 @@ pub struct JobContext {
     pub state: JobState,
     /// User ID that owns this job (for workspace scoping).
     pub user_id: String,
+    /// Channel-specific requester/actor ID, when different from the owner scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_id: Option<String>,
     /// Conversation ID if linked to a conversation.
     pub conversation_id: Option<Uuid>,
     /// Job title.
@@ -194,6 +197,7 @@ impl JobContext {
             job_id: Uuid::new_v4(),
             state: JobState::Pending,
             user_id: user_id.into(),
+            requester_id: None,
             conversation_id: None,
             title: title.into(),
             description: description.into(),
@@ -222,6 +226,12 @@ impl JobContext {
     /// Set the user timezone on this context.
     pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
         self.user_timezone = tz.into();
+        self
+    }
+
+    /// Set the channel-specific requester/actor ID.
+    pub fn with_requester_id(mut self, requester_id: impl Into<String>) -> Self {
+        self.requester_id = Some(requester_id.into());
         self
     }
 

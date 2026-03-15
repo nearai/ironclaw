@@ -222,9 +222,12 @@ mod tests {
             id: Uuid::new_v4(),
             channel: "test".to_string(),
             user_id: "default".to_string(),
+            owner_id: "default".to_string(),
+            sender_id: "default".to_string(),
             user_name: None,
             content: "deploy to production now".to_string(),
             thread_id: None,
+            conversation_scope_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
             timezone: None,
@@ -244,9 +247,12 @@ mod tests {
             id: Uuid::new_v4(),
             channel: "test".to_string(),
             user_id: "default".to_string(),
+            owner_id: "default".to_string(),
+            sender_id: "default".to_string(),
             user_name: None,
             content: "check the staging environment".to_string(),
             thread_id: None,
+            conversation_scope_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
             timezone: None,
@@ -254,6 +260,119 @@ mod tests {
         };
         let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
+    }
+
+    #[tokio::test]
+    async fn event_trigger_respects_message_user_scope() {
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        let trace = LlmTrace::single_turn(
+            "test-event-user-scope",
+            "deploy",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "Owner event handled".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 8,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        let routine = make_routine(
+            "owner-deploy-watcher",
+            Trigger::Event {
+                channel: None,
+                pattern: "deploy.*production".to_string(),
+            },
+            "Report on deployment.",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let guest_msg = IncomingMessage {
+            id: Uuid::new_v4(),
+            channel: "telegram".to_string(),
+            user_id: "guest".to_string(),
+            owner_id: "default".to_string(),
+            sender_id: "guest-sender".to_string(),
+            user_name: None,
+            content: "deploy to production now".to_string(),
+            thread_id: None,
+            conversation_scope_id: None,
+            received_at: Utc::now(),
+            metadata: serde_json::json!({}),
+            timezone: None,
+            attachments: Vec::new(),
+        };
+        let guest_fired = engine.check_event_triggers(&guest_msg).await;
+        assert_eq!(
+            guest_fired, 0,
+            "Guest scope must not fire owner event routines"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let guest_runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs after guest message");
+        assert!(
+            guest_runs.is_empty(),
+            "Guest message should not create routine runs"
+        );
+
+        let owner_msg = IncomingMessage {
+            id: Uuid::new_v4(),
+            channel: "telegram".to_string(),
+            user_id: "default".to_string(),
+            owner_id: "default".to_string(),
+            sender_id: "owner-sender".to_string(),
+            user_name: None,
+            content: "deploy to production now".to_string(),
+            thread_id: None,
+            conversation_scope_id: None,
+            received_at: Utc::now(),
+            metadata: serde_json::json!({}),
+            timezone: None,
+            attachments: Vec::new(),
+        };
+        let owner_fired = engine.check_event_triggers(&owner_msg).await;
+        assert!(
+            owner_fired >= 1,
+            "Owner scope should fire matching owner event routine"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let owner_runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs after owner message");
+        assert_eq!(
+            owner_runs.len(),
+            1,
+            "Owner message should create exactly one run"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -459,9 +578,12 @@ mod tests {
             id: Uuid::new_v4(),
             channel: "test".to_string(),
             user_id: "default".to_string(),
+            owner_id: "default".to_string(),
+            sender_id: "default".to_string(),
             user_name: None,
             content: "test-cooldown trigger".to_string(),
             thread_id: None,
+            conversation_scope_id: None,
             received_at: Utc::now(),
             metadata: serde_json::json!({}),
             timezone: None,
