@@ -483,7 +483,8 @@ mod tests {
         // All 5 results should be returned correctly
         assert_eq!(results.len(), 5); // safety: test
         // But cache should not exceed max_entries
-        assert!(cached.len() <= 3, "cache size {} exceeds max_entries 3", cached.len()); // safety: test
+        let len = cached.len(); // safety: test
+        assert!(len <= 3, "cache len {len} exceeds max 3"); // safety: test
     }
 
     /// Mock embedding provider that fails the first N calls, then succeeds.
