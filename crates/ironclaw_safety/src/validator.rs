@@ -468,4 +468,24 @@ mod tests {
             "Strings within depth limit should still be validated"
         );
     }
+
+    /// Regression: empty input is rejected by validate(), but image-only messages
+    /// (empty text + attachments) should bypass this check at the caller level.
+    /// This test confirms the validator correctly rejects empty strings — the
+    /// bypass logic lives in thread_ops.rs, not in the validator itself.
+    #[test]
+    fn test_empty_input_rejected() {
+        let validator = Validator::new();
+        let result = validator.validate("");
+        assert!(!result.is_valid, "Empty input must be rejected");
+        assert_eq!(result.errors[0].code, ValidationErrorCode::Empty);
+    }
+
+    /// Non-empty input with valid content should pass validation.
+    #[test]
+    fn test_nonempty_input_passes() {
+        let validator = Validator::new();
+        let result = validator.validate("Hello, world!");
+        assert!(result.is_valid, "Non-empty valid input must pass");
+    }
 }
