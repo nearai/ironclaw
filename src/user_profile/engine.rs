@@ -1,8 +1,10 @@
 //! User profile persistence engine with at-rest encryption.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::Mutex;
 
 use crate::db::UserProfileStore;
 use crate::user_profile::error::UserProfileError;
@@ -34,6 +36,17 @@ pub trait UserProfileEngine: Send + Sync {
         category: &FactCategory,
         key: &str,
     ) -> Result<bool, UserProfileError>;
+
+    /// Remove all facts in a category (batch operation).
+    async fn clear_facts_by_category(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &FactCategory,
+    ) -> Result<u64, UserProfileError>;
+
+    /// Remove all facts for a user+agent (GDPR "forget me").
+    async fn clear_profile(&self, user_id: &str, agent_id: &str) -> Result<u64, UserProfileError>;
 }
 
 /// Profile engine that encrypts fact values using the existing `SecretsCrypto`.
@@ -44,6 +57,14 @@ pub struct EncryptedProfileEngine {
     db: Arc<dyn UserProfileStore>,
     crypto: Arc<crate::secrets::SecretsCrypto>,
     max_facts: usize,
+    /// Per-user locks to prevent TOCTOU races on max_facts limit.
+    /// Key is `"{user_id}:{agent_id}"`. The outer std::sync::Mutex is held
+    /// only briefly to get/insert the per-user tokio::sync::Mutex.
+    ///
+    /// NOTE: This map grows unbounded (one entry per distinct user+agent pair).
+    /// Acceptable for single-user personal assistant; add LRU eviction before
+    /// supporting multi-user deployments.
+    user_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl EncryptedProfileEngine {
@@ -52,6 +73,7 @@ impl EncryptedProfileEngine {
             db,
             crypto,
             max_facts: 100,
+            user_locks: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -75,6 +97,13 @@ impl EncryptedProfileEngine {
             }
         })?;
         Ok(decrypted.expose().to_string())
+    }
+
+    /// Get or create the per-user lock for atomic check-and-write operations.
+    fn user_lock(&self, user_id: &str, agent_id: &str) -> Arc<Mutex<()>> {
+        let key = format!("{user_id}:{agent_id}");
+        let mut locks = self.user_locks.lock().expect("user_locks poisoned"); // safety: held briefly, no .await
+        Arc::clone(locks.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
     }
 }
 
@@ -129,7 +158,24 @@ impl UserProfileEngine for EncryptedProfileEngine {
         agent_id: &str,
         fact: &ProfileFact,
     ) -> Result<(), UserProfileError> {
-        // Check fact count limit before writing (allow UPDATE of existing facts)
+        // Safety scan before storage (outside the lock — no DB access needed)
+        if let Some(threat) = ironclaw_safety::scan_content_for_threats(&fact.value) {
+            return Err(UserProfileError::SafetyRejected {
+                reason: format!("Fact value matches threat pattern: {threat}"),
+            });
+        }
+        if let Some(threat) = ironclaw_safety::scan_content_for_threats(&fact.key) {
+            return Err(UserProfileError::SafetyRejected {
+                reason: format!("Fact key matches threat pattern: {threat}"),
+            });
+        }
+
+        // Acquire per-user lock to prevent TOCTOU race on max_facts limit.
+        // Multiple concurrent distillation tasks for the same user are serialized here.
+        let lock = self.user_lock(user_id, agent_id);
+        let _guard = lock.lock().await;
+
+        // Check fact count limit (inside the lock — atomic with the write below)
         let existing = self.db.get_profile_facts(user_id, agent_id).await?;
         let is_update = existing
             .iter()
@@ -141,19 +187,6 @@ impl UserProfileEngine for EncryptedProfileEngine {
                     existing.len(),
                     self.max_facts
                 ),
-            });
-        }
-
-        // Safety scan before storage
-        if let Some(threat) = ironclaw_safety::scan_content_for_threats(&fact.value) {
-            return Err(UserProfileError::SafetyRejected {
-                reason: format!("Fact value matches threat pattern: {threat}"),
-            });
-        }
-        // Also scan the key
-        if let Some(threat) = ironclaw_safety::scan_content_for_threats(&fact.key) {
-            return Err(UserProfileError::SafetyRejected {
-                reason: format!("Fact key matches threat pattern: {threat}"),
             });
         }
 
@@ -186,5 +219,21 @@ impl UserProfileEngine for EncryptedProfileEngine {
             .db
             .delete_profile_fact(user_id, agent_id, category.as_str(), key)
             .await?)
+    }
+
+    async fn clear_facts_by_category(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &FactCategory,
+    ) -> Result<u64, UserProfileError> {
+        Ok(self
+            .db
+            .delete_profile_facts_by_category(user_id, agent_id, category.as_str())
+            .await?)
+    }
+
+    async fn clear_profile(&self, user_id: &str, agent_id: &str) -> Result<u64, UserProfileError> {
+        Ok(self.db.clear_profile(user_id, agent_id).await?)
     }
 }

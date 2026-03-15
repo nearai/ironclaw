@@ -1088,6 +1088,55 @@ impl UserProfileStore for PgBackend {
 
         Ok(n > 0)
     }
+
+    async fn delete_profile_facts_by_category(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+    ) -> Result<u64, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let n = conn
+            .execute(
+                r#"
+                DELETE FROM user_profile_facts
+                WHERE user_id = $1 AND agent_id = $2 AND category = $3
+                "#,
+                &[&user_id, &agent_id, &category],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(n)
+    }
+
+    async fn clear_profile(&self, user_id: &str, agent_id: &str) -> Result<u64, DatabaseError> {
+        let conn = self
+            .store
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get connection: {e}")))?;
+
+        let n = conn
+            .execute(
+                r#"
+                DELETE FROM user_profile_facts
+                WHERE user_id = $1 AND agent_id = $2
+                "#,
+                &[&user_id, &agent_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(n)
+    }
 }
 
 // ==================== LearningStore ====================

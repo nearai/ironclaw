@@ -229,8 +229,10 @@ impl Tool for ProfileClearTool {
     }
 
     fn description(&self) -> &str {
-        "Remove a specific profile fact (provide key) or all facts in a category \
-         (omit key). WARNING: omitting key deletes ALL facts in the category. \
+        "Remove profile facts. Three modes:\n\
+         1. Specific fact: provide both category and key\n\
+         2. All facts in a category: provide category only\n\
+         3. ALL profile data (forget me): omit both category and key\n\
          Use when the user explicitly asks to forget something."
     }
 
@@ -241,14 +243,14 @@ impl Tool for ProfileClearTool {
                 "category": {
                     "type": "string",
                     "enum": ["preference", "expertise", "style", "context"],
-                    "description": "Category of the fact to remove"
+                    "description": "Category of the fact to remove (omit to erase ALL profile data)"
                 },
                 "key": {
                     "type": "string",
                     "description": "Specific fact key to remove"
                 }
             },
-            "required": ["category"]
+            "required": []
         })
     }
 
@@ -259,14 +261,30 @@ impl Tool for ProfileClearTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let category_str = require_str(&params, "category")?;
+        let category_str = params.get("category").and_then(|v| v.as_str());
         let key = params.get("key").and_then(|v| v.as_str());
+
+        // Mode 3: no category → clear ALL profile data ("forget me")
+        let Some(category_str) = category_str else {
+            let removed_count = self
+                .engine
+                .clear_profile(&ctx.user_id, "default")
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Failed to clear profile: {e}")))?;
+
+            let msg = if removed_count == 0 {
+                "No profile data found — nothing to remove.".to_string()
+            } else {
+                format!("Erased all profile data ({removed_count} fact(s) removed).")
+            };
+            return Ok(ToolOutput::text(msg, start.elapsed()));
+        };
 
         let category = FactCategory::from_str_opt(category_str).ok_or_else(|| {
             ToolError::InvalidParameters(format!("Invalid category '{category_str}'"))
         })?;
 
-        // If key is provided, remove specific fact; otherwise remove all in category
+        // Mode 1: category + key → remove specific fact
         if let Some(key) = key {
             let removed = self
                 .engine
@@ -281,41 +299,17 @@ impl Tool for ProfileClearTool {
             };
             Ok(ToolOutput::text(msg, start.elapsed()))
         } else {
-            // Remove all facts in category by loading and deleting each
-            let profile = self
+            // Mode 2: category only → batch delete all facts in category
+            let removed_count = self
                 .engine
-                .load_profile(&ctx.user_id, "default")
+                .clear_facts_by_category(&ctx.user_id, "default", &category)
                 .await
-                .map_err(|e| ToolError::ExecutionFailed(format!("Failed to load profile: {e}")))?;
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Failed to clear category: {e}"))
+                })?;
 
-            let keys: Vec<String> = profile
-                .facts
-                .iter()
-                .filter(|f| f.category == category)
-                .map(|f| f.key.clone())
-                .collect();
-
-            let mut removed_count = 0;
-            let mut error_count = 0;
-            for k in &keys {
-                match self
-                    .engine
-                    .remove_fact(&ctx.user_id, "default", &category, k)
-                    .await
-                {
-                    Ok(true) => removed_count += 1,
-                    Ok(false) => {} // already deleted by another process
-                    Err(e) => {
-                        tracing::warn!("Profile clear: failed to remove fact '{k}': {e}");
-                        error_count += 1;
-                    }
-                }
-            }
-
-            let msg = if error_count > 0 {
-                format!(
-                    "Removed {removed_count} fact(s) from category '{category}' ({error_count} failed with error)."
-                )
+            let msg = if removed_count == 0 {
+                format!("No facts found in category '{category}' — nothing to remove.")
             } else {
                 format!("Removed {removed_count} fact(s) from category '{category}'.")
             };

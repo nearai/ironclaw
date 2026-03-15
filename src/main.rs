@@ -726,8 +726,8 @@ async fn async_main() -> anyhow::Result<()> {
         .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
 
     // Wire up learning system (before moving components into AgentDeps)
-    let learning_tx = if config.learning.enabled {
-        components.learning_store.as_ref().map(|ls| {
+    let (learning_tx, learning_worker_handle) = if config.learning.enabled {
+        match components.learning_store.as_ref().map(|ls| {
             let synth_llm = components
                 .cheap_llm
                 .clone()
@@ -740,9 +740,12 @@ async fn async_main() -> anyhow::Result<()> {
                 synthesizer,
                 Arc::clone(ls),
             )
-        })
+        }) {
+            Some((tx, handle)) => (Some(tx), Some(handle)),
+            None => (None, None),
+        }
     } else {
-        None
+        (None, None)
     };
 
     let profile_engine: Option<Arc<dyn ironclaw::user_profile::engine::UserProfileEngine>> =
@@ -813,8 +816,6 @@ async fn async_main() -> anyhow::Result<()> {
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
         builder: components.builder,
-        learning_tx: None, // TODO: create bounded mpsc channel when learning is enabled
-        profile_engine: None, // TODO: create EncryptedProfileEngine when profile is enabled
         learning_tx,
         profile_engine,
         user_profile_config: config.user_profile.clone(),
@@ -1032,6 +1033,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Signal background tasks (SIGHUP handler, etc.) to gracefully shut down
     let _ = shutdown_tx.send(());
+
+    // Wait for the learning worker to finish in-flight work.
+    // The sender was dropped when AgentDeps dropped (agent.run() returned),
+    // so the worker's rx.recv() returns None and the loop exits.
+    if let Some(handle) = learning_worker_handle {
+        let _ = handle.await;
+    }
 
     // Shut down all stdio MCP server child processes.
     components.mcp_process_manager.shutdown_all().await;

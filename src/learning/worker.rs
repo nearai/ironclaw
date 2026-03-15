@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::config::LearningConfig;
 use crate::db::LearningStore;
@@ -42,19 +44,20 @@ pub fn heuristic_quality_score(tools_used: &[String], turn_count: usize, had_err
 
 /// Spawn the background learning worker as a tokio task.
 ///
-/// Returns the `Sender` half — dispatch `LearningEvent`s into it.
-/// The worker runs until the sender is dropped.
+/// Returns `(Sender, JoinHandle)` — dispatch `LearningEvent`s into the sender.
+/// The worker runs until the sender is dropped. Await the `JoinHandle` for
+/// graceful shutdown (waits for in-flight work to complete).
 pub fn spawn_learning_worker(
     config: LearningConfig,
     synthesizer: Arc<dyn SkillSynthesizer>,
     store: Arc<dyn LearningStore>,
-) -> mpsc::Sender<LearningEvent> {
+) -> (mpsc::Sender<LearningEvent>, JoinHandle<()>) {
     let (tx, mut rx) = mpsc::channel::<LearningEvent>(32);
 
     let detector = PatternDetector::new(DetectorConfig::from_learning_config(&config));
     let validator = SkillValidator::new().with_max_size(config.max_skill_size);
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         tracing::info!("Learning background worker started");
 
         while let Some(event) = rx.recv().await {
@@ -147,16 +150,16 @@ pub fn spawn_learning_worker(
                 continue;
             }
 
-            let content_hash = format!("{:x}", content_hash(skill_content.as_bytes()));
+            let hash = content_hash(skill_content.as_bytes());
 
             // Record in audit log (pending status — user must approve)
             if let Err(e) = store
                 .record_synthesized_skill(
                     &event.user_id,
                     &event.agent_id,
-                    &format!("auto-{}", &content_hash[..8]),
+                    &format!("auto-{}", &hash[..8]),
                     Some(&skill_content),
-                    &content_hash,
+                    &hash,
                     Some(event.conversation_id),
                     crate::db::SkillStatus::Pending,
                     true, // safety_passed — only reached if validation succeeded
@@ -176,17 +179,13 @@ pub fn spawn_learning_worker(
         tracing::info!("Learning background worker stopped");
     });
 
-    tx
+    (tx, handle)
 }
 
-/// FNV-1a 64-bit hash for content deduplication (not cryptographic).
-fn content_hash(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
+/// SHA-256 content hash for collision-resistant deduplication.
+fn content_hash(data: &[u8]) -> String {
+    let hash = Sha256::digest(data);
+    format!("{hash:x}")
 }
 
 #[cfg(test)]

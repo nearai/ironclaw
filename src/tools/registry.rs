@@ -20,10 +20,10 @@ use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
     MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, ProfileClearTool,
-    ProfileEditTool, ProfileViewTool, PromptQueue, ReadFileTool, SessionSearchTool, ShellTool,
-    SkillApproveTool, SkillInstallTool, SkillListPendingTool, SkillListTool, SkillRemoveTool,
-    SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
-    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    ProfileEditTool, ProfileViewTool, PromptQueue, ReadFileTool, ShellTool, SkillApproveTool,
+    SkillInstallTool, SkillListPendingTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
+    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool,
+    ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
@@ -72,7 +72,6 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_search",
     "skill_install",
     "skill_remove",
-    "session_search",
     "skill_list_pending",
     "skill_approve",
     "profile_view",
@@ -350,21 +349,24 @@ impl ToolRegistry {
         tracing::debug!("Registered 4 memory tools");
     }
 
-    /// Register learning system tools (session search, skill approval).
+    /// Register learning system tools (skill approval).
     ///
-    /// Requires the learning store handles from `DatabaseHandles`.
+    /// Requires the learning store handle from `DatabaseHandles`.
+    /// Note: `SessionSearchTool` is not registered yet — session summaries
+    /// are not populated (the `upsert_session_summary` writer is not wired in).
+    /// The DB schema and `SessionSearchStore` trait are ready for a follow-up PR
+    /// that adds session summary generation on session end/compaction.
     pub fn register_learning_tools(
         &self,
-        session_search_store: Arc<dyn crate::db::SessionSearchStore>,
+        _session_search_store: Arc<dyn crate::db::SessionSearchStore>,
         learning_store: Arc<dyn crate::db::LearningStore>,
     ) {
-        self.register_sync(Arc::new(SessionSearchTool::new(session_search_store)));
         self.register_sync(Arc::new(SkillListPendingTool::new(Arc::clone(
             &learning_store,
         ))));
         self.register_sync(Arc::new(SkillApproveTool::new(learning_store)));
 
-        tracing::debug!("Registered 3 learning tools");
+        tracing::debug!("Registered 2 learning tools (session_search deferred)");
     }
 
     /// Register user profile tools (view, edit, clear).

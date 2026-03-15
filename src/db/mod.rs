@@ -764,6 +764,17 @@ pub trait UserProfileStore: Send + Sync {
         category: &str,
         fact_key: &str,
     ) -> Result<bool, DatabaseError>;
+
+    /// Delete all profile facts in a category (batch operation).
+    async fn delete_profile_facts_by_category(
+        &self,
+        user_id: &str,
+        agent_id: &str,
+        category: &str,
+    ) -> Result<u64, DatabaseError>;
+
+    /// Delete all profile facts for a user+agent (GDPR "forget me").
+    async fn clear_profile(&self, user_id: &str, agent_id: &str) -> Result<u64, DatabaseError>;
 }
 
 /// Row type for encrypted profile facts.
