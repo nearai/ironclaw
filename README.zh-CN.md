@@ -164,7 +164,9 @@ ironclaw onboard
 ### 替代 LLM 提供商
 
 IronClaw 默认使用 NEAR AI，但兼容任何 OpenAI 兼容的端点。
-常用选项包括 **OpenRouter**（300+ 模型）、**Together AI**、**Fireworks AI**、**Ollama**（本地部署）以及自托管服务器如 **vLLM** 或 **LiteLLM**。
+常用选项包括 **OpenRouter**（300+ 模型）、**Together AI**、**Fireworks AI**、**Github Copilot**、**Ollama**（本地部署）以及自托管服务器如 **vLLM** 或 **LiteLLM**。
+
+对于 GitHub Copilot，`ironclaw onboard` 现在可以通过 GitHub 设备登录流程获取并保存令牌。
 
 在向导中选择 *"OpenAI-compatible"*，或直接设置环境变量：
 

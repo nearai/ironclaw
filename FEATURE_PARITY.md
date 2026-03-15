@@ -242,6 +242,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
 | OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
+| GitHub Copilot | ❌ | ✅ | - | Dedicated provider with OAuth token exchange (`GithubCopilotProvider`) |
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
 | MiniMax | ✅ | ❌ | P3 | Regional endpoint selection |
