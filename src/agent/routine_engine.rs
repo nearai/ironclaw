@@ -425,7 +425,7 @@ impl RoutineEngine {
                 .map(|r| sanitize_summary(&r));
 
             let (new_status, summary) = match job.state {
-                JobState::Completed | JobState::Accepted => {
+                JobState::Completed => {
                     let summary =
                         last_reason.unwrap_or_else(|| "Job completed successfully".to_string());
                     (RunStatus::Ok, summary)
@@ -436,11 +436,13 @@ impl RoutineEngine {
                     (RunStatus::Failed, summary)
                 }
                 JobState::Cancelled => (RunStatus::Failed, "Job was cancelled".to_string()),
-                // Still in progress — skip (Submitted can still transition to Failed)
+                // Still in progress — Submitted and Accepted can still transition
+                // to Failed, so treat them like Pending/InProgress.
                 JobState::Pending
                 | JobState::InProgress
                 | JobState::Stuck
-                | JobState::Submitted => continue,
+                | JobState::Submitted
+                | JobState::Accepted => continue,
             };
 
             tracing::info!(
@@ -1434,13 +1436,51 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Sanitize a summary string from job transitions before using in notifications.
-/// Truncates to 500 chars and strips control characters to prevent injection.
+///
+/// `last_reason` comes from untrusted container code, so we:
+/// 1. Strip control characters (except newline) to prevent terminal injection
+/// 2. Strip HTML tags to prevent injection in web-rendered notifications
+/// 3. Collapse multiple whitespace/newlines to single spaces for cleaner output
+/// 4. Truncate to 500 chars to prevent oversized notifications
 fn sanitize_summary(s: &str) -> String {
-    let cleaned: String = s
+    // Strip control characters (keep newline for now, collapse later)
+    let no_control: String = s
         .chars()
         .filter(|c| !c.is_control() || *c == '\n')
         .collect();
-    truncate(&cleaned, 500)
+
+    // Strip HTML tags (e.g. <script>, <img>, <a href=...>)
+    let no_html = strip_html_tags(&no_control);
+
+    // Collapse whitespace: multiple spaces/newlines become a single space
+    let collapsed: String = no_html.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Truncate to reasonable length
+    if collapsed.len() <= 500 {
+        collapsed
+    } else {
+        // Find a safe char boundary for truncation
+        let mut end = 500;
+        while !collapsed.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}...", &collapsed[..end])
+    }
+}
+
+/// Remove HTML/XML tags from a string.
+fn strip_html_tags(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => result.push(c),
+            _ => {}
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1763,16 +1803,42 @@ mod tests {
         // Preserves normal text
         assert_eq!(sanitize_summary("Job completed"), "Job completed");
 
-        // Strips control characters but preserves newlines
+        // Strips control characters and collapses whitespace
         assert_eq!(
             sanitize_summary("line1\nline2\x00\x1b[31mred"),
-            "line1\nline2[31mred"
+            "line1 line2[31mred"
         );
 
         // Truncates long strings
         let long = "x".repeat(600);
         let result = sanitize_summary(&long);
         assert!(result.len() <= 503); // 500 + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_sanitize_summary_strips_html() {
+        use super::sanitize_summary;
+
+        assert_eq!(
+            sanitize_summary("Hello <script>alert('xss')</script> world"),
+            "Hello alert('xss') world"
+        );
+        assert_eq!(
+            sanitize_summary("<b>bold</b> and <a href=\"evil\">link</a>"),
+            "bold and link"
+        );
+        assert_eq!(sanitize_summary("<img src=x onerror=alert(1)>"), "");
+    }
+
+    #[test]
+    fn test_sanitize_summary_multibyte_truncation() {
+        use super::sanitize_summary;
+
+        // Ensure truncation doesn't panic on multi-byte chars near the boundary
+        let s = "a".repeat(498) + "\u{1F600}\u{1F600}"; // 498 + two 4-byte emoji
+        let result = sanitize_summary(&s);
+        assert!(result.len() <= 503);
         assert!(result.ends_with("..."));
     }
 }

@@ -956,8 +956,10 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some(warning) = docker_user_warning {
         let channels_ref = Arc::clone(&channels_for_warnings);
         tokio::spawn(async move {
-            // Small delay to let channels finish connecting
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // Delay to let channels finish connecting before sending the warning.
+            // 5s is generous but avoids the message being lost on slow startups.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tracing::debug!("Sending sandbox-unavailable warning to connected channels");
             let response = ironclaw::channels::OutgoingResponse {
                 content: format!("Warning: {warning}"),
                 thread_id: None,
