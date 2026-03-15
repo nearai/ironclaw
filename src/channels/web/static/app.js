@@ -2750,6 +2750,46 @@ function renderConfigureModal(name, secrets) {
   if (fields.length > 0) fields[0].input.focus();
 }
 
+function renderTelegramVerificationChallenge(overlay, verification) {
+  if (!overlay || !verification) return;
+  const modal = overlay.querySelector('.configure-modal');
+  if (!modal) return;
+
+  let panel = modal.querySelector('.configure-verification');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'configure-verification';
+    modal.insertBefore(panel, modal.querySelector('.configure-actions'));
+  }
+
+  panel.innerHTML = '';
+
+  const title = document.createElement('div');
+  title.className = 'configure-verification-title';
+  title.textContent = I18n.t('config.telegramChallengeTitle');
+  panel.appendChild(title);
+
+  const instructions = document.createElement('div');
+  instructions.className = 'configure-verification-instructions';
+  instructions.textContent = verification.instructions;
+  panel.appendChild(instructions);
+
+  const code = document.createElement('code');
+  code.className = 'configure-verification-code';
+  code.textContent = verification.code;
+  panel.appendChild(code);
+
+  if (verification.deep_link) {
+    const link = document.createElement('a');
+    link.className = 'configure-verification-link';
+    link.href = verification.deep_link;
+    link.target = '_blank';
+    link.rel = 'noreferrer noopener';
+    link.textContent = I18n.t('config.telegramOpenBot');
+    panel.appendChild(link);
+  }
+}
+
 function submitConfigureModal(name, fields) {
   const secrets = {};
   for (const f of fields) {
@@ -2773,6 +2813,16 @@ function submitConfigureModal(name, fields) {
   })
     .then((res) => {
       if (res.success) {
+        if (res.verification && name === 'telegram') {
+          btns.forEach(function(b) { b.disabled = false; });
+          renderTelegramVerificationChallenge(overlay, res.verification);
+          fields.forEach(function(f) { f.input.value = ''; });
+          const submitBtn = overlay.querySelector('.configure-actions button.btn-ext.activate');
+          if (submitBtn) submitBtn.textContent = I18n.t('config.telegramVerifyOwner');
+          showToast(res.message || res.verification.instructions, 'info');
+          return;
+        }
+
         closeConfigureModal();
         if (res.auth_url) {
           showAuthCard({
@@ -2790,7 +2840,12 @@ function submitConfigureModal(name, fields) {
         btns.forEach(function(b) { b.disabled = false; });
         if (name === 'telegram') {
           const submitBtn = overlay && overlay.querySelector('.configure-actions button.btn-ext.activate');
-          if (submitBtn) submitBtn.textContent = I18n.t('config.save');
+          const hasVerification = overlay && overlay.querySelector('.configure-verification');
+          if (submitBtn) {
+            submitBtn.textContent = hasVerification
+              ? I18n.t('config.telegramVerifyOwner')
+              : I18n.t('config.save');
+          }
         }
         showToast(res.message || 'Configuration failed', 'error');
       }
@@ -2799,7 +2854,12 @@ function submitConfigureModal(name, fields) {
       btns.forEach(function(b) { b.disabled = false; });
       if (name === 'telegram') {
         const submitBtn = overlay && overlay.querySelector('.configure-actions button.btn-ext.activate');
-        if (submitBtn) submitBtn.textContent = I18n.t('config.save');
+        const hasVerification = overlay && overlay.querySelector('.configure-verification');
+        if (submitBtn) {
+          submitBtn.textContent = hasVerification
+            ? I18n.t('config.telegramVerifyOwner')
+            : I18n.t('config.save');
+        }
       }
       showToast('Configuration failed: ' + err.message, 'error');
     });

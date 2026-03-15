@@ -537,6 +537,9 @@ pub struct ActionResponse {
     /// Whether the channel was successfully activated after setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
+    /// Pending manual verification challenge (for Telegram owner binding, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<crate::extensions::VerificationChallenge>,
 }
 
 impl ActionResponse {
@@ -548,6 +551,7 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
+            verification: None,
         }
     }
 
@@ -559,6 +563,7 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
+            verification: None,
         }
     }
 }

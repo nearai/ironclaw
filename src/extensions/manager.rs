@@ -20,7 +20,7 @@ use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
     ActivateResult, AuthResult, ConfigureResult, ExtensionError, ExtensionKind, ExtensionSource,
     InstallResult, InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
-    UpgradeOutcome, UpgradeResult,
+    UpgradeOutcome, UpgradeResult, VerificationChallenge,
 };
 use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
@@ -62,10 +62,12 @@ type TestWasmChannelLoader =
     Arc<dyn Fn(&str) -> Result<LoadedChannel, ExtensionError> + Send + Sync>;
 #[cfg(test)]
 type TestTelegramBindingResolver =
-    Arc<dyn Fn(&str, Option<i64>) -> Result<TelegramBindingData, ExtensionError> + Send + Sync>;
+    Arc<dyn Fn(&str, Option<i64>) -> Result<TelegramBindingResult, ExtensionError> + Send + Sync>;
 
 const TELEGRAM_OWNER_BIND_TIMEOUT_SECS: u64 = 120;
+const TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS: u64 = 300;
 const TELEGRAM_GET_UPDATES_TIMEOUT_SECS: u64 = 25;
+const TELEGRAM_OWNER_BIND_CODE_LEN: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TelegramBindingData {
@@ -78,6 +80,19 @@ struct TelegramBindingData {
 enum TelegramOwnerBindingState {
     Existing,
     VerifiedNow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingTelegramVerificationChallenge {
+    code: String,
+    bot_username: Option<String>,
+    expires_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TelegramBindingResult {
+    Bound(TelegramBindingData),
+    Pending(VerificationChallenge),
 }
 
 fn telegram_request_error(action: &'static str, error: &reqwest::Error) -> ExtensionError {
@@ -139,6 +154,8 @@ struct TelegramMessage {
     chat: TelegramChat,
     #[serde(default)]
     from: Option<TelegramUser>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -187,12 +204,53 @@ fn channel_auth_instructions(
 ) -> String {
     if channel_name == TELEGRAM_CHANNEL_NAME && secret.name == "telegram_bot_token" {
         return format!(
-            "{} After you submit it, send a private message to your bot in Telegram so IronClaw can verify you as the owner.",
+            "{} After you submit it, IronClaw will show a one-time verification code. Send `/start CODE` to your bot in Telegram, then verify again to bind the owner.",
             secret.prompt
         );
     }
 
     secret.prompt.clone()
+}
+
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn generate_telegram_verification_code() -> String {
+    use rand::Rng;
+    rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(TELEGRAM_OWNER_BIND_CODE_LEN)
+        .map(char::from)
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn telegram_verification_deep_link(bot_username: Option<&str>, code: &str) -> Option<String> {
+    bot_username
+        .filter(|username| !username.trim().is_empty())
+        .map(|username| format!("https://t.me/{username}?start={code}"))
+}
+
+fn telegram_verification_instructions(bot_username: Option<&str>, code: &str) -> String {
+    if let Some(username) = bot_username.filter(|username| !username.trim().is_empty()) {
+        return format!("Send `/start {code}` to @{username}, then click Verify owner.");
+    }
+
+    format!("Send `/start {code}` to your Telegram bot, then click Verify owner.")
+}
+
+fn telegram_message_matches_verification_code(text: &str, code: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed == code
+        || trimmed == format!("/start {code}")
+        || trimmed
+            .strip_prefix("/start ")
+            .map(|payload| payload.trim() == code)
+            .unwrap_or(false)
 }
 
 /// Central manager for extension lifecycle operations.
@@ -254,6 +312,7 @@ pub struct ExtensionManager {
     /// The gateway's own base URL for building OAuth redirect URIs.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
     gateway_base_url: RwLock<Option<String>>,
+    pending_telegram_verification: RwLock<HashMap<String, PendingTelegramVerificationChallenge>>,
     #[cfg(test)]
     test_wasm_channel_loader: RwLock<Option<TestWasmChannelLoader>>,
     #[cfg(test)]
@@ -333,6 +392,7 @@ impl ExtensionManager {
             relay_config: crate::config::RelayConfig::from_env(),
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
+            pending_telegram_verification: RwLock::new(HashMap::new()),
             #[cfg(test)]
             test_wasm_channel_loader: RwLock::new(None),
             #[cfg(test)]
@@ -522,6 +582,80 @@ impl ExtensionManager {
 
     pub async fn has_wasm_channel_owner_binding(&self, name: &str) -> bool {
         self.current_channel_owner_id(name).await.is_some()
+    }
+
+    async fn get_pending_telegram_verification(
+        &self,
+        name: &str,
+    ) -> Option<PendingTelegramVerificationChallenge> {
+        let now = unix_timestamp_secs();
+        let mut guard = self.pending_telegram_verification.write().await;
+        let challenge = guard.get(name).cloned()?;
+        if challenge.expires_at_unix <= now {
+            guard.remove(name);
+            return None;
+        }
+        Some(challenge)
+    }
+
+    async fn set_pending_telegram_verification(
+        &self,
+        name: &str,
+        challenge: PendingTelegramVerificationChallenge,
+    ) {
+        self.pending_telegram_verification
+            .write()
+            .await
+            .insert(name.to_string(), challenge);
+    }
+
+    async fn clear_pending_telegram_verification(&self, name: &str) {
+        self.pending_telegram_verification
+            .write()
+            .await
+            .remove(name);
+    }
+
+    async fn issue_telegram_verification_challenge(
+        &self,
+        client: &reqwest::Client,
+        name: &str,
+        bot_token: &str,
+        bot_username: Option<&str>,
+    ) -> Result<VerificationChallenge, ExtensionError> {
+        let delete_webhook_url = format!("https://api.telegram.org/bot{bot_token}/deleteWebhook");
+        let delete_webhook_resp = client
+            .post(&delete_webhook_url)
+            .query(&[("drop_pending_updates", "true")])
+            .send()
+            .await
+            .map_err(|e| telegram_request_error("deleteWebhook", &e))?;
+        if !delete_webhook_resp.status().is_success() {
+            return Err(ExtensionError::Other(format!(
+                "Telegram deleteWebhook failed (HTTP {})",
+                delete_webhook_resp.status()
+            )));
+        }
+
+        let challenge = PendingTelegramVerificationChallenge {
+            code: generate_telegram_verification_code(),
+            bot_username: bot_username.map(str::to_string),
+            expires_at_unix: unix_timestamp_secs() + TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS,
+        };
+        self.set_pending_telegram_verification(name, challenge.clone())
+            .await;
+
+        Ok(VerificationChallenge {
+            code: challenge.code.clone(),
+            instructions: telegram_verification_instructions(
+                challenge.bot_username.as_deref(),
+                &challenge.code,
+            ),
+            deep_link: telegram_verification_deep_link(
+                challenge.bot_username.as_deref(),
+                &challenge.code,
+            ),
+        })
     }
 
     /// Set just the channel manager for relay channel hot-activation.
@@ -3946,45 +4080,80 @@ impl ExtensionManager {
         &self,
         name: &str,
         secrets: &std::collections::HashMap<String, String>,
-    ) -> Result<TelegramBindingData, ExtensionError> {
-        let bot_token = if let Some(token) = secrets
+    ) -> Result<TelegramBindingResult, ExtensionError> {
+        let explicit_token = secrets
             .get("telegram_bot_token")
             .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-        {
+            .filter(|v| !v.is_empty());
+        let bot_token = if let Some(token) = explicit_token.clone() {
             token
         } else {
-            self.secrets
+            match self
+                .secrets
                 .get_decrypted(&self.user_id, "telegram_bot_token")
                 .await
-                .ok()
-                .map(|s| s.expose().trim().to_string())
-                .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    ExtensionError::ValidationFailed(
+            {
+                Ok(secret) => {
+                    let token = secret.expose().trim().to_string();
+                    if token.is_empty() {
+                        return Err(ExtensionError::ValidationFailed(
+                            "Telegram bot token is required before owner verification".to_string(),
+                        ));
+                    }
+                    token
+                }
+                Err(crate::secrets::SecretError::NotFound(_)) => {
+                    return Err(ExtensionError::ValidationFailed(
                         "Telegram bot token is required before owner verification".to_string(),
-                    )
-                })?
+                    ));
+                }
+                Err(err) => {
+                    return Err(ExtensionError::Config(format!(
+                        "Failed to read stored Telegram bot token: {err}"
+                    )));
+                }
+            }
         };
 
         let existing_owner_id = self.current_channel_owner_id(name).await;
         let binding = self
-            .resolve_telegram_binding(&bot_token, existing_owner_id)
+            .resolve_telegram_binding(name, &bot_token, existing_owner_id)
             .await?;
 
-        self.set_channel_owner_id(name, binding.owner_id).await?;
-
-        if let Some(username) = binding.bot_username.as_deref()
-            && let Some(store) = self.store.as_ref()
-        {
-            store
-                .set_setting(
-                    &self.user_id,
-                    &bot_username_setting_key(name),
-                    &serde_json::json!(username),
-                )
-                .await
-                .map_err(|e| ExtensionError::Config(e.to_string()))?;
+        match &binding {
+            TelegramBindingResult::Bound(data) => {
+                self.set_channel_owner_id(name, data.owner_id).await?;
+                if let Some(username) = data.bot_username.as_deref()
+                    && let Some(store) = self.store.as_ref()
+                {
+                    store
+                        .set_setting(
+                            &self.user_id,
+                            &bot_username_setting_key(name),
+                            &serde_json::json!(username),
+                        )
+                        .await
+                        .map_err(|e| ExtensionError::Config(e.to_string()))?;
+                }
+            }
+            TelegramBindingResult::Pending(challenge) => {
+                if let Some(deep_link) = challenge.deep_link.as_deref()
+                    && let Some(username) = deep_link
+                        .strip_prefix("https://t.me/")
+                        .and_then(|rest| rest.split('?').next())
+                        .filter(|value| !value.trim().is_empty())
+                    && let Some(store) = self.store.as_ref()
+                {
+                    store
+                        .set_setting(
+                            &self.user_id,
+                            &bot_username_setting_key(name),
+                            &serde_json::json!(username),
+                        )
+                        .await
+                        .map_err(|e| ExtensionError::Config(e.to_string()))?;
+                }
+            }
         }
 
         Ok(binding)
@@ -3992,9 +4161,10 @@ impl ExtensionManager {
 
     async fn resolve_telegram_binding(
         &self,
+        name: &str,
         bot_token: &str,
         existing_owner_id: Option<i64>,
-    ) -> Result<TelegramBindingData, ExtensionError> {
+    ) -> Result<TelegramBindingResult, ExtensionError> {
         #[cfg(test)]
         if let Some(resolver) = self.test_telegram_binding_resolver.read().await.as_ref() {
             return resolver(bot_token, existing_owner_id);
@@ -4036,24 +4206,42 @@ impl ExtensionManager {
             .filter(|username| !username.trim().is_empty());
 
         if let Some(owner_id) = existing_owner_id {
-            return Ok(TelegramBindingData {
+            self.clear_pending_telegram_verification(name).await;
+            return Ok(TelegramBindingResult::Bound(TelegramBindingData {
                 owner_id,
-                bot_username,
+                bot_username: bot_username.clone(),
                 binding_state: TelegramOwnerBindingState::Existing,
-            });
+            }));
         }
 
-        let delete_webhook_url = format!("https://api.telegram.org/bot{bot_token}/deleteWebhook");
-        let delete_webhook_resp = client
-            .post(&delete_webhook_url)
-            .send()
-            .await
-            .map_err(|e| telegram_request_error("deleteWebhook", &e))?;
-        if !delete_webhook_resp.status().is_success() {
-            return Err(ExtensionError::Other(format!(
-                "Telegram deleteWebhook failed (HTTP {})",
-                delete_webhook_resp.status()
-            )));
+        let pending_challenge = self.get_pending_telegram_verification(name).await;
+
+        let challenge = if let Some(challenge) = pending_challenge {
+            challenge
+        } else {
+            return Ok(TelegramBindingResult::Pending(
+                self.issue_telegram_verification_challenge(
+                    &client,
+                    name,
+                    bot_token,
+                    bot_username.as_deref(),
+                )
+                .await?,
+            ));
+        };
+
+        let now = unix_timestamp_secs();
+        if challenge.expires_at_unix <= now {
+            self.clear_pending_telegram_verification(name).await;
+            return Ok(TelegramBindingResult::Pending(
+                self.issue_telegram_verification_challenge(
+                    &client,
+                    name,
+                    bot_token,
+                    bot_username.as_deref(),
+                )
+                .await?,
+            ));
         }
 
         let deadline = std::time::Instant::now()
@@ -4109,12 +4297,15 @@ impl ExtensionManager {
                     && message.chat.chat_type == "private"
                     && let Some(from) = message.from
                     && !from.is_bot
+                    && let Some(text) = message.text.as_deref()
+                    && telegram_message_matches_verification_code(text, &challenge.code)
                 {
                     bound_owner_id = Some(from.id);
                 }
             }
 
             if let Some(owner_id) = bound_owner_id {
+                self.clear_pending_telegram_verification(name).await;
                 if offset > 0 {
                     let _ = client
                         .get(format!(
@@ -4125,17 +4316,18 @@ impl ExtensionManager {
                         .await;
                 }
 
-                return Ok(TelegramBindingData {
+                return Ok(TelegramBindingResult::Bound(TelegramBindingData {
                     owner_id,
                     bot_username,
                     binding_state: TelegramOwnerBindingState::VerifiedNow,
-                });
+                }));
             }
         }
 
-        Err(ExtensionError::ValidationFailed(
-            "Telegram owner verification timed out. Send a private message to your bot in Telegram, then save again.".to_string(),
-        ))
+        Err(ExtensionError::ValidationFailed(format!(
+            "Telegram owner verification timed out. Send `/start {}` to your bot, then click Verify owner again.",
+            challenge.code
+        )))
     }
 
     async fn notify_telegram_owner_verified(
@@ -4361,7 +4553,22 @@ impl ExtensionManager {
 
         let mut telegram_binding = None;
         if kind == ExtensionKind::WasmChannel && name == TELEGRAM_CHANNEL_NAME {
-            telegram_binding = Some(self.configure_telegram_binding(name, secrets).await?);
+            match self.configure_telegram_binding(name, secrets).await? {
+                TelegramBindingResult::Bound(binding) => {
+                    telegram_binding = Some(binding);
+                }
+                TelegramBindingResult::Pending(verification) => {
+                    return Ok(ConfigureResult {
+                        message: format!(
+                            "Configuration saved for '{}'. {}",
+                            name, verification.instructions
+                        ),
+                        activated: false,
+                        auth_url: None,
+                        verification: Some(verification),
+                    });
+                }
+            }
         }
 
         // For tools, save and attempt auto-activation, then check auth.
@@ -4415,6 +4622,7 @@ impl ExtensionManager {
                         message,
                         activated: true,
                         auth_url,
+                        verification: None,
                     });
                 }
                 Err(e) => {
@@ -4427,6 +4635,7 @@ impl ExtensionManager {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
                         auth_url: None,
+                        verification: None,
                     });
                 }
             }
@@ -4444,6 +4653,7 @@ impl ExtensionManager {
                     message: format!("Configuration saved for '{}'.", name),
                     activated: false,
                     auth_url: None,
+                    verification: None,
                 });
             }
         };
@@ -4471,6 +4681,7 @@ impl ExtensionManager {
                     message,
                     activated: true,
                     auth_url: None,
+                    verification: None,
                 })
             }
             Err(e) => {
@@ -4493,6 +4704,7 @@ impl ExtensionManager {
                     ),
                     activated: false,
                     auth_url: None,
+                    verification: None,
                 })
             }
         }
@@ -4867,11 +5079,14 @@ mod tests {
     };
     use crate::extensions::ExtensionManager;
     use crate::extensions::manager::{
-        ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramOwnerBindingState,
-        build_wasm_channel_runtime_config_updates, combine_install_errors, fallback_decision,
-        infer_kind_from_url,
+        ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramBindingResult,
+        TelegramOwnerBindingState, build_wasm_channel_runtime_config_updates,
+        combine_install_errors, fallback_decision, infer_kind_from_url,
+        telegram_message_matches_verification_code,
     };
-    use crate::extensions::{ExtensionError, ExtensionKind, ExtensionSource, InstallResult};
+    use crate::extensions::{
+        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, VerificationChallenge,
+    };
     use crate::pairing::PairingStore;
 
     fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
@@ -5534,11 +5749,11 @@ mod tests {
                         "owner binding should be derived during setup".to_string(),
                     ));
                 }
-                Ok(TelegramBindingData {
+                Ok(TelegramBindingResult::Bound(TelegramBindingData {
                     owner_id: 424242,
                     bot_username: Some("test_hot_bot".to_string()),
                     binding_state: TelegramOwnerBindingState::VerifiedNow,
-                })
+                }))
             }))
             .await;
 
@@ -5621,6 +5836,86 @@ mod tests {
             bot_username_setting,
             Some(serde_json::json!("test_hot_bot")),
             "bot username setting",
+        )
+    }
+
+    #[tokio::test]
+    async fn test_telegram_hot_activation_returns_verification_challenge_before_binding()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
+        std::fs::write(channels_dir.join("telegram.wasm"), b"mock")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            channels_dir.join("telegram.capabilities.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "telegram_bot_token",
+                            "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+                            "optional": false
+                        }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                }
+            }))
+            .map_err(|err| format!("serialize capabilities: {err}"))?,
+        )
+        .map_err(|err| format!("write capabilities: {err}"))?;
+
+        let manager =
+            make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
+        manager
+            .set_test_telegram_binding_resolver(Arc::new(|_token, existing_owner_id| {
+                if existing_owner_id.is_some() {
+                    return Err(ExtensionError::Other(
+                        "owner binding should not exist before verification".to_string(),
+                    ));
+                }
+                Ok(TelegramBindingResult::Pending(VerificationChallenge {
+                    code: "iclaw-7qk2m9".to_string(),
+                    instructions:
+                        "Send `/start iclaw-7qk2m9` to @test_hot_bot, then click Verify owner."
+                            .to_string(),
+                    deep_link: Some("https://t.me/test_hot_bot?start=iclaw-7qk2m9".to_string()),
+                }))
+            }))
+            .await;
+
+        let result = manager
+            .configure(
+                "telegram",
+                &std::collections::HashMap::from([(
+                    "telegram_bot_token".to_string(),
+                    "123456789:ABCdefGhI".to_string(),
+                )]),
+            )
+            .await
+            .map_err(|err| format!("configure returned challenge: {err}"))?;
+
+        require(
+            !result.activated,
+            "expected setup to pause for verification",
+        )?;
+        require(
+            result.verification.as_ref().map(|v| v.code.as_str()) == Some("iclaw-7qk2m9"),
+            "expected verification code in configure result",
+        )?;
+        require(
+            !manager
+                .active_channel_names
+                .read()
+                .await
+                .contains("telegram"),
+            "telegram should not activate until owner verification completes",
         )
     }
 
@@ -6539,8 +6834,25 @@ mod tests {
             "telegram auth instructions should still ask for the bot token",
         )?;
         require(
-            instructions.contains("send a private message to your bot in Telegram"),
+            instructions.contains("one-time verification code")
+                && instructions.contains("/start CODE"),
             "telegram auth instructions should explain the owner verification step",
+        )
+    }
+
+    #[test]
+    fn test_telegram_message_matches_verification_code_variants() -> Result<(), String> {
+        require(
+            telegram_message_matches_verification_code("iclaw-7qk2m9", "iclaw-7qk2m9"),
+            "plain verification code should match",
+        )?;
+        require(
+            telegram_message_matches_verification_code("/start iclaw-7qk2m9", "iclaw-7qk2m9"),
+            "/start payload should match",
+        )?;
+        require(
+            !telegram_message_matches_verification_code("/start something-else", "iclaw-7qk2m9"),
+            "wrong verification code should not match",
         )
     }
 

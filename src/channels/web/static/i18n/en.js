@@ -342,8 +342,11 @@ I18n.register('en', {
   
   // Configure
   'config.title': 'Configure {name}',
-  'config.telegramOwnerHint': 'After saving, send a private message to your bot in Telegram so IronClaw can verify you as the owner.',
+  'config.telegramOwnerHint': 'After saving, IronClaw will show a one-time code. Send `/start CODE` to your bot in Telegram, then click Verify owner.',
+  'config.telegramChallengeTitle': 'Telegram owner verification',
   'config.telegramOwnerWaiting': 'Waiting for Telegram owner verification...',
+  'config.telegramVerifyOwner': 'Verify owner',
+  'config.telegramOpenBot': 'Open bot in Telegram',
   'config.optional': ' (optional)',
   'config.alreadySet': '(already set — leave empty to keep)',
   'config.alreadyConfigured': 'Already configured',

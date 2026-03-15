@@ -1148,16 +1148,31 @@ async fn chat_auth_token_handler(
         .await
     {
         Ok(result) => {
-            // Clear auth mode on the active thread
-            clear_auth_mode(&state).await;
+            let mut resp = ActionResponse::ok(result.message.clone());
+            resp.activated = Some(result.activated);
+            resp.auth_url = result.auth_url.clone();
+            resp.verification = result.verification.clone();
+            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
 
-            state.sse.broadcast(SseEvent::AuthCompleted {
-                extension_name: req.extension_name.clone(),
-                success: true,
-                message: result.message.clone(),
-            });
+            if result.verification.is_some() {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: req.extension_name.clone(),
+                    instructions: Some(result.message),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            } else {
+                // Clear auth mode on the active thread
+                clear_auth_mode(&state).await;
 
-            Ok(Json(ActionResponse::ok(result.message)))
+                state.sse.broadcast(SseEvent::AuthCompleted {
+                    extension_name: req.extension_name.clone(),
+                    success: true,
+                    message: result.message,
+                });
+            }
+
+            Ok(Json(resp))
         }
         Err(e) => {
             let msg = e.to_string();
@@ -2189,16 +2204,27 @@ async fn extensions_setup_submit_handler(
 
     match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
-            // Broadcast auth_completed so the chat UI can dismiss any in-progress
-            // auth card or setup modal that was triggered by tool_auth/tool_activate.
-            state.sse.broadcast(SseEvent::AuthCompleted {
-                extension_name: name.clone(),
-                success: true,
-                message: result.message.clone(),
-            });
-            let mut resp = ActionResponse::ok(result.message);
+            let mut resp = ActionResponse::ok(result.message.clone());
             resp.activated = Some(result.activated);
-            resp.auth_url = result.auth_url;
+            resp.auth_url = result.auth_url.clone();
+            resp.verification = result.verification.clone();
+            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
+            if result.verification.is_some() {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: name.clone(),
+                    instructions: resp.instructions.clone(),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            } else {
+                // Broadcast auth_completed so the chat UI can dismiss any in-progress
+                // auth card or setup modal that was triggered by tool_auth/tool_activate.
+                state.sse.broadcast(SseEvent::AuthCompleted {
+                    extension_name: name.clone(),
+                    success: true,
+                    message: resp.message.clone(),
+                });
+            }
             Ok(Json(resp))
         }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),

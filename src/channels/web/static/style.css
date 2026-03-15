@@ -2907,6 +2907,51 @@ body {
   line-height: 1.5;
 }
 
+.configure-verification {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 16px 0 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+.configure-verification-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.configure-verification-instructions {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.configure-verification-code {
+  display: inline-block;
+  width: fit-content;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.configure-verification-link {
+  width: fit-content;
+  color: var(--accent, var(--text-link, #4ea3ff));
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.configure-verification-link:hover {
+  text-decoration: underline;
+}
+
 .configure-form {
   display: flex;
   flex-direction: column;
