@@ -296,6 +296,17 @@ impl AppBuilder {
             tools.register_secrets_tools(Arc::clone(ss));
         }
 
+        // Register Composio tool if API key is configured
+        if let Ok(composio_key) = std::env::var("COMPOSIO_API_KEY")
+            && !composio_key.is_empty()
+        {
+            let entity_id =
+                std::env::var("COMPOSIO_ENTITY_ID").unwrap_or_else(|_| "default".to_string());
+            if let Err(e) = tools.register_composio_tools(composio_key, entity_id) {
+                tracing::warn!("Failed to register composio tool: {e}");
+            }
+        }
+
         // Create embeddings provider using the unified method
         let embeddings = self
             .config
