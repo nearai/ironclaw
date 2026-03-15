@@ -229,16 +229,17 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
         return Ok(());
     }
 
-    // For HTTPS, reject private/loopback/link-local/metadata IP literals.
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        let is_dangerous = match ip {
+    // Check whether an IP is in a blocked range (private, loopback,
+    // link-local, multicast, metadata, CGN, ULA).
+    let is_dangerous_ip = |ip: &IpAddr| -> bool {
+        match ip {
             IpAddr::V4(v4) => {
                 v4.is_private()
                     || v4.is_loopback()
                     || v4.is_link_local()
                     || v4.is_multicast()
                     || v4.is_unspecified()
-                    || v4 == Ipv4Addr::new(169, 254, 169, 254)
+                    || *v4 == Ipv4Addr::new(169, 254, 169, 254)
                     || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGN
             }
             IpAddr::V6(v6) => {
@@ -248,20 +249,49 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
                         || v4.is_link_local()
                         || v4 == Ipv4Addr::new(169, 254, 169, 254)
                 } else {
-                    v6.is_loopback() || v6.is_unspecified()
+                    v6.is_loopback()
+                        || v6.is_unspecified()
+                        || (v6.octets()[0] & 0xfe) == 0xfc // ULA (fc00::/7)
                 }
             }
-        };
-        if is_dangerous {
+        }
+    };
+
+    // For HTTPS, reject private/loopback/link-local/metadata IPs.
+    // Check both IP literals and resolved hostnames to prevent DNS-based SSRF.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_dangerous_ip(&ip) {
             return Err(ConfigError::InvalidValue {
                 key: field_name.to_string(),
                 message: format!(
-                    "HTTPS URL points to a private/internal IP '{}'. \
+                    "URL points to a private/internal IP '{}'. \
                      This is blocked to prevent SSRF attacks.",
                     ip
                 ),
             });
         }
+    } else {
+        // Hostname — resolve and check all resulting IPs.
+        use std::net::ToSocketAddrs;
+        let port = parsed.port().unwrap_or(443);
+        if let Ok(addrs) = (host, port).to_socket_addrs() {
+            for addr in addrs {
+                if is_dangerous_ip(&addr.ip()) {
+                    return Err(ConfigError::InvalidValue {
+                        key: field_name.to_string(),
+                        message: format!(
+                            "hostname '{}' resolves to private/internal IP '{}'. \
+                             This is blocked to prevent SSRF attacks.",
+                            host,
+                            addr.ip()
+                        ),
+                    });
+                }
+            }
+        }
+        // If DNS resolution fails, allow it — the HTTP request will fail
+        // later with a clear connection error. We don't want to block
+        // startup when DNS is temporarily unavailable.
     }
 
     Ok(())
