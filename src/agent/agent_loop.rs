@@ -95,6 +95,7 @@ pub struct Agent {
     pub(super) context_monitor: ContextMonitor,
     pub(super) heartbeat_config: Option<HeartbeatConfig>,
     pub(super) hygiene_config: Option<crate::config::HygieneConfig>,
+    pub(super) snapshot_config: Option<crate::config::SnapshotConfig>,
     pub(super) routine_config: Option<RoutineConfig>,
     /// Optional slot to expose the routine engine to the gateway for manual triggering.
     pub(super) routine_engine_slot:
@@ -113,6 +114,7 @@ impl Agent {
         channels: Arc<ChannelManager>,
         heartbeat_config: Option<HeartbeatConfig>,
         hygiene_config: Option<crate::config::HygieneConfig>,
+        snapshot_config: Option<crate::config::SnapshotConfig>,
         routine_config: Option<RoutineConfig>,
         context_manager: Option<Arc<ContextManager>>,
         session_manager: Option<Arc<SessionManager>>,
@@ -150,6 +152,7 @@ impl Agent {
             context_monitor: ContextMonitor::new(),
             heartbeat_config,
             hygiene_config,
+            snapshot_config,
             routine_config,
             routine_engine_slot: None,
         }
@@ -412,9 +415,19 @@ impl Agent {
                         .map(|h| h.to_workspace_config())
                         .unwrap_or_default();
 
+                    let snapshot = self
+                        .snapshot_config
+                        .as_ref()
+                        .map(|s| s.to_workspace_config(workspace.user_id()))
+                        .unwrap_or_else(|| {
+                            crate::config::SnapshotConfig::default()
+                                .to_workspace_config(workspace.user_id())
+                        });
+
                     Some(spawn_heartbeat(
                         config,
                         hygiene,
+                        snapshot,
                         workspace.clone(),
                         self.cheap_llm().clone(),
                         Some(notify_tx),

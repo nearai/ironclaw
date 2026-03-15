@@ -706,6 +706,7 @@ async fn async_main() -> anyhow::Result<()> {
         channels,
         Some(config.heartbeat.clone()),
         Some(config.hygiene.clone()),
+        Some(config.snapshot.clone()),
         Some(config.routines.clone()),
         Some(components.context_manager),
         Some(session_manager),

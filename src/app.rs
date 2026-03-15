@@ -706,8 +706,45 @@ impl AppBuilder {
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
 
-        // Seed workspace and backfill embeddings
+        // Startup recovery chain: hydrate → import → seed → backfill
+        // Each step is best-effort — failure only warns, never blocks subsequent steps.
         if let Some(ref ws) = workspace {
+            // Hydrate from snapshot if workspace is empty and a snapshot file exists.
+            let snap_cfg = self.config.snapshot.to_workspace_config(ws.user_id());
+            if snap_cfg.enabled && snap_cfg.snapshot_path.exists() {
+                match ws.list_all().await {
+                    Ok(docs) if docs.is_empty() => {
+                        match crate::workspace::snapshot::hydrate_from_snapshot(
+                            ws,
+                            &snap_cfg.snapshot_path,
+                        )
+                        .await
+                        {
+                            Ok(report) => {
+                                tracing::info!(
+                                    "Hydrated {} document(s) from snapshot {}",
+                                    report.restored,
+                                    snap_cfg.snapshot_path.display()
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to hydrate from snapshot {}: {}",
+                                    snap_cfg.snapshot_path.display(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        // Workspace is not empty — skip hydration.
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to list workspace docs for hydration check: {}", e);
+                    }
+                }
+            }
+
             // Import workspace files from disk FIRST if WORKSPACE_IMPORT_DIR is set.
             // This lets Docker images / deployment scripts ship customized
             // workspace templates (e.g., AGENTS.md, TOOLS.md) that override
