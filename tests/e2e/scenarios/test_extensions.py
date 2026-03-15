@@ -931,14 +931,10 @@ async def test_auth_completed_failure_sse_shows_error_toast_and_reloads_extensio
         else:
             await route.continue_()
 
-    async def handle_tools(route):
-        await route.fulfill(status=200, content_type="application/json", body='{"tools":[]}')
-
     async def handle_registry(route):
         await route.fulfill(status=200, content_type="application/json", body='{"entries":[]}')
 
     await page.route("**/api/extensions*", counting_handler)
-    await page.route("**/api/extensions/tools", handle_tools)
     await page.route("**/api/extensions/registry", handle_registry)
 
     await go_to_extensions(page)
@@ -947,13 +943,18 @@ async def test_auth_completed_failure_sse_shows_error_toast_and_reloads_extensio
     await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth")
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 1
 
-    await page.evaluate("""
-        handleAuthCompleted({
-          extension_name: 'gmail',
-          success: false,
-          message: 'OAuth flow expired. Please try again.',
-        });
-    """)
+    # Set up response listener before triggering the action so we catch the reload.
+    async with page.expect_response(
+        lambda r: r.url.split("?")[0].endswith("/api/extensions") and "/registry" not in r.url,
+        timeout=5000,
+    ) as resp_info:
+        await page.evaluate("""
+            handleAuthCompleted({
+              extension_name: 'gmail',
+              success: false,
+              message: 'OAuth flow expired. Please try again.',
+            });
+        """)
 
     await wait_for_toast(page, "OAuth flow expired. Please try again.")
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 0
@@ -963,8 +964,6 @@ async def test_auth_completed_failure_sse_shows_error_toast_and_reloads_extensio
         ).count()
         >= 1
     )
-
-    await page.wait_for_timeout(600)
     assert len(reload_count) > count_before, "Extensions list did not reload after auth failure"
 
 
