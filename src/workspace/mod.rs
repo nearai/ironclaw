@@ -91,10 +91,13 @@ fn is_system_prompt_file(path: &str) -> bool {
         .any(|p| path.eq_ignore_ascii_case(p))
 }
 
+/// Shared sanitizer instance — avoids rebuilding Aho-Corasick + regexes on every write.
+static SANITIZER: std::sync::LazyLock<Sanitizer> = std::sync::LazyLock::new(Sanitizer::new);
+
 /// Scan content for prompt injection. Returns `Err` if high-severity patterns
 /// are detected, otherwise logs warnings and returns `Ok(())`.
 fn reject_if_injected(path: &str, content: &str) -> Result<(), WorkspaceError> {
-    let sanitizer = Sanitizer::new();
+    let sanitizer = &*SANITIZER;
     let warnings = sanitizer.detect(content);
     let dominated = warnings.iter().any(|w| w.severity >= Severity::High);
     if dominated {
@@ -1147,7 +1150,10 @@ impl Workspace {
         // may already have a profile from a previous install and doesn't need
         // onboarding). This prevents existing users from getting a spurious
         // first-run ritual after upgrading.
-        let has_profile = self.read(paths::PROFILE).await.is_ok();
+        let has_profile = self
+            .read(paths::PROFILE)
+            .await
+            .is_ok_and(|d| !d.content.trim().is_empty());
         if is_fresh_workspace && !has_profile {
             if let Err(e) = self.write(paths::BOOTSTRAP, BOOTSTRAP_SEED).await {
                 tracing::warn!("Failed to seed {}: {}", paths::BOOTSTRAP, e);
@@ -1482,5 +1488,75 @@ mod tests {
         // Injection content targeting a non-system-prompt file should not
         // be checked (the guard is in write/append, not reject_if_injected).
         assert!(!is_system_prompt_file("notes/foo.md"));
+    }
+}
+
+#[cfg(all(test, feature = "libsql"))]
+mod seed_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn create_test_workspace() -> (Workspace, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("seed_test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+            .await
+            .expect("migrations");
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let ws = Workspace::new_with_db("test_seed", db);
+        (ws, temp_dir)
+    }
+
+    /// Empty profile.json should NOT suppress bootstrap seeding.
+    #[tokio::test]
+    async fn seed_if_empty_ignores_empty_profile() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Pre-create an empty profile.json (simulates a previous failed write).
+        ws.write(paths::PROFILE, "").await.expect("write empty profile");
+
+        // Seed should still create BOOTSTRAP.md because the profile is empty.
+        let count = ws.seed_if_empty().await.expect("seed_if_empty");
+        assert!(count > 0, "should have seeded files");
+        assert!(
+            ws.take_bootstrap_pending(),
+            "bootstrap_pending should be set when profile is empty"
+        );
+
+        // BOOTSTRAP.md should exist with content.
+        let doc = ws.read(paths::BOOTSTRAP).await.expect("read BOOTSTRAP");
+        assert!(
+            !doc.content.is_empty(),
+            "BOOTSTRAP.md should have been seeded"
+        );
+    }
+
+    /// Non-empty profile.json should suppress bootstrap seeding (existing user).
+    #[tokio::test]
+    async fn seed_if_empty_skips_bootstrap_with_populated_profile() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Pre-create a non-empty profile.json (existing user upgrading).
+        ws.write(paths::PROFILE, r#"{"version":2,"confidence":0.5}"#)
+            .await
+            .expect("write profile");
+
+        let count = ws.seed_if_empty().await.expect("seed_if_empty");
+        // Identity files are still seeded, but BOOTSTRAP should be skipped.
+        assert!(count > 0, "should have seeded identity files");
+        assert!(
+            !ws.take_bootstrap_pending(),
+            "bootstrap_pending should NOT be set when profile exists"
+        );
+
+        // BOOTSTRAP.md should not exist.
+        assert!(
+            ws.read(paths::BOOTSTRAP).await.is_err(),
+            "BOOTSTRAP.md should NOT have been seeded with existing profile"
+        );
     }
 }
