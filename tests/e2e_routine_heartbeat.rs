@@ -218,18 +218,7 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // Positive match: message containing "deploy to production".
-        let matching_msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "test".to_string(),
-            user_id: "default".to_string(),
-            user_name: None,
-            content: "deploy to production now".to_string(),
-            thread_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
+        let matching_msg = IncomingMessage::new("test", "default", "deploy to production now");
         let fired = engine.check_event_triggers(&matching_msg).await;
         assert!(
             fired >= 1,
@@ -240,18 +229,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Negative match: message that doesn't match.
-        let non_matching_msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "test".to_string(),
-            user_id: "default".to_string(),
-            user_name: None,
-            content: "check the staging environment".to_string(),
-            thread_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
+        let non_matching_msg =
+            IncomingMessage::new("test", "default", "check the staging environment");
         let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
     }
@@ -455,18 +434,7 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // First fire should work.
-        let msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "test".to_string(),
-            user_id: "default".to_string(),
-            user_name: None,
-            content: "test-cooldown trigger".to_string(),
-            thread_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
+        let msg = IncomingMessage::new("test", "default", "test-cooldown trigger");
         let fired1 = engine.check_event_triggers(&msg).await;
         assert!(fired1 >= 1, "First fire should work");
 
