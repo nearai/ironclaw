@@ -143,6 +143,11 @@ impl Agent {
             JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
+        job_ctx.metadata = serde_json::json!({
+            "notify_channel": message.channel,
+            "notify_user": message.user_id,
+            "notify_thread_id": message.thread_id,
+        });
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
