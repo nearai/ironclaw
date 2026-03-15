@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{optional_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_optional_env, validate_base_url};
 use crate::error::ConfigError;
 use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
@@ -94,13 +94,17 @@ impl LlmConfig {
         let nearai = NearAiConfig {
             model: Self::resolve_model("NEARAI_MODEL", settings, "zai-org/GLM-latest")?,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
-            base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
-                if nearai_api_key.is_some() {
-                    "https://cloud-api.near.ai".to_string()
-                } else {
-                    "https://private.near.ai".to_string()
-                }
-            }),
+            base_url: {
+                let url = optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
+                    if nearai_api_key.is_some() {
+                        "https://cloud-api.near.ai".to_string()
+                    } else {
+                        "https://private.near.ai".to_string()
+                    }
+                });
+                validate_base_url(&url, "NEARAI_BASE_URL")?;
+                url
+            },
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
