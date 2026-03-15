@@ -577,10 +577,7 @@ impl Agent {
         if let Some(id) = bootstrap_thread_id {
             // Use get_or_create_session (not resolve_thread) to avoid creating
             // an orphan thread. Then insert the DB-sourced thread directly.
-            let session = self
-                .session_manager
-                .get_or_create_session("default")
-                .await;
+            let session = self.session_manager.get_or_create_session("default").await;
             {
                 use crate::agent::session::Thread;
                 let mut sess = session.lock().await;
