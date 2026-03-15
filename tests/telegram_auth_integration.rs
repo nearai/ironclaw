@@ -40,8 +40,31 @@ macro_rules! require_telegram_wasm {
 
 /// Path to the built Telegram WASM module
 fn telegram_wasm_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm")
+    let local = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm");
+    if local.exists() {
+        return local;
+    }
+
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Some(path) = line.strip_prefix("worktree ") {
+                let candidate = std::path::PathBuf::from(path).join(
+                    "channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm",
+                );
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    local
 }
 
 /// Create a test runtime for WASM channel operations.

@@ -90,6 +90,7 @@ pub mod setup;
 pub(crate) mod signature;
 #[allow(dead_code)]
 pub(crate) mod storage;
+mod telegram_host_config;
 mod wrapper;
 
 // Core types
@@ -107,4 +108,5 @@ pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
 pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
+pub(crate) use telegram_host_config::{TELEGRAM_CHANNEL_NAME, bot_username_setting_key};
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};

@@ -7,8 +7,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::channels::wasm::{
-    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, WasmChannel, WasmChannelLoader,
-    WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
+    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannel,
+    WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
+    bot_username_setting_key, create_wasm_channel_router,
 };
 use crate::config::Config;
 use crate::db::Database;
@@ -48,7 +49,7 @@ pub async fn setup_wasm_channels(
     let mut loader = WasmChannelLoader::new(
         Arc::clone(&runtime),
         Arc::clone(&pairing_store),
-        settings_store,
+        settings_store.clone(),
     );
     if let Some(secrets) = secrets_store {
         loader = loader.with_secrets_store(Arc::clone(secrets));
@@ -70,7 +71,14 @@ pub async fn setup_wasm_channels(
     let mut channel_names: Vec<String> = Vec::new();
 
     for loaded in results.loaded {
-        let (name, channel) = register_channel(loaded, config, secrets_store, &wasm_router).await;
+        let (name, channel) = register_channel(
+            loaded,
+            config,
+            secrets_store,
+            settings_store.as_ref(),
+            &wasm_router,
+        )
+        .await;
         channel_names.push(name.clone());
         channels.push((name, channel));
     }
@@ -104,6 +112,7 @@ async fn register_channel(
     loaded: LoadedChannel,
     config: &Config,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
     wasm_router: &Arc<WasmChannelRouter>,
 ) -> (String, Box<dyn crate::channels::Channel>) {
     let channel_name = loaded.name().to_string();
@@ -159,6 +168,16 @@ async fn register_channel(
             .get(channel_name.as_str())
         {
             config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
+        }
+
+        if channel_name == TELEGRAM_CHANNEL_NAME
+            && let Some(store) = settings_store
+            && let Ok(Some(serde_json::Value::String(username))) = store
+                .get_setting("default", &bot_username_setting_key(&channel_name))
+                .await
+            && !username.trim().is_empty()
+        {
+            config_updates.insert("bot_username".to_string(), serde_json::json!(username));
         }
 
         if !config_updates.is_empty() {
