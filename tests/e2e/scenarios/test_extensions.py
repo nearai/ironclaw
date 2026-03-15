@@ -285,7 +285,8 @@ async def _load_wasm_channel(page, activation_status, activation_error=None):
     ext = {**_WASM_CHANNEL, "activation_status": activation_status, "activation_error": activation_error}
     await mock_ext_apis(page, installed=[ext])
     await go_to_channels(page)
-    card = page.locator(SEL["channels_ext_card"]).first
+    # Find the WASM channel card specifically (not built-in channel cards)
+    card = page.locator(SEL["channels_ext_card"], has_text="Test Channel").first
     await card.wait_for(state="visible", timeout=5000)
     return card
 
