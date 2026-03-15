@@ -2090,11 +2090,9 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
         }
-        // All words must be present across chunks.
+        // Rejoined chunks must equal the original text exactly.
         let rejoined = chunks.join(" ");
-        for word in &words {
-            assert!(rejoined.contains(word.as_str()));
-        }
+        assert_eq!(rejoined, text);
     }
 
     #[test]
