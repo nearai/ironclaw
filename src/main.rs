@@ -92,6 +92,10 @@ async fn async_main() -> anyhow::Result<()> {
             return ironclaw::cli::run_skills_command(skills_cmd.clone(), cli.config.as_deref())
                 .await;
         }
+        Some(Command::Logs(logs_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_logs_command(logs_cmd.clone(), cli.config.as_deref()).await;
+        }
         Some(Command::Doctor) => {
             init_cli_tracing();
             return ironclaw::cli::run_doctor_command().await;
@@ -920,7 +924,16 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     if let Some(ref ws_arc) = webhook_server {
-        ws_arc.lock().await.shutdown().await;
+        let (shutdown_tx, handle) = {
+            let mut ws = ws_arc.lock().await;
+            ws.begin_shutdown()
+        };
+        if let Some(tx) = shutdown_tx {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 
     if let Some(tunnel) = active_tunnel {

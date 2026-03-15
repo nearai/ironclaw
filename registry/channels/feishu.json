@@ -1,0 +1,34 @@
+{
+  "name": "feishu",
+  "display_name": "Feishu / Lark Channel",
+  "kind": "channel",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Talk to your agent through a Feishu or Lark bot",
+  "keywords": [
+    "messaging",
+    "bot",
+    "chat",
+    "feishu",
+    "lark"
+  ],
+  "source": {
+    "dir": "channels-src/feishu",
+    "capabilities": "feishu.capabilities.json",
+    "crate_name": "feishu-channel"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Feishu / Lark",
+    "secrets": [
+      "feishu_app_id",
+      "feishu_app_secret"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://open.feishu.cn/app"
+  },
+  "tags": [
+    "messaging"
+  ]
+}

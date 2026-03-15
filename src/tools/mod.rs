@@ -9,6 +9,7 @@
 
 pub mod builder;
 pub mod builtin;
+mod coercion;
 pub mod execute;
 pub mod mcp;
 pub mod rate_limiter;
@@ -24,6 +25,7 @@ pub use builder::{
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
+pub(crate) use coercion::prepare_tool_params;
 pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
 pub use tool::{
