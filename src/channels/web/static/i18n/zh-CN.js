@@ -36,6 +36,7 @@ I18n.register('zh-CN', {
   'settings.inference': '推理',
   'settings.agent': '代理',
   'settings.channels': '频道',
+  'settings.networking': '网络',
   'settings.mcp': 'MCP',
   
   // 状态
@@ -161,13 +162,8 @@ I18n.register('zh-CN', {
   'mcp.addCustom': '添加自定义 MCP 服务器',
   'mcp.add': '添加',
   'mcp.addedSuccess': '已添加 MCP 服务器 {name}',
-  
-  // 注册工具
-  'tools.registered': '注册工具',
-  'tools.name': '名称',
-  'tools.description': '描述',
-  'tools.empty': '没有注册工具',
-  
+
+
   // 技能标签页
   'skills.installed': '已安装技能',
   'skills.noInstalled': '没有安装技能',
@@ -362,4 +358,6 @@ I18n.register('zh-CN', {
   'settings.importSuccess': '设置导入成功',
   'settings.importFailed': '导入失败: {message}',
   'settings.restartRequired': '需要重启才能使更改生效。',
+  'settings.restartNow': '立即重启',
+  'settings.noMatchingSettings': '没有匹配 "{query}" 的设置',
 });

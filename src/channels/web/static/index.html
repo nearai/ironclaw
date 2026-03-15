@@ -277,6 +277,7 @@
           <button class="settings-subtab active" data-settings-subtab="inference" data-i18n="settings.inference">Inference</button>
           <button class="settings-subtab" data-settings-subtab="agent" data-i18n="settings.agent">Agent</button>
           <button class="settings-subtab" data-settings-subtab="channels" data-i18n="settings.channels">Channels</button>
+          <button class="settings-subtab" data-settings-subtab="networking" data-i18n="settings.networking">Networking</button>
           <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
@@ -286,8 +287,8 @@
             <div class="settings-search">
               <input type="text" id="settings-search-input" placeholder="Search settings..." aria-label="Search settings">
             </div>
-            <button onclick="exportSettings()" class="settings-toolbar-btn">Export</button>
-            <button onclick="importSettings()" class="settings-toolbar-btn">Import</button>
+            <button id="settings-export-btn" class="settings-toolbar-btn" data-i18n="settings.export">Export</button>
+            <button id="settings-import-btn" class="settings-toolbar-btn" data-i18n="settings.import">Import</button>
           </div>
           <div class="settings-subpanel active" id="settings-inference">
             <div class="extensions-container" id="settings-inference-content">
@@ -302,6 +303,11 @@
           <div class="settings-subpanel" id="settings-channels">
             <div class="extensions-container" id="settings-channels-content">
               <div class="empty-state" data-i18n="common.loading">Loading channels...</div>
+            </div>
+          </div>
+          <div class="settings-subpanel" id="settings-networking">
+            <div class="extensions-container" id="settings-networking-content">
+              <div class="empty-state" data-i18n="common.loading">Loading...</div>
             </div>
           </div>
           <div class="settings-subpanel" id="settings-extensions">
@@ -325,14 +331,6 @@
                   <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
                   <button id="wasm-install-btn" data-i18n="extensions.install">Install</button>
                 </div>
-              </div>
-              <div class="extensions-section">
-                <h3 data-i18n="tools.registered">Registered Tools</h3>
-                <table class="tools-table" id="tools-table">
-                  <thead><tr><th data-i18n="tools.name">Name</th><th data-i18n="tools.description">Description</th></tr></thead>
-                  <tbody id="tools-tbody"></tbody>
-                </table>
-                <div class="empty-state" id="tools-empty" style="display:none" data-i18n="tools.empty">No tools registered</div>
               </div>
             </div>
           </div>

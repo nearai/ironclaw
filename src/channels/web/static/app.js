@@ -2232,15 +2232,13 @@ var kindLabels = { 'wasm_channel': 'Channel', 'wasm_tool': 'Tool', 'mcp_server':
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
   const wasmList = document.getElementById('available-wasm-list');
-  const toolsTbody = document.getElementById('tools-tbody');
-  const toolsEmpty = document.getElementById('tools-empty');
+  extList.innerHTML = renderCardsSkeleton(3);
 
-  // Fetch all three in parallel
+  // Fetch extensions and registry in parallel
   Promise.all([
     apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
-    apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
     apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
-  ]).then(([extData, toolData, registryData]) => {
+  ]).then(([extData, registryData]) => {
     // Render installed extensions (exclude wasm_channel and mcp_server — shown in their own tabs)
     var nonChannelExts = extData.extensions.filter(function(e) {
       return e.kind !== 'wasm_channel' && e.kind !== 'mcp_server';
@@ -2270,16 +2268,6 @@ function loadExtensions() {
       }
     }
 
-    // Render tools
-    if (toolData.tools.length === 0) {
-      toolsTbody.innerHTML = '';
-      toolsEmpty.style.display = 'block';
-    } else {
-      toolsEmpty.style.display = 'none';
-      toolsTbody.innerHTML = toolData.tools.map((t) =>
-        '<tr><td>' + escapeHtml(t.name) + '</td><td>' + escapeHtml(t.description) + '</td></tr>'
-      ).join('');
-    }
   });
 }
 
@@ -2463,7 +2451,16 @@ function createReconfigureButton(extName) {
 
 function renderExtensionCard(ext) {
   const card = document.createElement('div');
-  card.className = 'ext-card';
+  var stateClass = 'state-inactive';
+  if (ext.kind === 'wasm_channel') {
+    var s = ext.activation_status || 'installed';
+    if (s === 'active') stateClass = 'state-active';
+    else if (s === 'failed') stateClass = 'state-error';
+    else if (s === 'pairing') stateClass = 'state-pairing';
+  } else if (ext.active) {
+    stateClass = 'state-active';
+  }
+  card.className = 'ext-card ' + stateClass;
 
   const header = document.createElement('div');
   header.className = 'ext-header';
@@ -2660,7 +2657,7 @@ function removeExtension(name) {
         refreshCurrentSettingsTab();
       })
       .catch((err) => showToast(I18n.t('ext.removeFailed', { message: err.message }), 'error'));
-  });
+  }, I18n.t('common.remove'), 'btn-danger');
 }
 
 function showConfigureModal(name) {
@@ -3997,6 +3994,7 @@ function addMcpServer() {
 
 function loadSkills() {
   var skillsList = document.getElementById('skills-list');
+  skillsList.innerHTML = renderCardsSkeleton(3);
   apiFetch('/api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
@@ -4013,7 +4011,7 @@ function loadSkills() {
 
 function renderSkillCard(skill) {
   var card = document.createElement('div');
-  card.className = 'ext-card';
+  card.className = 'ext-card state-active';
 
   var header = document.createElement('div');
   header.className = 'ext-header';
@@ -4294,7 +4292,7 @@ function removeSkill(name) {
     }).catch(function(err) {
       showToast(I18n.t('skills.removeFailed', { message: err.message }), 'error');
     });
-  });
+  }, I18n.t('common.remove'), 'btn-danger');
 }
 
 function installSkillFromForm() {
@@ -4389,6 +4387,7 @@ function loadSettingsSubtab(subtab) {
   if (subtab === 'inference') loadInferenceSettings();
   else if (subtab === 'agent') loadAgentSettings();
   else if (subtab === 'channels') { loadChannelsStatus(); startPairingPoll(); }
+  else if (subtab === 'networking') loadNetworkingSettings();
   else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
   else if (subtab === 'mcp') loadMcpServers();
   else if (subtab === 'skills') loadSkills();
@@ -4499,20 +4498,53 @@ var AGENT_SETTINGS = [
   },
 ];
 
+function renderSettingsSkeleton(rows) {
+  var html = '<div class="settings-group" style="border:none;background:none">';
+  for (var i = 0; i < (rows || 5); i++) {
+    var w1 = 100 + Math.floor(Math.random() * 60);
+    var w2 = 140 + Math.floor(Math.random() * 60);
+    html += '<div class="skeleton-row"><div class="skeleton-bar" style="width:' + w1 + 'px"></div><div class="skeleton-bar" style="width:' + w2 + 'px"></div></div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderCardsSkeleton(count) {
+  var html = '<div class="extensions-list">';
+  for (var i = 0; i < (count || 3); i++) {
+    html += '<div class="skeleton-card"><div class="skeleton-bar" style="width:60%;height:14px"></div><div class="skeleton-bar" style="width:90%;height:10px"></div><div class="skeleton-bar" style="width:40%;height:10px"></div></div>';
+  }
+  html += '</div>';
+  return html;
+}
+
 function loadInferenceSettings() {
   var container = document.getElementById('settings-inference-content');
-  container.innerHTML = '<div class="empty-state">Loading settings...</div>';
+  container.innerHTML = renderSettingsSkeleton(6);
 
   Promise.all([
     apiFetch('/api/settings/export'),
-    apiFetch('/api/gateway/status').catch(function() { return {}; })
+    apiFetch('/api/gateway/status').catch(function() { return {}; }),
+    apiFetch('/v1/models').catch(function() { return { data: [] }; })
   ]).then(function(results) {
     var settings = results[0].settings || {};
     var status = results[1];
+    var modelsData = results[2];
     var activeValues = {
       'llm_backend': status.llm_backend,
       'selected_model': status.llm_model
     };
+    // Inject available model IDs as suggestions for the selected_model field
+    var modelIds = (modelsData.data || []).map(function(m) { return m.id; }).filter(Boolean);
+    if (modelIds.length > 0) {
+      var llmGroup = INFERENCE_SETTINGS[0];
+      for (var i = 0; i < llmGroup.settings.length; i++) {
+        if (llmGroup.settings[i].key === 'selected_model') {
+          llmGroup.settings[i].suggestions = modelIds;
+          break;
+        }
+      }
+    }
     container.innerHTML = '';
     renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, activeValues);
   }).catch(function(err) {
@@ -4527,7 +4559,7 @@ function loadAgentSettings() {
 
 function loadStructuredSettings(containerId, settingsDefs) {
   var container = document.getElementById(containerId);
-  container.innerHTML = '<div class="empty-state">Loading settings...</div>';
+  container.innerHTML = renderSettingsSkeleton(8);
 
   apiFetch('/api/settings/export').then(function(data) {
     var settings = data.settings || {};
@@ -4678,6 +4710,19 @@ function renderStructuredSettingsRow(def, value, activeValue) {
     textInp.setAttribute('aria-label', ariaLabel);
     textInp.value = (value === null || value === undefined) ? '' : String(value);
     if (!value) textInp.placeholder = placeholderText;
+    // Attach datalist for autocomplete suggestions (e.g., model list)
+    if (def.suggestions && def.suggestions.length > 0) {
+      var dlId = 'dl-' + def.key.replace(/\./g, '-');
+      var dl = document.createElement('datalist');
+      dl.id = dlId;
+      for (var di = 0; di < def.suggestions.length; di++) {
+        var dlOpt = document.createElement('option');
+        dlOpt.value = def.suggestions[di];
+        dl.appendChild(dlOpt);
+      }
+      textInp.setAttribute('list', dlId);
+      inputWrap.appendChild(dl);
+    }
     textInp.addEventListener('change', (function(k, el) {
       return function() { saveSetting(k, el.value === '' ? null : el.value); };
     })(def.key, textInp));
@@ -4686,7 +4731,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
 
   var saved = document.createElement('span');
   saved.className = 'settings-saved-indicator';
-  saved.textContent = 'Saved';
+  saved.textContent = '\u2713 Saved';
   saved.setAttribute('data-key', def.key);
   saved.setAttribute('role', 'status');
   saved.setAttribute('aria-live', 'polite');
@@ -4698,7 +4743,9 @@ function renderStructuredSettingsRow(def, value, activeValue) {
 
 var RESTART_REQUIRED_KEYS = ['llm_backend', 'selected_model', 'ollama_base_url', 'openai_compatible_base_url',
   'bedrock_region', 'bedrock_cross_region', 'bedrock_profile', 'embeddings.enabled', 'embeddings.provider', 'embeddings.model',
-  'agent.auto_approve_tools'];
+  'agent.auto_approve_tools', 'tunnel.provider', 'tunnel.public_url', 'gateway.rate_limit', 'gateway.max_connections'];
+
+var _settingsSavedTimers = {};
 
 function saveSetting(key, value) {
   var method = (value === null || value === undefined) ? 'DELETE' : 'PUT';
@@ -4707,8 +4754,9 @@ function saveSetting(key, value) {
   apiFetch('/api/settings/' + encodeURIComponent(key), opts).then(function() {
     var indicator = document.querySelector('.settings-saved-indicator[data-key="' + key + '"]');
     if (indicator) {
+      if (_settingsSavedTimers[key]) clearTimeout(_settingsSavedTimers[key]);
       indicator.classList.add('visible');
-      setTimeout(function() { indicator.classList.remove('visible'); }, 1500);
+      _settingsSavedTimers[key] = setTimeout(function() { indicator.classList.remove('visible'); }, 2000);
     }
     // Show restart banner for inference settings
     if (RESTART_REQUIRED_KEYS.indexOf(key) !== -1) {
@@ -4725,13 +4773,21 @@ function showRestartBanner() {
   var banner = document.createElement('div');
   banner.className = 'restart-banner';
   banner.setAttribute('role', 'alert');
-  banner.innerHTML = '<span>\u26A0\uFE0F Restart required for changes to take effect.</span>';
+  var textSpan = document.createElement('span');
+  textSpan.className = 'restart-banner-text';
+  textSpan.textContent = '\u26A0\uFE0F ' + I18n.t('settings.restartRequired');
+  banner.appendChild(textSpan);
+  var restartBtn = document.createElement('button');
+  restartBtn.className = 'restart-banner-btn';
+  restartBtn.textContent = I18n.t('settings.restartNow');
+  restartBtn.addEventListener('click', function() { triggerRestart(); });
+  banner.appendChild(restartBtn);
   container.insertBefore(banner, container.firstChild);
 }
 
 function loadMcpServers() {
   var mcpList = document.getElementById('mcp-servers-list');
-  mcpList.innerHTML = '<div class="empty-state">Loading...</div>';
+  mcpList.innerHTML = renderCardsSkeleton(2);
 
   Promise.all([
     apiFetch('/api/extensions').catch(function() { return { extensions: [] }; }),
@@ -4770,7 +4826,7 @@ function loadMcpServers() {
 
 function loadChannelsStatus() {
   var container = document.getElementById('settings-channels-content');
-  container.innerHTML = '<div class="empty-state">Loading channels...</div>';
+  container.innerHTML = renderCardsSkeleton(4);
 
   Promise.all([
     apiFetch('/api/gateway/status').catch(function() { return {}; }),
@@ -4869,37 +4925,12 @@ function loadChannelsStatus() {
       messagingSection.appendChild(messagingList);
       container.appendChild(messagingSection);
     }
-
-    // Tunnel settings section
-    var tunnelSection = document.createElement('div');
-    tunnelSection.className = 'extensions-section';
-    var tunnelTitle = document.createElement('h3');
-    tunnelTitle.textContent = 'Tunnel';
-    tunnelSection.appendChild(tunnelTitle);
-    var tunnelContainer = document.createElement('div');
-    tunnelContainer.className = 'settings-group';
-    var TUNNEL_SETTINGS = [
-      {
-        group: 'Tunnel',
-        settings: [
-          { key: 'tunnel.provider', label: 'Provider', description: 'Public URL tunnel provider',
-            type: 'select', options: ['none', 'cloudflare', 'ngrok', 'tailscale', 'custom'] },
-          { key: 'tunnel.public_url', label: 'Public URL', description: 'Static public URL (if not using tunnel provider)', type: 'text' },
-        ]
-      }
-    ];
-    apiFetch('/api/settings/export').then(function(tunnelData) {
-      var tunnelSettings = tunnelData.settings || {};
-      renderStructuredSettingsInto(tunnelContainer, TUNNEL_SETTINGS, tunnelSettings, {});
-    }).catch(function() {});
-    tunnelSection.appendChild(tunnelContainer);
-    container.appendChild(tunnelSection);
   });
 }
 
 function renderBuiltinChannelCard(name, description, active, detail) {
   var card = document.createElement('div');
-  card.className = 'ext-card';
+  card.className = 'ext-card ' + (active ? 'state-active' : 'state-inactive');
 
   var header = document.createElement('div');
   header.className = 'ext-header';
@@ -4942,6 +4973,40 @@ function renderBuiltinChannelCard(name, description, active, detail) {
   card.appendChild(actions);
 
   return card;
+}
+
+// --- Networking Settings ---
+
+var NETWORKING_SETTINGS = [
+  {
+    group: 'Tunnel',
+    settings: [
+      { key: 'tunnel.provider', label: 'Provider', description: 'Public URL tunnel provider',
+        type: 'select', options: ['none', 'cloudflare', 'ngrok', 'tailscale', 'custom'] },
+      { key: 'tunnel.public_url', label: 'Public URL', description: 'Static public URL (if not using tunnel provider)', type: 'text' },
+    ]
+  },
+  {
+    group: 'Gateway',
+    settings: [
+      { key: 'gateway.rate_limit', label: 'Rate Limit', description: 'Max chat messages per minute', type: 'number', min: 0 },
+      { key: 'gateway.max_connections', label: 'Max Connections', description: 'Max simultaneous SSE/WS connections', type: 'number', min: 0 },
+    ]
+  },
+];
+
+function loadNetworkingSettings() {
+  var container = document.getElementById('settings-networking-content');
+  container.innerHTML = renderSettingsSkeleton(4);
+
+  apiFetch('/api/settings/export').then(function(data) {
+    var settings = data.settings || {};
+    container.innerHTML = '';
+    renderStructuredSettingsInto(container, NETWORKING_SETTINGS, settings, {});
+  }).catch(function(err) {
+    container.innerHTML = '<div class="empty-state">Failed to load settings: '
+      + escapeHtml(err.message) + '</div>';
+  });
 }
 
 function formatGroupName(name) {
@@ -5005,6 +5070,8 @@ document.getElementById('wasm-install-btn').addEventListener('click', () => inst
 document.getElementById('mcp-add-btn').addEventListener('click', () => addMcpServer());
 document.getElementById('skill-search-btn').addEventListener('click', () => searchClawHub());
 document.getElementById('skill-install-btn').addEventListener('click', () => installSkillFromForm());
+document.getElementById('settings-export-btn').addEventListener('click', () => exportSettings());
+document.getElementById('settings-import-btn').addEventListener('click', () => importSettings());
 
 // --- Delegated Event Handlers (for dynamically generated HTML) ---
 
@@ -5078,11 +5145,14 @@ document.getElementById('language-btn').addEventListener('click', function() {
 
 var _confirmModalCallback = null;
 
-function showConfirmModal(title, message, onConfirm) {
+function showConfirmModal(title, message, onConfirm, confirmLabel, confirmClass) {
   var modal = document.getElementById('confirm-modal');
   document.getElementById('confirm-modal-title').textContent = title;
   document.getElementById('confirm-modal-message').textContent = message || '';
   document.getElementById('confirm-modal-message').style.display = message ? '' : 'none';
+  var btn = document.getElementById('confirm-modal-btn');
+  btn.textContent = confirmLabel || I18n.t('btn.confirm');
+  btn.className = confirmClass || 'btn-danger';
   _confirmModalCallback = onConfirm;
   modal.style.display = 'flex';
 }
@@ -5150,10 +5220,12 @@ document.getElementById('settings-search-input').addEventListener('input', funct
   var activePanel = document.querySelector('.settings-subpanel.active');
   if (!activePanel) return;
   var rows = activePanel.querySelectorAll('.settings-row');
+  var visibleCount = 0;
   rows.forEach(function(row) {
     var text = row.textContent.toLowerCase();
     if (query === '' || text.indexOf(query) !== -1) {
       row.classList.remove('search-hidden');
+      visibleCount++;
     } else {
       row.classList.add('search-hidden');
     }
@@ -5162,11 +5234,19 @@ document.getElementById('settings-search-input').addEventListener('input', funct
   var groups = activePanel.querySelectorAll('.settings-group');
   groups.forEach(function(group) {
     var visibleRows = group.querySelectorAll('.settings-row:not(.search-hidden):not(.hidden)');
-    var title = group.querySelector('.settings-group-title');
     if (visibleRows.length === 0 && query !== '') {
       group.style.display = 'none';
     } else {
       group.style.display = '';
     }
   });
+  // Show/hide empty state
+  var existingEmpty = activePanel.querySelector('.settings-search-empty');
+  if (existingEmpty) existingEmpty.remove();
+  if (query !== '' && visibleCount === 0) {
+    var empty = document.createElement('div');
+    empty.className = 'settings-search-empty';
+    empty.textContent = I18n.t('settings.noMatchingSettings', { query: this.value });
+    activePanel.appendChild(empty);
+  }
 });

@@ -36,6 +36,7 @@ I18n.register('en', {
   'settings.inference': 'Inference',
   'settings.agent': 'Agent',
   'settings.channels': 'Channels',
+  'settings.networking': 'Networking',
   'settings.mcp': 'MCP',
   
   // Status
@@ -161,13 +162,8 @@ I18n.register('en', {
   'mcp.addCustom': 'Add Custom MCP Server',
   'mcp.add': 'Add',
   'mcp.addedSuccess': 'Added MCP server {name}',
-  
-  // Registered Tools
-  'tools.registered': 'Registered Tools',
-  'tools.name': 'Name',
-  'tools.description': 'Description',
-  'tools.empty': 'No tools registered',
-  
+
+
   // Skills Tab
   'skills.installed': 'Installed Skills',
   'skills.noInstalled': 'No skills installed',
@@ -362,4 +358,6 @@ I18n.register('en', {
   'settings.importSuccess': 'Settings imported successfully',
   'settings.importFailed': 'Import failed: {message}',
   'settings.restartRequired': 'Restart required for changes to take effect.',
+  'settings.restartNow': 'Restart Now',
+  'settings.noMatchingSettings': 'No settings matching "{query}"',
 });
