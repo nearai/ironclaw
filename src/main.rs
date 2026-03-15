@@ -521,6 +521,30 @@ async fn async_main() -> anyhow::Result<()> {
             }
         }
 
+        // Persist auto-generated auth token so it survives restarts.
+        // Write to the "default" settings namespace, which is the namespace
+        // Config::from_db() reads from — NOT the gateway channel's user_id.
+        if gw_config.auth_token.is_none() {
+            let token_to_persist = gw.auth_token().to_string();
+            if let Some(ref db) = components.db {
+                let db = db.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = db
+                        .set_setting(
+                            "default",
+                            "channels.gateway_auth_token",
+                            &serde_json::Value::String(token_to_persist),
+                        )
+                        .await
+                    {
+                        tracing::warn!("Failed to persist auto-generated gateway auth token: {e}");
+                    } else {
+                        tracing::debug!("Persisted auto-generated gateway auth token to settings");
+                    }
+                });
+            }
+        }
+
         gateway_url = Some(format!(
             "http://{}:{}/?token={}",
             gw_config.host,
