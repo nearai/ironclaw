@@ -136,10 +136,12 @@ fi
 PROD_DIFF="$DIFF_OUTPUT"
 # Strip hunks from test-only files (tests/ directory, *_test.rs, test_*.rs)
 PROD_DIFF=$(echo "$PROD_DIFF" | grep -v '^+++ b/tests/' || true)
-# Strip hunks whose @@ context line indicates a test function or module
-# (git diff -U0 includes the enclosing function name after @@).
+# Strip hunks whose @@ context line indicates a test module.
+# git diff includes the enclosing function/module name after @@.
+# Only match `mod tests` (the conventional #[cfg(test)] module) — do NOT
+# match `fn test_*` because production code can have functions named test_*.
 PROD_DIFF=$(echo "$PROD_DIFF" | awk '
-    /^@@ / { in_test = ($0 ~ /fn test_/ || $0 ~ /mod tests/) }
+    /^@@ / { in_test = ($0 ~ /mod tests/) }
     !in_test { print }
 ' || true)
 if echo "$PROD_DIFF" | grep -nE '^\+' \

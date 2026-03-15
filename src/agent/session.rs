@@ -135,8 +135,11 @@ pub enum ThreadState {
 
 /// Pending auth token request.
 ///
-/// Auth mode TTL — matches `OAUTH_FLOW_EXPIRY` (5 minutes).
-const AUTH_MODE_TTL: TimeDelta = TimeDelta::minutes(5);
+/// Auth mode TTL — must stay in sync with
+/// `crate::cli::oauth_defaults::OAUTH_FLOW_EXPIRY` (5 minutes / 300 s).
+/// Defined separately to avoid a session→cli module dependency.
+const AUTH_MODE_TTL_SECS: i64 = 300;
+const AUTH_MODE_TTL: TimeDelta = TimeDelta::seconds(AUTH_MODE_TTL_SECS);
 
 /// When `tool_auth` returns `awaiting_token`, the thread enters auth mode.
 /// The next user message is intercepted before entering the normal pipeline
