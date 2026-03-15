@@ -86,37 +86,13 @@ jobs:
       uses: actions/checkout@v6
       with:
         fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
     - name: Check for .unwrap(), .expect(), assert!() in production code
       run: |
         BASE="${{ github.event.pull_request.base.sha }}"
-        # Get added lines in .rs files (production only, exclude tests/)
-        ADDED=$(git diff "$BASE"...HEAD -- 'src/**/*.rs' 'crates/**/*.rs' \
-          | grep -E '^\+[^+]' || true)
-
-        if [ -z "$ADDED" ]; then
-          echo "No production Rust changes detected."
-          exit 0
-        fi
-
-        # Match panic-inducing patterns, excluding test code and safety suppressions
-        VIOLATIONS=$(echo "$ADDED" \
-          | grep -E '\.(unwrap|expect)\(|[^_]assert(_eq|_ne)?!' \
-          | grep -Ev 'debug_assert|// safety:|#\[cfg\(test\)\]|#\[test\]|mod tests' \
-          || true)
-
-        if [ -n "$VIOLATIONS" ]; then
-          echo "::error::Found .unwrap(), .expect(), or assert!() in production code."
-          echo "Production code must use proper error handling instead of panicking."
-          echo "Suppress false positives with an inline '// safety: <reason>' comment."
-          echo ""
-          echo "$VIOLATIONS" | head -20
-          echo ""
-          COUNT=$(echo "$VIOLATIONS" | wc -l | tr -d ' ')
-          echo "Total: $COUNT violation(s)"
-          exit 1
-        fi
-
-        echo "OK: No panic-inducing calls in changed production code."
+        python3 scripts/check_no_panics.py --base "$BASE" --head HEAD
 
   # Roll-up job for branch protection
   code-style:

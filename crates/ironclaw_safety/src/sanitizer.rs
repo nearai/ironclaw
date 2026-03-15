@@ -160,30 +160,30 @@ impl Sanitizer {
         let pattern_matcher = AhoCorasick::builder()
             .ascii_case_insensitive(true)
             .build(&pattern_strings)
-            .expect("Failed to build pattern matcher");
+            .expect("Failed to build pattern matcher"); // safety: hardcoded string literals
 
-        // Regex patterns for more complex detection
+        // Regex patterns for more complex detection.
         let regex_patterns = vec![
             RegexPattern {
-                regex: Regex::new(r"(?i)base64[:\s]+[A-Za-z0-9+/=]{50,}").unwrap(),
+                regex: Regex::new(r"(?i)base64[:\s]+[A-Za-z0-9+/=]{50,}").unwrap(), // safety: hardcoded literal
                 name: "base64_payload".to_string(),
                 severity: Severity::Medium,
                 description: "Potential encoded payload".to_string(),
             },
             RegexPattern {
-                regex: Regex::new(r"(?i)eval\s*\(").unwrap(),
+                regex: Regex::new(r"(?i)eval\s*\(").unwrap(), // safety: hardcoded literal
                 name: "eval_call".to_string(),
                 severity: Severity::High,
                 description: "Potential code evaluation attempt".to_string(),
             },
             RegexPattern {
-                regex: Regex::new(r"(?i)exec\s*\(").unwrap(),
+                regex: Regex::new(r"(?i)exec\s*\(").unwrap(), // safety: hardcoded literal
                 name: "exec_call".to_string(),
                 severity: Severity::High,
                 description: "Potential code execution attempt".to_string(),
             },
             RegexPattern {
-                regex: Regex::new(r"\x00").unwrap(),
+                regex: Regex::new(r"\x00").unwrap(), // safety: hardcoded literal
                 name: "null_byte".to_string(),
                 severity: Severity::Critical,
                 description: "Null byte injection attempt".to_string(),

@@ -594,7 +594,7 @@ impl AppBuilder {
                 let entries: Vec<_> = catalog
                     .all()
                     .iter()
-                    .map(|m| m.to_registry_entry())
+                    .filter_map(|m| m.to_registry_entry())
                     .collect();
                 tracing::debug!(
                     count = entries.len(),
