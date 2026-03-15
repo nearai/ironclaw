@@ -81,6 +81,9 @@ pub struct AgentDeps {
     pub transcription: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
     /// Document text extraction middleware for PDF, DOCX, PPTX, etc.
     pub document_extraction: Option<Arc<crate::document_extraction::DocumentExtractionMiddleware>>,
+    /// WASM channel router for webhook ACK signaling.
+    /// When set, persist_user_message will call ack_message() after persistence.
+    pub wasm_router: Option<Arc<crate::channels::wasm::WasmChannelRouter>>,
 }
 
 /// The main agent that coordinates all components.
@@ -172,6 +175,11 @@ impl Agent {
 
     pub(super) fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()
+    }
+
+    /// Get the WASM channel router for ACK signaling.
+    pub(super) fn wasm_router(&self) -> Option<&Arc<crate::channels::wasm::WasmChannelRouter>> {
+        self.deps.wasm_router.as_ref()
     }
 
     pub(super) fn llm(&self) -> &Arc<dyn LlmProvider> {

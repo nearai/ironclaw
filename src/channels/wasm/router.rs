@@ -6,6 +6,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Maximum time to wait for ACK from agent before returning HTTP response.
+/// If the agent doesn't persist the message within this time, the webhook
+/// returns 200 OK anyway (best-effort reliability).
+const ACK_TIMEOUT_SECS: u64 = 30;
+
 use axum::{
     Json, Router,
     body::Bytes,
@@ -699,7 +704,23 @@ async fn webhook_handler(
         )
         .await
     {
-        Ok(response) => {
+        Ok((response, emitted_info)) => {
+            // Register pending ACKs for emitted messages
+            let mut ack_receivers: Vec<tokio::sync::oneshot::Receiver<()>> = Vec::new();
+            for (message_id, _metadata) in &emitted_info {
+                let ack_key = format!("{}:{}", channel_name, message_id);
+                let rx = state.router.register_pending_ack(ack_key).await;
+                ack_receivers.push(rx);
+
+                // Metadata will be passed to ack_message() by the agent after persistence,
+                // which triggers on_message_persisted callback (e.g., for mark_as_read)
+                tracing::debug!(
+                    channel = %channel_name,
+                    message_id = %message_id,
+                    "Registered pending ACK for webhook message"
+                );
+            }
+
             let status =
                 StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -707,6 +728,7 @@ async fn webhook_handler(
                 channel = %channel_name,
                 status = %status,
                 body_len = response.body.len(),
+                emitted_count = emitted_info.len(),
                 "WASM channel on_http_request completed successfully"
             );
 
@@ -717,6 +739,42 @@ async fn webhook_handler(
                         "raw": String::from_utf8_lossy(&response.body).to_string()
                     })
                 });
+
+            // Wait for ACKs with timeout
+            // If no messages were emitted, return immediately
+            if !ack_receivers.is_empty() {
+                let ack_timeout = tokio::time::Duration::from_secs(ACK_TIMEOUT_SECS);
+                let ack_results: Vec<_> = futures::future::join_all(
+                    ack_receivers.into_iter().map(|rx| {
+                        tokio::time::timeout(ack_timeout, rx)
+                    })
+                ).await;
+
+                let mut acked = 0;
+                let mut timed_out = 0;
+                for result in ack_results {
+                    match result {
+                        Ok(Ok(())) => acked += 1,
+                        Ok(Err(_)) => timed_out += 1, // Sender dropped
+                        Err(_) => timed_out += 1, // Timeout
+                    }
+                }
+
+                if timed_out > 0 {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        acked = acked,
+                        timed_out = timed_out,
+                        "Some webhook ACKs timed out"
+                    );
+                } else {
+                    tracing::debug!(
+                        channel = %channel_name,
+                        acked = acked,
+                        "All webhook ACKs received"
+                    );
+                }
+            }
 
             (status, Json(body_json))
         }

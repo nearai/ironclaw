@@ -238,7 +238,7 @@ mod channel_lifecycle_tests {
             .await
             .expect("HTTP callback failed");
 
-        assert_eq!(response.status, 200);
+        assert_eq!(response.0.status, 200);
 
         // Cleanup
         channel.shutdown().await.expect("Shutdown failed");
