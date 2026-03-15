@@ -493,6 +493,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 parameters: hook_params,
                 user_id: self.message.user_id.clone(),
                 context: "chat".to_string(),
+                intent: self.message.content.clone(),
             };
             match self.agent.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
@@ -654,14 +655,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         )
                         .await;
 
-                    let result = execute_chat_tool_standalone(
-                        &tools,
-                        &safety,
-                        &tc.name,
-                        &tc.arguments,
-                        &job_ctx,
-                    )
-                    .await;
+                    let result =
+                        execute_chat_tool_standalone(&tools, &safety, &tc.name, &tc.arguments, &job_ctx)
+                            .await;
 
                     let par_tool = tools.get(&tc.name).await;
                     let _ = channels
