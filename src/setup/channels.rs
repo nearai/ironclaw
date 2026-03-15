@@ -1016,7 +1016,7 @@ fn validation_placeholder_regex() -> &'static regex::Regex {
     static PLACEHOLDER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     PLACEHOLDER_RE.get_or_init(|| {
         regex::Regex::new(r"\{([A-Za-z0-9_]+)\}")
-            .expect("validation placeholder regex must compile")
+            .expect("validation placeholder regex must compile") // safety: hardcoded literal
     })
 }
 

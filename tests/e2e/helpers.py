@@ -133,3 +133,32 @@ async def wait_for_port_line(process, pattern: str, *, timeout: float = 60) -> i
         if match := re.search(pattern, decoded):
             return int(match.group(1))
     raise TimeoutError(f"Port pattern '{pattern}' not found in stdout after {timeout}s")
+
+
+# -- API helpers -----------------------------------------------------------
+
+def auth_headers() -> dict[str, str]:
+    """Return Authorization header dict for authenticated API calls."""
+    return {"Authorization": f"Bearer {AUTH_TOKEN}"}
+
+
+async def api_get(base_url: str, path: str, **kwargs) -> httpx.Response:
+    """Make an authenticated GET request to the ironclaw API."""
+    async with httpx.AsyncClient() as client:
+        return await client.get(
+            f"{base_url}{path}",
+            headers=auth_headers(),
+            timeout=kwargs.pop("timeout", 10),
+            **kwargs,
+        )
+
+
+async def api_post(base_url: str, path: str, **kwargs) -> httpx.Response:
+    """Make an authenticated POST request to the ironclaw API."""
+    async with httpx.AsyncClient() as client:
+        return await client.post(
+            f"{base_url}{path}",
+            headers=auth_headers(),
+            timeout=kwargs.pop("timeout", 10),
+            **kwargs,
+        )

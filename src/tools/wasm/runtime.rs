@@ -123,7 +123,9 @@ pub struct PreparedModule {
     pub name: String,
     /// Tool description (cached from component).
     pub description: String,
-    /// Parameter schema JSON (cached from component).
+    /// Full parameter schema JSON extracted from the component.
+    /// Used for discovery and coercion, not necessarily for the compact
+    /// schema advertised in the main tools array.
     pub schema: serde_json::Value,
     /// Pre-compiled component (cheaply cloneable via internal Arc).
     component: wasmtime::component::Component,
@@ -265,11 +267,29 @@ impl WasmToolRuntime {
             let component = wasmtime::component::Component::new(&engine, &wasm_bytes)
                 .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
-            // We need to instantiate briefly to extract metadata.
-            // In a full implementation, we'd use WIT bindgen to get typed access.
-            // For now, we extract what we can from the component.
-            let description = extract_tool_description(&engine, &component)?;
-            let schema = extract_tool_schema(&engine, &component)?;
+            // Briefly instantiate to extract metadata (description + schema)
+            // from the tool's exports, analogous to MCP's list_tools().
+            let effective_limits = limits.clone().unwrap_or(default_limits.clone());
+            let (description, schema) = crate::tools::wasm::wrapper::extract_wasm_metadata(
+                &engine,
+                &component,
+                &effective_limits,
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    name = %name,
+                    error = %e,
+                    "WASM metadata extraction failed, using fallbacks"
+                );
+                (
+                    "WASM sandboxed tool".to_string(),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": true
+                    }),
+                )
+            });
 
             Ok::<_, WasmError>(PreparedModule {
                 name: name.clone(),
@@ -319,41 +339,6 @@ impl WasmToolRuntime {
     pub async fn clear(&self) {
         self.modules.write().await.clear();
     }
-}
-
-/// Extract tool description from a compiled component.
-///
-/// Returns a generic fallback. Callers should prefer loading the description
-/// from the sidecar `*.capabilities.json` file and overriding via
-/// `WasmToolWrapper::with_description()` or the `WasmToolRegistration::description` field.
-fn extract_tool_description(
-    _engine: &Engine,
-    _component: &wasmtime::component::Component,
-) -> Result<String, WasmError> {
-    // WIT bindgen extraction is not yet implemented (see TODO #4 in CLAUDE.md).
-    // Real descriptions come from the capabilities.json sidecar file, which is
-    // loaded by the WasmToolLoader and passed as an override at registration time.
-    Ok("WASM sandboxed tool".to_string())
-}
-
-/// Extract tool parameter schema from a compiled component.
-///
-/// Returns a permissive fallback that accepts any JSON object. Callers should
-/// prefer loading the schema from the sidecar `*.capabilities.json` file and
-/// overriding via `WasmToolWrapper::with_schema()` or the
-/// `WasmToolRegistration::schema` field.
-fn extract_tool_schema(
-    _engine: &Engine,
-    _component: &wasmtime::component::Component,
-) -> Result<serde_json::Value, WasmError> {
-    // WIT bindgen extraction is not yet implemented (see TODO #4 in CLAUDE.md).
-    // Real schemas come from the capabilities.json sidecar file, which is
-    // loaded by the WasmToolLoader and passed as an override at registration time.
-    Ok(serde_json::json!({
-        "type": "object",
-        "properties": {},
-        "additionalProperties": true
-    }))
 }
 
 impl std::fmt::Debug for WasmToolRuntime {

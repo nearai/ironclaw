@@ -26,6 +26,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
+use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
@@ -525,23 +526,33 @@ async fn oauth_callback_handler(
             .get("error_description")
             .cloned()
             .unwrap_or_else(|| error.clone());
+        clear_auth_mode(&state).await;
         return oauth_error_page(&description);
     }
 
     let state_param = match params.get("state") {
         Some(s) if !s.is_empty() => s.clone(),
-        _ => return oauth_error_page("IronClaw"),
+        _ => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     let code = match params.get("code") {
         Some(c) if !c.is_empty() => c.clone(),
-        _ => return oauth_error_page("IronClaw"),
+        _ => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     // Look up the pending flow by CSRF state (atomic remove prevents replay)
     let ext_mgr = match state.extension_manager.as_ref() {
         Some(mgr) => mgr,
-        None => return oauth_error_page("IronClaw"),
+        None => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     // Strip instance prefix from state for registry lookup.
@@ -562,6 +573,7 @@ async fn oauth_callback_handler(
                 lookup_key = %lookup_key,
                 "OAuth callback received with unknown or expired state"
             );
+            clear_auth_mode(&state).await;
             return oauth_error_page("IronClaw");
         }
     };
@@ -572,6 +584,15 @@ async fn oauth_callback_handler(
             extension = %flow.extension_name,
             "OAuth flow expired"
         );
+        // Notify UI so auth card can show error instead of staying stuck
+        if let Some(ref sender) = flow.sse_sender {
+            let _ = sender.send(SseEvent::AuthCompleted {
+                extension_name: flow.extension_name.clone(),
+                success: false,
+                message: "OAuth flow expired. Please try again.".to_string(),
+            });
+        }
+        clear_auth_mode(&state).await;
         return oauth_error_page(&flow.display_name);
     }
 
@@ -581,7 +602,12 @@ async fn oauth_callback_handler(
     let exchange_proxy_url = std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL").ok();
 
     let result: Result<(), String> = async {
-        let token_response = if let Some(ref proxy_url) = exchange_proxy_url {
+        let token_response = if let (Some(proxy_url), None) = (&exchange_proxy_url, &flow.resource)
+        {
+            // Use the platform exchange proxy when configured and no resource
+            // parameter is needed. The proxy holds client_secret server-side so
+            // the container never sees it. MCP flows (resource.is_some()) bypass
+            // the proxy because it doesn't forward the RFC 8707 resource param.
             let gateway_token = flow.gateway_token.as_deref().unwrap_or_default();
             oauth_defaults::exchange_via_proxy(
                 proxy_url,
@@ -594,7 +620,10 @@ async fn oauth_callback_handler(
             .await
             .map_err(|e| e.to_string())?
         } else {
-            oauth_defaults::exchange_oauth_code(
+            // Direct token exchange: uses exchange_oauth_code_with_resource so MCP
+            // flows can include the RFC 8707 `resource` parameter to scope the
+            // issued token to the specific MCP server.
+            oauth_defaults::exchange_oauth_code_with_resource(
                 &flow.token_url,
                 &flow.client_id,
                 flow.client_secret.as_deref(),
@@ -602,6 +631,7 @@ async fn oauth_callback_handler(
                 &flow.redirect_uri,
                 flow.code_verifier.as_deref(),
                 &flow.access_token_field,
+                flow.resource.as_deref(),
             )
             .await
             .map_err(|e| e.to_string())?
@@ -627,6 +657,19 @@ async fn oauth_callback_handler(
         )
         .await
         .map_err(|e| e.to_string())?;
+
+        // For MCP OAuth flows (identified by resource field), persist the
+        // client_id so token refresh works without re-authentication.
+        // The CLI flow stores this in authorize_mcp_server(); the gateway
+        // callback must do the same.
+        if let Some(ref client_id_secret) = flow.client_id_secret_name {
+            let params = crate::secrets::CreateSecretParams::new(client_id_secret, &flow.client_id)
+                .with_provider(flow.provider.as_ref().cloned().unwrap_or_default());
+            flow.secrets
+                .create(&flow.user_id, params)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
 
         Ok(())
     }
@@ -659,12 +702,39 @@ async fn oauth_callback_handler(
         }
     }
 
+    // Clear auth mode regardless of outcome so the next user message goes
+    // through to the LLM instead of being intercepted as a token.
+    clear_auth_mode(&state).await;
+
+    // After successful OAuth, auto-activate the extension so it moves
+    // from "Installed (Authenticate)" → "Active" without a second click.
+    // OAuth success is independent of activation — tokens are already stored.
+    // Report auth as successful and attempt activation as a bonus step.
+    let final_message = if success {
+        match ext_mgr.activate(&flow.extension_name).await {
+            Ok(result) => result.message,
+            Err(e) => {
+                tracing::warn!(
+                    extension = %flow.extension_name,
+                    error = %e,
+                    "Auto-activation after OAuth failed"
+                );
+                format!(
+                    "{} authenticated successfully. Activation failed: {}. Try activating manually.",
+                    flow.display_name, e
+                )
+            }
+        }
+    } else {
+        message
+    };
+
     // Broadcast SSE event to notify the web UI
     if let Some(ref sender) = flow.sse_sender {
         let _ = sender.send(SseEvent::AuthCompleted {
             extension_name: flow.extension_name,
             success,
-            message,
+            message: final_message.clone(),
         });
     }
 
@@ -973,11 +1043,17 @@ async fn chat_send_handler(
         req.images.len()
     );
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tracing::debug!("[chat_send_handler] Sending message through channel");
     tx.send(msg).await.map_err(|_| {
@@ -1043,11 +1119,17 @@ async fn chat_approval_handler(
 
     let msg_id = msg.id;
 
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
 
     tx.send(msg).await.map_err(|_| {
         (
@@ -1081,7 +1163,7 @@ async fn chat_auth_token_handler(
         .configure_token(&req.extension_name, &req.token)
         .await
     {
-        Ok(result) => {
+        Ok(result) if result.activated => {
             // Clear auth mode on the active thread
             clear_auth_mode(&state).await;
 
@@ -1093,6 +1175,7 @@ async fn chat_auth_token_handler(
 
             Ok(Json(ActionResponse::ok(result.message)))
         }
+        Ok(result) => Ok(Json(ActionResponse::fail(result.message))),
         Err(e) => {
             let msg = e.to_string();
             // Re-emit auth_required for retry on validation errors
@@ -2116,16 +2199,24 @@ async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
+    // Clear auth mode regardless of outcome so the next user message goes
+    // through to the LLM instead of being intercepted as a token.
+    clear_auth_mode(&state).await;
+
     match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
-            // Broadcast auth_completed so the chat UI can dismiss any in-progress
-            // auth card or setup modal that was triggered by tool_auth/tool_activate.
+            // Broadcast completion status so chat UI can dismiss success cases while
+            // leaving failed auth/configuration flows visible for correction.
             state.sse.broadcast(SseEvent::AuthCompleted {
                 extension_name: name.clone(),
-                success: true,
+                success: result.activated,
                 message: result.message.clone(),
             });
-            let mut resp = ActionResponse::ok(result.message);
+            let mut resp = if result.activated {
+                ActionResponse::ok(result.message)
+            } else {
+                ActionResponse::fail(result.message)
+            };
             resp.activated = Some(result.activated);
             resp.auth_url = result.auth_url;
             Ok(Json(resp))
@@ -2280,12 +2371,16 @@ async fn routines_detail_handler(
             job_id: run.job_id,
         })
         .collect();
+    let routine_info = RoutineInfo::from_routine(&routine);
 
     Ok(Json(RoutineDetailResponse {
         id: routine.id,
         name: routine.name.clone(),
         description: routine.description.clone(),
         enabled: routine.enabled,
+        trigger_type: routine_info.trigger_type,
+        trigger_raw: routine_info.trigger_raw,
+        trigger_summary: routine_info.trigger_summary,
         trigger: serde_json::to_value(&routine.trigger).unwrap_or_default(),
         action: serde_json::to_value(&routine.action).unwrap_or_default(),
         guardrails: serde_json::to_value(&routine.guardrails).unwrap_or_default(),
@@ -2359,11 +2454,20 @@ async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    let was_enabled = routine.enabled;
     // If a specific value was provided, use it; otherwise toggle.
     routine.enabled = match body {
         Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
         None => !routine.enabled,
     };
+
+    if routine.enabled
+        && !was_enabled
+        && let Trigger::Cron { schedule, timezone } = &routine.trigger
+    {
+        routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref())
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     store
         .update_routine(&routine)
@@ -2639,6 +2743,7 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::oauth_defaults;
     use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
 
     #[test]
@@ -2757,6 +2862,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_extensions_setup_submit_returns_failure_when_not_activated() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let channel_name = "test-failing-channel";
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": channel_name,
+            "setup": {
+                "required_secrets": [
+                    {"name": "BOT_TOKEN", "prompt": "Enter bot token"}
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.capabilities.json")),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/setup",
+                post(extensions_setup_submit_handler),
+            )
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "secrets": {
+                "BOT_TOKEN": "dummy-token"
+            }
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/api/extensions/{channel_name}/setup"))
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(parsed["success"], serde_json::Value::Bool(false));
+        assert_eq!(parsed["activated"], serde_json::Value::Bool(false));
+        assert!(
+            parsed["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Activation failed"),
+            "expected activation failure in message: {:?}",
+            parsed
+        );
+    }
+
+    fn expired_flow_created_at() -> Option<std::time::Instant> {
+        std::time::Instant::now()
+            .checked_sub(oauth_defaults::OAUTH_FLOW_EXPIRY + std::time::Duration::from_secs(1))
+    }
+
+    #[tokio::test]
     async fn test_csp_header_present_on_responses() {
         use std::net::SocketAddr;
 
@@ -2862,29 +3046,14 @@ mod tests {
         use tower::ServiceExt;
 
         // Build an ExtensionManager so the handler can look up flows
-        let secrets = Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
-            crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
-                TEST_GATEWAY_CRYPTO_KEY.to_string(),
-            ))
-            .expect("crypto"),
-        )));
-        let tool_registry = Arc::new(ToolRegistry::new());
-        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
-
-        let ext_mgr = Arc::new(ExtensionManager::new(
-            mcp_sm,
-            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
-            secrets,
-            tool_registry,
-            None,
-            None,
-            std::path::PathBuf::from("/tmp/wasm_tools"),
-            std::path::PathBuf::from("/tmp/wasm_channels"),
-            None,
-            "test".to_string(),
-            None,
-            vec![],
-        ));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
 
         let state = test_gateway_state(Some(ext_mgr));
         let app = test_oauth_router(state);
@@ -2918,25 +3087,13 @@ mod tests {
                 ))
                 .expect("crypto"),
             )));
-        let tool_registry = Arc::new(ToolRegistry::new());
-        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+        let Some(created_at) = expired_flow_created_at() else {
+            eprintln!("Skipping expired OAuth flow test: monotonic uptime below expiry window");
+            return;
+        };
 
-        let ext_mgr = Arc::new(ExtensionManager::new(
-            mcp_sm,
-            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
-            secrets.clone(),
-            tool_registry,
-            None,
-            None,
-            std::path::PathBuf::from("/tmp/wasm_tools"),
-            std::path::PathBuf::from("/tmp/wasm_channels"),
-            None,
-            "test".to_string(),
-            None,
-            vec![],
-        ));
-
-        // Insert an expired flow (created 10 minutes ago)
+        // Insert an expired flow.
         let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
@@ -2954,9 +3111,9 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
-            created_at: std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_secs(600))
-                .expect("System uptime is too low to run expired flow test"),
+            resource: None,
+            client_id_secret_name: None,
+            created_at,
         };
 
         ext_mgr
@@ -2984,6 +3141,80 @@ mod tests {
         let html = String::from_utf8_lossy(&body);
         // Expired flow → error landing page
         assert!(html.contains("Authorization Failed"));
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_expired_flow_broadcasts_auth_completed_failure() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+
+        let (sender, mut receiver) = tokio::sync::broadcast::channel(4);
+        let Some(created_at) = expired_flow_created_at() else {
+            eprintln!("Skipping expired OAuth flow SSE test: monotonic uptime below expiry window");
+            return;
+        };
+        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "test_tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "test_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "test".to_string(),
+            secrets,
+            sse_sender: Some(sender),
+            gateway_token: None,
+            resource: None,
+            client_id_secret_name: None,
+            created_at,
+        };
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("expired_state".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_oauth_router(state);
+
+        let req = axum::http::Request::builder()
+            .uri("/oauth/callback?code=test_code&state=expired_state")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("auth_completed event") {
+            crate::channels::web::types::SseEvent::AuthCompleted {
+                extension_name,
+                success,
+                message,
+            } => {
+                assert_eq!(extension_name, "test_tool");
+                assert!(!success, "expired OAuth flow should broadcast failure");
+                assert_eq!(message, "OAuth flow expired. Please try again.");
+            }
+            event => panic!("expected AuthCompleted event, got {event:?}"),
+        }
     }
 
     #[tokio::test]
@@ -3024,28 +3255,16 @@ mod tests {
                 ))
                 .expect("crypto"),
             )));
-        let tool_registry = Arc::new(ToolRegistry::new());
-        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
-
-        let ext_mgr = Arc::new(ExtensionManager::new(
-            mcp_sm,
-            Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
-            secrets.clone(),
-            tool_registry,
-            None,
-            None,
-            std::path::PathBuf::from("/tmp/wasm_tools"),
-            std::path::PathBuf::from("/tmp/wasm_channels"),
-            None,
-            "test".to_string(),
-            None,
-            vec![],
-        ));
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
 
         // Insert a flow keyed by raw nonce "test_nonce" (without instance prefix).
         // Use an expired flow so the handler exits before attempting a real HTTP
         // token exchange — we only need to verify that the instance prefix was
         // stripped and the flow was found by the raw nonce.
+        let Some(created_at) = expired_flow_created_at() else {
+            eprintln!("Skipping OAuth state-prefix test: monotonic uptime below expiry window");
+            return;
+        };
         let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
             extension_name: "test_tool".to_string(),
             display_name: "Test Tool".to_string(),
@@ -3063,10 +3282,10 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
+            resource: None,
+            client_id_secret_name: None,
             // Expired — handler will reject after lookup (no network I/O)
-            created_at: std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_secs(600))
-                .expect("System uptime is too low to run expired flow test"),
+            created_at,
         };
 
         ext_mgr
@@ -3137,24 +3356,27 @@ mod tests {
 
     fn test_ext_mgr(
         secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
-    ) -> Arc<ExtensionManager> {
+    ) -> (Arc<ExtensionManager>, tempfile::TempDir, tempfile::TempDir) {
         let tool_registry = Arc::new(ToolRegistry::new());
         let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
         let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
-        Arc::new(ExtensionManager::new(
+        let wasm_tools_dir = tempfile::tempdir().expect("temp wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("temp wasm channels dir");
+        let ext_mgr = Arc::new(ExtensionManager::new(
             mcp_sm,
             mcp_pm,
             secrets,
             tool_registry,
             None,
             None,
-            std::path::PathBuf::from("/tmp/wasm_tools"),
-            std::path::PathBuf::from("/tmp/wasm_channels"),
+            wasm_tools_dir.path().to_path_buf(),
+            wasm_channels_dir.path().to_path_buf(),
             None,
             "test".to_string(),
             None,
             vec![],
-        ))
+        ));
+        (ext_mgr, wasm_tools_dir, wasm_channels_dir)
     }
 
     #[tokio::test]
@@ -3163,7 +3385,7 @@ mod tests {
         use tower::ServiceExt;
 
         let secrets = test_secrets_store();
-        let ext_mgr = test_ext_mgr(secrets);
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
         let state = test_gateway_state(Some(ext_mgr));
         let app = test_relay_oauth_router(state);
 
@@ -3207,7 +3429,7 @@ mod tests {
             .await
             .expect("store nonce");
 
-        let ext_mgr = test_ext_mgr(secrets);
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
         let state = test_gateway_state(Some(ext_mgr));
         let app = test_relay_oauth_router(state);
 
@@ -3252,7 +3474,7 @@ mod tests {
             .await
             .expect("store nonce");
 
-        let ext_mgr = test_ext_mgr(secrets.clone());
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
         let state = test_gateway_state(Some(ext_mgr));
         let app = test_relay_oauth_router(state);
 

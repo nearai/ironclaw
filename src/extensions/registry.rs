@@ -232,198 +232,11 @@ pub fn builtin_entries() -> Vec<RegistryEntry> {
 }
 
 /// Well-known extensions, with an optional relay URL for the channel-relay entry.
+///
+/// MCP server entries are loaded from `registry/mcp-servers/*.json` via the catalog
+/// system. Only runtime-dependent entries (like channel-relay) remain here.
 pub fn builtin_entries_with_relay(relay_url: Option<String>) -> Vec<RegistryEntry> {
-    let mut entries = vec![
-        // -- MCP Servers --
-        RegistryEntry {
-            name: "notion".to_string(),
-            display_name: "Notion".to_string(),
-            kind: ExtensionKind::McpServer,
-            description: "Connect to Notion for reading and writing pages, databases, and comments"
-                .to_string(),
-            keywords: vec![
-                "notes".into(),
-                "wiki".into(),
-                "docs".into(),
-                "pages".into(),
-                "database".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.notion.com/mcp".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        },
-        RegistryEntry {
-            name: "linear".to_string(),
-            display_name: "Linear".to_string(),
-            kind: ExtensionKind::McpServer,
-            description:
-                "Connect to Linear for issue tracking, project management, and team workflows"
-                    .to_string(),
-            keywords: vec![
-                "issues".into(),
-                "tickets".into(),
-                "project".into(),
-                "tracking".into(),
-                "bugs".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.linear.app/sse".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        },
-        RegistryEntry {
-            name: "github".to_string(),
-            display_name: "GitHub".to_string(),
-            kind: ExtensionKind::McpServer,
-            description:
-                "Connect to GitHub for repository management, issues, PRs, and code search"
-                    .to_string(),
-            keywords: vec![
-                "git".into(),
-                "repos".into(),
-                "code".into(),
-                "pull-request".into(),
-                "issues".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://api.githubcopilot.com/mcp/".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        },
-        RegistryEntry {
-            name: "slack-mcp".to_string(),
-            display_name: "Slack MCP".to_string(),
-            kind: ExtensionKind::McpServer,
-            description:
-                "Connect to Slack via MCP for messaging, channel management, and team communication"
-                    .to_string(),
-            keywords: vec![
-                "messaging".into(),
-                "chat".into(),
-                "channels".into(),
-                "team".into(),
-                "communication".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.slack.com".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        },
-        RegistryEntry {
-            name: "sentry".to_string(),
-            display_name: "Sentry".to_string(),
-            kind: ExtensionKind::McpServer,
-            description:
-                "Connect to Sentry for error tracking, performance monitoring, and debugging"
-                    .to_string(),
-            keywords: vec![
-                "errors".into(),
-                "monitoring".into(),
-                "debugging".into(),
-                "crashes".into(),
-                "performance".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.sentry.dev/mcp".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        },
-        RegistryEntry {
-            name: "stripe".to_string(),
-            display_name: "Stripe".to_string(),
-            kind: ExtensionKind::McpServer,
-            description:
-                "Connect to Stripe for payment processing, subscriptions, and financial data"
-                    .to_string(),
-            keywords: vec![
-                "payments".into(),
-                "billing".into(),
-                "subscriptions".into(),
-                "invoices".into(),
-                "finance".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.stripe.com".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        },
-        RegistryEntry {
-            name: "cloudflare".to_string(),
-            display_name: "Cloudflare".to_string(),
-            kind: ExtensionKind::McpServer,
-            description:
-                "Connect to Cloudflare for DNS, Workers, KV, and infrastructure management"
-                    .to_string(),
-            keywords: vec![
-                "cdn".into(),
-                "dns".into(),
-                "workers".into(),
-                "hosting".into(),
-                "infrastructure".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.cloudflare.com/mcp".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        },
-        RegistryEntry {
-            name: "asana".to_string(),
-            display_name: "Asana".to_string(),
-            kind: ExtensionKind::McpServer,
-            description: "Connect to Asana for task management, projects, and team coordination"
-                .to_string(),
-            keywords: vec![
-                "tasks".into(),
-                "projects".into(),
-                "management".into(),
-                "team".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.asana.com/v2/mcp".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        },
-        RegistryEntry {
-            name: "intercom".to_string(),
-            display_name: "Intercom".to_string(),
-            kind: ExtensionKind::McpServer,
-            description: "Connect to Intercom for customer messaging, support, and engagement"
-                .to_string(),
-            keywords: vec![
-                "support".into(),
-                "customers".into(),
-                "messaging".into(),
-                "chat".into(),
-                "helpdesk".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.intercom.com/mcp".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        },
-        // WASM channels (telegram, slack, discord, whatsapp) come from the embedded
-        // registry catalog (registry/channels/*.json) with WasmDownload URLs pointing
-        // to GitHub release artifacts. See new_with_catalog() for merging.
-    ];
+    let mut entries = vec![];
 
     // Conditionally add channel-relay entries when relay URL is configured
     if let Some(relay_url) = relay_url {
@@ -545,9 +358,21 @@ mod tests {
         assert_eq!(score, 0, "No match should score 0");
     }
 
+    /// Helper to create a registry with catalog entries (MCP servers come from catalog now).
+    fn registry_with_catalog() -> ExtensionRegistry {
+        let catalog = crate::registry::catalog::RegistryCatalog::load_or_embedded()
+            .expect("catalog should load");
+        let catalog_entries: Vec<RegistryEntry> = catalog
+            .all()
+            .iter()
+            .filter_map(|m| m.to_registry_entry())
+            .collect();
+        ExtensionRegistry::new_with_catalog(catalog_entries)
+    }
+
     #[tokio::test]
     async fn test_search_returns_sorted() {
-        let registry = ExtensionRegistry::new();
+        let registry = registry_with_catalog();
         let results = registry.search("notion").await;
 
         assert!(!results.is_empty(), "Should find notion in registry");
@@ -556,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_empty_query_returns_all() {
-        let registry = ExtensionRegistry::new();
+        let registry = registry_with_catalog();
         let results = registry.search("").await;
 
         assert!(results.len() > 5, "Empty query should return all entries");
@@ -564,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_by_keyword() {
-        let registry = ExtensionRegistry::new();
+        let registry = registry_with_catalog();
         let results = registry.search("issues tickets").await;
 
         assert!(
@@ -578,7 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_exact_name() {
-        let registry = ExtensionRegistry::new();
+        let registry = registry_with_catalog();
 
         let entry = registry.get("notion").await;
         assert!(entry.is_some());
@@ -658,17 +483,30 @@ mod tests {
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
             },
-            // This shares a name with the builtin slack-mcp but has a different kind, so both should appear
+            // Two entries with same name but different kinds should coexist
             RegistryEntry {
-                name: "slack-mcp".to_string(),
-                display_name: "Slack MCP WASM".to_string(),
+                name: "dual-ext".to_string(),
+                display_name: "Dual MCP".to_string(),
+                kind: ExtensionKind::McpServer,
+                description: "Dual extension MCP server".to_string(),
+                keywords: vec!["messaging".into()],
+                source: ExtensionSource::McpUrl {
+                    url: "https://mcp.example.com".to_string(),
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::Dcr,
+                version: None,
+            },
+            RegistryEntry {
+                name: "dual-ext".to_string(),
+                display_name: "Dual WASM".to_string(),
                 kind: ExtensionKind::WasmTool,
-                description: "Slack WASM tool".to_string(),
+                description: "Dual extension WASM tool".to_string(),
                 keywords: vec!["messaging".into()],
                 source: ExtensionSource::WasmBuildable {
-                    source_dir: "tools-src/slack".to_string(),
-                    build_dir: Some("tools-src/slack".to_string()),
-                    crate_name: Some("slack-tool".to_string()),
+                    source_dir: "tools-src/dual".to_string(),
+                    build_dir: Some("tools-src/dual".to_string()),
+                    crate_name: Some("dual-tool".to_string()),
                 },
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
@@ -683,41 +521,56 @@ mod tests {
         assert!(!results.is_empty(), "Should find telegram from catalog");
         assert_eq!(results[0].entry.name, "telegram");
 
-        // Should have both builtin MCP slack-mcp and catalog WASM slack-mcp
-        let results = registry.search("slack").await;
-        let slack_mcp = results
+        // Should have both MCP and WASM entries with the same name
+        let results = registry.search("dual-ext").await;
+        let has_mcp = results
             .iter()
-            .any(|r| r.entry.name == "slack-mcp" && r.entry.kind == ExtensionKind::McpServer);
-        let slack_wasm = results
+            .any(|r| r.entry.name == "dual-ext" && r.entry.kind == ExtensionKind::McpServer);
+        let has_wasm = results
             .iter()
-            .any(|r| r.entry.name == "slack-mcp" && r.entry.kind == ExtensionKind::WasmTool);
-        assert!(slack_mcp, "Should have builtin MCP slack-mcp");
-        assert!(slack_wasm, "Should have catalog WASM slack-mcp");
+            .any(|r| r.entry.name == "dual-ext" && r.entry.kind == ExtensionKind::WasmTool);
+        assert!(has_mcp, "Should have MCP dual-ext");
+        assert!(has_wasm, "Should have WASM dual-ext");
     }
 
     #[tokio::test]
     async fn test_new_with_catalog_dedup_same_kind() {
-        // A catalog entry with same name AND kind as a builtin should be skipped
-        let catalog_entries = vec![RegistryEntry {
-            name: "slack-mcp".to_string(),
-            display_name: "Slack MCP Override".to_string(),
-            kind: ExtensionKind::McpServer, // same kind as builtin slack-mcp
-            description: "Should be skipped".to_string(),
-            keywords: vec![],
-            source: ExtensionSource::McpUrl {
-                url: "https://other.slack.com".to_string(),
+        // When two catalog entries share name AND kind, only the first should be kept
+        let catalog_entries = vec![
+            RegistryEntry {
+                name: "test-ext".to_string(),
+                display_name: "Test First".to_string(),
+                kind: ExtensionKind::McpServer,
+                description: "First entry".to_string(),
+                keywords: vec![],
+                source: ExtensionSource::McpUrl {
+                    url: "https://first.example.com".to_string(),
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::Dcr,
+                version: None,
             },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-            version: None,
-        }];
+            RegistryEntry {
+                name: "test-ext".to_string(),
+                display_name: "Test Duplicate".to_string(),
+                kind: ExtensionKind::McpServer, // same kind
+                description: "Should be skipped".to_string(),
+                keywords: vec![],
+                source: ExtensionSource::McpUrl {
+                    url: "https://second.example.com".to_string(),
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::Dcr,
+                version: None,
+            },
+        ];
 
         let registry = ExtensionRegistry::new_with_catalog(catalog_entries);
 
-        let entry = registry.get("slack-mcp").await;
+        let entry = registry.get("test-ext").await;
         assert!(entry.is_some());
-        // Should still be the builtin, not the override
-        assert_eq!(entry.unwrap().display_name, "Slack MCP");
+        // Should be the first entry, not the duplicate
+        assert_eq!(entry.unwrap().display_name, "Test First");
     }
 
     #[tokio::test]

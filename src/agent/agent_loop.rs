@@ -18,7 +18,7 @@ use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
-use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
+use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
@@ -838,19 +838,42 @@ impl Agent {
         };
 
         if let Some(pending) = pending_auth {
-            match &submission {
-                Submission::UserInput { content } => {
-                    return self
-                        .process_auth_token(message, &pending, content, session, thread_id)
-                        .await;
-                }
-                _ => {
-                    // Any control submission (interrupt, undo, etc.) cancels auth mode
+            if pending.is_expired() {
+                // TTL exceeded — clear stale auth mode
+                tracing::warn!(
+                    extension = %pending.extension_name,
+                    "Auth mode expired after TTL, clearing"
+                );
+                {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
                         thread.pending_auth = None;
                     }
-                    // Fall through to normal handling
+                }
+                // If this was a user message (possibly a pasted token), return an
+                // explicit error instead of forwarding it to the LLM/history.
+                if matches!(submission, Submission::UserInput { .. }) {
+                    return Ok(Some(format!(
+                        "Authentication for **{}** expired. Please try again.",
+                        pending.extension_name
+                    )));
+                }
+                // Control submissions (interrupt, undo, etc.) fall through to normal handling
+            } else {
+                match &submission {
+                    Submission::UserInput { content } => {
+                        return self
+                            .process_auth_token(message, &pending, content, session, thread_id)
+                            .await;
+                    }
+                    _ => {
+                        // Any control submission (interrupt, undo, etc.) cancels auth mode
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.pending_auth = None;
+                        }
+                        // Fall through to normal handling
+                    }
                 }
             }
         }
@@ -936,29 +959,10 @@ impl Agent {
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
-            SubmissionResult::NeedApproval {
-                request_id,
-                tool_name,
-                description,
-                parameters,
-            } => {
-                // Each channel renders the approval prompt via send_status.
-                // Web gateway shows an inline card, REPL prints a formatted prompt, etc.
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ApprovalNeeded {
-                            request_id: request_id.to_string(),
-                            tool_name,
-                            description,
-                            parameters,
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-
-                // Empty string signals the caller to skip respond() (no duplicate text)
+            SubmissionResult::NeedApproval { .. } => {
+                // ApprovalNeeded status was already sent by thread_ops.rs before
+                // returning this result. Empty string signals the caller to skip
+                // respond() (no duplicate text).
                 Ok(Some(String::new()))
             }
         }

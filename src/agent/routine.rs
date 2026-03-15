@@ -207,7 +207,7 @@ impl Trigger {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RoutineAction {
-    /// Single LLM call, no tools. Cheap and fast.
+    /// Single LLM call (optionally with tools). Cheap and fast.
     Lightweight {
         /// The prompt sent to the LLM.
         prompt: String,
@@ -217,6 +217,14 @@ pub enum RoutineAction {
         /// Max output tokens (default: 4096).
         #[serde(default = "default_max_tokens")]
         max_tokens: u32,
+        /// Enable tool access (default: false for backward compatibility).
+        /// When true, the LLM can call tools during execution.
+        /// Tools requiring approval are automatically filtered out.
+        #[serde(default)]
+        use_tools: bool,
+        /// Max tool call rounds (default: 3). Only used when use_tools is true.
+        #[serde(default = "default_max_tool_rounds")]
+        max_tool_rounds: u32,
     },
     /// Full multi-turn worker job with tool access.
     FullJob {
@@ -241,6 +249,19 @@ fn default_max_tokens() -> u32 {
 
 fn default_max_iterations() -> u32 {
     10
+}
+
+fn default_max_tool_rounds() -> u32 {
+    3
+}
+
+/// Hard upper bound for max_tool_rounds to prevent runaway loops and cost explosion.
+pub(crate) const MAX_TOOL_ROUNDS_LIMIT: u32 = 20;
+
+/// Clamp max_tool_rounds to [1, MAX_TOOL_ROUNDS_LIMIT].
+/// Accepts u64 to avoid truncation before clamping.
+fn clamp_max_tool_rounds(value: u64) -> u32 {
+    value.clamp(1, MAX_TOOL_ROUNDS_LIMIT as u64) as u32
 }
 
 /// Parse a `tool_permissions` JSON array into a `Vec<String>`.
@@ -290,10 +311,22 @@ impl RoutineAction {
                     .get("max_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(default_max_tokens() as u64) as u32;
+                let use_tools = config
+                    .get("use_tools")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let max_tool_rounds = clamp_max_tool_rounds(
+                    config
+                        .get("max_tool_rounds")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(default_max_tool_rounds() as u64),
+                );
                 Ok(RoutineAction::Lightweight {
                     prompt,
                     context_paths,
                     max_tokens,
+                    use_tools,
+                    max_tool_rounds,
                 })
             }
             "full_job" => {
@@ -339,10 +372,14 @@ impl RoutineAction {
                 prompt,
                 context_paths,
                 max_tokens,
+                use_tools,
+                max_tool_rounds,
             } => serde_json::json!({
                 "prompt": prompt,
                 "context_paths": context_paths,
                 "max_tokens": max_tokens,
+                "use_tools": use_tools,
+                "max_tool_rounds": max_tool_rounds,
             }),
             RoutineAction::FullJob {
                 title,
@@ -501,10 +538,174 @@ pub fn next_cron_fire(
     }
 }
 
+/// Describe common routine cron patterns in plain English.
+///
+/// Falls back to `cron: <raw>` for malformed or complex expressions.
+pub fn describe_cron(schedule: &str, timezone: Option<&str>) -> String {
+    fn fallback(raw: &str) -> String {
+        if raw.trim().is_empty() {
+            "cron: (empty)".to_string()
+        } else {
+            format!("cron: {}", raw.trim())
+        }
+    }
+
+    fn parse_u8_token(token: &str) -> Option<u8> {
+        token.parse::<u8>().ok()
+    }
+
+    fn parse_step(token: &str) -> Option<u8> {
+        token
+            .strip_prefix("*/")
+            .and_then(parse_u8_token)
+            .filter(|n| *n > 0)
+    }
+
+    fn weekday_name(dow: &str) -> Option<&'static str> {
+        let normalized = dow.trim().to_ascii_uppercase();
+        match normalized.as_str() {
+            "MON" | "1" => Some("Monday"),
+            "TUE" | "2" => Some("Tuesday"),
+            "WED" | "3" => Some("Wednesday"),
+            "THU" | "4" => Some("Thursday"),
+            "FRI" | "5" => Some("Friday"),
+            "SAT" | "6" => Some("Saturday"),
+            "SUN" | "0" | "7" => Some("Sunday"),
+            _ => None,
+        }
+    }
+
+    fn format_time(hour: u8, minute: u8) -> String {
+        if hour == 0 && minute == 0 {
+            return "midnight".to_string();
+        }
+        let (display_hour, am_pm) = match hour {
+            0 => (12, "AM"),
+            1..=11 => (hour, "AM"),
+            12 => (12, "PM"),
+            _ => (hour - 12, "PM"),
+        };
+        format!("{display_hour}:{minute:02} {am_pm}")
+    }
+
+    fn ordinal(n: u8) -> String {
+        let suffix = if (11..=13).contains(&(n % 100)) {
+            "th"
+        } else {
+            match n % 10 {
+                1 => "st",
+                2 => "nd",
+                3 => "rd",
+                _ => "th",
+            }
+        };
+        format!("{n}{suffix}")
+    }
+
+    fn describe_inner(raw: &str) -> Option<String> {
+        let fields: Vec<&str> = raw.split_whitespace().collect();
+        let (sec, min, hour, dom, month, dow, year) = match fields.len() {
+            5 => (
+                "0", fields[0], fields[1], fields[2], fields[3], fields[4], None,
+            ),
+            6 => (
+                fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], None,
+            ),
+            7 => (
+                fields[0],
+                fields[1],
+                fields[2],
+                fields[3],
+                fields[4],
+                fields[5],
+                Some(fields[6]),
+            ),
+            _ => return None,
+        };
+
+        if year.is_some_and(|v| v != "*") {
+            return None;
+        }
+
+        if sec == "0"
+            && hour == "*"
+            && dom == "*"
+            && month == "*"
+            && dow == "*"
+            && let Some(step) = parse_step(min)
+        {
+            return Some(match step {
+                1 => "Every minute".to_string(),
+                n => format!("Every {n} minutes"),
+            });
+        }
+
+        if sec == "0"
+            && min == "0"
+            && dom == "*"
+            && month == "*"
+            && dow == "*"
+            && let Some(step) = parse_step(hour)
+        {
+            return Some(match step {
+                1 => "Every hour".to_string(),
+                n => format!("Every {n} hours"),
+            });
+        }
+
+        let hour = parse_u8_token(hour).filter(|h| *h <= 23)?;
+        let minute = parse_u8_token(min).filter(|m| *m <= 59)?;
+        let time = format_time(hour, minute);
+        let time_phrase = if time == "midnight" {
+            "at midnight".to_string()
+        } else {
+            format!("at {time}")
+        };
+
+        if sec == "0" && dom == "*" && month == "*" && dow == "*" {
+            return Some(format!("Daily {time_phrase}"));
+        }
+
+        if sec == "0" && dom == "*" && month == "*" && dow.eq_ignore_ascii_case("MON-FRI") {
+            return Some(format!("Weekdays {time_phrase}"));
+        }
+
+        if sec == "0"
+            && dom == "*"
+            && month == "*"
+            && let Some(day_name) = weekday_name(dow)
+        {
+            return Some(format!("Every {day_name} {time_phrase}"));
+        }
+
+        if sec == "0"
+            && month == "*"
+            && dow == "*"
+            && let Some(day_of_month) = parse_u8_token(dom).filter(|d| (1..=31).contains(d))
+        {
+            return Some(format!(
+                "{} of every month {time_phrase}",
+                ordinal(day_of_month)
+            ));
+        }
+
+        None
+    }
+
+    let mut description = describe_inner(schedule).unwrap_or_else(|| fallback(schedule));
+    if let Some(tz) = timezone.map(str::trim).filter(|tz| !tz.is_empty()) {
+        description.push_str(" (");
+        description.push_str(tz);
+        description.push(')');
+    }
+    description
+}
+
 #[cfg(test)]
 mod tests {
     use crate::agent::routine::{
-        RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash, next_cron_fire,
+        MAX_TOOL_ROUNDS_LIMIT, RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash,
+        describe_cron, next_cron_fire,
     };
 
     #[test]
@@ -554,11 +755,13 @@ mod tests {
             prompt: "Check PRs".to_string(),
             context_paths: vec!["context/priorities.md".to_string()],
             max_tokens: 2048,
+            use_tools: false,
+            max_tool_rounds: 3,
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("lightweight", json).expect("parse lightweight");
         assert!(
-            matches!(parsed, RoutineAction::Lightweight { prompt, context_paths, max_tokens }
+            matches!(parsed, RoutineAction::Lightweight { prompt, context_paths, max_tokens, .. }
             if prompt == "Check PRs" && context_paths.len() == 1 && max_tokens == 2048)
         );
     }
@@ -659,6 +862,40 @@ mod tests {
     }
 
     #[test]
+    fn test_describe_cron_common_patterns() {
+        let cases = vec![
+            ("0 */30 * * * *", None, "Every 30 minutes"),
+            ("0 0 9 * * *", None, "Daily at 9:00 AM"),
+            ("0 0 9 * * MON-FRI", None, "Weekdays at 9:00 AM"),
+            ("0 0 */2 * * *", None, "Every 2 hours"),
+            ("0 0 0 * * *", None, "Daily at midnight"),
+            ("0 0 9 * * 1", None, "Every Monday at 9:00 AM"),
+            ("0 0 9 1 * *", None, "1st of every month at 9:00 AM"),
+            (
+                "0 0 9 * * MON-FRI",
+                Some("America/New_York"),
+                "Weekdays at 9:00 AM (America/New_York)",
+            ),
+            ("1 2 3 4 5 6", None, "cron: 1 2 3 4 5 6"),
+        ];
+
+        for (schedule, timezone, expected) in cases {
+            let actual = describe_cron(schedule, timezone);
+            assert_eq!(actual, expected); // safety: test-only assertion in #[cfg(test)] module
+        }
+    }
+
+    #[test]
+    fn test_describe_cron_edge_cases() {
+        assert_eq!(describe_cron("", None), "cron: (empty)"); // safety: test-only assertion in #[cfg(test)] module
+        assert_eq!(describe_cron("not a cron", None), "cron: not a cron"); // safety: test-only assertion in #[cfg(test)] module
+        let weekdays_5_field = describe_cron("0 9 * * MON-FRI", None);
+        assert_eq!(weekdays_5_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
+        let weekdays_7_field = describe_cron("0 0 9 * * MON-FRI *", None);
+        assert_eq!(weekdays_7_field, "Weekdays at 9:00 AM"); // safety: test-only assertion in #[cfg(test)] module
+    }
+
+    #[test]
     fn test_guardrails_default() {
         let g = RoutineGuardrails::default();
         assert_eq!(g.cooldown.as_secs(), 300);
@@ -694,5 +931,78 @@ mod tests {
             "system_event"
         );
         assert_eq!(Trigger::Manual.type_tag(), "manual");
+    }
+
+    #[test]
+    fn test_action_lightweight_backward_compat_no_use_tools() {
+        // Simulate old DB record without use_tools field
+        let json = serde_json::json!({
+            "prompt": "old routine",
+            "context_paths": [],
+            "max_tokens": 4096
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse lightweight");
+        assert!(
+            matches!(parsed, RoutineAction::Lightweight { use_tools, max_tool_rounds, .. }
+            if !use_tools && max_tool_rounds == 3),
+            "missing use_tools should default to false, max_tool_rounds to 3"
+        );
+    }
+
+    #[test]
+    fn test_max_tool_rounds_clamped_to_upper_bound() {
+        let json = serde_json::json!({
+            "prompt": "test",
+            "use_tools": true,
+            "max_tool_rounds": 9999
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse");
+        match parsed {
+            RoutineAction::Lightweight {
+                max_tool_rounds, ..
+            } => {
+                assert_eq!(
+                    max_tool_rounds, MAX_TOOL_ROUNDS_LIMIT,
+                    "should clamp to MAX_TOOL_ROUNDS_LIMIT"
+                );
+            }
+            _ => panic!("expected Lightweight"),
+        }
+    }
+
+    #[test]
+    fn test_max_tool_rounds_clamped_to_lower_bound() {
+        let json = serde_json::json!({
+            "prompt": "test",
+            "use_tools": true,
+            "max_tool_rounds": 0
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse");
+        match parsed {
+            RoutineAction::Lightweight {
+                max_tool_rounds, ..
+            } => {
+                assert_eq!(max_tool_rounds, 1, "should clamp 0 to 1");
+            }
+            _ => panic!("expected Lightweight"),
+        }
+    }
+
+    #[test]
+    fn test_max_tool_rounds_normal_value_passes_through() {
+        let json = serde_json::json!({
+            "prompt": "test",
+            "use_tools": true,
+            "max_tool_rounds": 10
+        });
+        let parsed = RoutineAction::from_db("lightweight", json).expect("parse");
+        match parsed {
+            RoutineAction::Lightweight {
+                max_tool_rounds, ..
+            } => {
+                assert_eq!(max_tool_rounds, 10, "normal value should pass through");
+            }
+            _ => panic!("expected Lightweight"),
+        }
     }
 }

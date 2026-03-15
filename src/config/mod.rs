@@ -18,6 +18,7 @@ pub mod relay;
 mod routines;
 mod safety;
 mod sandbox;
+mod search;
 mod secrets;
 mod skills;
 mod transcription;
@@ -33,7 +34,9 @@ use crate::settings::Settings;
 // Re-export all public types so `crate::config::FooConfig` continues to work.
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
-pub use self::channels::{ChannelsConfig, CliConfig, GatewayConfig, HttpConfig, SignalConfig};
+pub use self::channels::{
+    ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, HttpConfig, SignalConfig,
+};
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
@@ -42,7 +45,9 @@ pub use self::llm::default_session_path;
 pub use self::relay::RelayConfig;
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
+use self::safety::resolve_safety_config;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
+pub use self::search::WorkspaceSearchConfig;
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::transcription::TranscriptionConfig;
@@ -90,6 +95,7 @@ pub struct Config {
     pub claude_code: ClaudeCodeConfig,
     pub skills: SkillsConfig,
     pub transcription: TranscriptionConfig,
+    pub search: WorkspaceSearchConfig,
     pub observability: crate::observability::ObservabilityConfig,
     /// Channel-relay integration (Slack via external relay service).
     /// Present only when both `CHANNEL_RELAY_URL` and `CHANNEL_RELAY_API_KEY` are set.
@@ -165,6 +171,7 @@ impl Config {
                 ..SkillsConfig::default()
             },
             transcription: TranscriptionConfig::default(),
+            search: WorkspaceSearchConfig::default(),
             observability: crate::observability::ObservabilityConfig::default(),
             relay: None,
         }
@@ -310,7 +317,7 @@ impl Config {
             channels: ChannelsConfig::resolve(settings, tunnel.is_enabled())?,
             tunnel,
             agent: AgentConfig::resolve(settings)?,
-            safety: SafetyConfig::resolve()?,
+            safety: resolve_safety_config()?,
             wasm: WasmConfig::resolve()?,
             secrets: SecretsConfig::resolve().await?,
             builder: BuilderModeConfig::resolve()?,
@@ -321,6 +328,7 @@ impl Config {
             claude_code: ClaudeCodeConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
             transcription: TranscriptionConfig::resolve(settings)?,
+            search: WorkspaceSearchConfig::resolve()?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },

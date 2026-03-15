@@ -13,6 +13,8 @@ mod support;
 mod tests {
     use std::time::Duration;
 
+    use uuid::Uuid;
+
     use crate::support::gateway_workflow_harness::GatewayWorkflowHarness;
     use crate::support::mock_openai_server::{
         MockOpenAiResponse, MockOpenAiRule, MockOpenAiServerBuilder, MockToolCall,
@@ -142,6 +144,117 @@ mod tests {
         assert!(
             requests.len() >= 2,
             "expected mock LLM server to receive requests"
+        );
+
+        harness.shutdown().await;
+        mock.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn routines_toggle_reenable_cron_recomputes_next_fire_at() {
+        let mock = MockOpenAiServerBuilder::new()
+            .with_rule(MockOpenAiRule::on_user_contains(
+                "create cron routine",
+                MockOpenAiResponse::ToolCalls(vec![MockToolCall::new(
+                    "call_create_cron_1",
+                    "routine_create",
+                    serde_json::json!({
+                        "name": "wf-cron-toggle-reenable",
+                        "description": "Cron toggle regression test",
+                        "trigger_type": "cron",
+                        "schedule": "0 */5 * * * *",
+                        "timezone": "UTC",
+                        "action_type": "lightweight",
+                        "prompt": "noop"
+                    }),
+                )]),
+            ))
+            .with_default_response(MockOpenAiResponse::Text("ack".to_string()))
+            .start()
+            .await;
+
+        let harness =
+            GatewayWorkflowHarness::start_openai_compatible(&mock.openai_base_url(), "mock-model")
+                .await;
+
+        let thread_id = harness.create_thread().await;
+        harness.send_chat(&thread_id, "create cron routine").await;
+        harness
+            .wait_for_turns(&thread_id, 1, Duration::from_secs(10))
+            .await;
+
+        let routine = harness
+            .routine_by_name("wf-cron-toggle-reenable")
+            .await
+            .expect("routine should exist");
+        let routine_id = routine
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("routine id missing");
+
+        let routine_uuid = Uuid::parse_str(routine_id).expect("valid routine uuid");
+
+        // Disable through the web toggle endpoint.
+        harness
+            .client
+            .post(format!(
+                "{}/api/routines/{routine_id}/toggle",
+                harness.base_url()
+            ))
+            .bearer_auth(&harness.auth_token)
+            .json(&serde_json::json!({ "enabled": false }))
+            .send()
+            .await
+            .expect("disable toggle request failed")
+            .error_for_status()
+            .expect("disable toggle non-2xx");
+
+        // Simulate an unscheduled disabled cron routine (next_fire_at missing).
+        let mut stored = harness
+            .db
+            .get_routine(routine_uuid)
+            .await
+            .expect("db get_routine")
+            .expect("routine should still exist");
+        stored.next_fire_at = None;
+        harness
+            .db
+            .update_routine(&stored)
+            .await
+            .expect("db update_routine");
+
+        // Re-enable through the web toggle endpoint.
+        harness
+            .client
+            .post(format!(
+                "{}/api/routines/{routine_id}/toggle",
+                harness.base_url()
+            ))
+            .bearer_auth(&harness.auth_token)
+            .json(&serde_json::json!({ "enabled": true }))
+            .send()
+            .await
+            .expect("enable toggle request failed")
+            .error_for_status()
+            .expect("enable toggle non-2xx");
+
+        let detail = harness
+            .client
+            .get(format!("{}/api/routines/{routine_id}", harness.base_url()))
+            .bearer_auth(&harness.auth_token)
+            .send()
+            .await
+            .expect("detail request failed")
+            .error_for_status()
+            .expect("detail non-2xx")
+            .json::<serde_json::Value>()
+            .await
+            .expect("invalid detail response");
+
+        assert_eq!(detail["enabled"].as_bool(), Some(true));
+        assert!(
+            detail["next_fire_at"].as_str().is_some(),
+            "expected next_fire_at to be recomputed when re-enabling cron routine, got {detail}"
         );
 
         harness.shutdown().await;

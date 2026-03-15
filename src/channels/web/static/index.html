@@ -9,12 +9,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
-  
+
   <!-- i18n Modules -->
   <script src="/i18n/index.js"></script>
   <script src="/i18n/en.js"></script>
   <script src="/i18n/zh-CN.js"></script>
-  
+
   <script
     src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.3/purify.min.js"
     integrity="sha384-osZDKVu4ipZP703HmPOhWdyBajcFyjX2Psjk//TG1Rc0AdwEtuToaylrmcK3LdAl"
@@ -37,7 +37,7 @@
       <div class="auth-form">
         <label for="token-input" data-i18n="auth.tokenLabel">Gateway Token</label>
         <input type="password" id="token-input" data-i18n="auth.tokenPlaceholder" data-i18n-attr="placeholder" placeholder="Paste your auth token" autofocus>
-        <button onclick="authenticate()" data-i18n="auth.connect">Connect</button>
+        <button id="auth-connect-btn" data-i18n="auth.connect">Connect</button>
       </div>
       <div id="auth-error"></div>
       <p class="auth-hint" data-i18n="auth.hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
@@ -46,11 +46,11 @@
 
   <!-- Restart Confirmation Modal -->
   <div id="restart-confirm-modal" class="restart-modal" style="display: none;">
-    <div class="restart-modal-overlay" onclick="cancelRestart()"></div>
+    <div class="restart-modal-overlay" id="restart-overlay"></div>
     <div class="restart-modal-content">
       <div class="restart-modal-header">
         <h2 data-i18n="restart.title">Restart IronClaw Instance</h2>
-        <button class="restart-modal-close" onclick="cancelRestart()" data-i18n="restart.closeTooltip" data-i18n-attr="title"
+        <button class="restart-modal-close" id="restart-close-btn" data-i18n="restart.closeTooltip" data-i18n-attr="title"
           title="Close">×</button>
       </div>
       <div class="restart-modal-body">
@@ -63,8 +63,8 @@
         </div>
       </div>
       <div class="restart-modal-footer">
-        <button class="restart-modal-btn cancel" onclick="cancelRestart()" data-i18n="restart.cancel">Cancel</button>
-        <button class="restart-modal-btn confirm" onclick="confirmRestart()" data-i18n="restart.confirm">Confirm Restart</button>
+        <button class="restart-modal-btn cancel" id="restart-cancel-btn" data-i18n="restart.cancel">Cancel</button>
+        <button class="restart-modal-btn confirm" id="restart-confirm-btn" data-i18n="restart.confirm">Confirm Restart</button>
       </div>
     </div>
   </div>
@@ -98,17 +98,17 @@
       <button data-tab="extensions" data-i18n="tab.extensions">Extensions</button>
       <button data-tab="skills" data-i18n="tab.skills">Skills</button>
       <div class="spacer"></div>
-      
+
       <!-- Language Switcher -->
       <div class="language-switcher">
-        <button class="language-btn" id="language-btn" type="button" onclick="toggleLanguageMenu()" title="Switch Language"
+        <button class="language-btn" id="language-btn" type="button" title="Switch Language"
           aria-label="Switch language" aria-haspopup="true" aria-expanded="false" aria-controls="language-menu">🌐</button>
         <div class="language-menu" id="language-menu" style="display: none;">
-          <button type="button" class="language-option" onclick="switchLanguage('en')" data-lang="en">English</button>
-          <button type="button" class="language-option" onclick="switchLanguage('zh-CN')" data-lang="zh-CN">简体中文</button>
+          <button type="button" class="language-option" data-action="switch-language" data-lang="en">English</button>
+          <button type="button" class="language-option" data-action="switch-language" data-lang="zh-CN">简体中文</button>
         </div>
       </div>
-      
+
       <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
       <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -122,7 +122,7 @@
         <span id="sse-status" data-i18n="status.connected">Connected</span>
         <div class="gateway-popover" id="gateway-popover"></div>
       </div>
-      <button class="restart-btn" id="restart-btn" onclick="triggerRestart()" data-i18n="status.restartTooltip"
+      <button class="restart-btn" id="restart-btn" data-i18n="status.restartTooltip"
         data-i18n-attr="title" title="Gracefully restart the process" style="display: none;">
         <svg id="restart-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M23 4v6h-6"></path>
@@ -137,13 +137,13 @@
     <div class="tab-panel active" id="tab-chat">
       <div class="thread-sidebar" id="thread-sidebar">
         <div class="thread-sidebar-header">
-          <button class="thread-new-btn" onclick="createNewThread()" data-i18n="chat.newThread" data-i18n-attr="title"
+          <button class="thread-new-btn" id="thread-new-btn" data-i18n="chat.newThread" data-i18n-attr="title"
             title="New thread (Ctrl/Cmd+N)">+</button>
           <div class="spacer"></div>
-          <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" data-i18n="chat.toggleSidebar"
+          <button class="thread-toggle-btn" id="thread-toggle-btn" data-i18n="chat.toggleSidebar"
             data-i18n-attr="title" title="Toggle sidebar">&laquo;</button>
         </div>
-        <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
+        <div class="assistant-item" id="assistant-thread">
           <span class="assistant-label" id="assistant-label" data-i18n="chat.assistant">Assistant</span>
           <span class="assistant-meta" id="assistant-meta"></span>
         </div>
@@ -155,13 +155,17 @@
       <div class="chat-container">
         <div class="chat-messages" id="chat-messages"></div>
         <div id="slash-autocomplete" class="slash-autocomplete" style="display:none"></div>
+        <div id="suggestion-chips" class="suggestion-chips" style="display:none"></div>
         <div class="chat-input">
           <div id="image-preview-strip" class="image-preview-strip"></div>
-          <textarea id="chat-input" data-i18n="chat.inputPlaceholder" data-i18n-attr="placeholder" placeholder="Message or / for commands..." rows="1"></textarea>
+          <div class="chat-input-wrapper">
+            <textarea id="chat-input" data-i18n="chat.inputPlaceholder" data-i18n-attr="placeholder" placeholder="Message or / for commands..." rows="1"></textarea>
+            <div id="ghost-text" class="ghost-text"></div>
+          </div>
           <input type="file" id="image-file-input" accept="image/*" multiple style="display:none">
           <button id="attach-btn" class="attach-btn" data-i18n="chat.attachImages" data-i18n-attr="title" title="Attach images"
             aria-label="Attach images">&#x1F4CE;</button>
-          <button id="send-btn" onclick="sendMessage()" data-i18n="chat.send">Send</button>
+          <button id="send-btn" data-i18n="chat.send">Send</button>
         </div>
       </div>
     </div>
@@ -178,7 +182,7 @@
         <div class="memory-content">
           <div class="memory-breadcrumb" id="memory-breadcrumb">
             <span id="memory-breadcrumb-path">workspace /</span>
-            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" onclick="startMemoryEdit()" data-i18n="memory.edit">Edit</button>
+            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" data-i18n="memory.edit">Edit</button>
           </div>
           <div class="memory-viewer" id="memory-viewer">
             <div class="empty" data-i18n="memory.selectFile">Select a file to view its contents</div>
@@ -186,8 +190,8 @@
           <div class="memory-editor" id="memory-editor" style="display:none">
             <textarea id="memory-edit-textarea"></textarea>
             <div class="memory-editor-actions">
-              <button class="btn-save" onclick="saveMemoryEdit()" data-i18n="memory.save">Save</button>
-              <button class="btn-cancel-edit" onclick="cancelMemoryEdit()" data-i18n="memory.cancel">Cancel</button>
+              <button class="btn-save" id="memory-save-btn" data-i18n="memory.save">Save</button>
+              <button class="btn-cancel-edit" id="memory-cancel-btn" data-i18n="memory.cancel">Cancel</button>
             </div>
           </div>
         </div>
@@ -219,7 +223,7 @@
     <div class="tab-panel" id="tab-logs">
       <div class="logs-container">
         <div class="logs-toolbar">
-          <select id="logs-server-level" onchange="setServerLogLevel(this.value)" title="Server-side log level (changes what the server emits)">
+          <select id="logs-server-level" title="Server-side log level (changes what the server emits)">
             <option value="error">Server: ERROR</option>
             <option value="warn">Server: WARN</option>
             <option value="info" selected>Server: INFO</option>
@@ -234,8 +238,8 @@
           </select>
           <input type="text" id="logs-target-filter" placeholder="Filter by target...">
           <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> <span data-i18n="logs.autoScroll">Auto-scroll</span></label>
-          <button id="logs-pause-btn" onclick="toggleLogsPause()" data-i18n="logs.pause">Pause</button>
-          <button onclick="clearLogs()" data-i18n="logs.clear">Clear</button>
+          <button id="logs-pause-btn" data-i18n="logs.pause">Pause</button>
+          <button id="logs-clear-btn" data-i18n="logs.clear">Clear</button>
         </div>
         <div class="logs-output" id="logs-output"></div>
       </div>
@@ -287,7 +291,7 @@
           <div class="ext-install-form">
             <input type="text" id="wasm-install-name" data-i18n-placeholder="common.name" placeholder="Extension name">
             <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
-            <button onclick="installWasmExtension()" data-i18n="extensions.install">Install</button>
+            <button id="wasm-install-btn" data-i18n="extensions.install">Install</button>
           </div>
         </div>
         <div class="extensions-section">
@@ -299,7 +303,7 @@
           <div class="ext-install-form">
             <input type="text" id="mcp-install-name" data-i18n-placeholder="common.name" placeholder="Server name">
             <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
-            <button onclick="addMcpServer()" data-i18n="mcp.add">Add</button>
+            <button id="mcp-add-btn" data-i18n="mcp.add">Add</button>
           </div>
         </div>
         <div class="extensions-section">
@@ -320,7 +324,7 @@
           <h3 data-i18n="skills.searchClawHub">Search ClawHub</h3>
           <div class="skill-search-box">
             <input type="text" id="skill-search-input" data-i18n-placeholder="skills.searchPlaceholder" placeholder="Search...">
-            <button onclick="searchClawHub()" data-i18n="skills.search">Search</button>
+            <button id="skill-search-btn" data-i18n="skills.search">Search</button>
           </div>
           <div class="extensions-list" id="skill-search-results"></div>
         </div>
@@ -335,7 +339,7 @@
           <div class="ext-install-form">
             <input type="text" id="skill-install-name" data-i18n-placeholder="skills.namePlaceholder" placeholder="Skill name or slug">
             <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
-            <button onclick="installSkillFromForm()" data-i18n="extensions.install">Install</button>
+            <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
           </div>
         </div>
       </div>

@@ -554,6 +554,31 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 };
 
                 if needs_approval {
+                    // In non-DM relay channels, auto-deny approval-
+                    // requiring tools to prevent stuck AwaitingApproval
+                    // state and prompt injection from other users.
+                    let is_relay = self.message.channel.ends_with("-relay");
+                    let is_dm = self
+                        .message
+                        .metadata
+                        .get("event_type")
+                        .and_then(|v| v.as_str())
+                        == Some("direct_message");
+                    if is_relay && !is_dm {
+                        tracing::info!(
+                            tool = %tc.name,
+                            channel = %self.message.channel,
+                            "Auto-denying approval-requiring tool in non-DM relay channel"
+                        );
+                        let reject_msg = format!(
+                            "Tool '{}' requires approval and cannot run in shared channels. \
+                             Ask the user to message me directly (DM) to use this tool.",
+                            tc.name
+                        );
+                        preflight.push((tc, PreflightOutcome::Rejected(reject_msg)));
+                        continue;
+                    }
+
                     approval_needed = Some((idx, tc, tool));
                     break;
                 }
@@ -1024,6 +1049,54 @@ fn strip_internal_tool_call_text(text: &str) -> String {
     } else {
         result.to_string()
     }
+}
+
+/// Extract `<suggestions>["...","..."]</suggestions>` from a response string.
+///
+/// Returns `(cleaned_text, suggestions)`. The `<suggestions>` block is stripped
+/// from the text regardless of whether the JSON inside parses successfully.
+/// Only the **last** `<suggestions>` block is used (closest to end of response).
+/// Blocks inside markdown code fences are ignored.
+pub(crate) fn extract_suggestions(text: &str) -> (String, Vec<String>) {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)<suggestions>\s*(.*?)\s*</suggestions>").expect("valid regex") // safety: constant pattern
+    });
+
+    // Find the position of the last closing code fence to avoid matching inside code blocks
+    let last_code_fence = text.rfind("```").unwrap_or(0);
+
+    // Find all matches, take the last one that's after the last code fence
+    let mut best_match: Option<regex::Match<'_>> = None;
+    let mut best_capture: Option<String> = None;
+    for caps in RE.captures_iter(text) {
+        if let (Some(full), Some(inner)) = (caps.get(0), caps.get(1))
+            && full.start() >= last_code_fence
+        {
+            best_match = Some(full);
+            best_capture = Some(inner.as_str().to_string());
+        }
+    }
+
+    let Some(full) = best_match else {
+        return (text.to_string(), Vec::new());
+    };
+
+    let cleaned = format!("{}{}", &text[..full.start()], &text[full.end()..]); // safety: regex match boundaries are valid UTF-8
+    let cleaned = cleaned.trim().to_string();
+
+    // Parse the JSON array
+    let suggestions = best_capture
+        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.trim().is_empty() && s.len() <= 80)
+        .take(3)
+        .collect();
+
+    (cleaned, suggestions)
 }
 
 #[cfg(test)]
@@ -2173,6 +2246,55 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_suggestions_basic() {
+        let input = "Here is my answer.\n<suggestions>[\"Check logs\", \"Deploy\"]</suggestions>";
+        let (text, suggestions) = super::extract_suggestions(input);
+        assert_eq!(text, "Here is my answer."); // safety: test
+        assert_eq!(suggestions, vec!["Check logs", "Deploy"]); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_no_tag() {
+        let input = "Just a plain response.";
+        let (text, suggestions) = super::extract_suggestions(input);
+        assert_eq!(text, "Just a plain response."); // safety: test
+        assert!(suggestions.is_empty()); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_malformed_json() {
+        let input = "Answer.\n<suggestions>not json</suggestions>";
+        let (text, suggestions) = super::extract_suggestions(input);
+        assert_eq!(text, "Answer."); // safety: test
+        assert!(suggestions.is_empty()); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_inside_code_fence() {
+        let input = "```\n<suggestions>[\"foo\"]</suggestions>\n```";
+        let (text, suggestions) = super::extract_suggestions(input);
+        // The tag is inside a code fence, so it should not be extracted
+        assert_eq!(text, input); // safety: test
+        assert!(suggestions.is_empty()); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_after_code_fence() {
+        let input = "```\ncode\n```\nAnswer.\n<suggestions>[\"foo\"]</suggestions>";
+        let (text, suggestions) = super::extract_suggestions(input);
+        assert_eq!(text, "```\ncode\n```\nAnswer."); // safety: test
+        assert_eq!(suggestions, vec!["foo"]); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_filters_long() {
+        let long = "x".repeat(81);
+        let input = format!("Answer.\n<suggestions>[\"{}\", \"ok\"]</suggestions>", long);
+        let (_, suggestions) = super::extract_suggestions(&input);
+        assert_eq!(suggestions, vec!["ok"]); // safety: test
+    }
+
+    #[test]
     fn test_tool_error_format_includes_tool_name() {
         // Regression test for issue #487: tool errors sent to the LLM should
         // include the tool name so the model can reason about which tool failed
@@ -2234,5 +2356,52 @@ mod tests {
             !data_url.is_empty(),
             "Present 'data' field should produce non-empty string"
         );
+    }
+
+    /// Test the relay channel auto-deny decision logic:
+    /// approval-requiring tools in non-DM relay channels must be rejected.
+    #[test]
+    fn test_relay_non_dm_auto_deny_decision() {
+        use crate::channels::IncomingMessage;
+
+        // Case 1: relay channel + non-DM → should auto-deny
+        let msg = IncomingMessage::new("slack-relay", "u1", "hello")
+            .with_metadata(serde_json::json!({ "event_type": "message" }));
+        let is_relay = msg.channel.ends_with("-relay");
+        let is_dm =
+            msg.metadata.get("event_type").and_then(|v| v.as_str()) == Some("direct_message");
+        assert!(is_relay && !is_dm, "Should auto-deny in relay non-DM");
+
+        // Case 2: relay channel + DM → should NOT auto-deny
+        let msg_dm = IncomingMessage::new("slack-relay", "u1", "hello")
+            .with_metadata(serde_json::json!({ "event_type": "direct_message" }));
+        let is_dm_2 =
+            msg_dm.metadata.get("event_type").and_then(|v| v.as_str()) == Some("direct_message");
+        assert!(
+            !msg_dm.channel.ends_with("-relay") || is_dm_2,
+            "Should NOT auto-deny in relay DM"
+        );
+
+        // Case 3: non-relay channel → should NOT auto-deny
+        let msg_web = IncomingMessage::new("web", "u1", "hello")
+            .with_metadata(serde_json::json!({ "event_type": "message" }));
+        assert!(
+            !msg_web.channel.ends_with("-relay"),
+            "Non-relay channel should not trigger auto-deny"
+        );
+    }
+
+    /// Test that the auto-deny produces a PreflightOutcome::Rejected-style message.
+    #[test]
+    fn test_relay_auto_deny_message_format() {
+        let tool_name = "shell";
+        let result_msg = format!(
+            "Tool '{}' requires approval and cannot run in shared channels. \
+             Ask the user to message me directly (DM) to use this tool.",
+            tool_name
+        );
+        assert!(result_msg.contains("shell"));
+        assert!(result_msg.contains("approval"));
+        assert!(result_msg.contains("DM"));
     }
 }

@@ -420,6 +420,10 @@ impl Agent {
         // Complete, fail, or request approval
         match result {
             Ok(AgenticLoopResult::Response(response)) => {
+                // Extract <suggestions> from response text before user sees it
+                let (response, suggestions) =
+                    crate::agent::dispatcher::extract_suggestions(&response);
+
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
                 let response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
@@ -473,6 +477,18 @@ impl Agent {
                 )
                 .await;
 
+                // Send suggestions after response (best-effort, rendered by web gateway)
+                if !suggestions.is_empty() {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Suggestions { suggestions },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
                 Ok(SubmissionResult::response(response))
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
@@ -486,7 +502,12 @@ impl Agent {
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::Status("Awaiting approval".into()),
+                        StatusUpdate::ApprovalNeeded {
+                            request_id: request_id.to_string(),
+                            tool_name: tool_name.clone(),
+                            description: description.clone(),
+                            parameters: parameters.clone(),
+                        },
                         &message.metadata,
                     )
                     .await;
@@ -1297,7 +1318,12 @@ impl Agent {
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::Status("Awaiting approval".into()),
+                        StatusUpdate::ApprovalNeeded {
+                            request_id: request_id.to_string(),
+                            tool_name: tool_name.clone(),
+                            description: description.clone(),
+                            parameters: parameters.clone(),
+                        },
                         &message.metadata,
                     )
                     .await;
@@ -1324,6 +1350,8 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
+                    let (response, suggestions) =
+                        crate::agent::dispatcher::extract_suggestions(&response);
                     thread.complete_turn(&response);
                     let (turn_number, tool_calls) = thread
                         .turns
@@ -1354,6 +1382,16 @@ impl Agent {
                             &message.metadata,
                         )
                         .await;
+                    if !suggestions.is_empty() {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Suggestions { suggestions },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {
@@ -1368,7 +1406,12 @@ impl Agent {
                         .channels
                         .send_status(
                             &message.channel,
-                            StatusUpdate::Status("Awaiting approval".into()),
+                            StatusUpdate::ApprovalNeeded {
+                                request_id: request_id.to_string(),
+                                tool_name: tool_name.clone(),
+                                description: description.clone(),
+                                parameters: parameters.clone(),
+                            },
                             &message.metadata,
                         )
                         .await;
@@ -1497,7 +1540,8 @@ impl Agent {
             .configure_token(&pending.extension_name, token)
             .await
         {
-            Ok(result) => {
+            Ok(result) if result.activated => {
+                // Ensure extension is actually activated
                 tracing::info!(
                     "Extension '{}' configured via auth mode: {}",
                     pending.extension_name,
@@ -1511,6 +1555,28 @@ impl Agent {
                             extension_name: pending.extension_name.clone(),
                             success: true,
                             message: result.message.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+                Ok(Some(result.message))
+            }
+            Ok(result) => {
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thread.enter_auth_mode(pending.extension_name.clone());
+                    }
+                }
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::AuthRequired {
+                            extension_name: pending.extension_name.clone(),
+                            instructions: Some(result.message.clone()),
+                            auth_url: None,
+                            setup_url: None,
                         },
                         &message.metadata,
                     )

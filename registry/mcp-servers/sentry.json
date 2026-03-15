@@ -1,0 +1,9 @@
+{
+  "name": "sentry",
+  "display_name": "Sentry",
+  "kind": "mcp_server",
+  "description": "Connect to Sentry for error tracking, performance monitoring, and debugging",
+  "keywords": ["errors", "monitoring", "debugging", "crashes", "performance"],
+  "url": "https://mcp.sentry.dev/mcp",
+  "auth": "dcr"
+}

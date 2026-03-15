@@ -32,7 +32,9 @@ use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::{ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry};
+use crate::tools::{
+    ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry, prepare_tool_params,
+};
 use crate::workspace::Workspace;
 
 enum EventMatcher {
@@ -93,19 +95,26 @@ impl RoutineEngine {
                 let mut cache = Vec::new();
                 for routine in routines {
                     match &routine.trigger {
-                        Trigger::Event { pattern, .. } => match Regex::new(pattern) {
-                            Ok(re) => cache.push(EventMatcher::Message {
-                                routine: routine.clone(),
-                                regex: re,
-                            }),
-                            Err(e) => {
-                                tracing::warn!(
-                                    routine = %routine.name,
-                                    "Invalid event regex '{}': {}",
-                                    pattern, e
-                                );
+                        Trigger::Event { pattern, .. } => {
+                            // Use RegexBuilder with size limit to prevent ReDoS
+                            // from user-supplied patterns (issue #825).
+                            match regex::RegexBuilder::new(pattern)
+                                .size_limit(64 * 1024) // 64KB compiled size limit
+                                .build()
+                            {
+                                Ok(re) => cache.push(EventMatcher::Message {
+                                    routine: routine.clone(),
+                                    regex: re,
+                                }),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        routine = %routine.name,
+                                        "Invalid or too complex event regex '{}': {}",
+                                        pattern, e
+                                    );
+                                }
                             }
-                        },
+                        }
                         Trigger::SystemEvent { .. } => {
                             cache.push(EventMatcher::System {
                                 routine: routine.clone(),
@@ -132,6 +141,32 @@ impl RoutineEngine {
         let cache = self.event_cache.read().await;
         let mut fired = 0;
 
+        // Collect routine IDs for batch query
+        let routine_ids: Vec<Uuid> = cache
+            .iter()
+            .filter_map(|matcher| match matcher {
+                EventMatcher::Message { routine, .. } => Some(routine.id),
+                EventMatcher::System { .. } => None,
+            })
+            .collect();
+
+        if routine_ids.is_empty() {
+            return 0;
+        }
+
+        // Single batch query instead of N queries
+        let concurrent_counts = match self
+            .store
+            .count_running_routine_runs_batch(&routine_ids)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(e) => {
+                tracing::error!("Failed to batch-load concurrent counts: {}", e);
+                return 0;
+            }
+        };
+
         for matcher in cache.iter() {
             let (routine, re) = match matcher {
                 EventMatcher::Message { routine, regex } => (routine, regex),
@@ -157,8 +192,9 @@ impl RoutineEngine {
                 continue;
             }
 
-            // Concurrent run check
-            if !self.check_concurrent(routine).await {
+            // Concurrent run check (using batch-loaded counts)
+            let running_count = concurrent_counts.get(&routine.id).copied().unwrap_or(0);
+            if running_count >= routine.guardrails.max_concurrent as i64 {
                 tracing::trace!(routine = %routine.name, "Skipped: max concurrent reached");
                 continue;
             }
@@ -189,6 +225,35 @@ impl RoutineEngine {
     ) -> usize {
         let cache = self.event_cache.read().await;
         let mut fired = 0;
+
+        // Collect routine IDs for batch query
+        let routine_ids: Vec<Uuid> = cache
+            .iter()
+            .filter_map(|matcher| match matcher {
+                EventMatcher::System { routine } => Some(routine.id),
+                EventMatcher::Message { .. } => None,
+            })
+            .collect();
+
+        if routine_ids.is_empty() {
+            return 0;
+        }
+
+        // Single batch query instead of N queries
+        let concurrent_counts = match self
+            .store
+            .count_running_routine_runs_batch(&routine_ids)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to batch-load concurrent counts for system events: {}",
+                    e
+                );
+                return 0;
+            }
+        };
 
         for matcher in cache.iter() {
             let routine = match matcher {
@@ -241,7 +306,9 @@ impl RoutineEngine {
                 continue;
             }
 
-            if !self.check_concurrent(routine).await {
+            // Concurrent run check (using batch-loaded counts)
+            let running_count = concurrent_counts.get(&routine.id).copied().unwrap_or(0);
+            if running_count >= routine.guardrails.max_concurrent as i64 {
                 tracing::debug!(routine = %routine.name, "Skipped: max concurrent reached");
                 continue;
             }
@@ -459,7 +526,20 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             prompt,
             context_paths,
             max_tokens,
-        } => execute_lightweight(&ctx, &routine, prompt, context_paths, *max_tokens).await,
+            use_tools,
+            max_tool_rounds,
+        } => {
+            execute_lightweight(
+                &ctx,
+                &routine,
+                prompt,
+                context_paths,
+                *max_tokens,
+                *use_tools,
+                *max_tool_rounds,
+            )
+            .await
+        }
         RoutineAction::FullJob {
             title,
             description,
@@ -670,6 +750,8 @@ async fn execute_lightweight(
     prompt: &str,
     context_paths: &[String],
     max_tokens: u32,
+    use_tools: bool,
+    max_tool_rounds: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Load context from workspace
     let mut context_parts = Vec::new();
@@ -732,14 +814,15 @@ async fn execute_lightweight(
         Err(_) => max_tokens,
     };
 
-    // If tools are enabled, use the tool execution loop; otherwise, single LLM call
-    if ctx.config.lightweight_tools_enabled {
+    // If tools are enabled (both globally and per-routine), use the tool execution loop
+    if use_tools && ctx.config.lightweight_tools_enabled {
         execute_lightweight_with_tools(
             ctx,
             routine,
             &system_prompt,
             &full_prompt,
             effective_max_tokens,
+            max_tool_rounds,
         )
         .await
     } else {
@@ -783,24 +866,12 @@ async fn execute_lightweight_no_tools(
             reason: e.to_string(),
         })?;
 
-    let content = response.content.trim();
-    let tokens_used = Some((response.input_tokens + response.output_tokens) as i32);
-
-    // Empty content guard
-    if content.is_empty() {
-        return if response.finish_reason == FinishReason::Length {
-            Err(RoutineError::TruncatedResponse)
-        } else {
-            Err(RoutineError::EmptyResponse)
-        };
-    }
-
-    // Check for the "nothing to do" sentinel
-    if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
-        return Ok((RunStatus::Ok, None, tokens_used));
-    }
-
-    Ok((RunStatus::Attention, Some(content.to_string()), tokens_used))
+    handle_text_response(
+        &response.content,
+        response.finish_reason,
+        response.input_tokens,
+        response.output_tokens,
+    )
 }
 
 /// Handle a text-only LLM response in lightweight routine execution.
@@ -850,6 +921,7 @@ async fn execute_lightweight_with_tools(
     system_prompt: &str,
     full_prompt: &str,
     effective_max_tokens: u32,
+    max_tool_rounds: u32,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let mut messages = if system_prompt.is_empty() {
         vec![ChatMessage::user(full_prompt)]
@@ -860,7 +932,9 @@ async fn execute_lightweight_with_tools(
         ]
     };
 
-    let max_iterations = ctx.config.lightweight_max_iterations.min(5);
+    let max_iterations = max_tool_rounds
+        .min(ctx.config.lightweight_max_iterations)
+        .min(5);
     let mut iteration = 0;
     let mut total_input_tokens = 0;
     let mut total_output_tokens = 0;
@@ -906,9 +980,13 @@ async fn execute_lightweight_with_tools(
             );
         } else {
             // Tool-enabled iteration
-            let tool_defs = ctx.tools.tool_definitions().await;
+            let tool_defs = ctx
+                .tools
+                .tool_definitions_excluding(ROUTINE_TOOL_DENYLIST)
+                .await;
 
-            let request = ToolCompletionRequest::new(messages.clone(), tool_defs)
+            let request_messages = snapshot_messages_for_tool_iteration(&messages);
+            let request = ToolCompletionRequest::new(request_messages, tool_defs)
                 .with_max_tokens(effective_max_tokens)
                 .with_temperature(0.3);
 
@@ -963,6 +1041,18 @@ async fn execute_lightweight_with_tools(
                     }
                 };
 
+                // Truncate oversized tool output to prevent unbounded context growth.
+                // Routine tool loops are lightweight and should not accumulate
+                // large payloads across iterations.
+                const MAX_TOOL_OUTPUT_CHARS: usize = 8192;
+                let result_content = if result_content.len() > MAX_TOOL_OUTPUT_CHARS {
+                    let truncated = &result_content
+                        [..result_content.floor_char_boundary(MAX_TOOL_OUTPUT_CHARS)];
+                    format!("{truncated}\n... [output truncated to {MAX_TOOL_OUTPUT_CHARS} chars]")
+                } else {
+                    result_content
+                };
+
                 // Add tool result to context
                 messages.push(ChatMessage::tool_result(&tc.id, &tc.name, &result_content));
             }
@@ -972,25 +1062,72 @@ async fn execute_lightweight_with_tools(
     }
 }
 
+// Bound per-iteration context copy cost for lightweight tool loops.
+const MAX_TOOL_LOOP_MESSAGES: usize = 32;
+
+fn snapshot_messages_for_tool_iteration(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    if messages.len() <= MAX_TOOL_LOOP_MESSAGES {
+        return messages.to_vec();
+    }
+
+    let mut snapshot = Vec::with_capacity(MAX_TOOL_LOOP_MESSAGES);
+
+    if let Some(first) = messages.first()
+        && first.role == crate::llm::Role::System
+    {
+        snapshot.push(first.clone());
+        let tail_len = MAX_TOOL_LOOP_MESSAGES - 1;
+        let tail_start = (messages.len() - tail_len).max(1);
+        snapshot.extend_from_slice(&messages[tail_start..]);
+    } else {
+        let tail_start = messages.len() - MAX_TOOL_LOOP_MESSAGES;
+        snapshot.extend_from_slice(&messages[tail_start..]);
+    }
+
+    snapshot
+}
+
+/// Tools that must never be callable from lightweight routines.
+///
+/// These tools pose autonomy-escalation risks: a routine could self-replicate,
+/// modify its own triggers/prompts, delete other routines, or restart the agent.
+const ROUTINE_TOOL_DENYLIST: &[&str] = &[
+    "routine_create",
+    "routine_update",
+    "routine_delete",
+    "routine_fire",
+    "restart",
+];
+
 /// Execute a single tool for a lightweight routine.
 async fn execute_routine_tool(
     ctx: &EngineContext,
     job_ctx: &JobContext,
     tc: &ToolCall,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Block tools that pose autonomy-escalation risks
+    if ROUTINE_TOOL_DENYLIST.contains(&tc.name.as_str()) {
+        return Err(format!(
+            "Tool '{}' is not available in lightweight routines",
+            tc.name
+        )
+        .into());
+    }
+
     // Check if tool exists
     let tool = ctx
         .tools
         .get(&tc.name)
         .await
         .ok_or_else(|| format!("Tool '{}' not found", tc.name))?;
+    let normalized_params = prepare_tool_params(tool.as_ref(), &tc.arguments);
 
     // Check approval requirement: only allow Never tools in lightweight routines.
     // UnlessAutoApproved and Always tools are blocked to prevent prompt injection attacks.
     // Lightweight routines can be triggered by external events and may process untrusted data,
     // making them vulnerable to prompt injection that could trick the LLM into calling
     // sensitive tools. Blocking these tools entirely is the safest approach.
-    match tool.requires_approval(&tc.arguments) {
+    match tool.requires_approval(&normalized_params) {
         ApprovalRequirement::Never => {}
         ApprovalRequirement::UnlessAutoApproved | ApprovalRequirement::Always => {
             return Err(format!(
@@ -1002,7 +1139,10 @@ async fn execute_routine_tool(
     }
 
     // Validate tool parameters
-    let validation = ctx.safety.validator().validate_tool_params(&tc.arguments);
+    let validation = ctx
+        .safety
+        .validator()
+        .validate_tool_params(&normalized_params);
     if !validation.is_valid {
         let details = validation
             .errors
@@ -1017,7 +1157,7 @@ async fn execute_routine_tool(
     let timeout = tool.execution_timeout();
     let start = std::time::Instant::now();
     let result = tokio::time::timeout(timeout, async {
-        tool.execute(tc.arguments.clone(), job_ctx).await
+        tool.execute(normalized_params.clone(), job_ctx).await
     })
     .await;
     let elapsed = start.elapsed();
@@ -1119,9 +1259,11 @@ pub fn spawn_cron_ticker(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        // Run one check immediately so routines due at startup don't wait
+        // an extra full polling interval.
+        engine.check_cron_triggers().await;
+
         let mut ticker = tokio::time::interval(interval);
-        // Skip immediate first tick
-        ticker.tick().await;
 
         loop {
             ticker.tick().await;
@@ -1284,6 +1426,36 @@ mod tests {
     }
 
     #[test]
+    fn test_routine_tool_denylist_blocks_self_management_tools() {
+        let denylisted = vec![
+            "routine_create",
+            "routine_update",
+            "routine_delete",
+            "routine_fire",
+            "restart",
+        ];
+        for tool in &denylisted {
+            assert!(
+                super::ROUTINE_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should be in ROUTINE_TOOL_DENYLIST",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_routine_tool_denylist_allows_safe_tools() {
+        let allowed = vec!["echo", "time", "json", "http", "memory_search", "shell"];
+        for tool in &allowed {
+            assert!(
+                !super::ROUTINE_TOOL_DENYLIST.contains(tool),
+                "Tool '{}' should NOT be in ROUTINE_TOOL_DENYLIST",
+                tool
+            );
+        }
+    }
+
+    #[test]
     fn test_empty_response_handling() {
         // Simulate the empty content guard logic
         let empty_content = "";
@@ -1296,5 +1468,41 @@ mod tests {
         );
         assert_eq!(finish_reason_length, crate::llm::FinishReason::Length);
         assert_eq!(finish_reason_stop, crate::llm::FinishReason::Stop);
+    }
+
+    #[test]
+    fn test_truncate_adds_ellipsis_when_over_limit() {
+        let input = "abcdefghijk";
+        let out = super::truncate(input, 5);
+        assert_eq!(out, "abcde...");
+    }
+
+    #[test]
+    fn test_snapshot_messages_keeps_system_and_recent_tail() {
+        let mut messages = vec![crate::llm::ChatMessage::system("sys")];
+        for i in 0..80 {
+            messages.push(crate::llm::ChatMessage::user(format!("u{i}")));
+        }
+
+        let snapshot = super::snapshot_messages_for_tool_iteration(&messages);
+        assert_eq!(snapshot.len(), super::MAX_TOOL_LOOP_MESSAGES); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[0].role, crate::llm::Role::System); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[0].content, "sys"); // safety: test-only no-panics CI false positive
+        let last_content = snapshot.last().map(|m| m.content.as_str());
+        assert_eq!(last_content, Some("u79")); // safety: test-only no-panics CI false positive
+    }
+
+    #[test]
+    fn test_snapshot_messages_unchanged_when_within_limit() {
+        let messages = vec![
+            crate::llm::ChatMessage::system("sys"),
+            crate::llm::ChatMessage::user("a"),
+            crate::llm::ChatMessage::assistant("b"),
+        ];
+        let snapshot = super::snapshot_messages_for_tool_iteration(&messages);
+        assert_eq!(snapshot.len(), messages.len()); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[0].role, crate::llm::Role::System); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[1].content, "a"); // safety: test-only no-panics CI false positive
+        assert_eq!(snapshot[2].content, "b"); // safety: test-only no-panics CI false positive
     }
 }

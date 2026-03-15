@@ -666,6 +666,7 @@ body {
   font-size: 14px;
   line-height: 1.5;
   word-wrap: break-word;
+  position: relative;
 }
 
 .message.user {
@@ -684,6 +685,58 @@ body {
   padding: 14px 18px;
   font-size: 15px;
   line-height: 1.6;
+}
+
+.message.has-copy {
+  padding-right: 52px;
+}
+
+.message-content {
+  min-width: 0;
+}
+
+.message-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  font-size: 11px;
+  padding: 2px 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.message.user:hover .message-copy-btn,
+.message.assistant:hover .message-copy-btn,
+.message.user:focus-within .message-copy-btn,
+.message.assistant:focus-within .message-copy-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.message-copy-btn:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.message-copy-btn:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+@media (hover: none) {
+  .message.user .message-copy-btn,
+  .message.assistant .message-copy-btn {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .message.system {
@@ -1166,7 +1219,21 @@ body {
   color: var(--danger);
 }
 
-/* Auth card (inline in chat) */
+/* Auth prompt */
+.auth-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
 .auth-card {
   align-self: flex-start;
   max-width: 80%;
@@ -1179,6 +1246,16 @@ body {
   flex-direction: column;
   gap: 8px;
   transition: border-color 0.2s;
+}
+
+.auth-overlay .auth-card {
+  width: 460px;
+  max-width: min(460px, 90vw);
+  margin: 0;
+  align-self: auto;
+  background: var(--bg);
+  border-color: rgba(52, 211, 153, 0.35);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
 }
 
 .auth-card .auth-header {
@@ -1285,8 +1362,14 @@ body {
   min-height: 56px;
 }
 
-.chat-input textarea {
+.chat-input-wrapper {
+  position: relative;
   flex: 1;
+  display: flex;
+}
+
+.chat-input-wrapper textarea {
+  width: 100%;
   padding: 8px 12px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -1299,15 +1382,64 @@ body {
   max-height: 120px;
 }
 
-.chat-input textarea:focus {
+.ghost-text {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  opacity: 0.5;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow: hidden;
+  display: none;
+  z-index: 1;
+}
+
+/* Hide native placeholder when ghost text is visible */
+.chat-input-wrapper.has-ghost textarea::placeholder {
+  color: transparent;
+}
+
+.chat-input-wrapper textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
-.chat-input textarea:disabled {
+.chat-input-wrapper textarea:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.suggestion-chips {
+  display: none;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.suggestion-chip {
+  padding: 6px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.suggestion-chip:hover {
+  background: var(--accent);
+  color: #09090b;
+  border-color: var(--accent);
 }
 
 .chat-input button {
@@ -1339,7 +1471,7 @@ body {
 }
 
 /* Keyboard accessibility focus rings */
-.chat-input textarea:focus-visible,
+.chat-input-wrapper textarea:focus-visible,
 .chat-input button:focus-visible,
 .tab-bar button:focus-visible,
 .tree-row:focus-visible {
@@ -3747,7 +3879,7 @@ mark {
     min-height: 52px;
   }
 
-  .chat-input textarea {
+  .chat-input-wrapper textarea {
     min-height: 36px;
     max-height: 100px;
   }
