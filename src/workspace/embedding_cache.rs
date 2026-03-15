@@ -101,7 +101,7 @@ impl CachedEmbeddingProvider {
         hasher.finalize().into()
     }
 
-    /// Evict the least-recently-used entry if at capacity.
+    /// Evict the least-recently-used entry if at capacity (single-entry path).
     // TODO: O(n) scan per eviction. If max_entries grows large, switch to
     // an ordered data structure (e.g. `IndexMap` with swap_remove, or a
     // linked-list LRU like the `lru` crate).
@@ -117,6 +117,29 @@ impl CachedEmbeddingProvider {
             } else {
                 break;
             }
+        }
+    }
+
+    /// Evict the `k` oldest entries in a single O(n) pass.
+    ///
+    /// Used by `embed_batch` to avoid the O(n×m) cost of calling
+    /// `evict_lru` per insert.
+    fn evict_k_oldest(cache: &mut HashMap<[u8; 32], CacheEntry>, k: usize) {
+        if k == 0 || cache.is_empty() {
+            return;
+        }
+        if k >= cache.len() {
+            cache.clear();
+            return;
+        }
+        // Collect keys with timestamps, partial-sort to find the k oldest.
+        let mut entries: Vec<([u8; 32], Instant)> = cache
+            .iter()
+            .map(|(key, entry)| (*key, entry.last_accessed))
+            .collect();
+        entries.sort_unstable_by_key(|(_, t)| *t);
+        for (key, _) in entries.into_iter().take(k) {
+            cache.remove(&key);
         }
     }
 }
@@ -230,12 +253,17 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         );
 
         // Store misses and assemble results.
-        // Evict before each insert to keep peak memory bounded.
+        // Batch eviction: compute how many entries must go, find the k-oldest
+        // in one O(n) pass, then insert all misses without per-insert eviction.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let need_to_evict =
+                (guard.len() + miss_indices.len()).saturating_sub(self.config.max_entries);
+            if need_to_evict > 0 {
+                Self::evict_k_oldest(&mut guard, need_to_evict);
+            }
             let now = Instant::now();
             for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
-                Self::evict_lru(&mut guard, self.config.max_entries);
                 guard.insert(
                     keys[orig_idx],
                     CacheEntry {
