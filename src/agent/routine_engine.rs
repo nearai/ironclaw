@@ -1781,7 +1781,7 @@ pub fn spawn_cron_ticker(
         // Periodic event cache refresh so web/CLI mutations are picked up
         // without requiring tool-path code to call refresh_event_cache().
         let mut refresh_counter: u64 = 0;
-        let refresh_every = 6; // refresh every 6 ticks (~60s at default 10s interval)
+        let refresh_every = 4; // refresh every 4 ticks (~60s at default 15s interval)
 
         loop {
             ticker.tick().await;
