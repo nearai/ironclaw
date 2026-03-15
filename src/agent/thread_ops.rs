@@ -240,8 +240,16 @@ impl Agent {
             }
         }
 
-        // Safety validation for user input
-        let validation = self.safety().validate_input(content);
+        // Safety validation for user input.
+        // Skip empty-content check when the message has attachments (e.g., image-only messages).
+        // The attachment pipeline (augment_with_attachments) will provide content downstream.
+        let has_attachments = !message.attachments.is_empty();
+        let validation = if content.is_empty() && has_attachments {
+            // Image/file-only message — bypass empty-input validation
+            ironclaw_safety::ValidationResult::ok()
+        } else {
+            self.safety().validate_input(content)
+        };
         if !validation.is_valid {
             let details = validation
                 .errors
