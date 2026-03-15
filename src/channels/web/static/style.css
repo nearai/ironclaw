@@ -870,6 +870,30 @@ body {
   font-style: italic;
 }
 
+/* Reasoning / chain-of-thought collapsible block (stream_chunk with chunk_type=reasoning) */
+.reasoning-block {
+  margin: 4px 0 8px;
+  border-left: 2px solid var(--text-secondary);
+  padding-left: 10px;
+  opacity: 0.7;
+}
+
+.reasoning-block summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-style: italic;
+  user-select: none;
+}
+
+.reasoning-block .reasoning-content {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Tool card */
 
 .activity-tool-card {
