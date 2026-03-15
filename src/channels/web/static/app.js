@@ -5141,6 +5141,7 @@ function showConfirmModal(title, message, onConfirm, confirmLabel, confirmClass)
   btn.className = confirmClass || 'btn-danger';
   _confirmModalCallback = onConfirm;
   modal.style.display = 'flex';
+  btn.focus();
 }
 
 function closeConfirmModal() {
@@ -5153,6 +5154,14 @@ document.getElementById('confirm-modal-btn').addEventListener('click', function(
   closeConfirmModal();
 });
 document.getElementById('confirm-modal-cancel-btn').addEventListener('click', closeConfirmModal);
+document.getElementById('confirm-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeConfirmModal();
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && document.getElementById('confirm-modal').style.display === 'flex') {
+    closeConfirmModal();
+  }
+});
 
 // --- Settings Import/Export ---
 
@@ -5208,6 +5217,7 @@ document.getElementById('settings-search-input').addEventListener('input', funct
   var activePanel = document.querySelector('.settings-subpanel.active');
   if (!activePanel) return;
   var rows = activePanel.querySelectorAll('.settings-row');
+  if (rows.length === 0) return;
   var visibleCount = 0;
   rows.forEach(function(row) {
     var text = row.textContent.toLowerCase();
