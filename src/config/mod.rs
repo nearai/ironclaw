@@ -54,7 +54,7 @@ pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
 pub use crate::llm::config::{
-    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER,
+    BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER, OpenAiCodexConfig,
     RegistryProviderConfig,
 };
 pub use crate::llm::session::SessionConfig;
@@ -340,7 +340,7 @@ impl Config {
 /// are read by `optional_env()` before falling back to `std::env::var()`,
 /// so explicit env vars always win.
 ///
-/// Also loads tokens from OS credential stores (macOS Keychain, Linux
+/// Also loads tokens from OS credential stores (macOS Keychain / Linux
 /// credentials files) which don't require the secrets DB.
 pub async fn inject_llm_keys_from_secrets(
     secrets: &dyn crate::secrets::SecretsStore,

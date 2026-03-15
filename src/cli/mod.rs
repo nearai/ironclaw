@@ -239,6 +239,17 @@ pub enum Command {
     )]
     Import(ImportCommand),
 
+    /// Authenticate with a provider (re-login)
+    #[command(
+        about = "Authenticate with a provider",
+        long_about = "Re-authenticate with an LLM provider.\nExample: ironclaw login --openai-codex"
+    )]
+    Login {
+        /// Authenticate with OpenAI Codex (ChatGPT subscription)
+        #[arg(long)]
+        openai_codex: bool,
+    },
+
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
     #[command(hide = true)]
