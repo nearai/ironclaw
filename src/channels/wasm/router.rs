@@ -672,6 +672,7 @@ mod tests {
             runtime,
             prepared,
             capabilities,
+            "default",
             "{}".to_string(),
             Arc::new(PairingStore::new()),
             None,

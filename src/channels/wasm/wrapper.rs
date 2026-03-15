@@ -811,6 +811,7 @@ impl WasmChannel {
         runtime: Arc<WasmChannelRuntime>,
         prepared: Arc<PreparedChannelModule>,
         capabilities: ChannelCapabilities,
+        owner_scope_id: impl Into<String>,
         config_json: String,
         pairing_store: Arc<PairingStore>,
         settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
@@ -837,7 +838,7 @@ impl WasmChannel {
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
-            owner_scope_id: "default".to_string(),
+            owner_scope_id: owner_scope_id.into(),
             owner_actor_id: None,
             secrets_store: None,
         }
@@ -853,13 +854,8 @@ impl WasmChannel {
         self
     }
 
-    /// Bind this channel to the configured owner scope and external owner actor.
-    pub fn with_owner_binding(
-        mut self,
-        owner_scope_id: impl Into<String>,
-        owner_actor_id: Option<String>,
-    ) -> Self {
-        self.owner_scope_id = owner_scope_id.into();
+    /// Bind this channel to the external actor that maps to the configured owner.
+    pub fn with_owner_actor_id(mut self, owner_actor_id: Option<String>) -> Self {
         self.owner_actor_id = owner_actor_id;
         self
     }
@@ -3257,6 +3253,10 @@ mod tests {
     use crate::tools::wasm::ResourceLimits;
 
     fn create_test_channel() -> WasmChannel {
+        create_test_channel_with_owner_scope("default")
+    }
+
+    fn create_test_channel_with_owner_scope(owner_scope_id: &str) -> WasmChannel {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
@@ -3273,6 +3273,7 @@ mod tests {
             runtime,
             prepared,
             capabilities,
+            owner_scope_id,
             "{}".to_string(),
             Arc::new(PairingStore::new()),
             None,
@@ -3467,6 +3468,7 @@ mod tests {
             runtime,
             prepared,
             capabilities,
+            "default",
             "{}".to_string(),
             Arc::new(PairingStore::new()),
             None,
@@ -4566,8 +4568,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcast_owner_scope_uses_stored_owner_metadata() {
-        let channel = create_test_channel()
-            .with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
+        let channel = create_test_channel_with_owner_scope("owner-scope")
+            .with_owner_actor_id(Some("telegram-owner".to_string()));
 
         *channel.last_broadcast_metadata.write().await = Some(r#"{"chat_id":12345}"#.to_string());
 
@@ -4589,8 +4591,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_broadcast_owner_scope_requires_stored_metadata() {
-        let channel = create_test_channel()
-            .with_owner_binding("owner-scope", Some("telegram-owner".to_string()));
+        let channel = create_test_channel_with_owner_scope("owner-scope")
+            .with_owner_actor_id(Some("telegram-owner".to_string()));
 
         let result = channel
             .broadcast(

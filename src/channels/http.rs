@@ -133,7 +133,8 @@ impl HttpChannel {
 
 #[derive(Debug, Deserialize)]
 struct WebhookRequest {
-    /// User or client identifier (ignored, user is fixed by server config).
+    /// Optional caller or client identifier for sender-scoped routing.
+    /// The channel owner/storage scope remains fixed by server config.
     #[serde(default)]
     user_id: Option<String>,
     /// Message content.
@@ -406,7 +407,8 @@ async fn process_authenticated_request(
     let _ = req.user_id.as_ref().map(|user_id| {
         tracing::debug!(
             provided_user_id = %user_id,
-            "HTTP webhook request provided user_id, ignoring in favor of configured user_id"
+            configured_owner_id = %state.user_id,
+            "HTTP webhook request provided user_id; using it as sender_id while keeping the configured owner scope"
         );
     });
 

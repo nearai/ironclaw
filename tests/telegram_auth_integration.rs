@@ -115,6 +115,7 @@ async fn create_telegram_channel_with_store(
         runtime,
         module,
         ChannelCapabilities::for_channel("telegram").with_path("/webhook/telegram"),
+        "default",
         config_json.to_string(),
         pairing_store,
         None,
