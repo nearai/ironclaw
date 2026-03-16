@@ -1,8 +1,29 @@
 use std::time::Duration;
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
+// ─── Risk: hardcoded VS Code Copilot identity ───────────────────────────────
+//
+// The client ID and editor identity headers below are extracted from the
+// VS Code Copilot Chat extension.  This is the *only* publicly documented
+// way to access the Copilot completions API with a personal GitHub token.
+//
+// **Known risks:**
+//   • GitHub may rotate or revoke this client ID at any time, which would
+//     break authentication for all IronClaw users until the constant is
+//     updated and a new release is shipped.
+//   • Using another product's client ID may violate GitHub's Terms of
+//     Service.  Maintainers should seek explicit guidance from GitHub
+//     before shipping this to a wide audience.
+//   • The editor version strings (`vscode/1.99.3`, `copilot-chat/0.26.7`)
+//     will become stale and could eventually be rejected by the API.
+//
+// **Mitigation:** If GitHub publishes an official Copilot API client ID or
+// an OAuth app registration flow for third-party tools, migrate to it
+// immediately.
+// ─────────────────────────────────────────────────────────────────────────────
 pub const GITHUB_COPILOT_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 pub const GITHUB_COPILOT_SCOPE: &str = "read:user";
 pub const GITHUB_COPILOT_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
@@ -389,14 +410,21 @@ pub async fn exchange_copilot_token(
 /// before it expires (with a 5-minute buffer).
 pub struct CopilotTokenManager {
     client: reqwest::Client,
-    oauth_token: String,
+    oauth_token: SecretString,
     cached: RwLock<Option<CachedCopilotToken>>,
 }
 
 #[derive(Clone)]
 struct CachedCopilotToken {
-    token: String,
+    token: SecretString,
     expires_at: u64,
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 impl CopilotTokenManager {
@@ -404,7 +432,7 @@ impl CopilotTokenManager {
     pub fn new(client: reqwest::Client, oauth_token: String) -> Self {
         Self {
             client,
-            oauth_token,
+            oauth_token: SecretString::from(oauth_token),
             cached: RwLock::new(None),
         }
     }
@@ -413,15 +441,12 @@ impl CopilotTokenManager {
     ///
     /// Returns the cached token if it has more than 5 minutes remaining,
     /// otherwise exchanges the OAuth token for a fresh session token.
-    pub async fn get_token(&self) -> Result<String, GithubCopilotAuthError> {
-        // Fast path: check if cached token is still valid
+    pub async fn get_token(&self) -> Result<SecretString, GithubCopilotAuthError> {
+        // Fast path: check if cached token is still valid under read lock.
         {
             let guard = self.cached.read().await;
             if let Some(ref cached) = *guard {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let now = unix_now();
                 if cached.expires_at > now + TOKEN_REFRESH_BUFFER_SECS {
                     return Ok(cached.token.clone());
                 }
@@ -430,22 +455,31 @@ impl CopilotTokenManager {
                     now = now,
                     "Copilot: cached session token expired or expiring soon, refreshing"
                 );
-            } else {
             }
         }
 
-        // Slow path: exchange and cache
-        let response = exchange_copilot_token(&self.client, &self.oauth_token).await?;
-        let token = response.token.clone();
-
+        // Slow path: acquire write lock and re-check (another caller may have
+        // already refreshed while we waited for the lock).
         let mut guard = self.cached.write().await;
+        if let Some(ref cached) = *guard {
+            let now = unix_now();
+            if cached.expires_at > now + TOKEN_REFRESH_BUFFER_SECS {
+                return Ok(cached.token.clone());
+            }
+        }
+
+        let response =
+            exchange_copilot_token(&self.client, self.oauth_token.expose_secret()).await?;
+        let token = SecretString::from(response.token);
+
+        let expires_at = response.expires_at;
         *guard = Some(CachedCopilotToken {
-            token: response.token,
-            expires_at: response.expires_at,
+            token: token.clone(),
+            expires_at,
         });
 
         tracing::debug!(
-            expires_at = response.expires_at,
+            expires_at = expires_at,
             "Copilot session token refreshed"
         );
 
@@ -521,5 +555,192 @@ mod tests {
         let truncated = truncate_for_error(&long);
         assert!(truncated.ends_with("..."));
         assert!(truncated.is_char_boundary(truncated.len() - 3));
+    }
+
+    #[test]
+    fn truncate_for_error_short_strings_unchanged() {
+        let short = "hello";
+        assert_eq!(truncate_for_error(short), "hello");
+    }
+
+    // --- poll_for_access_token response parsing ---
+
+    fn parse_access_token_body(json: &str) -> AccessTokenResponse {
+        serde_json::from_str(json).expect("valid JSON")
+    }
+
+    #[test]
+    fn parse_authorization_pending_response() {
+        let body: AccessTokenResponse =
+            parse_access_token_body(r#"{"error": "authorization_pending"}"#);
+        assert!(body.access_token.is_none());
+        assert_eq!(body.error.as_deref(), Some("authorization_pending"));
+    }
+
+    #[test]
+    fn parse_slow_down_response() {
+        let body: AccessTokenResponse = parse_access_token_body(r#"{"error": "slow_down"}"#);
+        assert_eq!(body.error.as_deref(), Some("slow_down"));
+    }
+
+    #[test]
+    fn parse_access_denied_response() {
+        let body: AccessTokenResponse = parse_access_token_body(r#"{"error": "access_denied"}"#);
+        assert_eq!(body.error.as_deref(), Some("access_denied"));
+    }
+
+    #[test]
+    fn parse_expired_token_response() {
+        let body: AccessTokenResponse = parse_access_token_body(r#"{"error": "expired_token"}"#);
+        assert_eq!(body.error.as_deref(), Some("expired_token"));
+    }
+
+    #[test]
+    fn parse_successful_token_response() {
+        let body: AccessTokenResponse =
+            parse_access_token_body(r#"{"access_token": "ghu_abc123"}"#);
+        assert_eq!(body.access_token.as_deref(), Some("ghu_abc123"));
+        assert!(body.error.is_none());
+    }
+
+    #[test]
+    fn parse_error_with_description() {
+        let body: AccessTokenResponse = parse_access_token_body(
+            r#"{"error": "bad_verification_code", "error_description": "The code has expired"}"#,
+        );
+        assert_eq!(body.error.as_deref(), Some("bad_verification_code"));
+        assert_eq!(
+            body.error_description.as_deref(),
+            Some("The code has expired")
+        );
+    }
+
+    #[test]
+    fn parse_device_code_response_with_defaults() {
+        let json = r#"{
+            "device_code": "dc_123",
+            "user_code": "ABCD-1234",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": 900
+        }"#;
+        let resp: DeviceCodeResponse = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(resp.device_code, "dc_123");
+        assert_eq!(resp.user_code, "ABCD-1234");
+        assert_eq!(resp.interval, 5); // default_poll_interval_secs
+        assert_eq!(resp.expires_in, 900);
+    }
+
+    #[test]
+    fn parse_device_code_response_with_custom_interval() {
+        let json = r#"{
+            "device_code": "dc_456",
+            "user_code": "EFGH-5678",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": 600,
+            "interval": 10
+        }"#;
+        let resp: DeviceCodeResponse = serde_json::from_str(json).expect("valid JSON");
+        assert_eq!(resp.interval, 10);
+    }
+
+    // --- CopilotTokenManager ---
+
+    #[tokio::test]
+    async fn token_manager_caches_token_and_returns_same_value() {
+        // Pre-populate the cache with a token that expires far in the future.
+        let client = reqwest::Client::new();
+        let manager = CopilotTokenManager::new(client, "unused_oauth".to_string());
+
+        let far_future = unix_now() + 3600;
+        {
+            let mut guard = manager.cached.write().await;
+            *guard = Some(CachedCopilotToken {
+                token: SecretString::from("cached_session_token".to_string()),
+                expires_at: far_future,
+            });
+        }
+
+        let token = manager.get_token().await.expect("should return cached");
+        assert_eq!(token.expose_secret(), "cached_session_token");
+
+        // A second call should return the same cached token.
+        let token2 = manager.get_token().await.expect("should return cached");
+        assert_eq!(token2.expose_secret(), "cached_session_token");
+    }
+
+    #[tokio::test]
+    async fn token_manager_invalidation_clears_cache() {
+        let client = reqwest::Client::new();
+        let manager = CopilotTokenManager::new(client, "unused_oauth".to_string());
+
+        let far_future = unix_now() + 3600;
+        {
+            let mut guard = manager.cached.write().await;
+            *guard = Some(CachedCopilotToken {
+                token: SecretString::from("old_token".to_string()),
+                expires_at: far_future,
+            });
+        }
+
+        manager.invalidate().await;
+
+        let guard = manager.cached.read().await;
+        assert!(guard.is_none(), "cache should be empty after invalidation");
+    }
+
+    #[tokio::test]
+    async fn token_manager_expired_token_triggers_refresh_path() {
+        let client = reqwest::Client::new();
+        let manager = CopilotTokenManager::new(client, "unused_oauth".to_string());
+
+        // Set a token that is already expired (expires_at in the past).
+        {
+            let mut guard = manager.cached.write().await;
+            *guard = Some(CachedCopilotToken {
+                token: SecretString::from("stale_token".to_string()),
+                expires_at: 1, // way in the past
+            });
+        }
+
+        // get_token will try the slow path (token exchange) which will fail
+        // because we have no real server, but this proves the cached stale
+        // token is NOT returned.
+        let result = manager.get_token().await;
+        assert!(
+            result.is_err(),
+            "expired cached token should trigger exchange, which fails without a server"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_manager_within_buffer_triggers_refresh() {
+        let client = reqwest::Client::new();
+        let manager = CopilotTokenManager::new(client, "unused_oauth".to_string());
+
+        // Set a token that expires within the refresh buffer window.
+        let expires_soon = unix_now() + TOKEN_REFRESH_BUFFER_SECS - 10;
+        {
+            let mut guard = manager.cached.write().await;
+            *guard = Some(CachedCopilotToken {
+                token: SecretString::from("expiring_soon".to_string()),
+                expires_at: expires_soon,
+            });
+        }
+
+        let result = manager.get_token().await;
+        assert!(
+            result.is_err(),
+            "token within buffer should trigger exchange"
+        );
+    }
+
+    // --- CopilotTokenResponse parsing ---
+
+    #[test]
+    fn parse_copilot_token_response() {
+        let json = r#"{"token": "tid=abc;exp=999;sku=123;sig=xyz", "expires_at": 1700000000}"#;
+        let resp: CopilotTokenResponse = serde_json::from_str(json).expect("valid JSON");
+        assert!(resp.token.starts_with("tid="));
+        assert_eq!(resp.expires_at, 1700000000);
     }
 }

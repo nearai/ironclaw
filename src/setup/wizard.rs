@@ -1358,22 +1358,11 @@ impl SetupWizard {
     }
 
     async fn setup_github_copilot(&mut self) -> Result<(), SetupError> {
-        let options = &["GitHub device login", "Paste existing token"];
-        let choice = select_one(
-            "How do you want to authenticate with GitHub Copilot?",
-            options,
-        )
-        .map_err(SetupError::Io)?;
-
-        if choice == 0 {
-            self.setup_github_copilot_device_login().await
-        } else {
-            self.setup_github_copilot_manual_token().await
-        }
+        self.setup_github_copilot_device_login().await
     }
 
     async fn setup_github_copilot_device_login(&mut self) -> Result<(), SetupError> {
-        self.prepare_github_copilot_setup();
+        self.set_llm_backend_preserving_model("github_copilot");
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
@@ -1405,48 +1394,6 @@ impl SetupWizard {
             .map_err(|e| SetupError::Auth(e.to_string()))?;
 
         self.save_github_copilot_token(&client, &token).await
-    }
-
-    async fn setup_github_copilot_manual_token(&mut self) -> Result<(), SetupError> {
-        self.prepare_github_copilot_setup();
-
-        if let Ok(existing) = std::env::var("GITHUB_COPILOT_TOKEN") {
-            print_info(&format!(
-                "GITHUB_COPILOT_TOKEN found: {}",
-                mask_api_key(&existing)
-            ));
-            if confirm("Use this token?", true).map_err(SetupError::Io)? {
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(15))
-                    .build()
-                    .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
-                return self.save_github_copilot_token(&client, &existing).await;
-            }
-        }
-
-        print_info(
-            "Paste the GitHub Copilot OAuth token from your IDE, or go back and choose GitHub device login.",
-        );
-        let token = secret_input("GitHub Copilot token").map_err(SetupError::Io)?;
-        let token_str = token.expose_secret();
-        if token_str.is_empty() {
-            return Err(SetupError::Config(
-                "GitHub Copilot token cannot be empty".to_string(),
-            ));
-        }
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
-        self.save_github_copilot_token(&client, token_str).await
-    }
-
-    fn prepare_github_copilot_setup(&mut self) {
-        if self.settings.llm_backend.as_deref() != Some("github_copilot") {
-            self.settings.selected_model = None;
-        }
-        self.settings.llm_backend = Some("github_copilot".to_string());
     }
 
     async fn save_github_copilot_token(
@@ -3631,12 +3578,12 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_github_copilot_setup_preserves_model_for_same_backend() {
+    fn test_github_copilot_setup_preserves_model_for_same_backend() {
         let mut wizard = SetupWizard::new();
         wizard.settings.llm_backend = Some("github_copilot".to_string());
         wizard.settings.selected_model = Some("gpt-4o".to_string());
 
-        wizard.prepare_github_copilot_setup();
+        wizard.set_llm_backend_preserving_model("github_copilot");
 
         assert_eq!(wizard.settings.selected_model.as_deref(), Some("gpt-4o"));
         assert_eq!(
@@ -3646,12 +3593,12 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_github_copilot_setup_clears_stale_model_on_switch() {
+    fn test_github_copilot_setup_clears_stale_model_on_switch() {
         let mut wizard = SetupWizard::new();
         wizard.settings.llm_backend = Some("openai".to_string());
         wizard.settings.selected_model = Some("gpt-5".to_string());
 
-        wizard.prepare_github_copilot_setup();
+        wizard.set_llm_backend_preserving_model("github_copilot");
 
         assert!(wizard.settings.selected_model.is_none());
         assert_eq!(
