@@ -696,19 +696,13 @@ mod tests {
         let token = std::sync::RwLock::new(original);
 
         // Read the original
-        assert_eq!(
-            token.read().unwrap().expose_secret(),
-            "old_token"
-        );
+        assert_eq!(token.read().unwrap().expose_secret(), "old_token");
 
         // Simulate a successful refresh
         let refreshed = SecretString::from("new_token".to_string());
         *token.write().unwrap() = refreshed;
 
         // Subsequent reads see the updated token
-        assert_eq!(
-            token.read().unwrap().expose_secret(),
-            "new_token"
-        );
+        assert_eq!(token.read().unwrap().expose_secret(), "new_token");
     }
 }
