@@ -133,28 +133,48 @@ async def test_approval_params_toggle(page):
 
 
 async def test_waiting_for_approval_message_no_error_prefix(page):
-    """Verify UI correctly renders 'Waiting for approval' messages without 'Error:' prefix.
+    """Verify that input submitted while awaiting approval shows non-error status with tool context.
 
-    This is a frontend rendering test that verifies the SSE → DOM pipeline.
-    The backend behavior (rejecting input during AwaitingApproval with non-error Pending result)
-    is covered by the Rust integration test in src/agent/thread_ops.rs.
+    Tests the real flow: show approval card, then attempt to send input while approval is pending.
+    Backend rejects with Pending result (not Error), and message includes tool context.
     """
-    # Inject a status message that simulates what the fixed backend code produces
-    # when a user tries to send input while the thread is awaiting approval.
-    # The message should have tool context and NOT be prefixed with "Error:".
+    # First, inject an approval card to simulate the thread being in AwaitingApproval state
     await page.evaluate("""
-        addMessage('assistant', 'Waiting for approval: shell — Execute: echo hello. Use /interrupt to cancel.')
+        showApproval({
+            request_id: 'test-req-waiting-approval',
+            thread_id: currentThreadId,
+            tool_name: 'shell',
+            description: 'Execute: echo hello',
+            parameters: '{"command": "echo hello"}'
+        })
     """)
 
-    # Get the last assistant message
-    last_msg = page.locator(SEL["message_assistant"]).last
-    await last_msg.wait_for(state="visible", timeout=5000)
+    # Wait for approval card to be visible (thread is now in AwaitingApproval state)
+    card = page.locator('.approval-card[data-request-id="test-req-waiting-approval"]')
+    await card.wait_for(state="visible", timeout=5000)
 
+    # Record initial message count
+    initial_count = await page.locator(SEL["message_assistant"]).count()
+
+    # Now attempt to send input while approval is pending
+    # (the backend will reject this and return the "Waiting for approval" status message)
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.fill("Test input while awaiting approval")
+    await chat_input.press("Enter")
+
+    # Wait for the status message from the backend rejection
+    await page.wait_for_function(
+        f"() => document.querySelectorAll('{SEL['message_assistant']}').length > {initial_count}",
+        timeout=10000,
+    )
+
+    # Get the new status message
+    last_msg = page.locator(SEL["message_assistant"]).last
     msg_text = await last_msg.text_content()
 
     # Verify no "Error:" prefix
     assert not msg_text.lower().startswith("error:"), (
-        f"Approval status must NOT have 'Error:' prefix. Got: {msg_text!r}"
+        f"Approval rejection must NOT have 'Error:' prefix. Got: {msg_text!r}"
     )
 
     # Verify it contains "waiting for approval"
