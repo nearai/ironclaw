@@ -3419,6 +3419,7 @@ impl ExtensionManager {
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
                 settings_store,
+                self.user_id.clone(),
             )
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
@@ -3435,6 +3436,7 @@ impl ExtensionManager {
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
                 settings_store,
+                self.user_id.clone(),
             )
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
@@ -3462,6 +3464,7 @@ impl ExtensionManager {
         owner_id: Option<i64>,
     ) -> Result<ActivateResult, ExtensionError> {
         let channel_name = loaded.name().to_string();
+        let owner_actor_id = owner_id.map(|id| id.to_string());
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
@@ -3475,7 +3478,7 @@ impl ExtensionManager {
             .ok()
             .map(|s| s.expose().to_string());
 
-        let channel_arc = Arc::new(loaded.channel);
+        let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id));
 
         // Inject runtime config (tunnel_url, webhook_secret, owner_id)
         {
@@ -5615,6 +5618,7 @@ mod tests {
                 runtime,
                 prepared,
                 capabilities,
+                "default",
                 "{}".to_string(),
                 pairing_store,
                 None,
