@@ -106,16 +106,15 @@ impl GithubCopilotProvider {
         let url = self.api_url();
         let token = self.token_manager.get_token().await.map_err(|e| {
             tracing::warn!(error = %e, "Copilot: token exchange failed");
-            LlmError::RequestFailed {
+            LlmError::AuthFailed {
                 provider: "github_copilot".to_string(),
-                reason: format!("Token exchange failed: {e}"),
             }
         })?;
 
         let mut request = self
             .client
             .post(&url)
-            .bearer_auth(&token)
+            .bearer_auth(token.expose_secret())
             .header("Content-Type", "application/json");
 
         // Inject Copilot identity headers
@@ -159,11 +158,8 @@ impl GithubCopilotProvider {
                     "Copilot: 401 Unauthorized — invalidating cached session token for retry"
                 );
                 self.token_manager.invalidate().await;
-                return Err(LlmError::RequestFailed {
+                return Err(LlmError::AuthFailed {
                     provider: "github_copilot".to_string(),
-                    reason: format!(
-                        "HTTP 401 Unauthorized (stale session token invalidated): {response_text}"
-                    ),
                 });
             }
             if status.as_u16() == 429 {
