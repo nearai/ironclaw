@@ -66,14 +66,12 @@ pub trait SelfRepair: Send + Sync {
 /// Default self-repair implementation.
 pub struct DefaultSelfRepair {
     context_manager: Arc<ContextManager>,
-    // TODO: use for time-based stuck detection (currently only max_repair_attempts is checked)
-    #[allow(dead_code)]
+    /// Jobs in `InProgress` longer than this are treated as stuck.
     stuck_threshold: Duration,
     max_repair_attempts: u32,
     store: Option<Arc<dyn Database>>,
     builder: Option<Arc<dyn SoftwareBuilder>>,
-    // TODO: use for tool hot-reload after repair
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: use for tool hot-reload after repair
     tools: Option<Arc<ToolRegistry>>,
 }
 
@@ -95,14 +93,14 @@ impl DefaultSelfRepair {
     }
 
     /// Add a Store for tool failure tracking.
-    #[allow(dead_code)] // TODO: wire up in main.rs when persistence is needed
+    #[allow(dead_code)] // wired when persistence is enabled
     pub(crate) fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.store = Some(store);
         self
     }
 
     /// Add a Builder and ToolRegistry for automatic tool repair.
-    #[allow(dead_code)] // TODO: wire up in main.rs when auto-repair is needed
+    #[allow(dead_code)] // wired when auto-repair is enabled
     pub(crate) fn with_builder(
         mut self,
         builder: Arc<dyn SoftwareBuilder>,
@@ -117,12 +115,15 @@ impl DefaultSelfRepair {
 #[async_trait]
 impl SelfRepair for DefaultSelfRepair {
     async fn detect_stuck_jobs(&self) -> Vec<StuckJob> {
-        let stuck_ids = self.context_manager.find_stuck_jobs().await;
+        let stuck_ids = self
+            .context_manager
+            .find_stuck_jobs_with_threshold(Some(self.stuck_threshold))
+            .await;
         let mut stuck_jobs = Vec::new();
 
         for job_id in stuck_ids {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await
-                && ctx.state == JobState::Stuck
+                && matches!(ctx.state, JobState::Stuck | JobState::InProgress)
             {
                 let stuck_duration = ctx
                     .started_at
