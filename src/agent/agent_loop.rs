@@ -804,6 +804,20 @@ impl Agent {
             "Message details"
         );
 
+        // Internal messages (e.g. job-monitor notifications) are already
+        // rendered text and should be forwarded directly to the user without
+        // entering the normal user-input pipeline (LLM/tool loop).
+        // The `is_internal` field and `into_internal()` setter are pub(crate),
+        // so external channels cannot spoof this flag.
+        if message.is_internal {
+            tracing::debug!(
+                message_id = %message.id,
+                channel = %message.channel,
+                "Forwarding internal message"
+            );
+            return Ok(Some(message.content.clone()));
+        }
+
         // Set message tool context for this turn (current channel and target)
         // For Signal, use signal_target from metadata (group:ID or phone number),
         // otherwise fall back to user_id

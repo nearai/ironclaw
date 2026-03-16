@@ -14,8 +14,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-#[cfg(feature = "postgres")]
-use deadpool_postgres::Config as PoolConfig;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::bootstrap::ironclaw_base_dir;
@@ -23,8 +21,12 @@ use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
 use crate::config::OAUTH_PLACEHOLDER;
+use crate::llm::models::{
+    build_nearai_model_fetch_config, fetch_anthropic_models, fetch_ollama_models,
+    fetch_openai_compatible_models, fetch_openai_models,
+};
 use crate::llm::{SessionConfig, SessionManager};
-use crate::secrets::{SecretsCrypto, SecretsStore};
+use crate::secrets::SecretsCrypto;
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
     SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
@@ -85,12 +87,10 @@ pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
     session_manager: Option<Arc<SessionManager>>,
-    /// Database pool (created during setup, postgres only).
-    #[cfg(feature = "postgres")]
-    db_pool: Option<deadpool_postgres::Pool>,
-    /// libSQL backend (created during setup, libsql only).
-    #[cfg(feature = "libsql")]
-    db_backend: Option<crate::db::libsql::LibSqlBackend>,
+    /// Backend-agnostic database trait object (created during setup).
+    db: Option<Arc<dyn crate::db::Database>>,
+    /// Backend-specific handles for secrets store and other satellite consumers.
+    db_handles: Option<crate::db::DatabaseHandles>,
     /// Secrets crypto (created during setup).
     secrets_crypto: Option<Arc<SecretsCrypto>>,
     /// Cached API key from provider setup (used by model fetcher without env mutation).
@@ -104,10 +104,8 @@ impl SetupWizard {
             config: SetupConfig::default(),
             settings: Settings::default(),
             session_manager: None,
-            #[cfg(feature = "postgres")]
-            db_pool: None,
-            #[cfg(feature = "libsql")]
-            db_backend: None,
+            db: None,
+            db_handles: None,
             secrets_crypto: None,
             llm_api_key: None,
         }
@@ -119,10 +117,8 @@ impl SetupWizard {
             config,
             settings: Settings::default(),
             session_manager: None,
-            #[cfg(feature = "postgres")]
-            db_pool: None,
-            #[cfg(feature = "libsql")]
-            db_backend: None,
+            db: None,
+            db_handles: None,
             secrets_crypto: None,
             llm_api_key: None,
         }
@@ -297,115 +293,79 @@ impl SetupWizard {
     /// database connection and the wizard's `self.settings` reflects the
     /// previously saved configuration.
     async fn reconnect_existing_db(&mut self) -> Result<(), SetupError> {
-        // Determine backend from env (set by bootstrap .env loaded in main).
-        let backend = std::env::var("DATABASE_BACKEND").unwrap_or_else(|_| "postgres".to_string());
+        use crate::config::DatabaseConfig;
 
-        // Try libsql first if that's the configured backend.
-        #[cfg(feature = "libsql")]
-        if backend == "libsql" || backend == "turso" || backend == "sqlite" {
-            return self.reconnect_libsql().await;
-        }
-
-        // Try postgres (either explicitly configured or as default).
-        #[cfg(feature = "postgres")]
-        {
-            let _ = &backend;
-            return self.reconnect_postgres().await;
-        }
-
-        #[allow(unreachable_code)]
-        Err(SetupError::Database(
-            "No database configured. Run full setup first (ironclaw onboard).".to_string(),
-        ))
-    }
-
-    /// Reconnect to an existing PostgreSQL database and load settings.
-    #[cfg(feature = "postgres")]
-    async fn reconnect_postgres(&mut self) -> Result<(), SetupError> {
-        let url = std::env::var("DATABASE_URL").map_err(|_| {
-            SetupError::Database(
-                "DATABASE_URL not set. Run full setup first (ironclaw onboard).".to_string(),
-            )
+        let db_config = DatabaseConfig::resolve().map_err(|e| {
+            SetupError::Database(format!(
+                "Cannot resolve database config. Run full setup first (ironclaw onboard): {}",
+                e
+            ))
         })?;
 
-        self.test_database_connection_postgres(&url).await?;
-        self.settings.database_backend = Some("postgres".to_string());
-        self.settings.database_url = Some(url.clone());
+        let backend_name = db_config.backend.to_string();
+        let (db, handles) = crate::db::connect_with_handles(&db_config)
+            .await
+            .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?;
 
-        // Load existing settings from DB, then restore connection fields that
-        // may not be persisted in the settings map.
-        if let Some(ref pool) = self.db_pool {
-            let store = crate::history::Store::from_pool(pool.clone());
-            if let Ok(map) = store.get_all_settings("default").await {
-                self.settings = Settings::from_db_map(&map);
-                self.settings.database_backend = Some("postgres".to_string());
-                self.settings.database_url = Some(url);
-            }
+        // Load existing settings from DB
+        if let Ok(map) = db.get_all_settings("default").await {
+            self.settings = Settings::from_db_map(&map);
         }
 
-        Ok(())
-    }
-
-    /// Reconnect to an existing libSQL database and load settings.
-    #[cfg(feature = "libsql")]
-    async fn reconnect_libsql(&mut self) -> Result<(), SetupError> {
-        let path = std::env::var("LIBSQL_PATH").unwrap_or_else(|_| {
-            crate::config::default_libsql_path()
-                .to_string_lossy()
-                .to_string()
-        });
-        let turso_url = std::env::var("LIBSQL_URL").ok();
-        let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
-
-        self.test_database_connection_libsql(&path, turso_url.as_deref(), turso_token.as_deref())
-            .await?;
-
-        self.settings.database_backend = Some("libsql".to_string());
-        self.settings.libsql_path = Some(path.clone());
-        if let Some(ref url) = turso_url {
-            self.settings.libsql_url = Some(url.clone());
+        // Restore connection fields that may not be persisted in the settings map
+        self.settings.database_backend = Some(backend_name);
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            self.settings.database_url = Some(url);
+        }
+        if let Ok(path) = std::env::var("LIBSQL_PATH") {
+            self.settings.libsql_path = Some(path);
+        } else if db_config.libsql_path.is_some() {
+            self.settings.libsql_path = db_config
+                .libsql_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
+        }
+        if let Ok(url) = std::env::var("LIBSQL_URL") {
+            self.settings.libsql_url = Some(url);
         }
 
-        // Load existing settings from DB, then restore connection fields that
-        // may not be persisted in the settings map.
-        if let Some(ref db) = self.db_backend {
-            use crate::db::SettingsStore as _;
-            if let Ok(map) = db.get_all_settings("default").await {
-                self.settings = Settings::from_db_map(&map);
-                self.settings.database_backend = Some("libsql".to_string());
-                self.settings.libsql_path = Some(path);
-                if let Some(url) = turso_url {
-                    self.settings.libsql_url = Some(url);
-                }
-            }
-        }
+        self.db = Some(db);
+        self.db_handles = Some(handles);
 
         Ok(())
     }
 
     /// Step 1: Database connection.
+    ///
+    /// Determines the backend at runtime (env var, interactive selection, or
+    /// compile-time default) and runs the appropriate configuration flow.
     async fn step_database(&mut self) -> Result<(), SetupError> {
-        // When both features are compiled, let the user choose.
-        // If DATABASE_BACKEND is already set in the environment, respect it.
-        #[cfg(all(feature = "postgres", feature = "libsql"))]
-        {
-            // Check if a backend is already pinned via env var
-            let env_backend = std::env::var("DATABASE_BACKEND").ok();
+        use crate::config::{DatabaseBackend, DatabaseConfig};
 
-            if let Some(ref backend) = env_backend {
-                if backend == "libsql" || backend == "turso" || backend == "sqlite" {
-                    return self.step_database_libsql().await;
-                }
-                if backend != "postgres" && backend != "postgresql" {
+        const POSTGRES_AVAILABLE: bool = cfg!(feature = "postgres");
+        const LIBSQL_AVAILABLE: bool = cfg!(feature = "libsql");
+
+        // Determine backend from env var, interactive selection, or default.
+        let env_backend = std::env::var("DATABASE_BACKEND").ok();
+
+        let backend = if let Some(ref raw) = env_backend {
+            match raw.parse::<DatabaseBackend>() {
+                Ok(b) => b,
+                Err(_) => {
+                    let fallback = if POSTGRES_AVAILABLE {
+                        DatabaseBackend::Postgres
+                    } else {
+                        DatabaseBackend::LibSql
+                    };
                     print_info(&format!(
-                        "Unknown DATABASE_BACKEND '{}', defaulting to PostgreSQL",
-                        backend
+                        "Unknown DATABASE_BACKEND '{}', defaulting to {}",
+                        raw, fallback
                     ));
+                    fallback
                 }
-                return self.step_database_postgres().await;
             }
-
-            // Interactive selection
+        } else if POSTGRES_AVAILABLE && LIBSQL_AVAILABLE {
+            // Both features compiled — offer interactive selection.
             let pre_selected = self.settings.database_backend.as_deref().map(|b| match b {
                 "libsql" | "turso" | "sqlite" => 1,
                 _ => 0,
@@ -431,88 +391,82 @@ impl SetupWizard {
                 self.settings.libsql_url = None;
             }
 
-            match choice {
-                1 => return self.step_database_libsql().await,
-                _ => return self.step_database_postgres().await,
+            if choice == 1 {
+                DatabaseBackend::LibSql
+            } else {
+                DatabaseBackend::Postgres
             }
-        }
+        } else if LIBSQL_AVAILABLE {
+            DatabaseBackend::LibSql
+        } else {
+            // Only postgres (or neither, but that won't compile anyway).
+            DatabaseBackend::Postgres
+        };
 
-        #[cfg(all(feature = "postgres", not(feature = "libsql")))]
-        {
-            return self.step_database_postgres().await;
-        }
+        // --- Postgres flow ---
+        if backend == DatabaseBackend::Postgres {
+            self.settings.database_backend = Some("postgres".to_string());
 
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
-            return self.step_database_libsql().await;
-        }
-    }
+            let existing_url = std::env::var("DATABASE_URL")
+                .ok()
+                .or_else(|| self.settings.database_url.clone());
 
-    /// Step 1 (postgres): Database connection via PostgreSQL URL.
-    #[cfg(feature = "postgres")]
-    async fn step_database_postgres(&mut self) -> Result<(), SetupError> {
-        self.settings.database_backend = Some("postgres".to_string());
+            if let Some(ref url) = existing_url {
+                let display_url = mask_password_in_url(url);
+                print_info(&format!("Existing database URL: {}", display_url));
 
-        let existing_url = std::env::var("DATABASE_URL")
-            .ok()
-            .or_else(|| self.settings.database_url.clone());
-
-        if let Some(ref url) = existing_url {
-            let display_url = mask_password_in_url(url);
-            print_info(&format!("Existing database URL: {}", display_url));
-
-            if confirm("Use this database?", true).map_err(SetupError::Io)? {
-                if let Err(e) = self.test_database_connection_postgres(url).await {
-                    print_error(&format!("Connection failed: {}", e));
-                    print_info("Let's configure a new database URL.");
-                } else {
-                    print_success("Database connection successful");
-                    self.settings.database_url = Some(url.clone());
-                    return Ok(());
-                }
-            }
-        }
-
-        println!();
-        print_info("Enter your PostgreSQL connection URL.");
-        print_info("Format: postgres://user:password@host:port/database");
-        println!();
-
-        loop {
-            let url = input("Database URL").map_err(SetupError::Io)?;
-
-            if url.is_empty() {
-                print_error("Database URL is required.");
-                continue;
-            }
-
-            print_info("Testing connection...");
-            match self.test_database_connection_postgres(&url).await {
-                Ok(()) => {
-                    print_success("Database connection successful");
-
-                    if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
-                        self.run_migrations_postgres().await?;
+                if confirm("Use this database?", true).map_err(SetupError::Io)? {
+                    let config = DatabaseConfig::from_postgres_url(url, 5);
+                    if let Err(e) = self.test_database_connection(&config).await {
+                        print_error(&format!("Connection failed: {}", e));
+                        print_info("Let's configure a new database URL.");
+                    } else {
+                        print_success("Database connection successful");
+                        self.settings.database_url = Some(url.clone());
+                        return Ok(());
                     }
-
-                    self.settings.database_url = Some(url);
-                    return Ok(());
                 }
-                Err(e) => {
-                    print_error(&format!("Connection failed: {}", e));
-                    if !confirm("Try again?", true).map_err(SetupError::Io)? {
-                        return Err(SetupError::Database(
-                            "Database connection failed".to_string(),
-                        ));
+            }
+
+            println!();
+            print_info("Enter your PostgreSQL connection URL.");
+            print_info("Format: postgres://user:password@host:port/database");
+            println!();
+
+            loop {
+                let url = input("Database URL").map_err(SetupError::Io)?;
+
+                if url.is_empty() {
+                    print_error("Database URL is required.");
+                    continue;
+                }
+
+                print_info("Testing connection...");
+                let config = DatabaseConfig::from_postgres_url(&url, 5);
+                match self.test_database_connection(&config).await {
+                    Ok(()) => {
+                        print_success("Database connection successful");
+
+                        if confirm("Run database migrations?", true).map_err(SetupError::Io)? {
+                            self.run_migrations().await?;
+                        }
+
+                        self.settings.database_url = Some(url);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        print_error(&format!("Connection failed: {}", e));
+                        if !confirm("Try again?", true).map_err(SetupError::Io)? {
+                            return Err(SetupError::Database(
+                                "Database connection failed".to_string(),
+                            ));
+                        }
                     }
                 }
             }
         }
-    }
 
-    /// Step 1 (libsql): Database connection via local file or Turso remote replica.
-    #[cfg(feature = "libsql")]
-    async fn step_database_libsql(&mut self) -> Result<(), SetupError> {
+        // --- libSQL flow ---
         self.settings.database_backend = Some("libsql".to_string());
 
         let default_path = crate::config::default_libsql_path();
@@ -531,14 +485,12 @@ impl SetupWizard {
                     .or_else(|| self.settings.libsql_url.clone());
                 let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
 
-                match self
-                    .test_database_connection_libsql(
-                        path,
-                        turso_url.as_deref(),
-                        turso_token.as_deref(),
-                    )
-                    .await
-                {
+                let config = DatabaseConfig::from_libsql_path(
+                    path,
+                    turso_url.as_deref(),
+                    turso_token.as_deref(),
+                );
+                match self.test_database_connection(&config).await {
                     Ok(()) => {
                         print_success("Database connection successful");
                         self.settings.libsql_path = Some(path.clone());
@@ -597,15 +549,17 @@ impl SetupWizard {
         };
 
         print_info("Testing connection...");
-        match self
-            .test_database_connection_libsql(&db_path, turso_url.as_deref(), turso_token.as_deref())
-            .await
-        {
+        let config = DatabaseConfig::from_libsql_path(
+            &db_path,
+            turso_url.as_deref(),
+            turso_token.as_deref(),
+        );
+        match self.test_database_connection(&config).await {
             Ok(()) => {
                 print_success("Database connection successful");
 
                 // Always run migrations for libsql (they're idempotent)
-                self.run_migrations_libsql().await?;
+                self.run_migrations().await?;
 
                 self.settings.libsql_path = Some(db_path);
                 if let Some(url) = turso_url {
@@ -617,155 +571,39 @@ impl SetupWizard {
         }
     }
 
-    /// Test PostgreSQL connection and store the pool.
+    /// Test database connection using the db module factory.
     ///
-    /// After connecting, validates:
-    /// 1. PostgreSQL version >= 15 (required for pgvector compatibility)
-    /// 2. pgvector extension is available (required for embeddings/vector search)
-    #[cfg(feature = "postgres")]
-    async fn test_database_connection_postgres(&mut self, url: &str) -> Result<(), SetupError> {
-        let mut cfg = PoolConfig::new();
-        cfg.url = Some(url.to_string());
-        cfg.pool = Some(deadpool_postgres::PoolConfig {
-            max_size: 5,
-            ..Default::default()
-        });
-
-        let pool = crate::db::tls::create_pool(&cfg, crate::config::SslMode::from_env())
-            .map_err(|e| SetupError::Database(format!("Failed to create pool: {}", e)))?;
-
-        let client = pool
-            .get()
-            .await
-            .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?;
-
-        // Check PostgreSQL server version (need 15+ for pgvector)
-        let version_row = client
-            .query_one("SHOW server_version", &[])
-            .await
-            .map_err(|e| SetupError::Database(format!("Failed to query server version: {}", e)))?;
-        let version_str: &str = version_row.get(0);
-        let major_version = version_str
-            .split('.')
-            .next()
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(0);
-
-        const MIN_PG_MAJOR_VERSION: u32 = 15;
-
-        if major_version < MIN_PG_MAJOR_VERSION {
-            return Err(SetupError::Database(format!(
-                "PostgreSQL {} detected. IronClaw requires PostgreSQL {} or later for pgvector support.\n\
-                 Upgrade: https://www.postgresql.org/download/",
-                version_str, MIN_PG_MAJOR_VERSION
-            )));
-        }
-
-        // Check if pgvector extension is available
-        let pgvector_row = client
-            .query_opt(
-                "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'",
-                &[],
-            )
-            .await
-            .map_err(|e| {
-                SetupError::Database(format!("Failed to check pgvector availability: {}", e))
-            })?;
-
-        if pgvector_row.is_none() {
-            return Err(SetupError::Database(format!(
-                "pgvector extension not found on your PostgreSQL server.\n\n\
-                 Install it:\n  \
-                 macOS:   brew install pgvector\n  \
-                 Ubuntu:  apt install postgresql-{0}-pgvector\n  \
-                 Docker:  use the pgvector/pgvector:pg{0} image\n  \
-                 Source:  https://github.com/pgvector/pgvector#installation\n\n\
-                 Then restart PostgreSQL and re-run: ironclaw onboard",
-                major_version
-            )));
-        }
-
-        self.db_pool = Some(pool);
-        Ok(())
-    }
-
-    /// Test libSQL connection and store the backend.
-    #[cfg(feature = "libsql")]
-    async fn test_database_connection_libsql(
+    /// Connects without running migrations and validates PostgreSQL
+    /// prerequisites (version, pgvector) when using the postgres backend.
+    async fn test_database_connection(
         &mut self,
-        path: &str,
-        turso_url: Option<&str>,
-        turso_token: Option<&str>,
+        config: &crate::config::DatabaseConfig,
     ) -> Result<(), SetupError> {
-        use crate::db::libsql::LibSqlBackend;
-        use std::path::Path;
+        let (db, handles) = crate::db::connect_without_migrations(config)
+            .await
+            .map_err(|e| SetupError::Database(e.to_string()))?;
 
-        let db_path = Path::new(path);
-
-        let backend = if let (Some(url), Some(token)) = (turso_url, turso_token) {
-            LibSqlBackend::new_remote_replica(db_path, url, token)
-                .await
-                .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?
-        } else {
-            LibSqlBackend::new_local(db_path)
-                .await
-                .map_err(|e| SetupError::Database(format!("Failed to open database: {}", e)))?
-        };
-
-        self.db_backend = Some(backend);
+        self.db = Some(db);
+        self.db_handles = Some(handles);
         Ok(())
     }
 
-    /// Run PostgreSQL migrations.
-    #[cfg(feature = "postgres")]
-    async fn run_migrations_postgres(&self) -> Result<(), SetupError> {
-        if let Some(ref pool) = self.db_pool {
-            use refinery::embed_migrations;
-            embed_migrations!("migrations");
-
+    /// Run database migrations on the current connection.
+    async fn run_migrations(&self) -> Result<(), SetupError> {
+        if let Some(ref db) = self.db {
             if !self.config.quick {
                 print_info("Running migrations...");
             }
-            tracing::debug!("Running PostgreSQL migrations...");
+            tracing::debug!("Running database migrations...");
 
-            let mut client = pool
-                .get()
-                .await
-                .map_err(|e| SetupError::Database(format!("Pool error: {}", e)))?;
-
-            migrations::runner()
-                .run_async(&mut **client)
+            db.run_migrations()
                 .await
                 .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
 
             if !self.config.quick {
                 print_success("Migrations applied");
             }
-            tracing::debug!("PostgreSQL migrations applied");
-        }
-        Ok(())
-    }
-
-    /// Run libSQL migrations.
-    #[cfg(feature = "libsql")]
-    async fn run_migrations_libsql(&self) -> Result<(), SetupError> {
-        if let Some(ref backend) = self.db_backend {
-            use crate::db::Database;
-
-            if !self.config.quick {
-                print_info("Running migrations...");
-            }
-            tracing::debug!("Running libSQL migrations...");
-
-            backend
-                .run_migrations()
-                .await
-                .map_err(|e| SetupError::Database(format!("Migration failed: {}", e)))?;
-
-            if !self.config.quick {
-                print_success("Migrations applied");
-            }
-            tracing::debug!("libSQL migrations applied");
+            tracing::debug!("Database migrations applied");
         }
         Ok(())
     }
@@ -782,20 +620,19 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // Try to retrieve existing key from keychain. We use get_master_key()
-        // instead of has_master_key() so we can cache the key bytes and build
-        // SecretsCrypto eagerly, avoiding redundant keychain accesses later
-        // (each access triggers macOS system dialogs).
+        // Try to retrieve existing key from keychain via resolve_master_key
+        // (checks env var first, then keychain). We skip the env var case
+        // above, so this will only find a keychain key here.
         print_info("Checking OS keychain for existing master key...");
         if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
             let key_hex: String = keychain_key_bytes
                 .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
+            self.secrets_crypto = Some(
+                crate::secrets::crypto_from_hex(&key_hex)
                     .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
+            );
 
             print_info("Existing master key found in OS keychain.");
             if confirm("Use existing keychain key?", true).map_err(SetupError::Io)? {
@@ -834,12 +671,11 @@ impl SetupWizard {
                         SetupError::Config(format!("Failed to store in keychain: {}", e))
                     })?;
 
-                // Also create crypto instance
                 let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-                self.secrets_crypto = Some(Arc::new(
-                    SecretsCrypto::new(SecretString::from(key_hex))
+                self.secrets_crypto = Some(
+                    crate::secrets::crypto_from_hex(&key_hex)
                         .map_err(|e| SetupError::Config(e.to_string()))?,
-                ));
+                );
 
                 self.settings.secrets_master_key_source = KeySource::Keychain;
                 print_success("Master key generated and stored in OS keychain");
@@ -850,10 +686,10 @@ impl SetupWizard {
 
                 // Initialize crypto so subsequent wizard steps (channel setup,
                 // API key storage) can encrypt secrets immediately.
-                self.secrets_crypto = Some(Arc::new(
-                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                self.secrets_crypto = Some(
+                    crate::secrets::crypto_from_hex(&key_hex)
                         .map_err(|e| SetupError::Config(e.to_string()))?,
-                ));
+                );
 
                 // Make visible to optional_env() for any subsequent config resolution.
                 crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
@@ -886,16 +722,22 @@ impl SetupWizard {
     /// standard path. Falls back to the interactive `step_database()` only when
     /// just the postgres feature is compiled (can't auto-default postgres).
     async fn auto_setup_database(&mut self) -> Result<(), SetupError> {
-        // If DATABASE_URL or LIBSQL_PATH already set, respect existing config
-        #[cfg(feature = "postgres")]
+        use crate::config::{DatabaseBackend, DatabaseConfig};
+
+        const POSTGRES_AVAILABLE: bool = cfg!(feature = "postgres");
+        const LIBSQL_AVAILABLE: bool = cfg!(feature = "libsql");
+
         let env_backend = std::env::var("DATABASE_BACKEND").ok();
 
-        #[cfg(feature = "postgres")]
+        // If DATABASE_BACKEND=postgres and DATABASE_URL exists: connect+migrate
         if let Some(ref backend) = env_backend
-            && (backend == "postgres" || backend == "postgresql")
+            && let Ok(DatabaseBackend::Postgres) = backend.parse::<DatabaseBackend>()
         {
             if let Ok(url) = std::env::var("DATABASE_URL") {
                 print_info("Using existing PostgreSQL configuration");
+                let config = DatabaseConfig::from_postgres_url(&url, 5);
+                self.test_database_connection(&config).await?;
+                self.run_migrations().await?;
                 self.settings.database_backend = Some("postgres".to_string());
                 self.settings.database_url = Some(url);
                 return Ok(());
@@ -904,17 +746,23 @@ impl SetupWizard {
             return self.step_database().await;
         }
 
-        #[cfg(feature = "postgres")]
-        if let Ok(url) = std::env::var("DATABASE_URL") {
+        // If DATABASE_URL exists (no explicit backend): connect+migrate as postgres,
+        // but only when the postgres feature is actually compiled in.
+        if POSTGRES_AVAILABLE
+            && env_backend.is_none()
+            && let Ok(url) = std::env::var("DATABASE_URL")
+        {
             print_info("Using existing PostgreSQL configuration");
+            let config = DatabaseConfig::from_postgres_url(&url, 5);
+            self.test_database_connection(&config).await?;
+            self.run_migrations().await?;
             self.settings.database_backend = Some("postgres".to_string());
             self.settings.database_url = Some(url);
             return Ok(());
         }
 
-        // Auto-default to libsql if the feature is compiled
-        #[cfg(feature = "libsql")]
-        {
+        // Auto-default to libsql if available
+        if LIBSQL_AVAILABLE {
             self.settings.database_backend = Some("libsql".to_string());
 
             let existing_path = std::env::var("LIBSQL_PATH")
@@ -930,14 +778,13 @@ impl SetupWizard {
             let turso_url = std::env::var("LIBSQL_URL").ok();
             let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
 
-            self.test_database_connection_libsql(
+            let config = DatabaseConfig::from_libsql_path(
                 &db_path,
                 turso_url.as_deref(),
                 turso_token.as_deref(),
-            )
-            .await?;
-
-            self.run_migrations_libsql().await?;
+            );
+            self.test_database_connection(&config).await?;
+            self.run_migrations().await?;
 
             self.settings.libsql_path = Some(db_path.clone());
             if let Some(url) = turso_url {
@@ -949,10 +796,7 @@ impl SetupWizard {
         }
 
         // Only postgres feature compiled — can't auto-default, use interactive
-        #[allow(unreachable_code)]
-        {
-            self.step_database().await
-        }
+        self.step_database().await
     }
 
     /// Auto-setup security with zero prompts (quick mode).
@@ -961,26 +805,23 @@ impl SetupWizard {
     /// key if available, otherwise generates and stores one automatically
     /// (keychain on macOS, env var fallback).
     async fn auto_setup_security(&mut self) -> Result<(), SetupError> {
-        // Check env var first
-        if std::env::var("SECRETS_MASTER_KEY").is_ok() {
-            self.settings.secrets_master_key_source = KeySource::Env;
-            print_success("Security configured (env var)");
-            return Ok(());
-        }
-
-        // Try existing keychain key (no prompts — get_master_key may show
-        // OS dialogs on macOS, but that's unavoidable for keychain access)
-        if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
-            let key_hex: String = keychain_key_bytes
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
+        // Try resolving an existing key from env var or keychain
+        if let Some(key_hex) = crate::secrets::resolve_master_key().await {
+            self.secrets_crypto = Some(
+                crate::secrets::crypto_from_hex(&key_hex)
                     .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
-            self.settings.secrets_master_key_source = KeySource::Keychain;
-            print_success("Security configured (keychain)");
+            );
+            // Determine source: env var or keychain (filter empty to match resolve_master_key)
+            let (source, label) = if std::env::var("SECRETS_MASTER_KEY")
+                .ok()
+                .is_some_and(|v| !v.is_empty())
+            {
+                (KeySource::Env, "env var")
+            } else {
+                (KeySource::Keychain, "keychain")
+            };
+            self.settings.secrets_master_key_source = source;
+            print_success(&format!("Security configured ({})", label));
             return Ok(());
         }
 
@@ -992,10 +833,10 @@ impl SetupWizard {
             .is_ok()
         {
             let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
+            self.secrets_crypto = Some(
+                crate::secrets::crypto_from_hex(&key_hex)
                     .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
+            );
             self.settings.secrets_master_key_source = KeySource::Keychain;
             print_success("Master key stored in OS keychain");
             return Ok(());
@@ -1003,10 +844,10 @@ impl SetupWizard {
 
         // Keychain unavailable — fall back to env var mode
         let key_hex = crate::secrets::keychain::generate_master_key_hex();
-        self.secrets_crypto = Some(Arc::new(
-            SecretsCrypto::new(SecretString::from(key_hex.clone()))
+        self.secrets_crypto = Some(
+            crate::secrets::crypto_from_hex(&key_hex)
                 .map_err(|e| SetupError::Config(e.to_string()))?,
-        ));
+        );
         crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
         self.settings.secrets_master_key_hex = Some(key_hex);
         self.settings.secrets_master_key_source = KeySource::Env;
@@ -1881,135 +1722,32 @@ impl SetupWizard {
 
     /// Initialize secrets context for channel setup.
     async fn init_secrets_context(&mut self) -> Result<SecretsContext, SetupError> {
-        // Get crypto (should be set from step 2, or load from keychain/env)
+        // Get crypto (should be set from step 2, or resolve from keychain/env)
         let crypto = if let Some(ref c) = self.secrets_crypto {
             Arc::clone(c)
         } else {
-            // Try to load master key from keychain or env
-            let key = if let Ok(env_key) = std::env::var("SECRETS_MASTER_KEY") {
-                env_key
-            } else if let Ok(keychain_key) = crate::secrets::keychain::get_master_key().await {
-                keychain_key.iter().map(|b| format!("{:02x}", b)).collect()
-            } else {
-                return Err(SetupError::Config(
+            let key_hex = crate::secrets::resolve_master_key().await.ok_or_else(|| {
+                SetupError::Config(
                     "Secrets not configured. Run full setup or set SECRETS_MASTER_KEY.".to_string(),
-                ));
-            };
+                )
+            })?;
 
-            let crypto = Arc::new(
-                SecretsCrypto::new(SecretString::from(key))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            );
+            let crypto = crate::secrets::crypto_from_hex(&key_hex)
+                .map_err(|e| SetupError::Config(e.to_string()))?;
             self.secrets_crypto = Some(Arc::clone(&crypto));
             crypto
         };
 
-        // Create backend-appropriate secrets store.
-        // Use runtime dispatch based on the user's selected backend.
-        // Default to whichever backend is compiled in. When only libsql is
-        // available, we must not default to "postgres" or we'd skip store creation.
-        let default_backend = {
-            #[cfg(feature = "postgres")]
-            {
-                "postgres"
-            }
-            #[cfg(not(feature = "postgres"))]
-            {
-                "libsql"
-            }
-        };
-        let selected_backend = self
-            .settings
-            .database_backend
-            .as_deref()
-            .unwrap_or(default_backend);
-
-        match selected_backend {
-            #[cfg(feature = "libsql")]
-            "libsql" | "turso" | "sqlite" => {
-                if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
-                }
-                // Fallback to postgres if libsql store creation returned None
-                #[cfg(feature = "postgres")]
-                if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
-                }
-            }
-            #[cfg(feature = "postgres")]
-            _ => {
-                if let Some(store) = self.create_postgres_secrets_store(&crypto).await? {
-                    return Ok(SecretsContext::from_store(store, "default"));
-                }
-                // Fallback to libsql if postgres store creation returned None
-                #[cfg(feature = "libsql")]
-                if let Some(store) = self.create_libsql_secrets_store(&crypto)? {
-                    return Ok(SecretsContext::from_store(store, "default"));
-                }
-            }
-            #[cfg(not(feature = "postgres"))]
-            _ => {}
+        // Create secrets store from existing database handles
+        if let Some(ref handles) = self.db_handles
+            && let Some(store) = crate::secrets::create_secrets_store(Arc::clone(&crypto), handles)
+        {
+            return Ok(SecretsContext::from_store(store, "default"));
         }
 
         Err(SetupError::Config(
             "No database backend available for secrets storage".to_string(),
         ))
-    }
-
-    /// Create a PostgreSQL secrets store from the current pool.
-    #[cfg(feature = "postgres")]
-    async fn create_postgres_secrets_store(
-        &mut self,
-        crypto: &Arc<SecretsCrypto>,
-    ) -> Result<Option<Arc<dyn SecretsStore>>, SetupError> {
-        let pool = if let Some(ref p) = self.db_pool {
-            p.clone()
-        } else {
-            // Fall back to creating one from settings/env
-            let url = self
-                .settings
-                .database_url
-                .clone()
-                .or_else(|| std::env::var("DATABASE_URL").ok());
-
-            if let Some(url) = url {
-                self.test_database_connection_postgres(&url).await?;
-                self.run_migrations_postgres().await?;
-                match self.db_pool.clone() {
-                    Some(pool) => pool,
-                    None => {
-                        return Err(SetupError::Database(
-                            "Database pool not initialized after connection test".to_string(),
-                        ));
-                    }
-                }
-            } else {
-                return Ok(None);
-            }
-        };
-
-        let store: Arc<dyn SecretsStore> = Arc::new(crate::secrets::PostgresSecretsStore::new(
-            pool,
-            Arc::clone(crypto),
-        ));
-        Ok(Some(store))
-    }
-
-    /// Create a libSQL secrets store from the current backend.
-    #[cfg(feature = "libsql")]
-    fn create_libsql_secrets_store(
-        &self,
-        crypto: &Arc<SecretsCrypto>,
-    ) -> Result<Option<Arc<dyn SecretsStore>>, SetupError> {
-        if let Some(ref backend) = self.db_backend {
-            let store: Arc<dyn SecretsStore> = Arc::new(crate::secrets::LibSqlSecretsStore::new(
-                backend.shared_db(),
-                Arc::clone(crypto),
-            ));
-            Ok(Some(store))
-        } else {
-            Ok(None)
-        }
     }
 
     /// Step 6: Channel configuration.
@@ -2529,45 +2267,15 @@ impl SetupWizard {
     /// connection is available yet (e.g., before Step 1 completes).
     async fn persist_settings(&self) -> Result<bool, SetupError> {
         let db_map = self.settings.to_db_map();
-        let saved = false;
 
-        #[cfg(feature = "postgres")]
-        let saved = if !saved {
-            if let Some(ref pool) = self.db_pool {
-                let store = crate::history::Store::from_pool(pool.clone());
-                store
-                    .set_all_settings("default", &db_map)
-                    .await
-                    .map_err(|e| {
-                        SetupError::Database(format!("Failed to save settings to database: {}", e))
-                    })?;
-                true
-            } else {
-                false
-            }
+        if let Some(ref db) = self.db {
+            db.set_all_settings("default", &db_map).await.map_err(|e| {
+                SetupError::Database(format!("Failed to save settings to database: {}", e))
+            })?;
+            Ok(true)
         } else {
-            saved
-        };
-
-        #[cfg(feature = "libsql")]
-        let saved = if !saved {
-            if let Some(ref backend) = self.db_backend {
-                use crate::db::SettingsStore as _;
-                backend
-                    .set_all_settings("default", &db_map)
-                    .await
-                    .map_err(|e| {
-                        SetupError::Database(format!("Failed to save settings to database: {}", e))
-                    })?;
-                true
-            } else {
-                false
-            }
-        } else {
-            saved
-        };
-
-        Ok(saved)
+            Ok(false)
+        }
     }
 
     /// Write bootstrap environment variables to `~/.ironclaw/.env`.
@@ -2743,28 +2451,12 @@ impl SetupWizard {
             Err(_) => return,
         };
 
-        #[cfg(feature = "postgres")]
-        if let Some(ref pool) = self.db_pool {
-            let store = crate::history::Store::from_pool(pool.clone());
-            if let Err(e) = store
+        if let Some(ref db) = self.db {
+            if let Err(e) = db
                 .set_setting("default", "nearai.session_token", &value)
                 .await
             {
-                tracing::debug!("Could not persist session token to postgres: {}", e);
-            } else {
-                tracing::debug!("Session token persisted to database");
-                return;
-            }
-        }
-
-        #[cfg(feature = "libsql")]
-        if let Some(ref backend) = self.db_backend {
-            use crate::db::SettingsStore as _;
-            if let Err(e) = backend
-                .set_setting("default", "nearai.session_token", &value)
-                .await
-            {
-                tracing::debug!("Could not persist session token to libsql: {}", e);
+                tracing::debug!("Could not persist session token to database: {}", e);
             } else {
                 tracing::debug!("Session token persisted to database");
             }
@@ -2801,58 +2493,19 @@ impl SetupWizard {
     /// prefers the `other` argument's non-default values. Without this,
     /// stale DB values would overwrite fresh user choices.
     async fn try_load_existing_settings(&mut self) {
-        let loaded = false;
-
-        #[cfg(feature = "postgres")]
-        let loaded = if !loaded {
-            if let Some(ref pool) = self.db_pool {
-                let store = crate::history::Store::from_pool(pool.clone());
-                match store.get_all_settings("default").await {
-                    Ok(db_map) if !db_map.is_empty() => {
-                        let existing = Settings::from_db_map(&db_map);
-                        self.settings.merge_from(&existing);
-                        tracing::info!("Loaded {} existing settings from database", db_map.len());
-                        true
-                    }
-                    Ok(_) => false,
-                    Err(e) => {
-                        tracing::debug!("Could not load existing settings: {}", e);
-                        false
-                    }
+        if let Some(ref db) = self.db {
+            match db.get_all_settings("default").await {
+                Ok(db_map) if !db_map.is_empty() => {
+                    let existing = Settings::from_db_map(&db_map);
+                    self.settings.merge_from(&existing);
+                    tracing::info!("Loaded {} existing settings from database", db_map.len());
                 }
-            } else {
-                false
-            }
-        } else {
-            loaded
-        };
-
-        #[cfg(feature = "libsql")]
-        let loaded = if !loaded {
-            if let Some(ref backend) = self.db_backend {
-                use crate::db::SettingsStore as _;
-                match backend.get_all_settings("default").await {
-                    Ok(db_map) if !db_map.is_empty() => {
-                        let existing = Settings::from_db_map(&db_map);
-                        self.settings.merge_from(&existing);
-                        tracing::info!("Loaded {} existing settings from database", db_map.len());
-                        true
-                    }
-                    Ok(_) => false,
-                    Err(e) => {
-                        tracing::debug!("Could not load existing settings: {}", e);
-                        false
-                    }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!("Could not load existing settings: {}", e);
                 }
-            } else {
-                false
             }
-        } else {
-            loaded
-        };
-
-        // Suppress unused variable warning when only one backend is compiled.
-        let _ = loaded;
+        }
     }
 
     /// Save settings to the database and `~/.ironclaw/.env`, then print summary.
@@ -3002,7 +2655,6 @@ impl Default for SetupWizard {
 }
 
 /// Mask password in a database URL for display.
-#[cfg(feature = "postgres")]
 fn mask_password_in_url(url: &str) -> String {
     // URL format: scheme://user:password@host/database
     // Find "://" to locate start of credentials
@@ -3029,331 +2681,6 @@ fn mask_password_in_url(url: &str) -> String {
     let after_at = &url[at_abs..]; // "@localhost/db"
 
     format!("{}{}:****{}", scheme, username, after_at)
-}
-
-/// Fetch models from the Anthropic API.
-///
-/// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
-async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
-    let static_defaults = vec![
-        (
-            "claude-opus-4-6".into(),
-            "Claude Opus 4.6 (latest flagship)".into(),
-        ),
-        ("claude-sonnet-4-6".into(), "Claude Sonnet 4.6".into()),
-        ("claude-opus-4-5".into(), "Claude Opus 4.5".into()),
-        ("claude-sonnet-4-5".into(), "Claude Sonnet 4.5".into()),
-        ("claude-haiku-4-5".into(), "Claude Haiku 4.5 (fast)".into()),
-    ];
-
-    let api_key = cached_key
-        .map(String::from)
-        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-        .filter(|k| !k.is_empty() && k != crate::config::OAUTH_PLACEHOLDER);
-
-    // Fall back to OAuth token if no API key
-    let oauth_token = if api_key.is_none() {
-        crate::config::helpers::optional_env("ANTHROPIC_OAUTH_TOKEN")
-            .ok()
-            .flatten()
-            .filter(|t| !t.is_empty())
-    } else {
-        None
-    };
-
-    let (key_or_token, is_oauth) = match (api_key, oauth_token) {
-        (Some(k), _) => (k, false),
-        (None, Some(t)) => (t, true),
-        (None, None) => return static_defaults,
-    };
-
-    let client = reqwest::Client::new();
-    let mut request = client
-        .get("https://api.anthropic.com/v1/models")
-        .header("anthropic-version", "2023-06-01")
-        .timeout(std::time::Duration::from_secs(5));
-
-    if is_oauth {
-        request = request
-            .bearer_auth(&key_or_token)
-            .header("anthropic-beta", "oauth-2025-04-20");
-    } else {
-        request = request.header("x-api-key", &key_or_token);
-    }
-
-    let resp = match request.send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return static_defaults,
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        id: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct ModelsResponse {
-        data: Vec<ModelEntry>,
-    }
-
-    match resp.json::<ModelsResponse>().await {
-        Ok(body) => {
-            let mut models: Vec<(String, String)> = body
-                .data
-                .into_iter()
-                .filter(|m| !m.id.contains("embedding") && !m.id.contains("audio"))
-                .map(|m| {
-                    let label = m.id.clone();
-                    (m.id, label)
-                })
-                .collect();
-            if models.is_empty() {
-                return static_defaults;
-            }
-            models.sort_by(|a, b| a.0.cmp(&b.0));
-            models
-        }
-        Err(_) => static_defaults,
-    }
-}
-
-/// Fetch models from the OpenAI API.
-///
-/// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
-async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
-    let static_defaults = vec![
-        (
-            "gpt-5.3-codex".into(),
-            "GPT-5.3 Codex (latest flagship)".into(),
-        ),
-        ("gpt-5.2-codex".into(), "GPT-5.2 Codex".into()),
-        ("gpt-5.2".into(), "GPT-5.2".into()),
-        (
-            "gpt-5.1-codex-mini".into(),
-            "GPT-5.1 Codex Mini (fast)".into(),
-        ),
-        ("gpt-5".into(), "GPT-5".into()),
-        ("gpt-5-mini".into(), "GPT-5 Mini".into()),
-        ("gpt-4.1".into(), "GPT-4.1".into()),
-        ("gpt-4.1-mini".into(), "GPT-4.1 Mini".into()),
-        ("o4-mini".into(), "o4-mini (fast reasoning)".into()),
-        ("o3".into(), "o3 (reasoning)".into()),
-    ];
-
-    let api_key = cached_key
-        .map(String::from)
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-        .filter(|k| !k.is_empty());
-
-    let api_key = match api_key {
-        Some(k) => k,
-        None => return static_defaults,
-    };
-
-    let client = reqwest::Client::new();
-    let resp = match client
-        .get("https://api.openai.com/v1/models")
-        .bearer_auth(&api_key)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        _ => return static_defaults,
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        id: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct ModelsResponse {
-        data: Vec<ModelEntry>,
-    }
-
-    match resp.json::<ModelsResponse>().await {
-        Ok(body) => {
-            let mut models: Vec<(String, String)> = body
-                .data
-                .into_iter()
-                .filter(|m| is_openai_chat_model(&m.id))
-                .map(|m| {
-                    let label = m.id.clone();
-                    (m.id, label)
-                })
-                .collect();
-            if models.is_empty() {
-                return static_defaults;
-            }
-            sort_openai_models(&mut models);
-            models
-        }
-        Err(_) => static_defaults,
-    }
-}
-
-fn is_openai_chat_model(model_id: &str) -> bool {
-    let id = model_id.to_ascii_lowercase();
-
-    let is_chat_family = id.starts_with("gpt-")
-        || id.starts_with("chatgpt-")
-        || id.starts_with("o1")
-        || id.starts_with("o3")
-        || id.starts_with("o4")
-        || id.starts_with("o5");
-
-    let is_non_chat_variant = id.contains("realtime")
-        || id.contains("audio")
-        || id.contains("transcribe")
-        || id.contains("tts")
-        || id.contains("embedding")
-        || id.contains("moderation")
-        || id.contains("image");
-
-    is_chat_family && !is_non_chat_variant
-}
-
-fn openai_model_priority(model_id: &str) -> usize {
-    let id = model_id.to_ascii_lowercase();
-
-    const EXACT_PRIORITY: &[&str] = &[
-        "gpt-5.3-codex",
-        "gpt-5.2-codex",
-        "gpt-5.2",
-        "gpt-5.1-codex-mini",
-        "gpt-5",
-        "gpt-5-mini",
-        "gpt-5-nano",
-        "o4-mini",
-        "o3",
-        "o1",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4o",
-        "gpt-4o-mini",
-    ];
-    if let Some(pos) = EXACT_PRIORITY.iter().position(|m| id == *m) {
-        return pos;
-    }
-
-    const PREFIX_PRIORITY: &[&str] = &[
-        "gpt-5.", "gpt-5-", "o3-", "o4-", "o1-", "gpt-4.1-", "gpt-4o-", "gpt-3.5-", "chatgpt-",
-    ];
-    if let Some(pos) = PREFIX_PRIORITY
-        .iter()
-        .position(|prefix| id.starts_with(prefix))
-    {
-        return EXACT_PRIORITY.len() + pos;
-    }
-
-    EXACT_PRIORITY.len() + PREFIX_PRIORITY.len() + 1
-}
-
-fn sort_openai_models(models: &mut [(String, String)]) {
-    models.sort_by(|a, b| {
-        openai_model_priority(&a.0)
-            .cmp(&openai_model_priority(&b.0))
-            .then_with(|| a.0.cmp(&b.0))
-    });
-}
-
-/// Fetch installed models from a local Ollama instance.
-///
-/// Returns `(model_name, display_label)` pairs. Falls back to static defaults on error.
-async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)> {
-    let static_defaults = vec![
-        ("llama3".into(), "llama3".into()),
-        ("mistral".into(), "mistral".into()),
-        ("codellama".into(), "codellama".into()),
-    ];
-
-    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
-
-    let resp = match client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        Ok(_) => return static_defaults,
-        Err(_) => {
-            print_info("Could not connect to Ollama. Is it running?");
-            return static_defaults;
-        }
-    };
-
-    #[derive(serde::Deserialize)]
-    struct ModelEntry {
-        name: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct TagsResponse {
-        models: Vec<ModelEntry>,
-    }
-
-    match resp.json::<TagsResponse>().await {
-        Ok(body) => {
-            let models: Vec<(String, String)> = body
-                .models
-                .into_iter()
-                .map(|m| {
-                    let label = m.name.clone();
-                    (m.name, label)
-                })
-                .collect();
-            if models.is_empty() {
-                return static_defaults;
-            }
-            models
-        }
-        Err(_) => static_defaults,
-    }
-}
-
-/// Fetch models from a generic OpenAI-compatible /v1/models endpoint.
-///
-/// Used for registry providers like Groq, NVIDIA NIM, etc.
-async fn fetch_openai_compatible_models(
-    base_url: &str,
-    cached_key: Option<&str>,
-) -> Vec<(String, String)> {
-    if base_url.is_empty() {
-        return vec![];
-    }
-
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let client = reqwest::Client::new();
-    let mut req = client.get(&url).timeout(std::time::Duration::from_secs(5));
-    if let Some(key) = cached_key {
-        req = req.bearer_auth(key);
-    }
-
-    let resp = match req.send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return vec![],
-    };
-
-    #[derive(serde::Deserialize)]
-    struct Model {
-        id: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct ModelsResponse {
-        data: Vec<Model>,
-    }
-
-    match resp.json::<ModelsResponse>().await {
-        Ok(body) => body
-            .data
-            .into_iter()
-            .map(|m| {
-                let label = m.id.clone();
-                (m.id, label)
-            })
-            .collect(),
-        Err(_) => vec![],
-    }
 }
 
 /// Discover WASM channels in a directory.
@@ -3425,58 +2752,6 @@ async fn discover_wasm_channels(dir: &std::path::Path) -> Vec<(String, ChannelCa
 /// Mask an API key for display: show first 6 + last 4 chars.
 ///
 /// Uses char-based indexing to avoid panicking on multi-byte UTF-8.
-/// Build the `LlmConfig` used by `fetch_nearai_models` to list available models.
-///
-/// Reads `NEARAI_API_KEY` from the environment so that users who authenticated
-/// via Cloud API key (option 4) don't get re-prompted during model selection.
-fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
-    // If the user authenticated via API key (option 4), the key is stored
-    // via set_runtime_env(). Use env_or_override() (not std::env::var) so
-    // the runtime overlay is checked — otherwise resolve_bearer_token()
-    // falls back to session-token auth and re-triggers the interactive
-    // auth prompt.
-    let api_key =
-        crate::config::helpers::env_or_override("NEARAI_API_KEY").map(secrecy::SecretString::from);
-
-    // Match the same base_url logic as LlmConfig::resolve(): use cloud-api
-    // when an API key is present, private.near.ai for session-token auth.
-    let default_base = if api_key.is_some() {
-        "https://cloud-api.near.ai"
-    } else {
-        "https://private.near.ai"
-    };
-    let base_url = std::env::var("NEARAI_BASE_URL").unwrap_or_else(|_| default_base.to_string());
-    let auth_base_url =
-        std::env::var("NEARAI_AUTH_URL").unwrap_or_else(|_| "https://private.near.ai".to_string());
-
-    crate::config::LlmConfig {
-        backend: "nearai".to_string(),
-        session: crate::llm::session::SessionConfig {
-            auth_base_url,
-            session_path: crate::config::llm::default_session_path(),
-        },
-        nearai: crate::config::NearAiConfig {
-            model: "dummy".to_string(),
-            cheap_model: None,
-            base_url,
-            api_key,
-            fallback_model: None,
-            max_retries: 3,
-            circuit_breaker_threshold: None,
-            circuit_breaker_recovery_secs: 30,
-            response_cache_enabled: false,
-            response_cache_ttl_secs: 3600,
-            response_cache_max_entries: 1000,
-            failover_cooldown_secs: 300,
-            failover_cooldown_threshold: 3,
-            smart_routing_cascade: true,
-        },
-        provider: None,
-        bedrock: None,
-        request_timeout_secs: 120,
-    }
-}
-
 fn mask_api_key(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
     if chars.len() < 12 {
@@ -3686,6 +2961,7 @@ mod tests {
 
     use super::*;
     use crate::config::helpers::ENV_MUTEX;
+    use crate::llm::models::{is_openai_chat_model, sort_openai_models};
 
     #[test]
     fn test_wizard_creation() {
@@ -3707,7 +2983,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "postgres")]
     fn test_mask_password_in_url() {
         assert_eq!(
             mask_password_in_url("postgres://user:secret@localhost/db"),

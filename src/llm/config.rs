@@ -163,3 +163,41 @@ pub struct NearAiConfig {
     /// Enable cascade mode for smart routing. Default: true.
     pub smart_routing_cascade: bool,
 }
+
+impl NearAiConfig {
+    /// Create a minimal config suitable for listing available models.
+    ///
+    /// Reads `NEARAI_API_KEY` from the environment and selects the
+    /// appropriate base URL (cloud-api when API key is present,
+    /// private.near.ai for session-token auth).
+    pub(crate) fn for_model_discovery() -> Self {
+        let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")
+            .filter(|k| !k.is_empty())
+            .map(SecretString::from);
+
+        let default_base = if api_key.is_some() {
+            "https://cloud-api.near.ai"
+        } else {
+            "https://private.near.ai"
+        };
+        let base_url =
+            std::env::var("NEARAI_BASE_URL").unwrap_or_else(|_| default_base.to_string());
+
+        Self {
+            model: String::new(),
+            cheap_model: None,
+            base_url,
+            api_key,
+            fallback_model: None,
+            max_retries: 3,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
+            smart_routing_cascade: true,
+        }
+    }
+}

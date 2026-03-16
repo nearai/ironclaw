@@ -92,18 +92,26 @@ pub struct SignalConfig {
 
 impl ChannelsConfig {
     /// Resolve channels config following `env > settings > default` for every field.
-    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &Settings, tunnel_enabled: bool) -> Result<Self, ConfigError> {
         let cs = &settings.channels;
 
         // --- HTTP webhook ---
         // HTTP is enabled when env vars are set OR settings has it enabled.
         let http_enabled_by_env =
             optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some();
+        // When a tunnel is configured, default to loopback since external
+        // traffic arrives through the tunnel. Without a tunnel the webhook
+        // server needs to accept connections from the network directly.
+        let default_host = if tunnel_enabled {
+            "127.0.0.1"
+        } else {
+            "0.0.0.0"
+        };
         let http = if http_enabled_by_env || cs.http_enabled {
             Some(HttpConfig {
                 host: optional_env("HTTP_HOST")?
                     .or_else(|| cs.http_host.clone())
-                    .unwrap_or_else(|| "0.0.0.0".to_string()),
+                    .unwrap_or_else(|| default_host.to_string()),
                 port: parse_optional_env("HTTP_PORT", cs.http_port.unwrap_or(8080))?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
                 user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
@@ -390,6 +398,69 @@ mod tests {
         assert!(!cfg.wasm_channels_enabled);
     }
 
+    /// When a tunnel is active and HTTP_HOST is not explicitly set, the
+    /// webhook server should default to loopback to avoid unnecessary exposure.
+    #[test]
+    fn http_host_defaults_to_loopback_with_tunnel() {
+        // Set HTTP_PORT to trigger HttpConfig creation, but leave HTTP_HOST unset
+        // so the default kicks in.
+        unsafe {
+            std::env::set_var("HTTP_PORT", "9999");
+            std::env::remove_var("HTTP_HOST");
+        }
+        let settings = crate::settings::Settings::default();
+        let cfg = ChannelsConfig::resolve(&settings, true).unwrap();
+        unsafe {
+            std::env::remove_var("HTTP_PORT");
+        }
+        let http = cfg.http.expect("HttpConfig should be present");
+        assert_eq!(
+            http.host, "127.0.0.1",
+            "tunnel active should default to loopback"
+        );
+        assert_eq!(http.port, 9999);
+    }
+
+    /// Without a tunnel, the webhook server defaults to 0.0.0.0 so external
+    /// services can reach it directly.
+    #[test]
+    fn http_host_defaults_to_all_interfaces_without_tunnel() {
+        unsafe {
+            std::env::set_var("HTTP_PORT", "9998");
+            std::env::remove_var("HTTP_HOST");
+        }
+        let settings = crate::settings::Settings::default();
+        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
+        unsafe {
+            std::env::remove_var("HTTP_PORT");
+        }
+        let http = cfg.http.expect("HttpConfig should be present");
+        assert_eq!(
+            http.host, "0.0.0.0",
+            "no tunnel should default to all interfaces"
+        );
+    }
+
+    /// An explicit HTTP_HOST always wins regardless of tunnel state.
+    #[test]
+    fn explicit_http_host_overrides_tunnel_default() {
+        unsafe {
+            std::env::set_var("HTTP_PORT", "9997");
+            std::env::set_var("HTTP_HOST", "192.168.1.50");
+        }
+        let settings = crate::settings::Settings::default();
+        let cfg = ChannelsConfig::resolve(&settings, true).unwrap();
+        unsafe {
+            std::env::remove_var("HTTP_PORT");
+            std::env::remove_var("HTTP_HOST");
+        }
+        let http = cfg.http.expect("HttpConfig should be present");
+        assert_eq!(
+            http.host, "192.168.1.50",
+            "explicit host should override tunnel default"
+        );
+    }
+
     #[test]
     fn default_channels_dir_ends_with_channels() {
         let dir = default_channels_dir();
@@ -425,7 +496,7 @@ mod tests {
         }
 
         let settings = crate::settings::Settings::default();
-        let cfg = ChannelsConfig::resolve(&settings).unwrap();
+        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
 
         let gw = cfg.gateway.expect("gateway should be enabled by default");
         assert_eq!(gw.host, "127.0.0.1");
@@ -459,7 +530,7 @@ mod tests {
         settings.channels.gateway_auth_token = Some("db-token-123".to_string());
         settings.channels.gateway_user_id = Some("myuser".to_string());
 
-        let cfg = ChannelsConfig::resolve(&settings).unwrap();
+        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
         let gw = cfg.gateway.expect("gateway should be enabled");
         assert_eq!(gw.port, 4000);
         assert_eq!(gw.host, "0.0.0.0");
@@ -491,7 +562,7 @@ mod tests {
         settings.channels.gateway_host = Some("0.0.0.0".to_string());
         settings.channels.gateway_auth_token = Some("db-token".to_string());
 
-        let cfg = ChannelsConfig::resolve(&settings).unwrap();
+        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
         let gw = cfg.gateway.expect("gateway should be enabled");
         assert_eq!(gw.port, 5000, "env should override settings");
         assert_eq!(gw.host, "10.0.0.1", "env should override settings");
@@ -531,7 +602,7 @@ mod tests {
         let mut settings = crate::settings::Settings::default();
         settings.channels.cli_enabled = false;
 
-        let cfg = ChannelsConfig::resolve(&settings).unwrap();
+        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
         assert!(!cfg.cli.enabled, "settings should disable CLI");
     }
 
@@ -561,7 +632,7 @@ mod tests {
         settings.channels.http_port = Some(9090);
         settings.channels.http_host = Some("10.0.0.1".to_string());
 
-        let cfg = ChannelsConfig::resolve(&settings).unwrap();
+        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
         let http = cfg.http.expect("HTTP should be enabled from settings");
         assert_eq!(http.port, 9090);
         assert_eq!(http.host, "10.0.0.1");
@@ -611,7 +682,7 @@ mod tests {
             std::env::remove_var("WASM_CHANNELS_DIR");
             std::env::remove_var("TELEGRAM_OWNER_ID");
         }
-        let result = ChannelsConfig::resolve(&settings);
+        let result = ChannelsConfig::resolve(&settings, false);
         assert!(result.is_err(), "GATEWAY_ENABLED=maybe should be rejected");
 
         // CLI_ENABLED=on should error
@@ -619,7 +690,7 @@ mod tests {
             std::env::remove_var("GATEWAY_ENABLED");
             std::env::set_var("CLI_ENABLED", "on");
         }
-        let result = ChannelsConfig::resolve(&settings);
+        let result = ChannelsConfig::resolve(&settings, false);
         assert!(result.is_err(), "CLI_ENABLED=on should be rejected");
 
         // WASM_CHANNELS_ENABLED=yes should error
@@ -627,7 +698,7 @@ mod tests {
             std::env::remove_var("CLI_ENABLED");
             std::env::set_var("WASM_CHANNELS_ENABLED", "yes");
         }
-        let result = ChannelsConfig::resolve(&settings);
+        let result = ChannelsConfig::resolve(&settings, false);
         assert!(
             result.is_err(),
             "WASM_CHANNELS_ENABLED=yes should be rejected"
