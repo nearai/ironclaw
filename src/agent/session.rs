@@ -372,8 +372,7 @@ impl Thread {
                     .enumerate()
                     .map(|(tc_idx, tc)| {
                         // Use provider-compatible tool call IDs derived from turn/tool indices.
-                        let seed = format!("{}-{}", turn_idx, tc_idx);
-                        (generate_tool_call_id(&seed), tc)
+                        (generate_tool_call_id(turn_idx, tc_idx), tc)
                     })
                     .collect();
 
