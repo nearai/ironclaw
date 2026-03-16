@@ -3,7 +3,7 @@
 /// Fetch models from the Anthropic API.
 ///
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
-pub async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
+pub(crate) async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
         (
             "claude-opus-4-6".into(),
@@ -88,7 +88,7 @@ pub async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, St
 /// Fetch models from the OpenAI API.
 ///
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
-pub async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
+pub(crate) async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
         (
             "gpt-5.3-codex".into(),
@@ -160,7 +160,7 @@ pub async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, Strin
     }
 }
 
-pub fn is_openai_chat_model(model_id: &str) -> bool {
+pub(crate) fn is_openai_chat_model(model_id: &str) -> bool {
     let id = model_id.to_ascii_lowercase();
 
     let is_chat_family = id.starts_with("gpt-")
@@ -181,7 +181,7 @@ pub fn is_openai_chat_model(model_id: &str) -> bool {
     is_chat_family && !is_non_chat_variant
 }
 
-pub fn openai_model_priority(model_id: &str) -> usize {
+pub(crate) fn openai_model_priority(model_id: &str) -> usize {
     let id = model_id.to_ascii_lowercase();
 
     const EXACT_PRIORITY: &[&str] = &[
@@ -217,7 +217,7 @@ pub fn openai_model_priority(model_id: &str) -> usize {
     EXACT_PRIORITY.len() + PREFIX_PRIORITY.len() + 1
 }
 
-pub fn sort_openai_models(models: &mut [(String, String)]) {
+pub(crate) fn sort_openai_models(models: &mut [(String, String)]) {
     models.sort_by(|a, b| {
         openai_model_priority(&a.0)
             .cmp(&openai_model_priority(&b.0))
@@ -228,7 +228,7 @@ pub fn sort_openai_models(models: &mut [(String, String)]) {
 /// Fetch installed models from a local Ollama instance.
 ///
 /// Returns `(model_name, display_label)` pairs. Falls back to static defaults on error.
-pub async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)> {
+pub(crate) async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)> {
     let static_defaults = vec![
         ("llama3".into(), "llama3".into()),
         ("mistral".into(), "mistral".into()),
@@ -285,7 +285,7 @@ pub async fn fetch_ollama_models(base_url: &str) -> Vec<(String, String)> {
 /// Fetch models from a generic OpenAI-compatible /v1/models endpoint.
 ///
 /// Used for registry providers like Groq, NVIDIA NIM, etc.
-pub async fn fetch_openai_compatible_models(
+pub(crate) async fn fetch_openai_compatible_models(
     base_url: &str,
     cached_key: Option<&str>,
 ) -> Vec<(String, String)> {
@@ -329,25 +329,9 @@ pub async fn fetch_openai_compatible_models(
 
 /// Build the `LlmConfig` used by `fetch_nearai_models` to list available models.
 ///
-/// Reads `NEARAI_API_KEY` from the environment so that users who authenticated
-/// via Cloud API key (option 4) don't get re-prompted during model selection.
-pub fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
-    // If the user authenticated via API key (option 4), the key is stored
-    // as an env var. Pass it through so `resolve_bearer_token()` doesn't
-    // re-trigger the interactive auth prompt.
-    let api_key = std::env::var("NEARAI_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-        .map(secrecy::SecretString::from);
-
-    // Match the same base_url logic as LlmConfig::resolve(): use cloud-api
-    // when an API key is present, private.near.ai for session-token auth.
-    let default_base = if api_key.is_some() {
-        "https://cloud-api.near.ai"
-    } else {
-        "https://private.near.ai"
-    };
-    let base_url = std::env::var("NEARAI_BASE_URL").unwrap_or_else(|_| default_base.to_string());
+/// Uses [`NearAiConfig::for_model_discovery()`] to construct a minimal NEAR AI
+/// config, then wraps it in an `LlmConfig` with session config for auth.
+pub(crate) fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
     let auth_base_url =
         std::env::var("NEARAI_AUTH_URL").unwrap_or_else(|_| "https://private.near.ai".to_string());
 
@@ -357,22 +341,7 @@ pub fn build_nearai_model_fetch_config() -> crate::config::LlmConfig {
             auth_base_url,
             session_path: crate::config::llm::default_session_path(),
         },
-        nearai: crate::config::NearAiConfig {
-            model: "dummy".to_string(),
-            cheap_model: None,
-            base_url,
-            api_key,
-            fallback_model: None,
-            max_retries: 3,
-            circuit_breaker_threshold: None,
-            circuit_breaker_recovery_secs: 30,
-            response_cache_enabled: false,
-            response_cache_ttl_secs: 3600,
-            response_cache_max_entries: 1000,
-            failover_cooldown_secs: 300,
-            failover_cooldown_threshold: 3,
-            smart_routing_cascade: true,
-        },
+        nearai: crate::config::NearAiConfig::for_model_discovery(),
         provider: None,
         bedrock: None,
         request_timeout_secs: 120,

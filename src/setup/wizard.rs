@@ -530,7 +530,6 @@ impl SetupWizard {
         }
     }
 
-    /// Test PostgreSQL connection and store the pool.
     /// Test database connection using the db module factory.
     ///
     /// Connects without running migrations and validates PostgreSQL

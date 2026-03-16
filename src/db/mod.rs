@@ -263,7 +263,13 @@ async fn validate_postgres(pool: &deadpool_postgres::Pool) -> Result<(), Databas
         .split('.')
         .next()
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0);
+        .ok_or_else(|| {
+            DatabaseError::Pool(format!(
+                "Could not parse PostgreSQL version from '{}'. \
+                 Expected a numeric major version (e.g., '15.2').",
+                version_str
+            ))
+        })?;
 
     const MIN_PG_MAJOR_VERSION: u32 = 15;
 
