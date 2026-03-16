@@ -677,9 +677,9 @@ mod tests {
 
     #[test]
     fn non_transient_errors_are_not_retryable() {
-        assert!(!super::is_transient_sandbox_error(
-            &SandboxError::Timeout(std::time::Duration::from_secs(30))
-        ));
+        assert!(!super::is_transient_sandbox_error(&SandboxError::Timeout(
+            std::time::Duration::from_secs(30)
+        )));
         assert!(!super::is_transient_sandbox_error(
             &SandboxError::ExecutionFailed {
                 reason: "exit code 1".to_string()
@@ -690,10 +690,8 @@ mod tests {
                 reason: "policy violation".to_string()
             }
         ));
-        assert!(!super::is_transient_sandbox_error(
-            &SandboxError::Config {
-                reason: "bad config".to_string()
-            }
-        ));
+        assert!(!super::is_transient_sandbox_error(&SandboxError::Config {
+            reason: "bad config".to_string()
+        }));
     }
 }
