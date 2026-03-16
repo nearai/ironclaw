@@ -25,9 +25,15 @@ fn make_rustls_connector() -> MakeRustlsConnect {
     if root_store.is_empty() {
         tracing::error!("no system root certificates found -- TLS connections will fail");
     }
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    // `--all-features` brings in both aws-lc-rs and ring-backed rustls providers.
+    // Pick the same ring provider reqwest already uses so postgres TLS setup stays deterministic.
+    let config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .expect("ring provider should support rustls default protocol versions")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
     MakeRustlsConnect::new(config)
 }
 
