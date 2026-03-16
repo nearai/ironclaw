@@ -184,5 +184,5 @@ def signed_http_webhook_headers(body: bytes) -> dict[str, str]:
     ).hexdigest()
     return {
         "Content-Type": "application/json",
-        "X-IronClaw-Signature": f"sha256={digest}",
+        "X-Hub-Signature-256": f"sha256={digest}",
     }
