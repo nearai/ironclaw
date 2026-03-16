@@ -56,6 +56,25 @@ TOOL_CALL_PATTERNS = [
         },
     ),
     (
+        re.compile(
+            r"create event routine (?P<name>[a-z0-9][a-z0-9_-]*) "
+            r"channel (?P<channel>[a-z0-9_-]+) pattern (?P<pattern>[a-z0-9_|-]+)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Event routine {m.group('name')}",
+            "trigger_type": "event",
+            "event_channel": None if m.group("channel").lower() == "any" else m.group("channel"),
+            "event_pattern": m.group("pattern"),
+            "prompt": f"Acknowledge that {m.group('name')} fired.",
+            "action_type": "lightweight",
+            "use_tools": False,
+            "cooldown_secs": 0,
+        },
+    ),
+    (
         re.compile(r"list owner routines", re.IGNORECASE),
         "routine_list",
         lambda _: {},
