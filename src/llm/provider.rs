@@ -262,6 +262,82 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn generate_tool_call_id_has_valid_format() {
+        let samples = [
+            (0usize, 0usize),
+            (1usize, 2usize),
+            (42usize, 999usize),
+            (usize::MAX, usize::MAX),
+        ];
+
+        for (a, b) in samples {
+            let id = generate_tool_call_id(a, b);
+            assert_eq!(
+                id.len(),
+                9,
+                "tool-call ID must be exactly 9 characters for seeds ({a}, {b})"
+            );
+            assert!(
+                id.chars().all(|c| c.is_ascii_alphanumeric()),
+                "tool-call ID must be ASCII alphanumeric for seeds ({a}, {b}), got: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_tool_call_id_is_deterministic_for_same_seeds() {
+        let pairs = [
+            (0usize, 0usize),
+            (1usize, 2usize),
+            (123usize, 456usize),
+            (usize::MAX, 0usize),
+        ];
+
+        for (a, b) in pairs {
+            let id1 = generate_tool_call_id(a, b);
+            let id2 = generate_tool_call_id(a, b);
+            let id3 = generate_tool_call_id(a, b);
+            assert_eq!(
+                id1, id2,
+                "tool-call ID must be deterministic for seeds ({a}, {b})"
+            );
+            assert_eq!(
+                id2, id3,
+                "tool-call ID must be deterministic across multiple calls for seeds ({a}, {b})"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_tool_call_id_differs_for_different_seeds_in_small_sample() {
+        let seed_pairs = [
+            (0usize, 1usize),
+            (1usize, 0usize),
+            (1usize, 2usize),
+            (2usize, 3usize),
+            (10usize, 20usize),
+            (100usize, 200usize),
+        ];
+
+        let mut ids = HashSet::new();
+        for (a, b) in seed_pairs {
+            let id = generate_tool_call_id(a, b);
+            let inserted = ids.insert(id.clone());
+            assert!(
+                inserted,
+                "expected distinct tool-call IDs for different seeds, \
+                 but duplicate ID '{id}' found for seeds ({a}, {b})"
+            );
+        }
+    }
+}
+
 /// Request for a completion with tool use.
 #[derive(Debug, Clone)]
 pub struct ToolCompletionRequest {
