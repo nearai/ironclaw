@@ -172,7 +172,9 @@ impl SetupWizard {
             // Pre-populate backend from env so step_inference_provider
             // can offer "Keep current provider?" instead of asking from scratch.
             if self.settings.llm_backend.is_none() {
-                if let Ok(b) = std::env::var("LLM_BACKEND") {
+                if let Ok(b) = std::env::var("LLM_BACKEND")
+                    && !b.trim().is_empty()
+                {
                     self.settings.llm_backend = Some(b);
                 } else if std::env::var("NEARAI_API_KEY").is_ok() {
                     self.settings.llm_backend = Some("nearai".to_string());

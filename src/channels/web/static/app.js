@@ -106,9 +106,7 @@ document.getElementById('restart-close-btn').addEventListener('click', () => can
 document.getElementById('restart-cancel-btn').addEventListener('click', () => cancelRestart());
 document.getElementById('restart-confirm-btn').addEventListener('click', () => confirmRestart());
 document.getElementById('language-btn').addEventListener('click', () => toggleLanguageMenu());
-document.querySelectorAll('.language-option[data-lang]').forEach(btn => {
-  btn.addEventListener('click', () => switchLanguage(btn.dataset.lang));
-});
+// Language option clicks handled by delegated data-action="switch-language" handler.
 document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
 document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
 document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
