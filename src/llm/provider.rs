@@ -236,19 +236,23 @@ pub struct ToolCall {
 /// Generate a tool-call ID that satisfies all providers.
 ///
 /// Mistral requires exactly 9 alphanumeric characters (`[a-zA-Z0-9]{9}`).
-/// Other providers accept any non-empty string.  By default we produce a
-/// 9-char base-36 string derived from two seed values so the ID is both
+/// Other providers accept any non-empty string. By default we produce a
+/// 9-char base-62 string derived from two seed values so the ID is both
 /// deterministic (for replayed history) and provider-compatible.
 pub fn generate_tool_call_id(seed_a: usize, seed_b: usize) -> String {
     // Mix the two seeds into a single u64 using a simple hash-like combine.
     let combined = (seed_a as u64).wrapping_mul(6364136223846793005).wrapping_add(seed_b as u64);
-    // Format as 9-char zero-padded base-36 (digits + lowercase letters).
+    // Format as 9-char zero-padded base-62 (0-9, a-z, A-Z).
     let mut buf = [b'0'; 9];
     let mut val = combined;
     for b in buf.iter_mut().rev() {
-        let digit = (val % 36) as u8;
-        *b = if digit < 10 { b'0' + digit } else { b'a' + digit - 10 };
-        val /= 36;
+        let digit = (val % 62) as u8;
+        *b = match digit {
+            0..=9 => b'0' + digit,
+            10..=35 => b'a' + (digit - 10),
+            _ => b'A' + (digit - 36),
+        };
+        val /= 62;
     }
     String::from(std::str::from_utf8(&buf).unwrap())
 }
