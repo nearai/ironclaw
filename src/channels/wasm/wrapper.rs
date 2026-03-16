@@ -860,6 +860,24 @@ impl WasmChannel {
         self
     }
 
+    /// Attach a message stream for integration tests.
+    ///
+    /// This primes any startup-persisted workspace state, but tolerates
+    /// callback-level startup failures so tests can exercise webhook parsing
+    /// and message emission without depending on external network access.
+    #[cfg(feature = "integration")]
+    #[doc(hidden)]
+    pub async fn start_message_stream_for_test(&self) -> Result<MessageStream, WasmChannelError> {
+        self.prime_startup_state_for_test().await?;
+
+        let (tx, rx) = mpsc::channel(256);
+        *self.message_tx.write().await = Some(tx);
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
+
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
     /// Update the channel config before starting.
     ///
     /// Merges the provided values into the existing config JSON.
@@ -897,6 +915,99 @@ impl WasmChannel {
     /// Get a snapshot of credentials for use in callbacks.
     pub async fn get_credentials(&self) -> HashMap<String, String> {
         self.credentials.read().await.clone()
+    }
+
+    #[cfg(feature = "integration")]
+    async fn prime_startup_state_for_test(&self) -> Result<(), WasmChannelError> {
+        if self.prepared.component().is_none() {
+            return Ok(());
+        }
+
+        let runtime = Arc::clone(&self.runtime);
+        let prepared = Arc::clone(&self.prepared);
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
+        let config_json = self.config_json.read().await.clone();
+        let timeout = self.runtime.config().callback_timeout;
+        let channel_name = self.name.clone();
+        let credentials = self.get_credentials().await;
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await;
+        let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
+
+        let result = tokio::time::timeout(timeout, async move {
+            tokio::task::spawn_blocking(move || {
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    host_credentials,
+                    pairing_store,
+                )?;
+                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
+
+                let channel_iface = instance.near_agent_channel();
+                let start_result = channel_iface
+                    .call_on_start(&mut store, &config_json)
+                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))
+                    .and_then(|wasm_result| match wasm_result {
+                        Ok(_) => Ok(()),
+                        Err(err_msg) => Err(WasmChannelError::CallbackFailed {
+                            name: prepared.name.clone(),
+                            reason: err_msg,
+                        }),
+                    });
+
+                let mut host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
+                Ok::<_, WasmChannelError>((start_result, host_state))
+            })
+            .await
+            .map_err(|e| WasmChannelError::ExecutionPanicked {
+                name: channel_name.clone(),
+                reason: e.to_string(),
+            })?
+        })
+        .await;
+
+        match result {
+            Ok(Ok((Ok(()), mut host_state))) => {
+                for entry in host_state.take_logs() {
+                    tracing::debug!(channel = %self.name, "{}", entry.message);
+                }
+                Ok(())
+            }
+            Ok(Ok((Err(WasmChannelError::CallbackFailed { reason, .. }), mut host_state))) => {
+                for entry in host_state.take_logs() {
+                    tracing::debug!(channel = %self.name, "{}", entry.message);
+                }
+                tracing::debug!(
+                    channel = %self.name,
+                    reason = %reason,
+                    "Ignoring startup callback failure in test-only message stream bootstrap"
+                );
+                Ok(())
+            }
+            Ok(Ok((Err(e), mut host_state))) => {
+                for entry in host_state.take_logs() {
+                    tracing::debug!(channel = %self.name, "{}", entry.message);
+                }
+                Err(e)
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(WasmChannelError::Timeout {
+                name: self.name.clone(),
+                callback: "on_start".to_string(),
+            }),
+        }
     }
 
     /// Get the channel name.
