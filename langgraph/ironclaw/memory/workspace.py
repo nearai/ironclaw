@@ -72,6 +72,24 @@ class Workspace:
             return True
         return False
 
+    async def append(self, path: str, content: str) -> None:
+        """
+        Append content to an existing document, or create it if absent.
+
+        Used by the compaction system to write to daily log files
+        (e.g. ``daily/2026-03-16.md``).  Mirrors the Rust ``Workspace::append``.
+        """
+        doc = self._docs.get(path)
+        if doc:
+            doc.content += content
+            doc.updated_at = datetime.now(timezone.utc)
+        else:
+            self._docs[path] = WorkspaceDocument(
+                path=path,
+                content=content,
+            )
+        logger.debug("Workspace append: %s (+%d bytes)", path, len(content))
+
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------

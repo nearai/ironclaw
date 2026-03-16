@@ -20,21 +20,24 @@ Graph topology
            │    └──────┬───────┘
            │           │ stop → END
            │           ▼
-           │    ┌──────────────┐
+           │    ┌──────────────┐   ← NEW: auto-triggered before every LLM call
+           │    │compact_ctx   │       when token usage > 80% of context window
+           │    └──────┬───────┘
+           │           │
+           │    ┌──────▼───────┐
            │    │   call_llm   │
            │    └──────┬───────┘
            │           │
-           │    ┌──────▼───────────────────┐
-           │    │    route_llm_response    │
-           │    └──┬───────────┬────────── ┘
-           │  text │     tools │   nudge │  max_iter
-           │       │           │         │
-           │       ▼           ▼         ▼
-           │      END   ┌────────────┐ loop back
-           │            │exec_tools  │
-           │            └──────┬─────┘
-           │                   │ need_approval → END (wait)
-           └───────────────────┘  otherwise loop back
+           │    ┌──────▼──────────────────┐
+           │    │   route_llm_response   │
+           │    └──┬──────────┬───────────┘
+           │  text │    tools │  nudge │  max_iter
+           │       ▼          ▼        ▼
+           │      END  ┌────────────┐  loop back
+           │           │exec_tools  │
+           │           └──────┬─────┘
+           │                  │ need_approval → END
+           └──────────────────┘  otherwise loop back
 """
 
 from __future__ import annotations
@@ -50,6 +53,8 @@ from ironclaw.nodes.router import route_input_node
 from ironclaw.nodes.signals import check_signals_node
 from ironclaw.nodes.llm_call import call_llm_node
 from ironclaw.nodes.tool_exec import execute_tools_node
+from ironclaw.nodes.compaction import ContextCompactor, compact_context_node
+from ironclaw.nodes.context_monitor import ContextMonitor
 from ironclaw.safety.layer import SafetyLayer
 from ironclaw.state import AgentState
 from ironclaw.tools.registry import ToolRegistry
@@ -67,7 +72,15 @@ def _after_route_input(state: AgentState) -> Literal["check_signals", "__end__"]
     return "check_signals"
 
 
-def _after_check_signals(state: AgentState) -> Literal["call_llm", "__end__"]:
+def _after_check_signals(state: AgentState) -> Literal["compact_context", "__end__"]:
+    """After signal check: run compaction gate before every LLM call."""
+    if state.signal == "stop":
+        return END
+    return "compact_context"
+
+
+def _after_compact_context(state: AgentState) -> Literal["call_llm", "__end__"]:
+    """After compaction: proceed to LLM (compaction never stops the loop)."""
     if state.signal == "stop":
         return END
     return "call_llm"
@@ -84,14 +97,14 @@ def _after_call_llm(
         return END
     if state.last_response_type == "tool_calls":
         return "execute_tools"
-    # nudge or none — go back to signal check which will inject nudge msg
+    # nudge or none — loop back so check_signals injects the nudge message
     return "check_signals"
 
 
 def _after_execute_tools(
     state: AgentState,
 ) -> Literal["check_signals", "__end__"]:
-    """After tool execution: loop back unless approval is needed."""
+    """After tool execution: loop back unless approval is needed or stopped."""
     if state.last_response_type == "need_approval":
         return END
     if state.signal == "stop":
@@ -118,11 +131,15 @@ class AgentDeps:
         tool_registry: ToolRegistry,
         safety: SafetyLayer,
         config: AgentConfig,
+        workspace: Any = None,
+        context_limit: int = 100_000,
     ) -> None:
         self.llm = llm
         self.tool_registry = tool_registry
         self.safety = safety
         self.config = config
+        self.workspace = workspace
+        self.context_limit = context_limit
 
 
 def build_agent_graph(deps: AgentDeps) -> Any:
@@ -136,13 +153,28 @@ def build_agent_graph(deps: AgentDeps) -> Any:
 
     The ``MemorySaver`` checkpointer provides per-thread state persistence
     analogous to the Rust ``SessionManager`` + ``UndoManager``.
+
+    Compaction is transparent to callers: the ``compact_context`` node runs
+    automatically before every LLM call and is a no-op when token usage
+    is below the 80 % threshold.
     """
     builder = StateGraph(AgentState)
+
+    # ── Shared compaction objects ──────────────────────────────────────────────
+
+    monitor = ContextMonitor(context_limit=deps.context_limit)
+    compactor = ContextCompactor(llm=deps.llm, workspace=deps.workspace)
 
     # ── Nodes ────────────────────────────────────────────────────────────────
 
     builder.add_node("route_input", route_input_node)
     builder.add_node("check_signals", check_signals_node)
+
+    # Compaction node — runs before every LLM call, no-op when under threshold
+    async def _compact_context(state: AgentState) -> dict[str, Any]:
+        return await compact_context_node(state, compactor, monitor)
+
+    builder.add_node("compact_context", _compact_context)
 
     # LLM node — partial-apply deps
     async def _call_llm(state: AgentState) -> dict[str, Any]:
@@ -174,6 +206,12 @@ def build_agent_graph(deps: AgentDeps) -> Any:
     builder.add_conditional_edges(
         "check_signals",
         _after_check_signals,
+        {"compact_context": "compact_context", END: END},
+    )
+
+    builder.add_conditional_edges(
+        "compact_context",
+        _after_compact_context,
         {"call_llm": "call_llm", END: END},
     )
 
