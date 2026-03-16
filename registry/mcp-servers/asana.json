@@ -1,0 +1,9 @@
+{
+  "name": "asana",
+  "display_name": "Asana",
+  "kind": "mcp_server",
+  "description": "Connect to Asana for task management, projects, and team coordination",
+  "keywords": ["tasks", "projects", "management", "team"],
+  "url": "https://mcp.asana.com/v2/mcp",
+  "auth": "dcr"
+}

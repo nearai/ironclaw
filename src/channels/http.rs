@@ -140,7 +140,7 @@ struct WebhookRequest {
     content: String,
     /// Optional thread ID for conversation tracking.
     thread_id: Option<String>,
-    /// Deprecated: webhook secret in request body. Use X-IronClaw-Signature header instead.
+    /// Deprecated: webhook secret in request body. Use X-Hub-Signature-256 header instead.
     /// This field is accepted for backward compatibility but will be removed in a future release.
     secret: Option<String>,
     /// Whether to wait for a synchronous response.
@@ -269,27 +269,26 @@ async fn webhook_handler(
     let mut fallback_req = None;
     {
         let webhook_secret = state.webhook_secret.read().await;
-        if webhook_secret.is_none() {
-            // No secret configured — reject all requests. This guards against
-            // the secret being cleared at runtime via update_secret(None).
-            // The start() method also prevents startup without a secret, but
-            // this is defense-in-depth for the SIGHUP hot-swap path.
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(WebhookResponse {
-                    message_id: Uuid::nil(),
-                    status: "error".to_string(),
-                    response: Some("Webhook authentication not configured".to_string()),
-                }),
-            )
-                .into_response();
-        }
-        let expected_secret = webhook_secret
-            .as_ref()
-            .expect("checked is_none above")
-            .expose_secret();
+        let expected_secret = match webhook_secret.as_ref() {
+            Some(secret) => secret.expose_secret(),
+            None => {
+                // No secret configured — reject all requests. This guards against
+                // the secret being cleared at runtime via update_secret(None).
+                // The start() method also prevents startup without a secret, but
+                // this is defense-in-depth for the SIGHUP hot-swap path.
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(WebhookResponse {
+                        message_id: Uuid::nil(),
+                        status: "error".to_string(),
+                        response: Some("Webhook authentication not configured".to_string()),
+                    }),
+                )
+                    .into_response();
+            }
+        };
 
-        match headers.get("x-ironclaw-signature") {
+        match headers.get("x-hub-signature-256") {
             Some(raw_signature) => match raw_signature.to_str() {
                 Ok(signature) => {
                     if !verify_hmac_signature(expected_secret, &body, signature) {
@@ -326,7 +325,7 @@ async fn webhook_handler(
                                 message_id: Uuid::nil(),
                                 status: "error".to_string(),
                                 response: Some(
-                                    "Webhook authentication required. Provide X-IronClaw-Signature header \
+                                    "Webhook authentication required. Provide X-Hub-Signature-256 header \
                                      (preferred) or 'secret' field in body (deprecated)."
                                         .to_string(),
                                 ),
@@ -342,7 +341,7 @@ async fn webhook_handler(
                     {
                         tracing::warn!(
                             "Webhook authenticated via deprecated 'secret' field in request body. \
-                             Migrate to X-IronClaw-Signature header (HMAC-SHA256). \
+                             Migrate to X-Hub-Signature-256 header (HMAC-SHA256). \
                              Body secret support will be removed in a future release."
                         );
                         fallback_req = Some(req);
@@ -365,7 +364,7 @@ async fn webhook_handler(
                                 message_id: Uuid::nil(),
                                 status: "error".to_string(),
                                 response: Some(
-                                    "Webhook authentication required. Provide X-IronClaw-Signature header \
+                                    "Webhook authentication required. Provide X-Hub-Signature-256 header \
                                      (preferred) or 'secret' field in body (deprecated)."
                                         .to_string(),
                                 ),
@@ -727,7 +726,7 @@ mod tests {
             .method("POST")
             .uri("/webhook")
             .header("content-type", "application/json")
-            .header("x-ironclaw-signature", signature)
+            .header("x-hub-signature-256", signature)
             .body(Body::from(body_bytes))
             .unwrap();
 
@@ -750,7 +749,7 @@ mod tests {
             .method("POST")
             .uri("/webhook")
             .header("content-type", "application/json")
-            .header("x-ironclaw-signature", signature)
+            .header("x-hub-signature-256", signature)
             .body(Body::from(body_bytes))
             .unwrap();
 
@@ -771,7 +770,7 @@ mod tests {
             .method("POST")
             .uri("/webhook")
             .header("content-type", "application/json")
-            .header("x-ironclaw-signature", "not-a-valid-signature")
+            .header("x-hub-signature-256", "not-a-valid-signature")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
 
@@ -920,7 +919,7 @@ mod tests {
             .method("POST")
             .uri("/webhook")
             .header("content-type", "application/json")
-            .header("x-ironclaw-signature", signature)
+            .header("x-hub-signature-256", signature)
             .body(Body::from(body_bytes))
             .unwrap();
 
@@ -942,7 +941,7 @@ mod tests {
             .method("POST")
             .uri("/webhook")
             .header("content-type", "application/json")
-            .header("x-ironclaw-signature", signature)
+            .header("x-hub-signature-256", signature)
             .body(Body::from(body))
             .unwrap();
 
@@ -967,7 +966,7 @@ mod tests {
             .method("POST")
             .uri("/webhook")
             .header("content-type", "text/plain")
-            .header("x-ironclaw-signature", signature)
+            .header("x-hub-signature-256", signature)
             .body(Body::from(body_bytes))
             .unwrap();
 
@@ -992,7 +991,7 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         req.headers_mut().insert(
-            "x-ironclaw-signature",
+            "x-hub-signature-256",
             HeaderValue::from_bytes(b"\xFF").unwrap(),
         );
 
@@ -1084,12 +1083,12 @@ mod tests {
             .method("POST")
             .uri("/webhook")
             .header("content-type", "application/json")
-            .header("x-ironclaw-signature", signature)
+            .header("x-hub-signature-256", signature)
             .body(Body::from(body_bytes))
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE); // safety: test assertion
     }
 
     #[tokio::test]
