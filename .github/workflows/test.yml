@@ -50,9 +50,13 @@ jobs:
         uses: actions/checkout@v6
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
         with:
           key: heavy-integration
+      - name: Build Telegram WASM channel
+        run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
         run: cargo test --no-default-features --features libsql,integration --test e2e_thread_scheduling -- --nocapture
       - name: Run Telegram thread-scope regression test

@@ -923,90 +923,20 @@ impl WasmChannel {
             return Ok(());
         }
 
-        let runtime = Arc::clone(&self.runtime);
-        let prepared = Arc::clone(&self.prepared);
-        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
-        let config_json = self.config_json.read().await.clone();
-        let timeout = self.runtime.config().callback_timeout;
-        let channel_name = self.name.clone();
-        let credentials = self.get_credentials().await;
-        let host_credentials = resolve_channel_host_credentials(
-            &self.capabilities,
-            self.secrets_store.as_deref(),
-            &self.owner_scope_id,
-        )
-        .await;
-        let pairing_store = self.pairing_store.clone();
-        let workspace_store = self.workspace_store.clone();
+        let (start_result, mut host_state) = self.execute_on_start_with_state().await?;
+        self.log_on_start_host_state(&mut host_state);
 
-        let result = tokio::time::timeout(timeout, async move {
-            tokio::task::spawn_blocking(move || {
-                let mut store = Self::create_store(
-                    &runtime,
-                    &prepared,
-                    &capabilities,
-                    credentials,
-                    host_credentials,
-                    pairing_store,
-                )?;
-                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
-
-                let channel_iface = instance.near_agent_channel();
-                let start_result = channel_iface
-                    .call_on_start(&mut store, &config_json)
-                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))
-                    .and_then(|wasm_result| match wasm_result {
-                        Ok(_) => Ok(()),
-                        Err(err_msg) => Err(WasmChannelError::CallbackFailed {
-                            name: prepared.name.clone(),
-                            reason: err_msg,
-                        }),
-                    });
-
-                let mut host_state =
-                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
-
-                Ok::<_, WasmChannelError>((start_result, host_state))
-            })
-            .await
-            .map_err(|e| WasmChannelError::ExecutionPanicked {
-                name: channel_name.clone(),
-                reason: e.to_string(),
-            })?
-        })
-        .await;
-
-        match result {
-            Ok(Ok((Ok(()), mut host_state))) => {
-                for entry in host_state.take_logs() {
-                    tracing::debug!(channel = %self.name, "{}", entry.message);
-                }
-                Ok(())
-            }
-            Ok(Ok((Err(WasmChannelError::CallbackFailed { reason, .. }), mut host_state))) => {
-                for entry in host_state.take_logs() {
-                    tracing::debug!(channel = %self.name, "{}", entry.message);
-                }
-                tracing::debug!(
+        match start_result {
+            Ok(_) => Ok(()),
+            Err(WasmChannelError::CallbackFailed { reason, .. }) => {
+                tracing::warn!(
                     channel = %self.name,
                     reason = %reason,
                     "Ignoring startup callback failure in test-only message stream bootstrap"
                 );
                 Ok(())
             }
-            Ok(Ok((Err(e), mut host_state))) => {
-                for entry in host_state.take_logs() {
-                    tracing::debug!(channel = %self.name, "{}", entry.message);
-                }
-                Err(e)
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(WasmChannelError::Timeout {
-                name: self.name.clone(),
-                callback: "on_start".to_string(),
-            }),
+            Err(e) => Err(e),
         }
     }
 
@@ -1243,6 +1173,85 @@ impl WasmChannel {
         )
     }
 
+    fn log_on_start_host_state(&self, host_state: &mut ChannelHostState) {
+        for entry in host_state.take_logs() {
+            match entry.level {
+                crate::tools::wasm::LogLevel::Error => {
+                    tracing::error!(channel = %self.name, "{}", entry.message);
+                }
+                crate::tools::wasm::LogLevel::Warn => {
+                    tracing::warn!(channel = %self.name, "{}", entry.message);
+                }
+                _ => {
+                    tracing::debug!(channel = %self.name, "{}", entry.message);
+                }
+            }
+        }
+    }
+
+    async fn execute_on_start_with_state(
+        &self,
+    ) -> Result<(Result<ChannelConfig, WasmChannelError>, ChannelHostState), WasmChannelError> {
+        let runtime = Arc::clone(&self.runtime);
+        let prepared = Arc::clone(&self.prepared);
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
+        let config_json = self.config_json.read().await.clone();
+        let timeout = self.runtime.config().callback_timeout;
+        let channel_name = self.name.clone();
+        let credentials = self.get_credentials().await;
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await;
+        let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
+
+        tokio::time::timeout(timeout, async move {
+            tokio::task::spawn_blocking(move || {
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    host_credentials,
+                    pairing_store,
+                )?;
+                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
+
+                let channel_iface = instance.near_agent_channel();
+                let config_result = channel_iface
+                    .call_on_start(&mut store, &config_json)
+                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))
+                    .and_then(|wasm_result| match wasm_result {
+                        Ok(wit_config) => Ok(convert_channel_config(wit_config)),
+                        Err(err_msg) => Err(WasmChannelError::CallbackFailed {
+                            name: prepared.name.clone(),
+                            reason: err_msg,
+                        }),
+                    });
+
+                let mut host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
+                Ok::<_, WasmChannelError>((config_result, host_state))
+            })
+            .await
+            .map_err(|e| WasmChannelError::ExecutionPanicked {
+                name: channel_name.clone(),
+                reason: e.to_string(),
+            })?
+        })
+        .await
+        .map_err(|_| WasmChannelError::Timeout {
+            name: self.name.clone(),
+            callback: "on_start".to_string(),
+        })?
+    }
+
     /// Execute the on_start callback.
     ///
     /// Returns the channel configuration for HTTP endpoint registration.
@@ -1265,99 +1274,17 @@ impl WasmChannel {
             });
         }
 
-        let runtime = Arc::clone(&self.runtime);
-        let prepared = Arc::clone(&self.prepared);
-        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
-        let config_json = self.config_json.read().await.clone();
-        let timeout = self.runtime.config().callback_timeout;
-        let channel_name = self.name.clone();
-        let credentials = self.get_credentials().await;
-        let host_credentials = resolve_channel_host_credentials(
-            &self.capabilities,
-            self.secrets_store.as_deref(),
-            &self.owner_scope_id,
-        )
-        .await;
-        let pairing_store = self.pairing_store.clone();
-        let workspace_store = self.workspace_store.clone();
+        let (config_result, mut host_state) = self.execute_on_start_with_state().await?;
+        self.log_on_start_host_state(&mut host_state);
 
-        // Execute in blocking task with timeout
-        let result = tokio::time::timeout(timeout, async move {
-            tokio::task::spawn_blocking(move || {
-                let mut store = Self::create_store(
-                    &runtime,
-                    &prepared,
-                    &capabilities,
-                    credentials,
-                    host_credentials,
-                    pairing_store,
-                )?;
-                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
-
-                // Call on_start using the generated typed interface
-                let channel_iface = instance.near_agent_channel();
-                let wasm_result = channel_iface
-                    .call_on_start(&mut store, &config_json)
-                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
-
-                // Convert the result
-                let config = match wasm_result {
-                    Ok(wit_config) => convert_channel_config(wit_config),
-                    Err(err_msg) => {
-                        return Err(WasmChannelError::CallbackFailed {
-                            name: prepared.name.clone(),
-                            reason: err_msg,
-                        });
-                    }
-                };
-
-                let mut host_state =
-                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-
-                // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
-
-                Ok((config, host_state))
-            })
-            .await
-            .map_err(|e| WasmChannelError::ExecutionPanicked {
-                name: channel_name.clone(),
-                reason: e.to_string(),
-            })?
-        })
-        .await;
-
-        match result {
-            Ok(Ok((config, mut host_state))) => {
-                // Surface WASM guest logs (errors/warnings from webhook setup, etc.)
-                for entry in host_state.take_logs() {
-                    match entry.level {
-                        crate::tools::wasm::LogLevel::Error => {
-                            tracing::error!(channel = %self.name, "{}", entry.message);
-                        }
-                        crate::tools::wasm::LogLevel::Warn => {
-                            tracing::warn!(channel = %self.name, "{}", entry.message);
-                        }
-                        _ => {
-                            tracing::debug!(channel = %self.name, "{}", entry.message);
-                        }
-                    }
-                }
-                tracing::info!(
-                    channel = %self.name,
-                    display_name = %config.display_name,
-                    endpoints = config.http_endpoints.len(),
-                    "WASM channel on_start completed"
-                );
-                Ok(config)
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(WasmChannelError::Timeout {
-                name: self.name.clone(),
-                callback: "on_start".to_string(),
-            }),
-        }
+        let config = config_result?;
+        tracing::info!(
+            channel = %self.name,
+            display_name = %config.display_name,
+            endpoints = config.http_endpoints.len(),
+            "WASM channel on_start completed"
+        );
+        Ok(config)
     }
 
     /// Execute the on_http_request callback.
