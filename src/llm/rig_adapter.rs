@@ -411,10 +411,9 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
             return id.to_string();
         }
 
-        // Otherwise, deterministically hash the raw ID + seed into a 9-char base-36 ID.
+        // Otherwise, deterministically hash the raw ID into a 9-char base-36 ID.
         let mut hasher = DefaultHasher::new();
         id.hash(&mut hasher);
-        seed.hash(&mut hasher);
         let hash = hasher.finish();
         return base36_id_from_u64(hash, 9);
     }
