@@ -355,6 +355,7 @@ impl CreateJobTool {
     }
 
     /// Execute via sandboxed Docker container.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_sandbox(
         &self,
         task: &str,
@@ -362,6 +363,8 @@ impl CreateJobTool {
         wait: bool,
         mode: JobMode,
         credential_grants: Vec<CredentialGrant>,
+        mcp_servers: Option<Vec<String>>,
+        max_iterations: Option<u32>,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
@@ -431,7 +434,15 @@ impl CreateJobTool {
 
         // Create the container job with the pre-determined job_id.
         let _token = jm
-            .create_job(job_id, task, Some(project_dir), mode, credential_grants)
+            .create_job(
+                job_id,
+                task,
+                Some(project_dir),
+                mode,
+                credential_grants,
+                mcp_servers,
+                max_iterations,
+            )
             .await
             .map_err(|e| {
                 self.update_status(
@@ -849,6 +860,18 @@ impl Tool for CreateJobTool {
                                         secrets store (via 'ironclaw tool auth' or web UI). Example: \
                                         {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
                         "additionalProperties": { "type": "string" }
+                    },
+                    "mcp_servers": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of MCP server names to make available in the container. \
+                                        If omitted, the full master config is mounted. If empty, no MCP servers \
+                                        are available. Only effective when MCP_PER_JOB_ENABLED=true."
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "Maximum number of agent loop iterations for the worker. \
+                                        Defaults to 50, capped at 500. Use lower values for simple tasks."
                     }
                 },
                 "required": ["title", "description"]
@@ -909,10 +932,33 @@ impl Tool for CreateJobTool {
             // Parse and validate credential grants
             let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
 
+            // Parse optional MCP server filter and iteration cap.
+            let mcp_servers: Option<Vec<String>> = params
+                .get("mcp_servers")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                });
+            let max_iterations: Option<u32> = params
+                .get("max_iterations")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.min(500) as u32);
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
-            self.execute_sandbox(&task, explicit_dir, wait, mode, credential_grants, ctx)
-                .await
+            self.execute_sandbox(
+                &task,
+                explicit_dir,
+                wait,
+                mode,
+                credential_grants,
+                mcp_servers,
+                max_iterations,
+                ctx,
+            )
+            .await
         } else {
             self.execute_local(title, description, ctx).await
         }
@@ -1569,6 +1615,8 @@ mod tests {
                 false,
                 JobMode::Worker,
                 vec![],
+                None,
+                None,
                 &JobContext::default(),
             )
             .await;
