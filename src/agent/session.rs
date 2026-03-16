@@ -21,7 +21,6 @@ use crate::llm::{ChatMessage, ToolCall, generate_tool_call_id};
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     /// Unique session ID.
     pub id: Uuid,
