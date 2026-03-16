@@ -10,7 +10,7 @@ use crate::error::ConfigError;
 /// snapshot file and startup hydration from that snapshot.
 #[derive(Debug, Clone)]
 pub struct SnapshotConfig {
-    /// Whether snapshot is enabled. Env: `SNAPSHOT_ENABLED` (default: true).
+    /// Whether snapshot is enabled. Env: `SNAPSHOT_ENABLED` (default: false).
     pub enabled: bool,
     /// Minimum hours between snapshot passes. Env: `SNAPSHOT_CADENCE_HOURS` (default: 24).
     pub cadence_hours: u32,
@@ -21,6 +21,11 @@ pub struct SnapshotConfig {
     /// When the template does not contain `{user_id}`, a warning is logged.
     /// This is an intentional single-user compatibility escape hatch —
     /// it does NOT provide multi-user isolation guarantees.
+    ///
+    /// **Security:** The snapshot file at this path stores sensitive workspace
+    /// content (identity files, memory, context documents) in plaintext.
+    /// Ensure the path points to a user-controlled directory with restricted
+    /// access. On Unix, files are written with 0600 permissions automatically.
     pub path_template: String,
 }
 
@@ -28,7 +33,7 @@ impl Default for SnapshotConfig {
     fn default() -> Self {
         let base = ironclaw_base_dir();
         Self {
-            enabled: true,
+            enabled: false,
             cadence_hours: 24,
             path_template: format!("{}/MEMORY_SNAPSHOT_{{user_id}}.md", base.display()),
         }
@@ -40,7 +45,7 @@ impl SnapshotConfig {
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         let default = Self::default();
         Ok(Self {
-            enabled: parse_bool_env("SNAPSHOT_ENABLED", true)?,
+            enabled: parse_bool_env("SNAPSHOT_ENABLED", false)?,
             cadence_hours: parse_optional_env("SNAPSHOT_CADENCE_HOURS", 24)?,
             path_template: optional_env("SNAPSHOT_PATH")?.unwrap_or(default.path_template),
         })
@@ -101,7 +106,7 @@ mod tests {
     #[test]
     fn default_config_is_reasonable() {
         let cfg = SnapshotConfig::default();
-        assert!(cfg.enabled);
+        assert!(!cfg.enabled);
         assert_eq!(cfg.cadence_hours, 24);
         assert!(cfg.path_template.contains("{user_id}"));
     }
