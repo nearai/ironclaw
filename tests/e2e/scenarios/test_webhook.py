@@ -57,7 +57,7 @@ async def test_webhook_hmac_signature_valid(ironclaw_server_with_webhook_secret)
         )
         assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
         resp = r.json()
-        assert resp["status"] == "ok"
+        assert resp["status"] == "accepted"
 
 
 @pytest.mark.asyncio
@@ -194,7 +194,7 @@ async def test_webhook_deprecated_body_secret_still_works(
         # Should succeed (backward compatibility)
         assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
         resp = r.json()
-        assert resp["status"] == "ok"
+        assert resp["status"] == "accepted"
 
 
 @pytest.mark.asyncio
@@ -227,7 +227,7 @@ async def test_webhook_header_takes_precedence_over_body_secret(
         # Should succeed because header signature is valid (takes precedence)
         assert r.status_code == 200
         resp = r.json()
-        assert resp["status"] == "ok"
+        assert resp["status"] == "accepted"
 
 
 @pytest.mark.asyncio
@@ -334,7 +334,7 @@ async def test_webhook_message_queued_for_processing(
         )
         assert r.status_code == 200
         resp = r.json()
-        assert resp["status"] == "ok"
+        assert resp["status"] == "accepted"
         # Message ID should be present
         assert "message_id" in resp
         assert resp["message_id"] != "00000000-0000-0000-0000-000000000000"

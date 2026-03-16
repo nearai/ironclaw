@@ -5,6 +5,8 @@ on:
     - cron: "0 6 * * 1"  # Weekly Monday 6 AM UTC
   workflow_dispatch:
   pull_request:
+    branches:
+      - main
     paths:
       - "src/channels/web/**"
       - "tests/e2e/**"

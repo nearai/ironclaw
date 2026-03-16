@@ -31,7 +31,7 @@ fn make_rustls_connector() -> MakeRustlsConnect {
         rustls::crypto::ring::default_provider().into(),
     )
     .with_safe_default_protocol_versions()
-    .expect("ring provider should support rustls default protocol versions")
+    .expect("ring provider should support rustls default protocol versions") // safety: ring's default provider is explicitly selected above and supports rustls safe default protocol versions
     .with_root_certificates(root_store)
     .with_no_client_auth();
     MakeRustlsConnect::new(config)
