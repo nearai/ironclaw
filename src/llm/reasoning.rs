@@ -1337,7 +1337,7 @@ fn recover_tool_calls_from_content(
                     .cloned()
                     .unwrap_or(serde_json::Value::Object(Default::default()));
                 calls.push(ToolCall {
-                    id: format!("recovered_{}", calls.len()),
+                    id: super::provider::generate_tool_call_id(calls.len(), 99),
                     name: name.to_string(),
                     arguments,
                 });
@@ -1348,7 +1348,7 @@ fn recover_tool_calls_from_content(
             let name = inner.trim();
             if tool_names.contains(name) {
                 calls.push(ToolCall {
-                    id: format!("recovered_{}", calls.len()),
+                    id: super::provider::generate_tool_call_id(calls.len(), 99),
                     name: name.to_string(),
                     arguments: serde_json::Value::Object(Default::default()),
                 });
@@ -1382,7 +1382,7 @@ fn recover_tool_calls_from_content(
                     let arguments = serde_json::from_str::<serde_json::Value>(args_str)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
                     calls.push(ToolCall {
-                        id: format!("recovered_{}", calls.len()),
+                        id: super::provider::generate_tool_call_id(calls.len(), 99),
                         name: name.to_string(),
                         arguments,
                     });
@@ -1393,7 +1393,7 @@ fn recover_tool_calls_from_content(
 
             // No arguments or malformed — call with empty args
             calls.push(ToolCall {
-                id: format!("recovered_{}", calls.len()),
+                id: super::provider::generate_tool_call_id(calls.len(), 99),
                 name: name.to_string(),
                 arguments: serde_json::Value::Object(Default::default()),
             });

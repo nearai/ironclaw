@@ -393,7 +393,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
 fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
     match raw.map(str::trim).filter(|id| !id.is_empty()) {
         Some(id) => id.to_string(),
-        None => format!("generated_tool_call_{seed}"),
+        None => super::provider::generate_tool_call_id(seed, 0),
     }
 }
 

@@ -1844,7 +1844,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    id: crate::llm::generate_tool_call_id(0, 0),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "looping"}),
                 }],
@@ -1997,7 +1997,7 @@ mod tests {
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    id: crate::llm::generate_tool_call_id(0, 0),
                     name: "nonexistent_tool".to_string(),
                     arguments: serde_json::json!({}),
                 }],
