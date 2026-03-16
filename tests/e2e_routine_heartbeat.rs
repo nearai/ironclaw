@@ -554,12 +554,11 @@ mod tests {
         );
     }
 
-    /// Regression test for issue #1076: disabling an event routine via a DB mutation
-    /// followed by refresh_event_cache() (the path now taken by the web toggle handler)
-    /// must immediately stop the routine from firing.
-    #[tokio::test]
-    async fn toggle_disabling_event_routine_removes_from_cache() {
-        let (db, _dir) = create_test_db().await;
+    /// Helper to set up a test environment for routine engine mutation tests.
+    /// Returns the engine, database, and temp directory.
+    async fn setup_routine_mutation_test()
+    -> (Arc<RoutineEngine>, Arc<dyn Database>, tempfile::TempDir) {
+        let (db, dir) = create_test_db().await;
         let ws = create_workspace(&db);
         let (notify_tx, _rx) = tokio::sync::mpsc::channel(16);
         let tools = Arc::new(ToolRegistry::new());
@@ -571,7 +570,7 @@ mod tests {
         let safety = Arc::new(SafetyLayer::new(&safety_config));
 
         let trace = LlmTrace::single_turn(
-            "test-toggle",
+            "test-routine-mutation",
             "test",
             vec![TraceStep {
                 request_hint: None,
@@ -595,6 +594,16 @@ mod tests {
             tools,
             safety,
         ));
+
+        (engine, db, dir)
+    }
+
+    /// Regression test for issue #1076: disabling an event routine via a DB mutation
+    /// followed by refresh_event_cache() (the path now taken by the web toggle handler)
+    /// must immediately stop the routine from firing.
+    #[tokio::test]
+    async fn toggle_disabling_event_routine_removes_from_cache() {
+        let (engine, db, _dir) = setup_routine_mutation_test().await;
 
         // Create and cache an event routine.
         let mut routine = make_routine(
@@ -629,42 +638,7 @@ mod tests {
     /// followed by refresh_event_cache() must immediately stop the routine from firing.
     #[tokio::test]
     async fn delete_event_routine_removes_from_cache() {
-        let (db, _dir) = create_test_db().await;
-        let ws = create_workspace(&db);
-        let (notify_tx, _rx) = tokio::sync::mpsc::channel(16);
-        let tools = Arc::new(ToolRegistry::new());
-
-        let safety_config = SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: true,
-        };
-        let safety = Arc::new(SafetyLayer::new(&safety_config));
-
-        let trace = LlmTrace::single_turn(
-            "test-delete",
-            "test",
-            vec![TraceStep {
-                request_hint: None,
-                response: TraceResponse::Text {
-                    content: "ROUTINE_OK".to_string(),
-                    input_tokens: 50,
-                    output_tokens: 5,
-                },
-                expected_tool_results: vec![],
-            }],
-        );
-        let llm = Arc::new(TraceLlm::from_trace(trace));
-
-        let engine = Arc::new(RoutineEngine::new(
-            RoutineConfig::default(),
-            Arc::clone(&db),
-            llm,
-            ws,
-            notify_tx,
-            None,
-            tools,
-            safety,
-        ));
+        let (engine, db, _dir) = setup_routine_mutation_test().await;
 
         let routine = make_routine(
             "delete-me",
