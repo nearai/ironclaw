@@ -148,6 +148,7 @@ impl Agent {
             "notify_channel": message.channel,
             "notify_user": message.user_id,
             "notify_thread_id": message.thread_id,
+            "notify_metadata": message.metadata,
         });
 
         // Build system prompts once for this turn. Two variants: with tools
