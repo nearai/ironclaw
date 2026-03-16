@@ -835,7 +835,7 @@ impl Tool for RoutineCreateTool {
             },
             notify: NotifyConfig {
                 channel: normalized.delivery.channel.clone(),
-                user: normalized.delivery.user.clone(),
+                user: Some(normalized.delivery.user.clone()),
                 ..NotifyConfig::default()
             },
             last_run_at: None,

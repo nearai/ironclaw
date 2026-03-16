@@ -104,7 +104,7 @@ pub async fn connect_with_handles(
             Ok((Arc::new(backend) as Arc<dyn Database>, handles))
         }
         #[cfg(feature = "postgres")]
-        _ => {
+        crate::config::DatabaseBackend::Postgres => {
             let pg = postgres::PgBackend::new(config)
                 .await
                 .map_err(|e| DatabaseError::Pool(e.to_string()))?;
@@ -115,10 +115,11 @@ pub async fn connect_with_handles(
 
             Ok((Arc::new(pg) as Arc<dyn Database>, handles))
         }
-        #[cfg(not(feature = "postgres"))]
-        _ => Err(DatabaseError::Pool(
-            "No database backend available. Enable 'postgres' or 'libsql' feature.".to_string(),
-        )),
+        #[allow(unreachable_patterns)]
+        _ => Err(DatabaseError::Pool(format!(
+            "Database backend '{}' is not available. Rebuild with the appropriate feature flag.",
+            config.backend
+        ))),
     }
 }
 
@@ -161,7 +162,7 @@ pub async fn create_secrets_store(
             )))
         }
         #[cfg(feature = "postgres")]
-        _ => {
+        crate::config::DatabaseBackend::Postgres => {
             let pg = postgres::PgBackend::new(config)
                 .await
                 .map_err(|e| DatabaseError::Pool(e.to_string()))?;
@@ -172,12 +173,140 @@ pub async fn create_secrets_store(
                 crypto,
             )))
         }
-        #[cfg(not(feature = "postgres"))]
-        _ => Err(DatabaseError::Pool(
-            "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
-                .to_string(),
-        )),
+        #[allow(unreachable_patterns)]
+        _ => Err(DatabaseError::Pool(format!(
+            "Database backend '{}' is not available for secrets. Rebuild with the appropriate feature flag.",
+            config.backend
+        ))),
     }
+}
+
+// ==================== Wizard / testing helpers ====================
+
+/// Connect to the database WITHOUT running migrations, validating
+/// prerequisites when applicable (PostgreSQL version, pgvector).
+///
+/// Returns both the `Database` trait object and backend-specific handles.
+/// Used by the wizard to test connectivity before committing — call
+/// [`Database::run_migrations`] on the returned trait object when ready.
+pub async fn connect_without_migrations(
+    config: &crate::config::DatabaseConfig,
+) -> Result<(Arc<dyn Database>, DatabaseHandles), DatabaseError> {
+    let mut handles = DatabaseHandles::default();
+
+    match config.backend {
+        #[cfg(feature = "libsql")]
+        crate::config::DatabaseBackend::LibSql => {
+            use secrecy::ExposeSecret as _;
+
+            let default_path = crate::config::default_libsql_path();
+            let db_path = config.libsql_path.as_deref().unwrap_or(&default_path);
+
+            let backend = if let Some(ref url) = config.libsql_url {
+                let token = config.libsql_auth_token.as_ref().ok_or_else(|| {
+                    DatabaseError::Pool(
+                        "LIBSQL_AUTH_TOKEN required when LIBSQL_URL is set".to_string(),
+                    )
+                })?;
+                libsql::LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+                    .await
+                    .map_err(|e| DatabaseError::Pool(e.to_string()))?
+            } else {
+                libsql::LibSqlBackend::new_local(db_path)
+                    .await
+                    .map_err(|e| DatabaseError::Pool(e.to_string()))?
+            };
+
+            handles.libsql_db = Some(backend.shared_db());
+
+            Ok((Arc::new(backend) as Arc<dyn Database>, handles))
+        }
+        #[cfg(feature = "postgres")]
+        crate::config::DatabaseBackend::Postgres => {
+            let pg = postgres::PgBackend::new(config)
+                .await
+                .map_err(|e| DatabaseError::Pool(e.to_string()))?;
+
+            handles.pg_pool = Some(pg.pool());
+
+            // Validate PostgreSQL prerequisites (version, pgvector)
+            validate_postgres(&pg.pool()).await?;
+
+            Ok((Arc::new(pg) as Arc<dyn Database>, handles))
+        }
+        #[allow(unreachable_patterns)]
+        _ => Err(DatabaseError::Pool(format!(
+            "Database backend '{}' is not available. Rebuild with the appropriate feature flag.",
+            config.backend
+        ))),
+    }
+}
+
+/// Validate PostgreSQL prerequisites (version >= 15, pgvector available).
+///
+/// Returns `Ok(())` if all prerequisites are met, or a `DatabaseError`
+/// with a user-facing message describing the issue.
+#[cfg(feature = "postgres")]
+async fn validate_postgres(pool: &deadpool_postgres::Pool) -> Result<(), DatabaseError> {
+    let client = pool
+        .get()
+        .await
+        .map_err(|e| DatabaseError::Pool(format!("Failed to connect: {}", e)))?;
+
+    // Check PostgreSQL server version (need 15+ for pgvector).
+    let version_row = client
+        .query_one("SHOW server_version", &[])
+        .await
+        .map_err(|e| DatabaseError::Query(format!("Failed to query server version: {}", e)))?;
+    let version_str: &str = version_row.get(0);
+    let major_version = version_str
+        .split('.')
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .ok_or_else(|| {
+            DatabaseError::Pool(format!(
+                "Could not parse PostgreSQL version from '{}'. \
+                 Expected a numeric major version (e.g., '15.2').",
+                version_str
+            ))
+        })?;
+
+    const MIN_PG_MAJOR_VERSION: u32 = 15;
+
+    if major_version < MIN_PG_MAJOR_VERSION {
+        return Err(DatabaseError::Pool(format!(
+            "PostgreSQL {} detected. IronClaw requires PostgreSQL {} or later \
+             for pgvector support.\n\
+             Upgrade: https://www.postgresql.org/download/",
+            version_str, MIN_PG_MAJOR_VERSION
+        )));
+    }
+
+    // Check if pgvector extension is available.
+    let pgvector_row = client
+        .query_opt(
+            "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'",
+            &[],
+        )
+        .await
+        .map_err(|e| {
+            DatabaseError::Query(format!("Failed to check pgvector availability: {}", e))
+        })?;
+
+    if pgvector_row.is_none() {
+        return Err(DatabaseError::Pool(format!(
+            "pgvector extension not found on your PostgreSQL server.\n\n\
+             Install it:\n  \
+             macOS:   brew install pgvector\n  \
+             Ubuntu:  apt install postgresql-{0}-pgvector\n  \
+             Docker:  use the pgvector/pgvector:pg{0} image\n  \
+             Source:  https://github.com/pgvector/pgvector#installation\n\n\
+             Then restart PostgreSQL and re-run: ironclaw onboard",
+            major_version
+        )));
+    }
+
+    Ok(())
 }
 
 // ==================== Sub-traits ====================

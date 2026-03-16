@@ -924,7 +924,8 @@ impl Agent {
 
             // Execute the approved tool and continue the loop
             let mut job_ctx =
-                JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+                JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+                    .with_requester_id(&message.sender_id);
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
             // Prefer a valid timezone from the approval message, fall back to the
             // resolved timezone stored when the approval was originally requested.
@@ -1540,7 +1541,8 @@ impl Agent {
             .configure_token(&pending.extension_name, token)
             .await
         {
-            Ok(result) => {
+            Ok(result) if result.activated => {
+                // Ensure extension is actually activated
                 tracing::info!(
                     "Extension '{}' configured via auth mode: {}",
                     pending.extension_name,
@@ -1554,6 +1556,28 @@ impl Agent {
                             extension_name: pending.extension_name.clone(),
                             success: true,
                             message: result.message.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+                Ok(Some(result.message))
+            }
+            Ok(result) => {
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thread.enter_auth_mode(pending.extension_name.clone());
+                    }
+                }
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::AuthRequired {
+                            extension_name: pending.extension_name.clone(),
+                            instructions: Some(result.message.clone()),
+                            auth_url: None,
+                            setup_url: None,
                         },
                         &message.metadata,
                     )

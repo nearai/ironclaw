@@ -343,7 +343,7 @@ impl near::agent::host::Host for StoreData {
                     .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?,
             );
         }
-        let rt = self.http_runtime.as_ref().expect("just initialized");
+        let rt = self.http_runtime.as_ref().expect("just initialized"); // safety: is_none branch above guarantees Some
         let result = rt.block_on(async {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -841,13 +841,7 @@ impl Tool for WasmToolWrapper {
         // Pre-resolve host credentials from secrets store (async, before blocking task).
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
-        //
-        // BUG FIX: ExtensionManager stores OAuth tokens under user_id "default"
-        // (hardcoded at construction in app.rs), but this was previously looking
-        // them up under ctx.user_id — which could be a Telegram user ID, web
-        // gateway user, etc. — causing credential resolution to silently fail.
-        // Must match the storage key until per-user credential isolation is added.
-        let credential_user_id = "default";
+        let credential_user_id = &ctx.user_id;
         let host_credentials = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
@@ -1165,6 +1159,13 @@ async fn resolve_host_credentials(
         let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
             Ok(s) => Some(s),
             Err(e) => {
+                tracing::trace!(
+                    user_id = %user_id,
+                    secret_name = %mapping.secret_name,
+                    error = %e,
+                    "No matching host credential resolved for WASM tool in the requested scope"
+                );
+
                 // If lookup fails and we're not already looking up "default", try "default" as fallback
                 if user_id != "default" {
                     tracing::debug!(
@@ -1385,7 +1386,16 @@ fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use uuid::Uuid;
+
+    use crate::context::JobContext;
+    use crate::secrets::{
+        CreateSecretParams, DecryptedSecret, InMemorySecretsStore, Secret, SecretError, SecretRef,
+        SecretsStore,
+    };
 
     use crate::testing::credentials::{
         TEST_BEARER_TOKEN_123, TEST_GOOGLE_OAUTH_FRESH, TEST_GOOGLE_OAUTH_LEGACY,
@@ -1395,6 +1405,78 @@ mod tests {
     use crate::tools::tool::Tool;
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+
+    struct RecordingSecretsStore {
+        inner: InMemorySecretsStore,
+        get_decrypted_lookups: Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingSecretsStore {
+        fn new() -> Self {
+            Self {
+                inner: test_secrets_store(),
+                get_decrypted_lookups: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn decrypted_lookups(&self) -> Vec<(String, String)> {
+            self.get_decrypted_lookups.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl SecretsStore for RecordingSecretsStore {
+        async fn create(
+            &self,
+            user_id: &str,
+            params: CreateSecretParams,
+        ) -> Result<Secret, SecretError> {
+            self.inner.create(user_id, params).await
+        }
+
+        async fn get(&self, user_id: &str, name: &str) -> Result<Secret, SecretError> {
+            self.inner.get(user_id, name).await
+        }
+
+        async fn get_decrypted(
+            &self,
+            user_id: &str,
+            name: &str,
+        ) -> Result<DecryptedSecret, SecretError> {
+            self.get_decrypted_lookups
+                .lock()
+                .unwrap()
+                .push((user_id.to_string(), name.to_string()));
+            self.inner.get_decrypted(user_id, name).await
+        }
+
+        async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
+            self.inner.exists(user_id, name).await
+        }
+
+        async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
+            self.inner.list(user_id).await
+        }
+
+        async fn delete(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
+            self.inner.delete(user_id, name).await
+        }
+
+        async fn record_usage(&self, secret_id: Uuid) -> Result<(), SecretError> {
+            self.inner.record_usage(secret_id).await
+        }
+
+        async fn is_accessible(
+            &self,
+            user_id: &str,
+            secret_name: &str,
+            allowed_secrets: &[String],
+        ) -> Result<bool, SecretError> {
+            self.inner
+                .is_accessible(user_id, secret_name, allowed_secrets)
+                .await
+        }
+    }
 
     #[test]
     fn test_wrapper_creation() {
@@ -1689,6 +1771,104 @@ mod tests {
             result[0].headers.get("Authorization"),
             Some(&format!("Bearer {TEST_GOOGLE_OAUTH_TOKEN}"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_owner_scope_bearer() {
+        use std::collections::HashMap;
+
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+        let ctx = JobContext::with_user("owner-scope", "owner-scope test", "owner-scope test");
+
+        store
+            .create(
+                &ctx.user_id,
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_TOKEN),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = resolve_host_credentials(&caps, Some(&store), &ctx.user_id, None).await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].headers.get("Authorization"),
+            Some(&format!("Bearer {TEST_GOOGLE_OAUTH_TOKEN}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_resolves_host_credentials_from_owner_scope_context() {
+        use std::collections::HashMap;
+
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::capabilities::HttpCapability;
+
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap());
+        let prepared = runtime
+            .prepare("search", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap();
+        let store = Arc::new(RecordingSecretsStore::new());
+        let ctx = JobContext::with_user("owner-scope", "owner-scope test", "owner-scope test");
+
+        store
+            .create(
+                &ctx.user_id,
+                CreateSecretParams::new("google_oauth_token", TEST_GOOGLE_OAUTH_TOKEN),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["www.googleapis.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let wrapper = super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, caps)
+            .with_secrets_store(store.clone());
+        let result = wrapper.execute(serde_json::json!({}), &ctx).await;
+        assert!(result.is_err());
+
+        let lookups = store.decrypted_lookups();
+        assert!(lookups.contains(&("owner-scope".to_string(), "google_oauth_token".to_string())));
+        assert!(!lookups.contains(&("default".to_string(), "google_oauth_token".to_string())));
     }
 
     #[tokio::test]

@@ -91,54 +91,71 @@ pub struct SignalConfig {
 }
 
 impl ChannelsConfig {
-    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        let http = if optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some() {
+    pub(crate) fn resolve(settings: &Settings, owner_id: &str) -> Result<Self, ConfigError> {
+        let cs = &settings.channels;
+
+        let http_enabled_by_env =
+            optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some();
+        let http = if http_enabled_by_env || cs.http_enabled {
             Some(HttpConfig {
-                host: optional_env("HTTP_HOST")?.unwrap_or_else(|| "0.0.0.0".to_string()),
-                port: parse_optional_env("HTTP_PORT", 8080)?,
+                host: optional_env("HTTP_HOST")?
+                    .or_else(|| cs.http_host.clone())
+                    .unwrap_or_else(|| "0.0.0.0".to_string()),
+                port: parse_optional_env("HTTP_PORT", cs.http_port.unwrap_or(8080))?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
-                user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
+                user_id: owner_id.to_string(),
             })
         } else {
             None
         };
 
-        let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", true)?;
+        let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", cs.gateway_enabled)?;
         let gateway = if gateway_enabled {
             Some(GatewayConfig {
-                host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
-                port: parse_optional_env("GATEWAY_PORT", 3000)?,
-                auth_token: optional_env("GATEWAY_AUTH_TOKEN")?,
-                user_id: optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string()),
+                host: optional_env("GATEWAY_HOST")?
+                    .or_else(|| cs.gateway_host.clone())
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
+                port: parse_optional_env(
+                    "GATEWAY_PORT",
+                    cs.gateway_port.unwrap_or(DEFAULT_GATEWAY_PORT),
+                )?,
+                auth_token: optional_env("GATEWAY_AUTH_TOKEN")?
+                    .or_else(|| cs.gateway_auth_token.clone()),
+                user_id: owner_id.to_string(),
             })
         } else {
             None
         };
 
-        let signal = if let Some(http_url) = optional_env("SIGNAL_HTTP_URL")? {
-            let account = optional_env("SIGNAL_ACCOUNT")?.ok_or(ConfigError::InvalidValue {
-                key: "SIGNAL_ACCOUNT".to_string(),
-                message: "SIGNAL_ACCOUNT is required when SIGNAL_HTTP_URL is set".to_string(),
-            })?;
-            let allow_from = match std::env::var_os("SIGNAL_ALLOW_FROM") {
-                None => vec![account.clone()],
-                Some(val) => {
-                    let s = val.to_string_lossy();
-                    s.split(',')
+        let signal_url = optional_env("SIGNAL_HTTP_URL")?.or_else(|| cs.signal_http_url.clone());
+        let signal = if let Some(http_url) = signal_url {
+            let account = optional_env("SIGNAL_ACCOUNT")?
+                .or_else(|| cs.signal_account.clone())
+                .ok_or(ConfigError::InvalidValue {
+                    key: "SIGNAL_ACCOUNT".to_string(),
+                    message: "SIGNAL_ACCOUNT is required when SIGNAL_HTTP_URL is set".to_string(),
+                })?;
+            let allow_from =
+                match optional_env("SIGNAL_ALLOW_FROM")?.or_else(|| cs.signal_allow_from.clone()) {
+                    None => vec![account.clone()],
+                    Some(s) => s
+                        .split(',')
                         .map(|e| e.trim().to_string())
                         .filter(|s| !s.is_empty())
-                        .collect()
-                }
-            };
-            let dm_policy =
-                optional_env("SIGNAL_DM_POLICY")?.unwrap_or_else(|| "pairing".to_string());
-            let group_policy =
-                optional_env("SIGNAL_GROUP_POLICY")?.unwrap_or_else(|| "allowlist".to_string());
+                        .collect(),
+                };
+            let dm_policy = optional_env("SIGNAL_DM_POLICY")?
+                .or_else(|| cs.signal_dm_policy.clone())
+                .unwrap_or_else(|| "pairing".to_string());
+            let group_policy = optional_env("SIGNAL_GROUP_POLICY")?
+                .or_else(|| cs.signal_group_policy.clone())
+                .unwrap_or_else(|| "allowlist".to_string());
             Some(SignalConfig {
                 http_url,
                 account,
                 allow_from,
                 allow_from_groups: optional_env("SIGNAL_ALLOW_FROM_GROUPS")?
+                    .or_else(|| cs.signal_allow_from_groups.clone())
                     .map(|s| {
                         s.split(',')
                             .map(|e| e.trim().to_string())
@@ -149,6 +166,7 @@ impl ChannelsConfig {
                 dm_policy,
                 group_policy,
                 group_allow_from: optional_env("SIGNAL_GROUP_ALLOW_FROM")?
+                    .or_else(|| cs.signal_group_allow_from.clone())
                     .map(|s| {
                         s.split(',')
                             .map(|e| e.trim().to_string())
@@ -167,9 +185,7 @@ impl ChannelsConfig {
             None
         };
 
-        let cli_enabled = optional_env("CLI_ENABLED")?
-            .map(|s| s.to_lowercase() != "false" && s != "0")
-            .unwrap_or(true);
+        let cli_enabled = parse_bool_env("CLI_ENABLED", cs.cli_enabled)?;
 
         Ok(Self {
             cli: CliConfig {
@@ -180,10 +196,14 @@ impl ChannelsConfig {
             signal,
             wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
                 .map(PathBuf::from)
+                .or_else(|| cs.wasm_channels_dir.clone())
                 .unwrap_or_else(default_channels_dir),
-            wasm_channels_enabled: parse_bool_env("WASM_CHANNELS_ENABLED", true)?,
+            wasm_channels_enabled: parse_bool_env(
+                "WASM_CHANNELS_ENABLED",
+                cs.wasm_channels_enabled,
+            )?,
             wasm_channel_owner_ids: {
-                let mut ids = settings.channels.wasm_channel_owner_ids.clone();
+                let mut ids = cs.wasm_channel_owner_ids.clone();
                 // Backwards compat: TELEGRAM_OWNER_ID env var
                 if let Some(id_str) = optional_env("TELEGRAM_OWNER_ID")? {
                     let id: i64 = id_str.parse().map_err(|e: std::num::ParseIntError| {
@@ -200,6 +220,10 @@ impl ChannelsConfig {
     }
 }
 
+/// Default gateway port — used both in `resolve()` and as the fallback in
+/// other modules that need to construct a gateway URL.
+pub const DEFAULT_GATEWAY_PORT: u16 = 3000;
+
 /// Get the default channels directory (~/.ironclaw/channels/).
 fn default_channels_dir() -> PathBuf {
     ironclaw_base_dir().join("channels")
@@ -208,6 +232,8 @@ fn default_channels_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use crate::config::channels::*;
+    use crate::config::helpers::ENV_MUTEX;
+    use crate::settings::Settings;
 
     #[test]
     fn cli_config_fields() {
@@ -361,5 +387,46 @@ mod tests {
             dir.ends_with("channels"),
             "expected path ending in 'channels', got: {dir:?}"
         );
+    }
+
+    #[test]
+    fn resolve_uses_settings_channel_values_with_owner_scope_user_ids() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let mut settings = Settings::default();
+        settings.channels.http_enabled = true;
+        settings.channels.http_host = Some("127.0.0.2".to_string());
+        settings.channels.http_port = Some(8181);
+        settings.channels.gateway_enabled = true;
+        settings.channels.gateway_host = Some("127.0.0.3".to_string());
+        settings.channels.gateway_port = Some(9191);
+        settings.channels.gateway_auth_token = Some("tok".to_string());
+        settings.channels.signal_http_url = Some("http://127.0.0.1:8080".to_string());
+        settings.channels.signal_account = Some("+15551234567".to_string());
+        settings.channels.signal_allow_from = Some("+15551234567,+15557654321".to_string());
+        settings.channels.wasm_channels_dir = Some(PathBuf::from("/tmp/settings-channels"));
+        settings.channels.wasm_channels_enabled = false;
+
+        let cfg = ChannelsConfig::resolve(&settings, "owner-scope").expect("resolve");
+
+        let http = cfg.http.expect("http config");
+        assert_eq!(http.host, "127.0.0.2");
+        assert_eq!(http.port, 8181);
+        assert_eq!(http.user_id, "owner-scope");
+
+        let gateway = cfg.gateway.expect("gateway config");
+        assert_eq!(gateway.host, "127.0.0.3");
+        assert_eq!(gateway.port, 9191);
+        assert_eq!(gateway.auth_token.as_deref(), Some("tok"));
+        assert_eq!(gateway.user_id, "owner-scope");
+
+        let signal = cfg.signal.expect("signal config");
+        assert_eq!(signal.account, "+15551234567");
+        assert_eq!(signal.allow_from, vec!["+15551234567", "+15557654321"]);
+
+        assert_eq!(
+            cfg.wasm_channels_dir,
+            PathBuf::from("/tmp/settings-channels")
+        );
+        assert!(!cfg.wasm_channels_enabled);
     }
 }

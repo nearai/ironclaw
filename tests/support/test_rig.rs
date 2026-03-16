@@ -612,6 +612,7 @@ impl TestRigBuilder {
 
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
+            owner_id: components.config.owner_id.clone(),
             store: components.db,
             llm: components.llm,
             cheap_llm: components.cheap_llm,

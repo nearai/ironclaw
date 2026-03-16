@@ -140,9 +140,15 @@ impl Agent {
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let mut job_ctx =
-            JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+            JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+                .with_requester_id(&message.sender_id);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
+        job_ctx.metadata = serde_json::json!({
+            "notify_channel": message.channel,
+            "notify_user": message.user_id,
+            "notify_thread_id": message.thread_id,
+        });
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -1170,6 +1176,7 @@ mod tests {
     /// Build a minimal `Agent` for unit testing (no DB, no workspace, no extensions).
     fn make_test_agent() -> Agent {
         let deps = AgentDeps {
+            owner_id: "default".to_string(),
             store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
@@ -2009,6 +2016,7 @@ mod tests {
     /// `max_tool_iterations` override.
     fn make_test_agent_with_llm(llm: Arc<dyn LlmProvider>, max_tool_iterations: usize) -> Agent {
         let deps = AgentDeps {
+            owner_id: "default".to_string(),
             store: None,
             llm,
             cheap_llm: None,
@@ -2122,6 +2130,7 @@ mod tests {
         let max_iter = 3;
         let agent = {
             let deps = AgentDeps {
+                owner_id: "default".to_string(),
                 store: None,
                 llm,
                 cheap_llm: None,

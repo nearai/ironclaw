@@ -48,6 +48,14 @@ impl JobState {
     pub fn can_transition_to(&self, target: JobState) -> bool {
         use JobState::*;
 
+        // Allow idempotent Completed -> Completed transition.
+        // Both the execution loop and the worker wrapper may race to mark a
+        // job complete; the second call should be a harmless no-op rather
+        // than an error that masks the successful completion.
+        if matches!((self, target), (Completed, Completed)) {
+            return true;
+        }
+
         matches!(
             (self, target),
             // From Pending
@@ -113,6 +121,9 @@ pub struct JobContext {
     pub state: JobState,
     /// User ID that owns this job (for workspace scoping).
     pub user_id: String,
+    /// Channel-specific requester/actor ID, when different from the owner scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester_id: Option<String>,
     /// Conversation ID if linked to a conversation.
     pub conversation_id: Option<Uuid>,
     /// Job title.
@@ -194,6 +205,7 @@ impl JobContext {
             job_id: Uuid::new_v4(),
             state: JobState::Pending,
             user_id: user_id.into(),
+            requester_id: None,
             conversation_id: None,
             title: title.into(),
             description: description.into(),
@@ -225,6 +237,12 @@ impl JobContext {
         self
     }
 
+    /// Set the channel-specific requester/actor ID.
+    pub fn with_requester_id(mut self, requester_id: impl Into<String>) -> Self {
+        self.requester_id = Some(requester_id.into());
+        self
+    }
+
     /// Transition to a new state.
     pub fn transition_to(
         &mut self,
@@ -236,6 +254,18 @@ impl JobContext {
                 "Cannot transition from {} to {}",
                 self.state, new_state
             ));
+        }
+
+        // Idempotent: already in the target state, skip recording a duplicate
+        // transition. This handles the Completed -> Completed race between
+        // execution_loop and the worker wrapper.
+        if self.state == new_state {
+            tracing::debug!(
+                job_id = %self.job_id,
+                state = %self.state,
+                "idempotent state transition (already in target state), skipping"
+            );
+            return Ok(());
         }
 
         let transition = StateTransition {
@@ -338,6 +368,45 @@ mod tests {
         assert!(JobState::InProgress.can_transition_to(JobState::Completed));
         assert!(!JobState::Completed.can_transition_to(JobState::Pending));
         assert!(!JobState::Accepted.can_transition_to(JobState::InProgress));
+    }
+
+    #[test]
+    fn test_completed_to_completed_is_idempotent() {
+        // Regression test for the race condition where both execution_loop
+        // and the worker wrapper call mark_completed(). The second call
+        // must succeed without error and must not record a duplicate
+        // transition.
+        let mut ctx = JobContext::new("Test", "Idempotent completion test");
+        ctx.transition_to(JobState::InProgress, None).unwrap();
+        ctx.transition_to(JobState::Completed, Some("first".into()))
+            .unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
+        let transitions_before = ctx.transitions.len();
+
+        // Second Completed -> Completed must be a no-op
+        let result = ctx.transition_to(JobState::Completed, Some("duplicate".into()));
+        assert!(
+            result.is_ok(),
+            "Completed -> Completed should be idempotent"
+        );
+        assert_eq!(ctx.state, JobState::Completed);
+        assert_eq!(
+            ctx.transitions.len(),
+            transitions_before,
+            "idempotent transition should not record a new history entry"
+        );
+    }
+
+    #[test]
+    fn test_other_self_transitions_still_rejected() {
+        // Ensure we only allow Completed -> Completed, not arbitrary X -> X.
+        assert!(!JobState::Pending.can_transition_to(JobState::Pending));
+        assert!(!JobState::InProgress.can_transition_to(JobState::InProgress));
+        assert!(!JobState::Failed.can_transition_to(JobState::Failed));
+        assert!(!JobState::Stuck.can_transition_to(JobState::Stuck));
+        assert!(!JobState::Submitted.can_transition_to(JobState::Submitted));
+        assert!(!JobState::Accepted.can_transition_to(JobState::Accepted));
+        assert!(!JobState::Cancelled.can_transition_to(JobState::Cancelled));
     }
 
     #[test]

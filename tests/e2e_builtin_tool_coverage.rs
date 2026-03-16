@@ -157,7 +157,7 @@ mod tests {
         }
 
         assert_eq!(routine.notify.channel.as_deref(), Some("telegram"));
-        assert_eq!(routine.notify.user, "ops-team");
+        assert_eq!(routine.notify.user.as_deref(), Some("ops-team"));
         assert_eq!(routine.guardrails.cooldown.as_secs(), 600);
 
         rig.shutdown();

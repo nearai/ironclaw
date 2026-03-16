@@ -26,7 +26,6 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
-use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
@@ -36,6 +35,7 @@ use crate::channels::web::handlers::jobs::{
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
     jobs_summary_handler,
 };
+use crate::channels::web::handlers::routines::{routines_delete_handler, routines_toggle_handler};
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
@@ -526,23 +526,33 @@ async fn oauth_callback_handler(
             .get("error_description")
             .cloned()
             .unwrap_or_else(|| error.clone());
+        clear_auth_mode(&state).await;
         return oauth_error_page(&description);
     }
 
     let state_param = match params.get("state") {
         Some(s) if !s.is_empty() => s.clone(),
-        _ => return oauth_error_page("IronClaw"),
+        _ => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     let code = match params.get("code") {
         Some(c) if !c.is_empty() => c.clone(),
-        _ => return oauth_error_page("IronClaw"),
+        _ => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     // Look up the pending flow by CSRF state (atomic remove prevents replay)
     let ext_mgr = match state.extension_manager.as_ref() {
         Some(mgr) => mgr,
-        None => return oauth_error_page("IronClaw"),
+        None => {
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
     };
 
     // Strip instance prefix from state for registry lookup.
@@ -563,6 +573,7 @@ async fn oauth_callback_handler(
                 lookup_key = %lookup_key,
                 "OAuth callback received with unknown or expired state"
             );
+            clear_auth_mode(&state).await;
             return oauth_error_page("IronClaw");
         }
     };
@@ -581,6 +592,7 @@ async fn oauth_callback_handler(
                 message: "OAuth flow expired. Please try again.".to_string(),
             });
         }
+        clear_auth_mode(&state).await;
         return oauth_error_page(&flow.display_name);
     }
 
@@ -689,6 +701,10 @@ async fn oauth_callback_handler(
             );
         }
     }
+
+    // Clear auth mode regardless of outcome so the next user message goes
+    // through to the LLM instead of being intercepted as a token.
+    clear_auth_mode(&state).await;
 
     // After successful OAuth, auto-activate the extension so it moves
     // from "Installed (Authenticate)" → "Active" without a second click.
@@ -1148,16 +1164,41 @@ async fn chat_auth_token_handler(
         .await
     {
         Ok(result) => {
-            // Clear auth mode on the active thread
-            clear_auth_mode(&state).await;
+            let mut resp = if result.verification.is_some() || result.activated {
+                ActionResponse::ok(result.message.clone())
+            } else {
+                ActionResponse::fail(result.message.clone())
+            };
+            resp.activated = Some(result.activated);
+            resp.auth_url = result.auth_url.clone();
+            resp.verification = result.verification.clone();
+            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
 
-            state.sse.broadcast(SseEvent::AuthCompleted {
-                extension_name: req.extension_name.clone(),
-                success: true,
-                message: result.message.clone(),
-            });
+            if result.verification.is_some() {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: req.extension_name.clone(),
+                    instructions: Some(result.message),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            } else if result.activated {
+                // Clear auth mode on the active thread
+                clear_auth_mode(&state).await;
 
-            Ok(Json(ActionResponse::ok(result.message)))
+                state.sse.broadcast(SseEvent::AuthCompleted {
+                    extension_name: req.extension_name.clone(),
+                    success: true,
+                    message: result.message,
+                });
+            } else {
+                state.sse.broadcast(SseEvent::AuthCompleted {
+                    extension_name: req.extension_name.clone(),
+                    success: false,
+                    message: result.message,
+                });
+            }
+
+            Ok(Json(resp))
         }
         Err(e) => {
             let msg = e.to_string();
@@ -1801,29 +1842,34 @@ async fn extensions_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let pairing_store = crate::pairing::PairingStore::new();
+    let mut owner_bound_channels = std::collections::HashSet::new();
+    for ext in &installed {
+        if ext.kind == crate::extensions::ExtensionKind::WasmChannel
+            && ext_mgr.has_wasm_channel_owner_binding(&ext.name).await
+        {
+            owner_bound_channels.insert(ext.name.clone());
+        }
+    }
     let extensions = installed
         .into_iter()
         .map(|ext| {
             let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-                Some(if ext.activation_error.is_some() {
-                    "failed".to_string()
-                } else if !ext.authenticated {
-                    // No credentials configured yet.
-                    "installed".to_string()
-                } else if ext.active {
-                    // Check pairing status for active channels.
-                    let has_paired = pairing_store
-                        .read_allow_from(&ext.name)
-                        .map(|list| !list.is_empty())
-                        .unwrap_or(false);
-                    if has_paired {
-                        "active".to_string()
-                    } else {
-                        "pairing".to_string()
-                    }
+                let has_paired = pairing_store
+                    .read_allow_from(&ext.name)
+                    .map(|list| !list.is_empty())
+                    .unwrap_or(false);
+                crate::channels::web::types::classify_wasm_channel_activation(
+                    &ext,
+                    has_paired,
+                    owner_bound_channels.contains(&ext.name),
+                )
+            } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
+                Some(if ext.active {
+                    ExtensionActivationStatus::Active
+                } else if ext.authenticated {
+                    ExtensionActivationStatus::Configured
                 } else {
-                    // Authenticated but not yet active.
-                    "configured".to_string()
+                    ExtensionActivationStatus::Installed
                 })
             } else {
                 None
@@ -2182,18 +2228,37 @@ async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
+    // Clear auth mode regardless of outcome so the next user message goes
+    // through to the LLM instead of being intercepted as a token.
+    clear_auth_mode(&state).await;
+
     match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
-            // Broadcast auth_completed so the chat UI can dismiss any in-progress
-            // auth card or setup modal that was triggered by tool_auth/tool_activate.
-            state.sse.broadcast(SseEvent::AuthCompleted {
-                extension_name: name.clone(),
-                success: true,
-                message: result.message.clone(),
-            });
-            let mut resp = ActionResponse::ok(result.message);
+            let mut resp = if result.verification.is_some() || result.activated {
+                ActionResponse::ok(result.message)
+            } else {
+                ActionResponse::fail(result.message)
+            };
             resp.activated = Some(result.activated);
-            resp.auth_url = result.auth_url;
+            resp.auth_url = result.auth_url.clone();
+            resp.verification = result.verification.clone();
+            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
+            if result.verification.is_some() {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: name.clone(),
+                    instructions: resp.instructions.clone(),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            } else {
+                // Broadcast auth_completed so the chat UI can dismiss any in-progress
+                // auth card or setup modal that was triggered by tool_auth/tool_activate.
+                state.sse.broadcast(SseEvent::AuthCompleted {
+                    extension_name: name.clone(),
+                    success: result.activated,
+                    message: resp.message.clone(),
+                });
+            }
             Ok(Json(resp))
         }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
@@ -2403,83 +2468,6 @@ async fn routines_trigger_handler(
         "routine_id": routine_id,
         "run_id": run_id,
     })))
-}
-
-#[derive(Deserialize)]
-struct ToggleRequest {
-    enabled: Option<bool>,
-}
-
-async fn routines_toggle_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(id): Path<String>,
-    body: Option<Json<ToggleRequest>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
-    let mut routine = store
-        .get_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    let was_enabled = routine.enabled;
-    // If a specific value was provided, use it; otherwise toggle.
-    routine.enabled = match body {
-        Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
-        None => !routine.enabled,
-    };
-
-    if routine.enabled
-        && !was_enabled
-        && let Trigger::Cron { schedule, timezone } = &routine.trigger
-    {
-        routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    store
-        .update_routine(&routine)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(serde_json::json!({
-        "status": if routine.enabled { "enabled" } else { "disabled" },
-        "routine_id": routine_id,
-    })))
-}
-
-async fn routines_delete_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
-    let deleted = store
-        .delete_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if deleted {
-        Ok(Json(serde_json::json!({
-            "status": "deleted",
-            "routine_id": routine_id,
-        })))
-    } else {
-        Err((StatusCode::NOT_FOUND, "Routine not found".to_string()))
-    }
 }
 
 async fn routines_runs_handler(
@@ -2718,7 +2706,11 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::web::types::{
+        ExtensionActivationStatus, classify_wasm_channel_activation,
+    };
     use crate::cli::oauth_defaults;
+    use crate::extensions::{ExtensionKind, InstalledExtension};
     use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
 
     #[test]
@@ -2797,6 +2789,85 @@ mod tests {
         assert!(turns.is_empty());
     }
 
+    #[test]
+    fn test_wasm_channel_activation_status_owner_bound_counts_as_active() -> Result<(), String> {
+        let ext = InstalledExtension {
+            name: "telegram".to_string(),
+            kind: ExtensionKind::WasmChannel,
+            display_name: Some("Telegram".to_string()),
+            description: None,
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: Vec::new(),
+            needs_setup: true,
+            has_auth: false,
+            installed: true,
+            activation_error: None,
+            version: None,
+        };
+
+        let owner_bound = classify_wasm_channel_activation(&ext, false, true);
+        if owner_bound != Some(ExtensionActivationStatus::Active) {
+            return Err(format!(
+                "owner-bound channel should be active, got {:?}",
+                owner_bound
+            ));
+        }
+
+        let unbound = classify_wasm_channel_activation(&ext, false, false);
+        if unbound != Some(ExtensionActivationStatus::Pairing) {
+            return Err(format!(
+                "unbound channel should be pairing, got {:?}",
+                unbound
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_channel_relay_activation_status_is_preserved() -> Result<(), String> {
+        let relay = InstalledExtension {
+            name: "signal".to_string(),
+            kind: ExtensionKind::ChannelRelay,
+            display_name: Some("Signal".to_string()),
+            description: None,
+            url: None,
+            authenticated: true,
+            active: false,
+            tools: Vec::new(),
+            needs_setup: true,
+            has_auth: false,
+            installed: true,
+            activation_error: None,
+            version: None,
+        };
+
+        let status = if relay.kind == crate::extensions::ExtensionKind::WasmChannel {
+            classify_wasm_channel_activation(&relay, false, false)
+        } else if relay.kind == crate::extensions::ExtensionKind::ChannelRelay {
+            Some(if relay.active {
+                ExtensionActivationStatus::Active
+            } else if relay.authenticated {
+                ExtensionActivationStatus::Configured
+            } else {
+                ExtensionActivationStatus::Installed
+            })
+        } else {
+            None
+        };
+
+        if status != Some(ExtensionActivationStatus::Configured) {
+            return Err(format!(
+                "channel relay should retain configured status, got {:?}",
+                status
+            ));
+        }
+
+        Ok(())
+    }
+
     // --- OAuth callback handler tests ---
 
     /// Build a minimal `GatewayState` for testing the OAuth callback handler.
@@ -2834,6 +2905,80 @@ mod tests {
         Router::new()
             .route("/oauth/callback", get(oauth_callback_handler))
             .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_extensions_setup_submit_returns_failure_when_not_activated() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let channel_name = "test-failing-channel";
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": channel_name,
+            "setup": {
+                "required_secrets": [
+                    {"name": "BOT_TOKEN", "prompt": "Enter bot token"}
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.capabilities.json")),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/setup",
+                post(extensions_setup_submit_handler),
+            )
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "secrets": {
+                "BOT_TOKEN": "dummy-token"
+            }
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/api/extensions/{channel_name}/setup"))
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(parsed["success"], serde_json::Value::Bool(false));
+        assert_eq!(parsed["activated"], serde_json::Value::Bool(false));
+        assert!(
+            parsed["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Activation failed"),
+            "expected activation failure in message: {:?}",
+            parsed
+        );
     }
 
     fn expired_flow_created_at() -> Option<std::time::Instant> {

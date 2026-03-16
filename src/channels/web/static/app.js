@@ -19,6 +19,7 @@ let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
+let authFlowPending = false;
 let _ghostSuggestion = '';
 
 // --- Slash Commands ---
@@ -487,6 +488,12 @@ function clearSuggestionChips() {
 function sendMessage() {
   clearSuggestionChips();
   const input = document.getElementById('chat-input');
+  if (authFlowPending) {
+    showToast('Complete the auth step before sending chat messages.', 'info');
+    const tokenField = document.querySelector('.auth-card .auth-token-input input');
+    if (tokenField) tokenField.focus();
+    return;
+  }
   if (!currentThreadId) {
     console.warn('sendMessage: no thread selected, ignoring');
     return;
@@ -515,7 +522,7 @@ function sendMessage() {
 }
 
 function enableChatInput() {
-  if (currentThreadIsReadOnly) return;
+  if (currentThreadIsReadOnly || authFlowPending) return;
   const input = document.getElementById('chat-input');
   const btn = document.getElementById('send-btn');
   if (input) {
@@ -598,6 +605,22 @@ document.getElementById('chat-input').addEventListener('paste', (e) => {
       if (file) handleImageFiles([file]);
     }
   }
+});
+
+const chatMessagesEl = document.getElementById('chat-messages');
+chatMessagesEl.addEventListener('copy', (e) => {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) return;
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+  if (!anchorNode || !focusNode) return;
+  if (!chatMessagesEl.contains(anchorNode) || !chatMessagesEl.contains(focusNode)) return;
+  const text = selection.toString();
+  if (!text || !e.clipboardData) return;
+  // Force plain-text clipboard output so dark-theme styling never leaks on paste.
+  e.preventDefault();
+  e.clipboardData.clearData();
+  e.clipboardData.setData('text/plain', text);
 });
 
 function addGeneratedImage(dataUrl, path) {
@@ -1182,6 +1205,7 @@ function showJobCard(data) {
 // --- Auth card ---
 
 function handleAuthRequired(data) {
+  setAuthFlowPending(true, data.instructions);
   if (data.auth_url) {
     // OAuth flow: show the global auth prompt with an OAuth button + optional token paste field.
     showAuthCard(data);
@@ -1193,10 +1217,17 @@ function handleAuthRequired(data) {
 }
 
 function handleAuthCompleted(data) {
-  // Dismiss only the matching extension's UI so unrelated setup work is not interrupted.
+  showToast(data.message, data.success ? 'success' : 'error');
+  // Dismiss only the matching extension's UI so stale prompts are cleared.
   removeAuthCard(data.extension_name);
   closeConfigureModal(data.extension_name);
-  showToast(data.message, data.success ? 'success' : 'error');
+  if (!data.success) {
+    setAuthFlowPending(false);
+    if (currentTab === 'extensions') loadExtensions();
+    enableChatInput();
+    return;
+  }
+  setAuthFlowPending(false);
   if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
     addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
   }
@@ -1376,6 +1407,7 @@ function cancelAuth(extensionName) {
     body: { extension_name: extensionName },
   }).catch(() => {});
   removeAuthCard(extensionName);
+  setAuthFlowPending(false);
   enableChatInput();
 }
 
@@ -1390,6 +1422,24 @@ function showAuthCardError(extensionName, message) {
   if (errorEl) {
     errorEl.textContent = message;
     errorEl.style.display = 'block';
+  }
+}
+
+function setAuthFlowPending(pending, instructions) {
+  authFlowPending = !!pending;
+  const input = document.getElementById('chat-input');
+  const btn = document.getElementById('send-btn');
+  if (!input || !btn) return;
+  if (authFlowPending) {
+    input.disabled = true;
+    btn.disabled = true;
+    input.placeholder = instructions || 'Complete extension auth to continue chatting';
+    return;
+  }
+  if (!currentThreadIsReadOnly) {
+    input.disabled = false;
+    btn.disabled = false;
+    input.placeholder = I18n.t('chat.inputPlaceholder');
   }
 }
 
@@ -1759,7 +1809,10 @@ chatInput.addEventListener('keydown', (e) => {
     }
   }
 
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  // Safari fires compositionend before keydown, so e.isComposing is already false
+  // when Enter confirms IME input. keyCode 229 (VK_PROCESS) catches this case.
+  // See https://bugs.webkit.org/show_bug.cgi?id=165004
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     hideSlashAutocomplete();
     sendMessage();
@@ -2670,6 +2723,13 @@ function renderConfigureModal(name, secrets) {
   header.textContent = I18n.t('config.title', { name: name });
   modal.appendChild(header);
 
+  if (name === 'telegram') {
+    const hint = document.createElement('div');
+    hint.className = 'configure-hint';
+    hint.textContent = I18n.t('config.telegramOwnerHint');
+    modal.appendChild(hint);
+  }
+
   const form = document.createElement('div');
   form.className = 'configure-form';
 
@@ -2743,6 +2803,46 @@ function renderConfigureModal(name, secrets) {
   if (fields.length > 0) fields[0].input.focus();
 }
 
+function renderTelegramVerificationChallenge(overlay, verification) {
+  if (!overlay || !verification) return;
+  const modal = overlay.querySelector('.configure-modal');
+  if (!modal) return;
+
+  let panel = modal.querySelector('.configure-verification');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'configure-verification';
+    modal.insertBefore(panel, modal.querySelector('.configure-actions'));
+  }
+
+  panel.innerHTML = '';
+
+  const title = document.createElement('div');
+  title.className = 'configure-verification-title';
+  title.textContent = I18n.t('config.telegramChallengeTitle');
+  panel.appendChild(title);
+
+  const instructions = document.createElement('div');
+  instructions.className = 'configure-verification-instructions';
+  instructions.textContent = verification.instructions;
+  panel.appendChild(instructions);
+
+  const code = document.createElement('code');
+  code.className = 'configure-verification-code';
+  code.textContent = verification.code;
+  panel.appendChild(code);
+
+  if (verification.deep_link) {
+    const link = document.createElement('a');
+    link.className = 'configure-verification-link';
+    link.href = verification.deep_link;
+    link.target = '_blank';
+    link.rel = 'noreferrer noopener';
+    link.textContent = I18n.t('config.telegramOpenBot');
+    panel.appendChild(link);
+  }
+}
+
 function submitConfigureModal(name, fields) {
   const secrets = {};
   for (const f of fields) {
@@ -2755,6 +2855,10 @@ function submitConfigureModal(name, fields) {
   const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
   var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];
   btns.forEach(function(b) { b.disabled = true; });
+  if (overlay && name === 'telegram') {
+    const submitBtn = overlay.querySelector('.configure-actions button.btn-ext.activate');
+    if (submitBtn) submitBtn.textContent = I18n.t('config.telegramOwnerWaiting');
+  }
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
@@ -2762,6 +2866,16 @@ function submitConfigureModal(name, fields) {
   })
     .then((res) => {
       if (res.success) {
+        if (res.verification && name === 'telegram') {
+          btns.forEach(function(b) { b.disabled = false; });
+          renderTelegramVerificationChallenge(overlay, res.verification);
+          fields.forEach(function(f) { f.input.value = ''; });
+          const submitBtn = overlay.querySelector('.configure-actions button.btn-ext.activate');
+          if (submitBtn) submitBtn.textContent = I18n.t('config.telegramVerifyOwner');
+          showToast(res.message || res.verification.instructions, 'info');
+          return;
+        }
+
         closeConfigureModal();
         if (res.auth_url) {
           showAuthCard({
@@ -2777,11 +2891,29 @@ function submitConfigureModal(name, fields) {
       } else {
         // Keep modal open so the user can correct their input and retry.
         btns.forEach(function(b) { b.disabled = false; });
+        if (name === 'telegram') {
+          const submitBtn = overlay && overlay.querySelector('.configure-actions button.btn-ext.activate');
+          const hasVerification = overlay && overlay.querySelector('.configure-verification');
+          if (submitBtn) {
+            submitBtn.textContent = hasVerification
+              ? I18n.t('config.telegramVerifyOwner')
+              : I18n.t('config.save');
+          }
+        }
         showToast(res.message || 'Configuration failed', 'error');
       }
     })
     .catch((err) => {
       btns.forEach(function(b) { b.disabled = false; });
+      if (name === 'telegram') {
+        const submitBtn = overlay && overlay.querySelector('.configure-actions button.btn-ext.activate');
+        const hasVerification = overlay && overlay.querySelector('.configure-verification');
+        if (submitBtn) {
+          submitBtn.textContent = hasVerification
+            ? I18n.t('config.telegramVerifyOwner')
+            : I18n.t('config.save');
+        }
+      }
       showToast('Configuration failed: ' + err.message, 'error');
     });
 }

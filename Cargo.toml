@@ -40,6 +40,7 @@ eula = false
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
+eventsource-stream = "0.2"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
@@ -197,6 +198,15 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
 insta = "1.46.3"
+criterion = "0.5"
+
+[[bench]]
+name = "safety_check"
+harness = false
+
+[[bench]]
+name = "safety_pipeline"
+harness = false
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown"]
