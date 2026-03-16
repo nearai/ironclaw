@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Pre-push hook: runs quality gate before pushing
+# Skip with: git push --no-verify
 
-# Pre-push hook: run clippy and tests before pushing.
-# Install: git config core.hooksPath .githooks
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT_DIR="$REPO_ROOT/scripts/ci"
 
-echo "pre-push: running clippy..."
-if ! cargo clippy --all --benches --tests --examples --all-features -- -D warnings; then
-    echo ""
-    echo "Push blocked: clippy warnings found."
-    echo "To bypass: git push --no-verify"
-    exit 1
+# Default: baseline quality gate
+"$SCRIPT_DIR/quality_gate.sh"
+
+# Optional strict delta lint (env-gated)
+if [ "${IRONCLAW_STRICT_DELTA_LINT:-0}" = "1" ]; then
+    "$SCRIPT_DIR/delta_lint.sh" "$1"
+elif [ "${IRONCLAW_STRICT_LINT:-0}" = "1" ]; then
+    echo "==> clippy (strict: all warnings)"
+    cargo clippy --locked --all-targets -- -D warnings
 fi
-
-echo "pre-push: running tests..."
-if ! cargo test; then
-    echo ""
-    echo "Push blocked: tests failed."
-    echo "To bypass: git push --no-verify"
-    exit 1
-fi
-
-echo "pre-push: all checks passed."

@@ -30,7 +30,7 @@ use crate::llm::{
 use crate::safety::SafetyLayer;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
-use crate::tools::{ApprovalContext, ToolRegistry, redact_params};
+use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
 
 /// Shared dependencies for worker execution.
 ///
@@ -483,8 +483,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     name: tool_name.to_string(),
                 })?;
 
+        let normalized_params = prepare_tool_params(tool.as_ref(), params);
+
         // Check approval: use context-aware check if available, else block all non-Never tools
-        let requirement = tool.requires_approval(params);
+        let requirement = tool.requires_approval(&normalized_params);
         let blocked =
             ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
         if blocked {
@@ -517,9 +519,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
 
         // Run BeforeToolCall hook
-        let params = {
+        let effective_params = {
             use crate::hooks::{HookError, HookEvent, HookOutcome};
-            let hook_params = redact_params(params, tool.sensitive_params());
+            let hook_params = redact_params(&normalized_params, tool.sensitive_params());
             let event = HookEvent::ToolCall {
                 tool_name: tool_name.to_string(),
                 parameters: hook_params,
@@ -543,15 +545,21 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
                 Ok(HookOutcome::Continue {
                     modified: Some(new_params),
-                }) => serde_json::from_str(&new_params).unwrap_or_else(|e| {
-                    tracing::warn!(
-                        tool = %tool_name,
-                        "Hook returned non-JSON modification for ToolCall, ignoring: {}",
-                        e
-                    );
-                    params.clone()
-                }),
-                _ => params.clone(),
+                }) => match serde_json::from_str(&new_params) {
+                    // Hook output is fresh JSON text and may reintroduce stringified scalars or
+                    // containers, so we normalize it again. The fallback path reuses the already
+                    // normalized input because no hook mutation was applied.
+                    Ok(parsed) => prepare_tool_params(tool.as_ref(), &parsed),
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %tool_name,
+                            "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                            e
+                        );
+                        normalized_params
+                    }
+                },
+                _ => normalized_params,
             }
         };
         if job_ctx.state == JobState::Cancelled {
@@ -563,7 +571,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
 
         // Validate tool parameters
-        let validation = deps.safety.validator().validate_tool_params(&params);
+        let validation = deps
+            .safety
+            .validator()
+            .validate_tool_params(&effective_params);
         if !validation.is_valid {
             let details = validation
                 .errors
@@ -579,7 +590,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
 
         // Redact sensitive parameter values before they touch any observability or audit path.
-        let safe_params = redact_params(&params, tool.sensitive_params());
+        let safe_params = redact_params(&effective_params, tool.sensitive_params());
         tracing::debug!(
             tool = %tool_name,
             params = %safe_params,
@@ -591,7 +602,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let tool_timeout = tool.execution_timeout();
         let start = std::time::Instant::now();
         let result = tokio::time::timeout(tool_timeout, async {
-            tool.execute(params.clone(), &job_ctx).await
+            tool.execute(effective_params.clone(), &job_ctx).await
         })
         .await;
         let elapsed = start.elapsed();

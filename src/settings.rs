@@ -220,7 +220,7 @@ pub struct TunnelSettings {
 }
 
 /// Channel-specific settings.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelSettings {
     /// Whether HTTP webhook channel is enabled.
     #[serde(default)]
@@ -233,6 +233,30 @@ pub struct ChannelSettings {
     /// HTTP webhook host.
     #[serde(default)]
     pub http_host: Option<String>,
+
+    /// Whether the web gateway is enabled.
+    #[serde(default = "default_true")]
+    pub gateway_enabled: bool,
+
+    /// Web gateway listen host.
+    #[serde(default)]
+    pub gateway_host: Option<String>,
+
+    /// Web gateway listen port.
+    #[serde(default)]
+    pub gateway_port: Option<u16>,
+
+    /// Web gateway bearer auth token. Auto-generated at gateway startup if unset.
+    #[serde(default)]
+    pub gateway_auth_token: Option<String>,
+
+    /// Web gateway user ID.
+    #[serde(default)]
+    pub gateway_user_id: Option<String>,
+
+    /// Whether the CLI channel is enabled.
+    #[serde(default = "default_true")]
+    pub cli_enabled: bool,
 
     /// Whether Signal channel is enabled.
     #[serde(default)]
@@ -287,6 +311,34 @@ pub struct ChannelSettings {
     /// Directory containing WASM channel modules.
     #[serde(default)]
     pub wasm_channels_dir: Option<PathBuf>,
+}
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            http_enabled: false,
+            http_port: None,
+            http_host: None,
+            gateway_enabled: true,
+            gateway_host: None,
+            gateway_port: None,
+            gateway_auth_token: None,
+            gateway_user_id: None,
+            cli_enabled: true,
+            signal_enabled: false,
+            signal_http_url: None,
+            signal_account: None,
+            signal_allow_from: None,
+            signal_allow_from_groups: None,
+            signal_dm_policy: None,
+            signal_group_policy: None,
+            signal_group_allow_from: None,
+            wasm_channel_owner_ids: std::collections::HashMap::new(),
+            wasm_channels: Vec::new(),
+            wasm_channels_enabled: true,
+            wasm_channels_dir: None,
+        }
+    }
 }
 
 /// Heartbeat configuration.
@@ -837,19 +889,16 @@ impl Settings {
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
         let parts: Vec<&str> = path.split('.').collect();
-        if parts.is_empty() {
-            return Err("Empty path".to_string());
-        }
+        let (final_key, parent_parts) =
+            parts.split_last().ok_or_else(|| "Empty path".to_string())?;
 
         // Navigate to parent and set the final key
         let mut current = &mut json;
-        for part in &parts[..parts.len() - 1] {
+        for part in parent_parts {
             current = current
                 .get_mut(*part)
                 .ok_or_else(|| format!("Path not found: {}", path))?;
         }
-
-        let final_key = parts.last().unwrap();
         let obj = current
             .as_object_mut()
             .ok_or_else(|| format!("Parent is not an object: {}", path))?;
@@ -1697,5 +1746,504 @@ mod tests {
             restored.selected_model, None,
             "None selected_model should stay None"
         );
+    }
+
+    // === Wizard re-run regression tests ===
+    //
+    // These tests simulate the merge ordering used by the wizard's `run()` method
+    // to verify that re-running the wizard (or a subset of steps) doesn't
+    // accidentally reset settings from prior runs.
+
+    /// Simulates `ironclaw onboard --provider-only` re-running on a fully
+    /// configured installation. Only provider + model should change; all
+    /// other settings (channels, embeddings, heartbeat) must survive.
+    #[test]
+    fn provider_only_rerun_preserves_unrelated_settings() {
+        // Prior completed run with everything configured
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("libsql".to_string()),
+            libsql_path: Some("/home/user/.ironclaw/ironclaw.db".to_string()),
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-4o".to_string()),
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "openai".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            },
+            channels: ChannelSettings {
+                http_enabled: true,
+                http_port: Some(8080),
+                signal_enabled: true,
+                signal_account: Some("+1234567890".to_string()),
+                wasm_channels: vec!["telegram".to_string()],
+                ..Default::default()
+            },
+            heartbeat: HeartbeatSettings {
+                enabled: true,
+                interval_secs: 900,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+
+        // provider_only mode: reconnect_existing_db loads from DB,
+        // then user picks a new provider + model via step_inference_provider
+        let mut current = Settings::from_db_map(&db_map);
+
+        // Simulate step_inference_provider: user switches to anthropic
+        current.llm_backend = Some("anthropic".to_string());
+        current.selected_model = None; // cleared because backend changed
+
+        // Simulate step_model_selection: user picks a model
+        current.selected_model = Some("claude-sonnet-4-5".to_string());
+
+        // Verify: provider/model changed
+        assert_eq!(current.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(current.selected_model.as_deref(), Some("claude-sonnet-4-5"));
+
+        // Verify: everything else preserved
+        assert!(current.channels.http_enabled, "HTTP channel must survive");
+        assert_eq!(current.channels.http_port, Some(8080));
+        assert!(current.channels.signal_enabled, "Signal must survive");
+        assert_eq!(
+            current.channels.wasm_channels,
+            vec!["telegram".to_string()],
+            "WASM channels must survive"
+        );
+        assert!(current.embeddings.enabled, "Embeddings must survive");
+        assert_eq!(current.embeddings.provider, "openai");
+        assert!(current.heartbeat.enabled, "Heartbeat must survive");
+        assert_eq!(current.heartbeat.interval_secs, 900);
+        assert_eq!(
+            current.database_backend.as_deref(),
+            Some("libsql"),
+            "DB backend must survive"
+        );
+    }
+
+    /// Simulates `ironclaw onboard --channels-only` re-running on a fully
+    /// configured installation. Only channel settings should change;
+    /// provider, model, embeddings, heartbeat must survive.
+    #[test]
+    fn channels_only_rerun_preserves_unrelated_settings() {
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-sonnet-4-5".to_string()),
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "nearai".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            },
+            heartbeat: HeartbeatSettings {
+                enabled: true,
+                interval_secs: 1800,
+                ..Default::default()
+            },
+            channels: ChannelSettings {
+                http_enabled: false,
+                wasm_channels: vec!["telegram".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+
+        // channels_only mode: reconnect_existing_db loads from DB
+        let mut current = Settings::from_db_map(&db_map);
+
+        // Simulate step_channels: user enables HTTP and adds discord
+        current.channels.http_enabled = true;
+        current.channels.http_port = Some(9090);
+        current.channels.wasm_channels = vec!["telegram".to_string(), "discord".to_string()];
+
+        // Verify: channels changed
+        assert!(current.channels.http_enabled);
+        assert_eq!(current.channels.http_port, Some(9090));
+        assert_eq!(current.channels.wasm_channels.len(), 2);
+
+        // Verify: everything else preserved
+        assert_eq!(current.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(current.selected_model.as_deref(), Some("claude-sonnet-4-5"));
+        assert!(current.embeddings.enabled);
+        assert_eq!(current.embeddings.provider, "nearai");
+        assert!(current.heartbeat.enabled);
+        assert_eq!(current.heartbeat.interval_secs, 1800);
+    }
+
+    /// Simulates quick mode re-run on an installation that previously
+    /// completed a full setup. Quick mode only touches DB + security +
+    /// provider + model; channels, embeddings, heartbeat, extensions
+    /// should survive via the merge_from ordering.
+    #[test]
+    fn quick_mode_rerun_preserves_prior_channels_and_heartbeat() {
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("libsql".to_string()),
+            libsql_path: Some("/home/user/.ironclaw/ironclaw.db".to_string()),
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-4o".to_string()),
+            channels: ChannelSettings {
+                http_enabled: true,
+                http_port: Some(8080),
+                signal_enabled: true,
+                wasm_channels: vec!["telegram".to_string()],
+                ..Default::default()
+            },
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "openai".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            },
+            heartbeat: HeartbeatSettings {
+                enabled: true,
+                interval_secs: 600,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // Quick mode flow:
+        // 1. auto_setup_database sets DB fields
+        let step1 = Settings {
+            database_backend: Some("libsql".to_string()),
+            libsql_path: Some("/home/user/.ironclaw/ironclaw.db".to_string()),
+            ..Default::default()
+        };
+
+        // 2. try_load_existing_settings → merge DB → merge step1 on top
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // 3. step_inference_provider: user picks anthropic this time
+        current.llm_backend = Some("anthropic".to_string());
+        current.selected_model = None; // cleared because backend changed
+
+        // 4. step_model_selection: user picks model
+        current.selected_model = Some("claude-opus-4-6".to_string());
+
+        // Verify: provider/model updated
+        assert_eq!(current.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(current.selected_model.as_deref(), Some("claude-opus-4-6"));
+
+        // Verify: channels, embeddings, heartbeat survived quick mode
+        assert!(
+            current.channels.http_enabled,
+            "HTTP channel must survive quick mode re-run"
+        );
+        assert_eq!(current.channels.http_port, Some(8080));
+        assert!(
+            current.channels.signal_enabled,
+            "Signal must survive quick mode re-run"
+        );
+        assert_eq!(
+            current.channels.wasm_channels,
+            vec!["telegram".to_string()],
+            "WASM channels must survive quick mode re-run"
+        );
+        assert!(
+            current.embeddings.enabled,
+            "Embeddings must survive quick mode re-run"
+        );
+        assert!(
+            current.heartbeat.enabled,
+            "Heartbeat must survive quick mode re-run"
+        );
+        assert_eq!(current.heartbeat.interval_secs, 600);
+    }
+
+    /// Full wizard re-run where user keeps the same provider. The model
+    /// selection from the prior run should be pre-populated (not reset).
+    ///
+    /// Regression: re-running with the same provider should preserve model.
+    #[test]
+    fn full_rerun_same_provider_preserves_model_through_merge() {
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // Step 1: user keeps same DB
+        let step1 = Settings {
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            ..Default::default()
+        };
+
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // After merge, prior settings recovered
+        assert_eq!(
+            current.llm_backend.as_deref(),
+            Some("anthropic"),
+            "Prior provider must be recovered from DB"
+        );
+        assert_eq!(
+            current.selected_model.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "Prior model must be recovered from DB"
+        );
+
+        // Step 3: user picks same provider (anthropic)
+        // set_llm_backend_preserving_model checks if backend changed
+        let backend_changed = current.llm_backend.as_deref() != Some("anthropic");
+        current.llm_backend = Some("anthropic".to_string());
+        if backend_changed {
+            current.selected_model = None;
+        }
+
+        // Model should NOT be cleared since backend didn't change
+        assert_eq!(
+            current.selected_model.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "Model must survive when re-selecting same provider"
+        );
+    }
+
+    /// Full wizard re-run where user switches provider. Model should be
+    /// cleared since the old model is invalid for the new backend.
+    #[test]
+    fn full_rerun_different_provider_clears_model_through_merge() {
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // Step 1 merge
+        let step1 = Settings {
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            ..Default::default()
+        };
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // Step 3: user switches to openai
+        let backend_changed = current.llm_backend.as_deref() != Some("openai");
+        assert!(backend_changed, "switching providers should be detected");
+        current.llm_backend = Some("openai".to_string());
+        if backend_changed {
+            current.selected_model = None;
+        }
+
+        assert_eq!(current.llm_backend.as_deref(), Some("openai"));
+        assert!(
+            current.selected_model.is_none(),
+            "Model must be cleared when switching providers"
+        );
+    }
+
+    /// Simulates incremental save correctness: persist_after_step after
+    /// Step 3 (provider) should not clobber settings set in Step 2 (security).
+    ///
+    /// The wizard persists the full settings object after each step. This
+    /// test verifies that incremental saves are idempotent for prior steps.
+    #[test]
+    fn incremental_persist_does_not_clobber_prior_steps() {
+        // After steps 1-2, settings has DB + security
+        let after_step2 = Settings {
+            database_backend: Some("libsql".to_string()),
+            secrets_master_key_source: KeySource::Keychain,
+            ..Default::default()
+        };
+
+        // persist_after_step saves to DB
+        let db_map_after_step2 = after_step2.to_db_map();
+
+        // Step 3 adds provider
+        let mut after_step3 = after_step2.clone();
+        after_step3.llm_backend = Some("openai".to_string());
+
+        // persist_after_step saves again — the full settings object
+        let db_map_after_step3 = after_step3.to_db_map();
+
+        // Reload from DB after step 3
+        let restored = Settings::from_db_map(&db_map_after_step3);
+
+        // Step 2's settings must survive step 3's persist
+        assert_eq!(
+            restored.secrets_master_key_source,
+            KeySource::Keychain,
+            "Step 2 security setting must survive step 3 persist"
+        );
+        assert_eq!(
+            restored.database_backend.as_deref(),
+            Some("libsql"),
+            "Step 1 DB setting must survive step 3 persist"
+        );
+        assert_eq!(
+            restored.llm_backend.as_deref(),
+            Some("openai"),
+            "Step 3 provider setting must be saved"
+        );
+
+        // Also verify that a partial step 2 reload doesn't regress
+        // (loading the step 2 snapshot and merging with step 3 state)
+        let from_step2_db = Settings::from_db_map(&db_map_after_step2);
+        let mut merged = after_step3.clone();
+        merged.merge_from(&from_step2_db);
+
+        assert_eq!(
+            merged.llm_backend.as_deref(),
+            Some("openai"),
+            "Step 3 provider must not be clobbered by step 2 snapshot merge"
+        );
+        assert_eq!(
+            merged.secrets_master_key_source,
+            KeySource::Keychain,
+            "Step 2 security must survive merge"
+        );
+    }
+
+    /// Switching database backend should allow fresh connection settings.
+    /// When user switches from postgres to libsql, the old database_url
+    /// should not prevent the new libsql_path from being used.
+    #[test]
+    fn switching_db_backend_allows_fresh_connection_settings() {
+        let prior = Settings {
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-4o".to_string()),
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // User picks libsql this time, wizard clears stale postgres settings
+        let step1 = Settings {
+            database_backend: Some("libsql".to_string()),
+            libsql_path: Some("/home/user/.ironclaw/ironclaw.db".to_string()),
+            database_url: None, // explicitly not set for libsql
+            ..Default::default()
+        };
+
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // libsql chosen
+        assert_eq!(current.database_backend.as_deref(), Some("libsql"));
+        assert_eq!(
+            current.libsql_path.as_deref(),
+            Some("/home/user/.ironclaw/ironclaw.db")
+        );
+
+        // Prior provider/model should survive (unrelated to DB switch)
+        assert_eq!(current.llm_backend.as_deref(), Some("openai"));
+        assert_eq!(current.selected_model.as_deref(), Some("gpt-4o"));
+
+        // Note: database_url from prior run persists in merge because
+        // step1.database_url is None (== default), so merge_from doesn't
+        // override it. This is expected — the .env writer decides which
+        // vars to emit based on database_backend. The stale URL is
+        // harmless because the libsql backend ignores it.
+        assert_eq!(
+            current.database_url.as_deref(),
+            Some("postgres://host/db"),
+            "stale database_url persists (harmless, ignored by libsql backend)"
+        );
+    }
+
+    /// Regression: merge_from must handle boolean fields correctly.
+    /// A prior run with heartbeat.enabled=true must not be reset to false
+    /// when merging with a Settings that has heartbeat.enabled=false (default).
+    #[test]
+    fn merge_preserves_true_booleans_when_overlay_has_default_false() {
+        let prior = Settings {
+            heartbeat: HeartbeatSettings {
+                enabled: true,
+                interval_secs: 600,
+                ..Default::default()
+            },
+            channels: ChannelSettings {
+                http_enabled: true,
+                signal_enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // New wizard run only sets DB (everything else is default/false)
+        let step1 = Settings {
+            database_backend: Some("libsql".to_string()),
+            ..Default::default()
+        };
+
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // true booleans from prior run must survive
+        assert!(
+            current.heartbeat.enabled,
+            "heartbeat.enabled=true must not be reset to false by default overlay"
+        );
+        assert!(
+            current.channels.http_enabled,
+            "http_enabled=true must not be reset to false by default overlay"
+        );
+        assert!(
+            current.channels.signal_enabled,
+            "signal_enabled=true must not be reset to false by default overlay"
+        );
+        assert_eq!(current.heartbeat.interval_secs, 600);
+    }
+
+    /// Regression: embeddings settings (provider, model, enabled) must
+    /// survive a wizard re-run that doesn't touch step 5.
+    #[test]
+    fn embeddings_survive_rerun_that_skips_step5() {
+        let prior = Settings {
+            onboard_completed: true,
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("qwen".to_string()),
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "nearai".to_string(),
+                model: "text-embedding-3-large".to_string(),
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // Full re-run: step 1 only sets DB
+        let step1 = Settings {
+            database_backend: Some("libsql".to_string()),
+            ..Default::default()
+        };
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // Before step 5 (embeddings) runs, check that prior values are present
+        assert!(current.embeddings.enabled);
+        assert_eq!(current.embeddings.provider, "nearai");
+        assert_eq!(current.embeddings.model, "text-embedding-3-large");
     }
 }

@@ -29,6 +29,7 @@ pub mod session;
 pub mod smart_routing;
 
 pub mod image_models;
+pub mod models;
 pub mod reasoning_models;
 pub mod vision_models;
 

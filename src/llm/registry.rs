@@ -219,7 +219,7 @@ impl ProviderRegistry {
     pub fn load() -> Self {
         let builtins: Vec<ProviderDefinition> =
             serde_json::from_str(include_str!("../../providers.json"))
-                .expect("built-in providers.json must be valid JSON");
+                .expect("built-in providers.json must be valid JSON"); // safety: compile-time embedded file
 
         let mut all = builtins;
 

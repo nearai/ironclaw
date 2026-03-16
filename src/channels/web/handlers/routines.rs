@@ -112,12 +112,16 @@ pub async fn routines_detail_handler(
             job_id: run.job_id,
         })
         .collect();
+    let routine_info = RoutineInfo::from_routine(&routine);
 
     Ok(Json(RoutineDetailResponse {
         id: routine.id,
         name: routine.name.clone(),
         description: routine.description.clone(),
         enabled: routine.enabled,
+        trigger_type: routine_info.trigger_type,
+        trigger_raw: routine_info.trigger_raw,
+        trigger_summary: routine_info.trigger_summary,
         trigger: serde_json::to_value(&routine.trigger).unwrap_or_default(),
         action: serde_json::to_value(&routine.action).unwrap_or_default(),
         guardrails: serde_json::to_value(&routine.guardrails).unwrap_or_default(),
