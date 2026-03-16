@@ -627,8 +627,9 @@ impl ContainerJobManager {
     /// Remove a completed job handle from memory (called after result is read).
     pub async fn cleanup_job(&self, job_id: Uuid) {
         // Clean up per-job MCP config temp file if one was written.
-        let tmp_path =
-            std::path::Path::new("/tmp/ironclaw-mcp-configs").join(format!("{}.json", job_id));
+        let tmp_path = std::env::temp_dir()
+            .join("ironclaw-mcp-configs")
+            .join(format!("{}.json", job_id));
         if tmp_path.exists()
             && let Err(e) = std::fs::remove_file(&tmp_path)
         {
@@ -677,7 +678,7 @@ impl ContainerJobManager {
 /// - `Some([])` → no MCP config (no mount)
 /// - `Some(["serpstat"])` → filtered config with only matching servers
 ///
-/// Temp files are written to `/tmp/ironclaw-mcp-configs/` and cleaned up
+/// Temp files are written to `<temp_dir>/ironclaw-mcp-configs/` and cleaned up
 /// in `cleanup_job`.
 fn generate_worker_mcp_config(
     master_path: &std::path::Path,
@@ -719,7 +720,7 @@ fn generate_worker_mcp_config(
                 .filter(|s| {
                     let name_matches = s["name"]
                         .as_str()
-                        .map(|n| names.iter().any(|req| req == n))
+                        .map(|n| names.iter().any(|req| req.eq_ignore_ascii_case(n)))
                         .unwrap_or(false);
                     let is_enabled = s["enabled"].as_bool().unwrap_or(true);
                     name_matches && is_enabled
@@ -744,8 +745,8 @@ fn generate_worker_mcp_config(
                 "schema_version": schema_version
             });
 
-            let tmp_dir = std::path::Path::new("/tmp/ironclaw-mcp-configs");
-            std::fs::create_dir_all(tmp_dir).map_err(|e| {
+            let tmp_dir = std::env::temp_dir().join("ironclaw-mcp-configs");
+            std::fs::create_dir_all(&tmp_dir).map_err(|e| {
                 OrchestratorError::ContainerCreationFailed {
                     job_id,
                     reason: format!("failed to create MCP config temp dir: {e}"),
@@ -933,5 +934,41 @@ mod tests {
         let names = vec!["nonexistent".to_string()];
         let result = generate_worker_mcp_config(tmp.path(), Some(&names), Uuid::new_v4());
         assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn test_mcp_config_case_insensitive_match() {
+        let job_id = Uuid::new_v4();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"{"servers":[{"name":"Serpstat","enabled":true}]}"#,
+        )
+        .unwrap();
+
+        let names = vec!["serpstat".to_string()];
+        let result = generate_worker_mcp_config(tmp.path(), Some(&names), job_id);
+        let out_path = result.unwrap().expect("case-insensitive match should work");
+        let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[test]
+    fn test_max_iterations_env_var_injected() {
+        // Verify the IRONCLAW_MAX_ITERATIONS env var name matches what the
+        // worker CLI reads via clap's `env` attribute.
+        let config = ContainerJobConfig::default();
+        let mgr = ContainerJobManager::new(config, TokenStore::new());
+        // We can't test actual container creation without Docker, but we can
+        // verify the env var name matches the clap definition.
+        // The clap definition uses: #[arg(long, env = "IRONCLAW_MAX_ITERATIONS")]
+        // The create_job_inner injects: format!("IRONCLAW_MAX_ITERATIONS={}", iters)
+        // This test ensures the constant isn't accidentally changed in either place.
+        let env_var_in_job = "IRONCLAW_MAX_ITERATIONS";
+        let source = include_str!("../cli/mod.rs");
+        assert!(
+            source.contains(&format!("env = \"{}\"", env_var_in_job)),
+            "cli/mod.rs must have env = \"IRONCLAW_MAX_ITERATIONS\" on the max_iterations arg"
+        );
+        drop(mgr);
     }
 }

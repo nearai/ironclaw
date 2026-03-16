@@ -944,7 +944,7 @@ impl Tool for CreateJobTool {
             let max_iterations: Option<u32> = params
                 .get("max_iterations")
                 .and_then(|v| v.as_u64())
-                .map(|n| n.min(500) as u32);
+                .map(|n| n.clamp(1, 500) as u32);
 
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
