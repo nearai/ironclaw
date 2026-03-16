@@ -57,6 +57,17 @@ struct ChannelRuntimeState {
 }
 
 /// Central manager for extension lifecycle operations.
+///
+/// # Initialization Order
+///
+/// Relay-channel restoration depends on a channel manager being injected first.
+/// Call one of the following before `restore_relay_channels()`:
+///
+/// 1. [`ExtensionManager::set_channel_runtime`] (also sets relay manager), or
+/// 2. [`ExtensionManager::set_relay_channel_manager`].
+///
+/// If `restore_relay_channels()` runs first, each restore attempt fails with
+/// "Channel manager not initialized" and channels remain inactive.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
     discovery: OnlineDiscovery,
@@ -312,6 +323,9 @@ impl ExtensionManager {
     ///
     /// Call this when WASM channel runtime is not available but relay channels
     /// still need to be hot-added.
+    ///
+    /// This must be called before [`ExtensionManager::restore_relay_channels`]
+    /// unless [`ExtensionManager::set_channel_runtime`] was already called.
     pub async fn set_relay_channel_manager(&self, channel_manager: Arc<ChannelManager>) {
         *self.relay_channel_manager.write().await = Some(channel_manager);
     }
@@ -356,7 +370,10 @@ impl ExtensionManager {
     ///
     /// Loads the persisted active channel list, filters to relay types (those with
     /// a stored stream token), and activates each via `activate_stored_relay()`.
-    /// Skips channels that are already active. Call this after `set_relay_channel_manager()`.
+    /// Skips channels that are already active.
+    ///
+    /// Call this only after `set_relay_channel_manager()` or `set_channel_runtime()`.
+    /// Otherwise, each activation attempt fails with "Channel manager not initialized".
     pub async fn restore_relay_channels(&self) {
         let persisted = self.load_persisted_active_channels().await;
         let already_active = self.active_channel_names.read().await.clone();
