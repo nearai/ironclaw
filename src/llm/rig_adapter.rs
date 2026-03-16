@@ -396,7 +396,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
 /// IDs must be compatible with providers like Mistral, which constrain IDs
 /// to `[a-zA-Z0-9]{9}`. We therefore:
 /// - pass through any non-empty raw ID that already matches this constraint;
-/// - otherwise deterministically map the raw string into a 9-char base-36 ID;
+/// - otherwise deterministically map the raw string into a provider-compliant ID;
 /// - and when `raw` is empty/None, delegate to `generate_tool_call_id`.
 fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
     // Trim and treat empty as None.
@@ -411,11 +411,13 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
             return id.to_string();
         }
 
-        // Otherwise, deterministically hash the raw ID into a 9-char base-36 ID.
+        // Otherwise, deterministically hash the raw ID and feed the hash-derived
+        // seed into the provider-level generator so that the encoding and any
+        // provider-specific constraints remain centralized in one place.
         let mut hasher = DefaultHasher::new();
         id.hash(&mut hasher);
-        let hash = hasher.finish();
-        return base36_id_from_u64(hash, 9);
+        let hash_seed = hasher.finish() as usize;
+        return super::provider::generate_tool_call_id(hash_seed, 0);
     }
 
     // Fallback for missing/empty raw IDs: use the provider-level generator,
@@ -423,23 +425,11 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
     super::provider::generate_tool_call_id(seed, 0)
 }
 
-/// Deterministically encode a `u64` as a fixed-length lower-case base-36 string.
-/// The output length is exactly `len` and uses characters `[0-9a-z]`.
-fn base36_id_from_u64(mut value: u64, len: usize) -> String {
-    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-    let mut buf = vec![b'0'; len];
-
-    for i in 0..len {
-        let digit = (value % 36) as usize;
-        buf[len - 1 - i] = DIGITS[digit];
-        value /= 36;
-    }
-
-    // SAFETY: `DIGITS` only contains valid ASCII, so `buf` is valid UTF-8.
-    String::from_utf8(buf).expect("base36_id_from_u64 produced non-UTF-8 bytes")
-}
-
 /// Convert IronClaw tool definitions to rig-core format.
+///
+/// Applies OpenAI strict-mode schema normalization to ensure all tool
+/// parameter schemas comply with OpenAI's function calling requirements.
+fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
 ///
 /// Applies OpenAI strict-mode schema normalization to ensure all tool
 /// parameter schemas comply with OpenAI's function calling requirements.
