@@ -16,8 +16,8 @@
 //! ]);
 //! ```
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use crate::llm::error::LlmError;
@@ -95,11 +95,7 @@ pub enum FaultMode {
     SequenceLoop,
     /// Fail randomly at the given rate (0.0 = never, 1.0 = always) with
     /// the specified fault type. Uses a seeded RNG for reproducibility.
-    Random {
-        error_rate: f64,
-        fault: FaultType,
-        seed: u64,
-    },
+    Random { error_rate: f64, fault: FaultType },
 }
 
 /// A configurable fault injector for [`StubLlm`](super::StubLlm).
@@ -111,6 +107,15 @@ pub struct FaultInjector {
     call_index: AtomicU32,
     /// Seeded RNG for Random mode, behind Mutex for Sync.
     rng_state: Mutex<u64>,
+}
+
+impl std::fmt::Debug for FaultInjector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FaultInjector")
+            .field("call_index", &self.call_index.load(Ordering::Relaxed))
+            .field("mode", &self.mode)
+            .finish()
+    }
 }
 
 impl FaultInjector {
@@ -135,14 +140,13 @@ impl FaultInjector {
     }
 
     /// Create a fault injector with random failures at the given rate.
+    ///
+    /// The seed is guarded against zero, which is a fixed point for xorshift.
     pub fn random(error_rate: f64, fault: FaultType, seed: u64) -> Self {
+        let seed = if seed == 0 { 1 } else { seed };
         Self {
             actions: Vec::new(),
-            mode: FaultMode::Random {
-                error_rate,
-                fault,
-                seed,
-            },
+            mode: FaultMode::Random { error_rate, fault },
             call_index: AtomicU32::new(0),
             rng_state: Mutex::new(seed),
         }
@@ -167,9 +171,7 @@ impl FaultInjector {
                     self.actions[index % self.actions.len()].clone()
                 }
             }
-            FaultMode::Random {
-                error_rate, fault, ..
-            } => {
+            FaultMode::Random { error_rate, fault } => {
                 // Simple xorshift64 PRNG for reproducible randomness.
                 let random_val = {
                     let mut state = self.rng_state.lock().unwrap_or_else(|p| p.into_inner());
@@ -178,7 +180,7 @@ impl FaultInjector {
                     *state ^= *state << 17;
                     (*state as f64) / (u64::MAX as f64)
                 };
-                if random_val.abs() < *error_rate {
+                if random_val < *error_rate {
                     FaultAction::Fail(fault.clone())
                 } else {
                     FaultAction::Succeed
@@ -206,7 +208,10 @@ mod tests {
         ]);
 
         // First two calls should fail
-        assert!(matches!(injector.next_action(), FaultAction::Fail(FaultType::RequestFailed)));
+        assert!(matches!(
+            injector.next_action(),
+            FaultAction::Fail(FaultType::RequestFailed)
+        ));
         assert!(matches!(
             injector.next_action(),
             FaultAction::Fail(FaultType::RateLimited { .. })
@@ -256,7 +261,10 @@ mod tests {
             LlmError::RequestFailed { .. }
         ));
         assert!(matches!(
-            FaultType::RateLimited { retry_after: Some(Duration::from_secs(5)) }.to_llm_error(provider),
+            FaultType::RateLimited {
+                retry_after: Some(Duration::from_secs(5))
+            }
+            .to_llm_error(provider),
             LlmError::RateLimited { .. }
         ));
         assert!(matches!(
@@ -285,5 +293,25 @@ mod tests {
     fn delay_action_exists() {
         let injector = FaultInjector::sequence([FaultAction::Delay(Duration::from_millis(100))]);
         assert!(matches!(injector.next_action(), FaultAction::Delay(_)));
+    }
+
+    #[test]
+    fn random_seed_zero_does_not_always_fail() {
+        // seed=0 is a fixed point for xorshift; the constructor guards it to 1.
+        let injector = FaultInjector::random(0.5, FaultType::RequestFailed, 0);
+        let results: Vec<bool> = (0..20)
+            .map(|_| matches!(injector.next_action(), FaultAction::Fail(_)))
+            .collect();
+        // With a working RNG, not every call should fail at 50% error rate.
+        let all_same = results.iter().all(|&r| r == results[0]);
+        assert!(!all_same, "seed=0 should not produce degenerate output");
+    }
+
+    #[test]
+    fn empty_sequence_always_succeeds() {
+        let injector = FaultInjector::sequence([]);
+        for _ in 0..10 {
+            assert!(matches!(injector.next_action(), FaultAction::Succeed));
+        }
     }
 }
