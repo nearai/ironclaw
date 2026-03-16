@@ -130,3 +130,38 @@ async def test_approval_params_toggle(page):
     await toggle.click()
     await page.wait_for_timeout(300)
     assert await params.is_hidden(), "Parameters should be hidden after second toggle"
+
+
+async def test_waiting_for_approval_message_no_error_prefix(page):
+    """Verify that 'Waiting for approval' status message doesn't have 'Error:' prefix
+    and includes tool context (tool name and description)."""
+    # Inject a status message that simulates what the fixed backend code produces
+    # when a user tries to send input while the thread is awaiting approval.
+    # The message should have tool context and NOT be prefixed with "Error:".
+    await page.evaluate("""
+        addMessage('assistant', 'Waiting for approval: shell — Execute: echo hello. Use /interrupt to cancel.')
+    """)
+
+    # Get the last assistant message
+    last_msg = page.locator(SEL["message_assistant"]).last
+    await last_msg.wait_for(state="visible", timeout=5000)
+
+    msg_text = await last_msg.text_content()
+
+    # Verify no "Error:" prefix
+    assert not msg_text.lower().startswith("error:"), (
+        f"Approval status must NOT have 'Error:' prefix. Got: {msg_text!r}"
+    )
+
+    # Verify it contains "waiting for approval"
+    assert "waiting for approval" in msg_text.lower(), (
+        f"Expected 'Waiting for approval' text. Got: {msg_text!r}"
+    )
+
+    # Verify it contains the tool name and description
+    assert "shell" in msg_text.lower(), (
+        f"Expected tool name 'shell' in message. Got: {msg_text!r}"
+    )
+    assert "echo hello" in msg_text, (
+        f"Expected tool description in message. Got: {msg_text!r}"
+    )

@@ -187,13 +187,17 @@ impl Agent {
         );
 
         // First check thread state without holding lock during I/O
-        let thread_state = {
+        let (thread_state, approval_context) = {
             let sess = session.lock().await;
             let thread = sess
                 .threads
                 .get(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thread.state
+            let approval_context = thread
+                .pending_approval
+                .as_ref()
+                .map(|a| (a.tool_name.clone(), a.description.clone()));
+            (thread.state, approval_context)
         };
 
         tracing::debug!(
@@ -221,9 +225,13 @@ impl Agent {
                     thread_id = %thread_id,
                     "Thread awaiting approval, rejecting new input"
                 );
-                return Ok(SubmissionResult::error(
-                    "Waiting for approval. Use /interrupt to cancel.",
-                ));
+                let msg = match approval_context {
+                    Some((tool_name, description)) => format!(
+                        "Waiting for approval: {tool_name} — {description}. Use /interrupt to cancel."
+                    ),
+                    None => "Waiting for approval. Use /interrupt to cancel.".to_string(),
+                };
+                return Ok(SubmissionResult::pending(msg));
             }
             ThreadState::Completed => {
                 tracing::warn!(
