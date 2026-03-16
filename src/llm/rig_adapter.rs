@@ -16,8 +16,6 @@ use rig::message::{
     UserContent,
 };
 use sha2::{Digest, Sha256};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
