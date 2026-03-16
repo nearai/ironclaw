@@ -29,7 +29,7 @@ pub(super) enum AgenticLoopResult {
     /// A tool requires approval before continuing.
     NeedApproval {
         /// The pending approval request to store.
-        pending: PendingApproval,
+        pending: Box<PendingApproval>,
     },
 }
 
@@ -216,9 +216,7 @@ impl Agent {
                 reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
             }
             .into()),
-            LoopOutcome::NeedApproval(pending) => {
-                Ok(AgenticLoopResult::NeedApproval { pending: *pending })
-            }
+            LoopOutcome::NeedApproval(pending) => Ok(AgenticLoopResult::NeedApproval { pending }),
         }
     }
 
@@ -481,6 +479,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             usize,
             crate::llm::ToolCall,
             Arc<dyn crate::tools::Tool>,
+            bool, // allow_always
         )> = None;
 
         for (idx, original_tc) in tool_calls.iter().enumerate() {
@@ -550,7 +549,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 && let Some(tool) = tool_opt
             {
                 use crate::tools::ApprovalRequirement;
-                let needs_approval = match tool.requires_approval(&tc.arguments) {
+                let requirement = tool.requires_approval(&tc.arguments);
+                let needs_approval = match requirement {
                     ApprovalRequirement::Never => false,
                     ApprovalRequirement::UnlessAutoApproved => {
                         let sess = self.session.lock().await;
@@ -585,7 +585,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         continue;
                     }
 
-                    approval_needed = Some((idx, tc, tool));
+                    let allow_always = !matches!(requirement, ApprovalRequirement::Always);
+                    approval_needed = Some((idx, tc, tool, allow_always));
                     break;
                 }
             }
@@ -886,7 +887,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // Handle approval if a tool needed it
-        if let Some((approval_idx, tc, tool)) = approval_needed {
+        if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
             let display_params = redact_params(&tc.arguments, tool.sensitive_params());
             let pending = PendingApproval {
                 request_id: Uuid::new_v4(),
@@ -898,6 +899,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 context_messages: reason_ctx.messages.clone(),
                 deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
                 user_timezone: Some(self.user_tz.name().to_string()),
+                allow_always,
             };
 
             return Ok(Some(LoopOutcome::NeedApproval(Box::new(pending))));
@@ -1363,6 +1365,35 @@ mod tests {
         assert!(always_needs, "Always must always require approval");
     }
 
+    /// Regression test: `allow_always` must be `false` for `Always` and
+    /// `true` for `UnlessAutoApproved`, so the UI hides the "always" button
+    /// for tools that truly cannot be auto-approved.
+    #[test]
+    fn test_allow_always_matches_approval_requirement() {
+        use crate::tools::ApprovalRequirement;
+
+        // Mirrors the expression used in dispatcher.rs and thread_ops.rs:
+        //   let allow_always = !matches!(requirement, ApprovalRequirement::Always);
+
+        // UnlessAutoApproved → allow_always = true
+        let req = ApprovalRequirement::UnlessAutoApproved;
+        let allow_always = !matches!(req, ApprovalRequirement::Always);
+        assert!(
+            allow_always,
+            "UnlessAutoApproved should set allow_always = true"
+        );
+
+        // Always → allow_always = false
+        let req = ApprovalRequirement::Always;
+        let allow_always = !matches!(req, ApprovalRequirement::Always);
+        assert!(!allow_always, "Always should set allow_always = false");
+
+        // Never → allow_always = true (approval is never needed, but if it were, always would be ok)
+        let req = ApprovalRequirement::Never;
+        let allow_always = !matches!(req, ApprovalRequirement::Always);
+        assert!(allow_always, "Never should set allow_always = true");
+    }
+
     #[test]
     fn test_pending_approval_serialization_backcompat_without_deferred_calls() {
         // PendingApproval from before the deferred_tool_calls field was added
@@ -1408,6 +1439,7 @@ mod tests {
                 },
             ],
             user_timezone: None,
+            allow_always: true,
         };
 
         let json = serde_json::to_string(&pending).expect("serialize");
