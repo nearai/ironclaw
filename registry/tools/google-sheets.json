@@ -2,7 +2,7 @@
   "name": "google-sheets",
   "display_name": "Google Sheets",
   "kind": "tool",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wit_version": "0.4.0",
   "description": "Read and write Google Sheets spreadsheet data",
   "keywords": [

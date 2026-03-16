@@ -2,7 +2,7 @@
   "name": "llm-context",
   "display_name": "LLM Context",
   "kind": "tool",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "wit_version": "0.4.0",
   "description": "Fetch pre-extracted web content from Brave Search for grounding LLM answers (RAG, fact-checking)",
   "keywords": [

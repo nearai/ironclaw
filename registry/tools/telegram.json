@@ -2,7 +2,7 @@
   "name": "telegram-mtproto",
   "display_name": "Telegram Tool",
   "kind": "tool",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "wit_version": "0.4.0",
   "description": "Your agent uses your Telegram account to read and send messages",
   "keywords": [

@@ -2,7 +2,7 @@
   "name": "github",
   "display_name": "GitHub",
   "kind": "tool",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "wit_version": "0.4.0",
   "description": "GitHub integration for issues, PRs, repos, and code search",
   "keywords": [
