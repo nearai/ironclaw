@@ -143,6 +143,11 @@ impl Agent {
             JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
+        job_ctx.metadata = serde_json::json!({
+            "notify_channel": message.channel,
+            "notify_user": message.user_id,
+            "notify_thread_id": message.thread_id,
+        });
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -1049,6 +1054,54 @@ fn strip_internal_tool_call_text(text: &str) -> String {
     } else {
         result.to_string()
     }
+}
+
+/// Extract `<suggestions>["...","..."]</suggestions>` from a response string.
+///
+/// Returns `(cleaned_text, suggestions)`. The `<suggestions>` block is stripped
+/// from the text regardless of whether the JSON inside parses successfully.
+/// Only the **last** `<suggestions>` block is used (closest to end of response).
+/// Blocks inside markdown code fences are ignored.
+pub(crate) fn extract_suggestions(text: &str) -> (String, Vec<String>) {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)<suggestions>\s*(.*?)\s*</suggestions>").expect("valid regex") // safety: constant pattern
+    });
+
+    // Find the position of the last closing code fence to avoid matching inside code blocks
+    let last_code_fence = text.rfind("```").unwrap_or(0);
+
+    // Find all matches, take the last one that's after the last code fence
+    let mut best_match: Option<regex::Match<'_>> = None;
+    let mut best_capture: Option<String> = None;
+    for caps in RE.captures_iter(text) {
+        if let (Some(full), Some(inner)) = (caps.get(0), caps.get(1))
+            && full.start() >= last_code_fence
+        {
+            best_match = Some(full);
+            best_capture = Some(inner.as_str().to_string());
+        }
+    }
+
+    let Some(full) = best_match else {
+        return (text.to_string(), Vec::new());
+    };
+
+    let cleaned = format!("{}{}", &text[..full.start()], &text[full.end()..]); // safety: regex match boundaries are valid UTF-8
+    let cleaned = cleaned.trim().to_string();
+
+    // Parse the JSON array
+    let suggestions = best_capture
+        .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !s.trim().is_empty() && s.len() <= 80)
+        .take(3)
+        .collect();
+
+    (cleaned, suggestions)
 }
 
 #[cfg(test)]
@@ -2195,6 +2248,55 @@ mod tests {
         let input = "This is a normal response with [brackets] inside.";
         let result = super::strip_internal_tool_call_text(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_extract_suggestions_basic() {
+        let input = "Here is my answer.\n<suggestions>[\"Check logs\", \"Deploy\"]</suggestions>";
+        let (text, suggestions) = super::extract_suggestions(input);
+        assert_eq!(text, "Here is my answer."); // safety: test
+        assert_eq!(suggestions, vec!["Check logs", "Deploy"]); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_no_tag() {
+        let input = "Just a plain response.";
+        let (text, suggestions) = super::extract_suggestions(input);
+        assert_eq!(text, "Just a plain response."); // safety: test
+        assert!(suggestions.is_empty()); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_malformed_json() {
+        let input = "Answer.\n<suggestions>not json</suggestions>";
+        let (text, suggestions) = super::extract_suggestions(input);
+        assert_eq!(text, "Answer."); // safety: test
+        assert!(suggestions.is_empty()); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_inside_code_fence() {
+        let input = "```\n<suggestions>[\"foo\"]</suggestions>\n```";
+        let (text, suggestions) = super::extract_suggestions(input);
+        // The tag is inside a code fence, so it should not be extracted
+        assert_eq!(text, input); // safety: test
+        assert!(suggestions.is_empty()); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_after_code_fence() {
+        let input = "```\ncode\n```\nAnswer.\n<suggestions>[\"foo\"]</suggestions>";
+        let (text, suggestions) = super::extract_suggestions(input);
+        assert_eq!(text, "```\ncode\n```\nAnswer."); // safety: test
+        assert_eq!(suggestions, vec!["foo"]); // safety: test
+    }
+
+    #[test]
+    fn test_extract_suggestions_filters_long() {
+        let long = "x".repeat(81);
+        let input = format!("Answer.\n<suggestions>[\"{}\", \"ok\"]</suggestions>", long);
+        let (_, suggestions) = super::extract_suggestions(&input);
+        assert_eq!(suggestions, vec!["ok"]); // safety: test
     }
 
     #[test]

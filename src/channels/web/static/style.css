@@ -1362,8 +1362,14 @@ body {
   min-height: 56px;
 }
 
-.chat-input textarea {
+.chat-input-wrapper {
+  position: relative;
   flex: 1;
+  display: flex;
+}
+
+.chat-input-wrapper textarea {
+  width: 100%;
   padding: 8px 12px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -1376,15 +1382,64 @@ body {
   max-height: 120px;
 }
 
-.chat-input textarea:focus {
+.ghost-text {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  opacity: 0.5;
+  pointer-events: none;
+  white-space: pre-wrap;
+  overflow: hidden;
+  display: none;
+  z-index: 1;
+}
+
+/* Hide native placeholder when ghost text is visible */
+.chat-input-wrapper.has-ghost textarea::placeholder {
+  color: transparent;
+}
+
+.chat-input-wrapper textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
-.chat-input textarea:disabled {
+.chat-input-wrapper textarea:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.suggestion-chips {
+  display: none;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.suggestion-chip {
+  padding: 6px 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.suggestion-chip:hover {
+  background: var(--accent);
+  color: #09090b;
+  border-color: var(--accent);
 }
 
 .chat-input button {
@@ -1416,7 +1471,7 @@ body {
 }
 
 /* Keyboard accessibility focus rings */
-.chat-input textarea:focus-visible,
+.chat-input-wrapper textarea:focus-visible,
 .chat-input button:focus-visible,
 .tab-bar button:focus-visible,
 .tree-row:focus-visible {
@@ -3824,7 +3879,7 @@ mark {
     min-height: 52px;
   }
 
-  .chat-input textarea {
+  .chat-input-wrapper textarea {
     min-height: 36px;
     max-height: 100px;
   }

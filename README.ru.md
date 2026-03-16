@@ -163,12 +163,20 @@ ironclaw onboard
 
 ### Альтернативные LLM-провайдеры
 
-IronClaw по умолчанию использует NEAR AI, но работает с любыми OpenAI-совместимыми эндпоинтами.
-Популярные варианты включают **OpenRouter** (300+ моделей), **Together AI**, **Fireworks AI**, **Ollama** (локально) и собственные серверы, такие как **vLLM** или **LiteLLM**.
+IronClaw по умолчанию использует NEAR AI, но поддерживает множество LLM-провайдеров из коробки.
+Встроенные провайдеры включают **Anthropic**, **OpenAI**, **Google Gemini**, **MiniMax**,
+**Mistral** и **Ollama** (локально). Также поддерживаются OpenAI-совместимые сервисы:
+**OpenRouter** (300+ моделей), **Together AI**, **Fireworks AI** и собственные серверы
+(**vLLM**, **LiteLLM**).
 
-Выберите *"OpenAI-compatible"* в мастере настройки или установите переменные окружения напрямую:
+Выберите провайдера в мастере настройки или установите переменные окружения напрямую:
 
 ```env
+# Пример: MiniMax (встроенный, контекст 204K)
+LLM_BACKEND=minimax
+MINIMAX_API_KEY=...
+
+# Пример: OpenAI-совместимый эндпоинт
 LLM_BACKEND=openai_compatible
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_API_KEY=sk-or-...

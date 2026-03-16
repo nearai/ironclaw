@@ -34,7 +34,9 @@ use crate::settings::Settings;
 // Re-export all public types so `crate::config::FooConfig` continues to work.
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
-pub use self::channels::{ChannelsConfig, CliConfig, GatewayConfig, HttpConfig, SignalConfig};
+pub use self::channels::{
+    ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, HttpConfig, SignalConfig,
+};
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
@@ -304,12 +306,16 @@ impl Config {
 
     /// Build config from settings (shared by from_env and from_db).
     async fn build(settings: &Settings) -> Result<Self, ConfigError> {
+        // Resolve tunnel first so channels can default to loopback when a
+        // tunnel handles external exposure (no need to bind 0.0.0.0).
+        let tunnel = TunnelConfig::resolve(settings)?;
+
         Ok(Self {
             database: DatabaseConfig::resolve()?,
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
-            tunnel: TunnelConfig::resolve(settings)?,
-            channels: ChannelsConfig::resolve(settings)?,
+            channels: ChannelsConfig::resolve(settings, tunnel.is_enabled())?,
+            tunnel,
             agent: AgentConfig::resolve(settings)?,
             safety: resolve_safety_config()?,
             wasm: WasmConfig::resolve()?,
