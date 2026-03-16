@@ -48,6 +48,19 @@ mod tests {
         Arc::new(Workspace::new_with_db("default", db.clone()))
     }
 
+    fn make_message(
+        channel: &str,
+        user_id: &str,
+        owner_id: &str,
+        sender_id: &str,
+        content: &str,
+    ) -> IncomingMessage {
+        IncomingMessage::new(channel, user_id, content)
+            .with_owner_id(owner_id)
+            .with_sender_id(sender_id)
+            .with_metadata(serde_json::json!({}))
+    }
+
     /// Helper to insert a routine directly into the database.
     fn make_routine(name: &str, trigger: Trigger, prompt: &str) -> Routine {
         Routine {
@@ -218,21 +231,13 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // Positive match: message containing "deploy to production".
-        let matching_msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "test".to_string(),
-            user_id: "default".to_string(),
-            owner_id: "default".to_string(),
-            sender_id: "default".to_string(),
-            user_name: None,
-            content: "deploy to production now".to_string(),
-            thread_id: None,
-            conversation_scope_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
+        let matching_msg = make_message(
+            "test",
+            "default",
+            "default",
+            "default",
+            "deploy to production now",
+        );
         let fired = engine.check_event_triggers(&matching_msg).await;
         assert!(
             fired >= 1,
@@ -243,21 +248,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Negative match: message that doesn't match.
-        let non_matching_msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "test".to_string(),
-            user_id: "default".to_string(),
-            owner_id: "default".to_string(),
-            sender_id: "default".to_string(),
-            user_name: None,
-            content: "check the staging environment".to_string(),
-            thread_id: None,
-            conversation_scope_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
+        let non_matching_msg = make_message(
+            "test",
+            "default",
+            "default",
+            "default",
+            "check the staging environment",
+        );
         let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
     }
@@ -311,21 +308,13 @@ mod tests {
         db.create_routine(&routine).await.expect("create_routine");
         engine.refresh_event_cache().await;
 
-        let guest_msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "telegram".to_string(),
-            user_id: "guest".to_string(),
-            owner_id: "default".to_string(),
-            sender_id: "guest-sender".to_string(),
-            user_name: None,
-            content: "deploy to production now".to_string(),
-            thread_id: None,
-            conversation_scope_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
+        let guest_msg = make_message(
+            "telegram",
+            "guest",
+            "default",
+            "guest-sender",
+            "deploy to production now",
+        );
         let guest_fired = engine.check_event_triggers(&guest_msg).await;
         assert_eq!(
             guest_fired, 0,
@@ -342,21 +331,13 @@ mod tests {
             "Guest message should not create routine runs"
         );
 
-        let owner_msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "telegram".to_string(),
-            user_id: "default".to_string(),
-            owner_id: "default".to_string(),
-            sender_id: "owner-sender".to_string(),
-            user_name: None,
-            content: "deploy to production now".to_string(),
-            thread_id: None,
-            conversation_scope_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
+        let owner_msg = make_message(
+            "telegram",
+            "default",
+            "default",
+            "owner-sender",
+            "deploy to production now",
+        );
         let owner_fired = engine.check_event_triggers(&owner_msg).await;
         assert!(
             owner_fired >= 1,
@@ -574,21 +555,13 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // First fire should work.
-        let msg = IncomingMessage {
-            id: Uuid::new_v4(),
-            channel: "test".to_string(),
-            user_id: "default".to_string(),
-            owner_id: "default".to_string(),
-            sender_id: "default".to_string(),
-            user_name: None,
-            content: "test-cooldown trigger".to_string(),
-            thread_id: None,
-            conversation_scope_id: None,
-            received_at: Utc::now(),
-            metadata: serde_json::json!({}),
-            timezone: None,
-            attachments: Vec::new(),
-        };
+        let msg = make_message(
+            "test",
+            "default",
+            "default",
+            "default",
+            "test-cooldown trigger",
+        );
         let fired1 = engine.check_event_triggers(&msg).await;
         assert!(fired1 >= 1, "First fire should work");
 
