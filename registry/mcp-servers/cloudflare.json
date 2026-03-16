@@ -1,0 +1,9 @@
+{
+  "name": "cloudflare",
+  "display_name": "Cloudflare",
+  "kind": "mcp_server",
+  "description": "Connect to Cloudflare for DNS, Workers, KV, and infrastructure management",
+  "keywords": ["cdn", "dns", "workers", "hosting", "infrastructure"],
+  "url": "https://mcp.cloudflare.com/mcp",
+  "auth": "dcr"
+}

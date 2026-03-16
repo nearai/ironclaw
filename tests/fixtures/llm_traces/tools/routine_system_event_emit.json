@@ -21,7 +21,12 @@
               "trigger_type": "system_event",
               "event_source": "github",
               "event_type": "issue.opened",
+              "event_filters": {
+                "repository": "nearai/ironclaw",
+                "priority": "p1"
+              },
               "action_type": "full_job",
+              "tool_permissions": ["shell"],
               "prompt": "Summarize the new issue and propose next steps."
             }
           }
@@ -42,6 +47,7 @@
               "event_type": "issue.opened",
               "payload": {
                 "repository": "nearai/ironclaw",
+                "priority": "p1",
                 "issue_number": 123,
                 "title": "Support event-driven project workflow"
               }

@@ -1,0 +1,9 @@
+{
+  "name": "intercom",
+  "display_name": "Intercom",
+  "kind": "mcp_server",
+  "description": "Connect to Intercom for customer messaging, support, and engagement",
+  "keywords": ["support", "customers", "messaging", "chat", "helpdesk"],
+  "url": "https://mcp.intercom.com/mcp",
+  "auth": "dcr"
+}
