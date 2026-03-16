@@ -15,6 +15,8 @@ use rig::message::{
     ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult, ToolResultContent,
     UserContent,
 };
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
@@ -390,11 +392,52 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
 }
 
 /// Responses-style providers require a non-empty tool call ID.
+///
+/// IDs must be compatible with providers like Mistral, which constrain IDs
+/// to `[a-zA-Z0-9]{9}`. We therefore:
+/// - pass through any non-empty raw ID that already matches this constraint;
+/// - otherwise deterministically map the raw string into a 9-char base-36 ID;
+/// - and when `raw` is empty/None, delegate to `generate_tool_call_id`.
 fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
-    match raw.map(str::trim).filter(|id| !id.is_empty()) {
-        Some(id) => id.to_string(),
-        None => super::provider::generate_tool_call_id(seed, 0),
+    // Trim and treat empty as None.
+    let trimmed = raw.and_then(|s| {
+        let t = s.trim();
+        if t.is_empty() { None } else { Some(t) }
+    });
+
+    if let Some(id) = trimmed {
+        // If the ID already satisfies `[a-zA-Z0-9]{9}`, pass it through unchanged.
+        if id.len() == 9 && id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return id.to_string();
+        }
+
+        // Otherwise, deterministically hash the raw ID + seed into a 9-char base-36 ID.
+        let mut hasher = DefaultHasher::new();
+        id.hash(&mut hasher);
+        seed.hash(&mut hasher);
+        let hash = hasher.finish();
+        return base36_id_from_u64(hash, 9);
     }
+
+    // Fallback for missing/empty raw IDs: use the provider-level generator,
+    // which already produces compliant IDs.
+    super::provider::generate_tool_call_id(seed, 0)
+}
+
+/// Deterministically encode a `u64` as a fixed-length lower-case base-36 string.
+/// The output length is exactly `len` and uses characters `[0-9a-z]`.
+fn base36_id_from_u64(mut value: u64, len: usize) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut buf = vec![b'0'; len];
+
+    for i in 0..len {
+        let digit = (value % 36) as usize;
+        buf[len - 1 - i] = DIGITS[digit];
+        value /= 36;
+    }
+
+    // SAFETY: `DIGITS` only contains valid ASCII, so `buf` is valid UTF-8.
+    String::from_utf8(buf).unwrap_or_else(|_| "000000000".to_string())
 }
 
 /// Convert IronClaw tool definitions to rig-core format.
