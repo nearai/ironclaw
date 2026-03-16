@@ -35,6 +35,10 @@ workspace/
 └── ...
 ```
 
+### Snapshot Security
+
+The snapshot file (`MEMORY_SNAPSHOT_{user_id}.md`) contains sensitive workspace content in plaintext, including identity files, memory, heartbeat configuration, tool notes, and context documents. On Unix systems, snapshot files are written with 0600 permissions (owner read/write only). Ensure the snapshot path (`SNAPSHOT_PATH` env var) points to a user-controlled directory.
+
 ## Using the Workspace
 
 ```rust
