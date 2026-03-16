@@ -67,13 +67,17 @@ const SNAPSHOT_VERSION: &str = "v1";
 static SNAPSHOT_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Regex matching well-formed begin markers with numeric length.
-static BEGIN_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<!-- begin: (.+) length:(\d+) -->").expect("BEGIN_RE"));
+static BEGIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // safety: hardcoded regex literal, cannot fail
+    Regex::new(r"<!-- begin: (.+) length:(\d+) -->").expect("BEGIN_RE")
+});
 
 /// Regex matching begin markers with any (possibly non-numeric) length value.
 /// Used to detect malformed markers that `BEGIN_RE` would silently skip.
-static MALFORMED_BEGIN_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<!-- begin: .+ length:\S+ -->").expect("MALFORMED_BEGIN_RE"));
+static MALFORMED_BEGIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // safety: hardcoded regex literal, cannot fail
+    Regex::new(r"<!-- begin: .+ length:\S+ -->").expect("MALFORMED_BEGIN_RE")
+});
 
 /// Workspace-side snapshot configuration (paths already resolved for a user).
 #[derive(Debug, Clone)]
