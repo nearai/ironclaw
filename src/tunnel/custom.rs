@@ -281,7 +281,7 @@ mod tests {
         // `yes` floods stdout indefinitely; without the drain task the pipe
         // buffer fills (64 KB) and the child blocks on write(), becoming a
         // zombie. With draining the child stays alive and stop() can kill it.
-        let tunnel = CustomTunnel::new("yes".into(), None, None);
+        let tunnel = CustomTunnel::new("yes".into(), None, None).unwrap();
         let url = tunnel.start("127.0.0.1", 19999).await.unwrap();
         assert_eq!(url, "http://127.0.0.1:19999");
 
