@@ -248,19 +248,24 @@ fn escape_xml_attr(s: &str) -> String {
 /// with `<\u{200B}` (zero-width space) so JSON and other content passes
 /// through unchanged.
 fn escape_tool_output_close(s: &str) -> String {
-    use regex::Regex;
-    use std::sync::LazyLock;
+    // Case-insensitive search for </tool_output (with optional whitespace/null after </)
+    // to block XML injection without corrupting other content.
+    let mut result = String::with_capacity(s.len());
+    let lower = s.to_ascii_lowercase();
+    let needle = "</tool_output";
+    let mut start = 0;
 
-    static CLOSE_TAG_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)</[\s\x00]*tool_output").expect("valid regex"));
-
-    CLOSE_TAG_RE
-        .replace_all(s, |caps: &regex::Captures| {
-            let matched = caps.get(0).expect("full match");
-            // Replace leading `<` with `<` + zero-width space
-            format!("<\u{200B}{}", &matched.as_str()[1..])
-        })
-        .into_owned()
+    while let Some(pos) = lower[start..].find(needle) {
+        let abs = start + pos;
+        result.push_str(&s[start..abs]);
+        // Insert zero-width space after '<' to break the closing tag
+        result.push('<');
+        result.push('\u{200B}');
+        result.push_str(&s[abs + 1..abs + needle.len()]);
+        start = abs + needle.len();
+    }
+    result.push_str(&s[start..]);
+    result
 }
 
 /// Reverse the escaping applied by [`escape_tool_output_close`] by removing
