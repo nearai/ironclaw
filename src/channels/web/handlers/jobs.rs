@@ -449,6 +449,8 @@ pub async fn jobs_restart_handler(
                     Some(project_dir),
                     mode,
                     credential_grants,
+                    None,
+                    None,
                 )
                 .await
                 .map_err(|e| {
