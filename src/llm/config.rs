@@ -5,6 +5,8 @@
 //! extracted into a standalone crate. Resolution logic (reading env vars,
 //! settings) lives in `crate::config::llm`.
 
+use std::path::PathBuf;
+
 use secrecy::SecretString;
 
 use crate::llm::registry::ProviderProtocol;
@@ -85,6 +87,13 @@ pub struct RegistryProviderConfig {
     /// OAuth token for providers that support Bearer auth (e.g. Anthropic via `claude login`).
     /// When set, the provider factory routes to the OAuth-specific provider implementation.
     pub oauth_token: Option<SecretString>,
+    /// When true, route OpenAI-compatible traffic to the Codex ChatGPT
+    /// Responses API provider instead of rig-core's Chat Completions path.
+    pub is_codex_chatgpt: bool,
+    /// OAuth refresh token for Codex ChatGPT token refresh.
+    pub refresh_token: Option<SecretString>,
+    /// Path to Codex auth.json for persisting refreshed tokens.
+    pub auth_path: Option<PathBuf>,
     /// Prompt cache retention (Anthropic-specific).
     pub cache_retention: CacheRetention,
     /// Parameter names that this provider does not support (e.g., `["temperature"]`).
