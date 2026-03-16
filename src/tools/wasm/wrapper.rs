@@ -485,7 +485,7 @@ struct WasmToolSchemas {
     /// This stays permissive by default to avoid serializing full exported
     /// WASM schemas on every LLM call. Sidecars can override it explicitly.
     advertised: serde_json::Value,
-    /// Full schema available for discovery and coercion.
+    /// Full schema available for discovery and runtime parameter preparation.
     ///
     /// Seeded from the WASM `schema()` export at registration time, unless a
     /// sidecar explicitly overrides it.
@@ -506,6 +506,19 @@ impl WasmToolSchemas {
             .get("properties")
             .and_then(|p| p.as_object())
             .is_none_or(|p| p.is_empty())
+    }
+
+    fn typed_property_count(schema: &serde_json::Value) -> usize {
+        schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .map(|props| {
+                props
+                    .values()
+                    .filter(|prop| schema_is_typed_property(prop))
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     fn new(discovery: serde_json::Value) -> Self {
@@ -531,27 +544,6 @@ impl WasmToolSchemas {
     }
 
     fn discovery(&self) -> serde_json::Value {
-        self.discovery.clone()
-    }
-
-    /// Return the best schema available for type coercion.
-    ///
-    /// Prefers the discovery schema when it has typed properties. Falls back
-    /// to the `PreparedModule` schema extracted at load time rather than
-    /// re-calling the WASM `schema()` export mid-execution, which could
-    /// interact with mutable linear memory state.
-    fn effective_for_coercion(&self, prepared_schema: &serde_json::Value) -> serde_json::Value {
-        if !Self::is_permissive_schema(&self.discovery) {
-            return self.discovery.clone();
-        }
-
-        // Fall back to the load-time extracted schema from PreparedModule.
-        // This avoids calling schema() on the already-running WASM instance
-        // where mutable state could produce inconsistent results.
-        if !Self::is_permissive_schema(prepared_schema) {
-            return prepared_schema.clone();
-        }
-
         self.discovery.clone()
     }
 }
@@ -583,7 +575,21 @@ impl WasmToolWrapper {
 
     /// Override the parameter schema.
     pub fn with_schema(mut self, schema: serde_json::Value) -> Self {
-        self.schemas = self.schemas.with_override(schema);
+        let override_typed = WasmToolSchemas::typed_property_count(&schema);
+        let prepared_typed = WasmToolSchemas::typed_property_count(&self.prepared.schema);
+
+        if override_typed == 0 && prepared_typed > 0 {
+            tracing::warn!(
+                tool = %self.prepared.name,
+                "Ignoring untyped schema override for discovery/runtime preparation and preserving extracted WASM schema"
+            );
+            self.schemas = WasmToolSchemas {
+                advertised: schema,
+                discovery: self.prepared.schema.clone(),
+            };
+        } else {
+            self.schemas = self.schemas.with_override(schema);
+        }
         self
     }
 
@@ -697,16 +703,6 @@ impl WasmToolWrapper {
         // Get typed interface — used for execute.
         let tool_iface = instance.near_agent_tool();
 
-        // Determine effective schema for type coercion.
-        // Prefer the discovery schema when typed; fall back to the load-time
-        // extracted schema from PreparedModule rather than re-calling the WASM
-        // export on the already-running instance.
-        let effective_schema = self.schemas.effective_for_coercion(&self.prepared.schema);
-
-        // Coerce string-encoded values to their schema-declared types.
-        // LLMs frequently pass numeric values as strings (e.g. "5" instead of 5).
-        let params = coerce_params_to_schema(params, &effective_schema);
-
         // Prepare the request
         let params_json = serde_json::to_string(&params)
             .map_err(|e| WasmError::InvalidResponseJson(e.to_string()))?;
@@ -734,10 +730,7 @@ impl WasmToolWrapper {
         // Check for tool-level error — point the LLM to tool_info for the
         // full schema instead of dumping ~3.5KB inline.
         if let Some(err) = response.error {
-            let hint = format!(
-                "Tip: call tool_info(name: \"{}\", include_schema: true) for the full parameter schema.",
-                self.prepared.name
-            );
+            let hint = build_tool_usage_hint(&self.prepared.name, &self.schemas.discovery());
             return Err(WasmError::ToolReturnedError { message: err, hint });
         }
 
@@ -1104,7 +1097,18 @@ async fn resolve_host_credentials(
 ) -> Vec<ResolvedHostCredential> {
     let store = match store {
         Some(s) => s,
-        None => return Vec::new(),
+        None => {
+            // If tool requires credentials but has no secrets store, this is a configuration error
+            if let Some(http_cap) = &capabilities.http
+                && !http_cap.credentials.is_empty()
+            {
+                tracing::warn!(
+                    user_id = %user_id,
+                    "WASM tool requires credentials but secrets_store is not configured - authentication will fail"
+                );
+            }
+            return Vec::new();
+        }
     };
 
     // Check if the access token needs refreshing before resolving credentials.
@@ -1155,13 +1159,37 @@ async fn resolve_host_credentials(
             continue;
         }
 
+        // Try to get credential under the provided user_id first.
+        // If not found and user_id != "default", fallback to "default" (global credentials).
+        // This handles OAuth tokens stored globally under "default" but accessed from routine contexts.
         let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
-            Ok(s) => s,
+            Ok(s) => Some(s),
             Err(e) => {
-                tracing::debug!(
+                // If lookup fails and we're not already looking up "default", try "default" as fallback
+                if user_id != "default" {
+                    tracing::debug!(
+                        secret_name = %mapping.secret_name,
+                        user_id = %user_id,
+                        error = %e,
+                        "Credential not found for user, trying default global credentials"
+                    );
+                    store
+                        .get_decrypted("default", &mapping.secret_name)
+                        .await
+                        .ok()
+                } else {
+                    None
+                }
+            }
+        };
+
+        let secret = match secret {
+            Some(s) => s,
+            None => {
+                tracing::warn!(
                     secret_name = %mapping.secret_name,
-                    error = %e,
-                    "Could not resolve credential for WASM tool (auth may not be configured)"
+                    user_id = %user_id,
+                    "Could not resolve credential for WASM tool (not found in user context or default)"
                 );
                 continue;
             }
@@ -1290,59 +1318,69 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// Coerce parameter values to match their JSON Schema-declared types.
-///
-/// LLMs frequently send numeric values as strings (e.g. `"5"` instead of `5`)
-/// or booleans as strings (`"true"` instead of `true`). This walks the params
-/// object and converts string values where the schema expects a different type.
-fn coerce_params_to_schema(
-    mut params: serde_json::Value,
-    schema: &serde_json::Value,
-) -> serde_json::Value {
-    let properties = schema.get("properties").and_then(|p| p.as_object());
+fn schema_contains_container_properties(schema: &serde_json::Value) -> bool {
+    schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|props| {
+            props.values().any(|prop| {
+                schema_declares_type(prop, "array") || schema_declares_type(prop, "object")
+            })
+        })
+        .unwrap_or(false)
+}
 
-    let properties = match properties {
-        Some(p) => p,
-        None => return params,
-    };
-
-    let obj = match params.as_object_mut() {
-        Some(o) => o,
-        None => return params,
-    };
-
-    for (key, prop_schema) in properties {
-        let declared_type = prop_schema.get("type").and_then(|t| t.as_str());
-        let declared_type = match declared_type {
-            Some(t) => t,
-            None => continue,
-        };
-
-        if let Some(current_value) = obj.get_mut(key)
-            && let Some(s) = current_value.as_str()
-        {
-            if declared_type == "string" {
-                continue;
+fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::String(t)) => t == expected,
+        Some(serde_json::Value::Array(types)) => types.iter().any(|t| t.as_str() == Some(expected)),
+        _ => match expected {
+            "object" => {
+                schema
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .is_some()
+                    || schema
+                        .get("additionalProperties")
+                        .is_some_and(serde_json::Value::is_object)
             }
+            "array" => schema.get("items").is_some(),
+            _ => false,
+        },
+    }
+}
 
-            let coerced = match declared_type {
-                "number" => s.parse::<f64>().ok().map(serde_json::Value::from),
-                "integer" => s.parse::<i64>().ok().map(serde_json::Value::from),
-                "boolean" => match s.to_lowercase().as_str() {
-                    "true" => Some(serde_json::json!(true)),
-                    "false" => Some(serde_json::json!(false)),
-                    _ => None,
-                },
-                _ => None,
-            };
+fn schema_is_typed_property(schema: &serde_json::Value) -> bool {
+    matches!(
+        schema.get("type"),
+        Some(serde_json::Value::String(_)) | Some(serde_json::Value::Array(_))
+    ) || schema.get("$ref").is_some()
+        || schema.get("anyOf").is_some()
+        || schema.get("oneOf").is_some()
+        || schema.get("allOf").is_some()
+        || schema.get("items").is_some()
+        || schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .is_some()
+        || schema
+            .get("additionalProperties")
+            .is_some_and(serde_json::Value::is_object)
+}
 
-            if let Some(new_val) = coerced {
-                *current_value = new_val;
-            }
-        }
+fn build_tool_usage_hint(tool_name: &str, schema: &serde_json::Value) -> String {
+    let mut hint = format!(
+        "Tip: call tool_info(name: \"{}\", include_schema: true) for the full parameter schema.",
+        tool_name
+    );
+
+    if schema_contains_container_properties(schema) {
+        hint.push_str(
+            " For array/object fields, pass native JSON arrays/objects, not quoted JSON strings.",
+        );
     }
 
-    params
+    hint
 }
 
 #[cfg(test)]
@@ -1910,100 +1948,60 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_coerce_params_string_to_number() {
-        let schema = serde_json::json!({
+    #[tokio::test]
+    async fn test_untyped_override_preserves_extracted_discovery_schema() {
+        let typed_schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "count": { "type": "number" },
-                "name": { "type": "string" }
+                "values": {
+                    "type": ["array", "null"],
+                    "items": { "type": "array" }
+                }
             }
         });
-        let params = serde_json::json!({"count": "5", "name": "test"});
-        let result = super::coerce_params_to_schema(params, &schema);
-        assert_eq!(result["count"], serde_json::json!(5.0));
-        assert_eq!(result["name"], serde_json::json!("test"));
+
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap()); // safety: test-only setup
+        let mut prepared = runtime
+            .prepare("sheets", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap(); // safety: test-only setup
+        Arc::get_mut(&mut prepared).unwrap().schema = typed_schema.clone(); // safety: test-only setup
+
+        let wrapper =
+            super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default())
+                .with_schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": true
+                }));
+
+        #[rustfmt::skip]
+        assert_eq!( // safety: test-only assertion
+            wrapper.parameters_schema(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        );
+        assert_eq!(wrapper.discovery_schema(), typed_schema); // safety: test-only assertion
     }
 
     #[test]
-    fn test_coerce_params_string_to_integer() {
+    fn test_build_tool_usage_hint_detects_nullable_container_properties() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
-                "limit": { "type": "integer" }
+                "requests": {
+                    "type": ["array", "null"],
+                    "items": { "type": "object" }
+                }
             }
         });
-        let params = serde_json::json!({"limit": "10"});
-        let result = super::coerce_params_to_schema(params, &schema);
-        assert_eq!(result["limit"], serde_json::json!(10));
-    }
 
-    #[test]
-    fn test_coerce_params_string_to_boolean() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "a": { "type": "boolean" },
-                "b": { "type": "boolean" },
-                "c": { "type": "boolean" },
-                "d": { "type": "boolean" }
-            }
-        });
-        let params = serde_json::json!({
-            "a": "true",
-            "b": "false",
-            "c": "True",
-            "d": "FALSE"
-        });
-        let result = super::coerce_params_to_schema(params, &schema);
-        assert_eq!(result["a"], serde_json::json!(true));
-        assert_eq!(result["b"], serde_json::json!(false));
-        assert_eq!(result["c"], serde_json::json!(true));
-        assert_eq!(result["d"], serde_json::json!(false));
-    }
+        let hint = super::build_tool_usage_hint("google_docs", &schema);
 
-    #[test]
-    fn test_coerce_params_already_correct_type() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "count": { "type": "number" }
-            }
-        });
-        let params = serde_json::json!({"count": 5});
-        let result = super::coerce_params_to_schema(params, &schema);
-        assert_eq!(result["count"], serde_json::json!(5));
-    }
-
-    #[test]
-    fn test_coerce_params_invalid_string_not_coerced() {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "count": { "type": "number" }
-            }
-        });
-        let params = serde_json::json!({"count": "not-a-number"});
-        let result = super::coerce_params_to_schema(params, &schema);
-        // Should remain as string since it can't be parsed
-        assert_eq!(result["count"], serde_json::json!("not-a-number"));
-    }
-
-    /// Regression: permissive fallback schema (empty properties) must NOT coerce.
-    /// This documents the bug where WASM tools with no sidecar `parameters` field
-    /// got the permissive fallback, causing coercion to be a no-op and LLM-provided
-    /// string integers to reach the WASM tool un-coerced.
-    #[test]
-    fn test_coerce_noop_with_permissive_schema() {
-        let permissive = serde_json::json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": true
-        });
-        let params = serde_json::json!({"query": "test", "count": "10"});
-        let result = super::coerce_params_to_schema(params, &permissive);
-        // With empty properties, no coercion happens — string stays string
-        assert_eq!(result["count"], serde_json::json!("10"));
+        assert!(hint.contains("native JSON arrays/objects")); // safety: test-only assertion
     }
 
     /// Regression test: leak scan must run on raw headers (before credential
@@ -2057,5 +2055,162 @@ mod tests {
             post_result.is_err(),
             "Leak scan on post-injection headers should block the Slack token"
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_fallback_to_default_user() {
+        use crate::secrets::{CredentialLocation, CredentialMapping, SecretsStore};
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Store a token under the "default" global user
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token_value"),
+            )
+            .await
+            .expect("Failed to store global token"); // safety: test code only
+
+        // Create capabilities requiring this credential
+        let mut creds = std::collections::HashMap::new();
+        creds.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["sheets.googleapis.com".to_string()],
+            },
+        );
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                allowlist: vec![],
+                credentials: creds,
+                rate_limit: crate::tools::wasm::capabilities::RateLimitConfig::default(),
+                max_request_bytes: 1024 * 1024,
+                max_response_bytes: 10 * 1024 * 1024,
+                timeout: std::time::Duration::from_secs(30),
+            }),
+            ..Default::default()
+        };
+
+        // Resolve credentials for a different user (routine context)
+        // Should fallback to "default" and find the token
+        let result = resolve_host_credentials(&caps, Some(&store), "routine_user_123", None).await;
+
+        assert!(!result.is_empty(), "fallback to default"); // safety: test code only
+        assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
+    }
+
+    fn test_capabilities_with_google_oauth() -> Capabilities {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::capabilities::HttpCapability;
+
+        let mut creds = std::collections::HashMap::new();
+        creds.insert(
+            "google_oauth_token".to_string(),
+            CredentialMapping {
+                secret_name: "google_oauth_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["sheets.googleapis.com".to_string()],
+            },
+        );
+        Capabilities {
+            http: Some(HttpCapability {
+                allowlist: vec![],
+                credentials: creds,
+                rate_limit: crate::tools::wasm::capabilities::RateLimitConfig::default(),
+                max_request_bytes: 1024 * 1024,
+                max_response_bytes: 10 * 1024 * 1024,
+                timeout: std::time::Duration::from_secs(30),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_prefers_user_specific_over_default() {
+        use crate::secrets::SecretsStore;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Store token under "default" (global)
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "global_token"),
+            )
+            .await
+            .expect("Failed to store global token"); // safety: test code only
+
+        // Store token under user_123 (user-specific)
+        store
+            .create(
+                "user_123",
+                crate::secrets::CreateSecretParams::new(
+                    "google_oauth_token",
+                    "user_specific_token",
+                ),
+            )
+            .await
+            .expect("Failed to store user token"); // safety: test code only
+
+        // Create capabilities
+        let caps = test_capabilities_with_google_oauth();
+
+        // Resolve credentials for user_123
+        // Should prefer user_123's token over default
+        let result = resolve_host_credentials(&caps, Some(&store), "user_123", None).await;
+
+        assert!(!result.is_empty(), "has user credentials"); // safety: test code only
+        assert_eq!(result[0].secret_value, "user_specific_token", "user token"); // safety: test code only
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_no_fallback_when_already_default() {
+        use crate::secrets::SecretsStore;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Only store token under "default" (not a duplicate)
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new("google_oauth_token", "default_token"),
+            )
+            .await
+            .expect("Failed to store default token"); // safety: test code only
+
+        // Create capabilities
+        let caps = test_capabilities_with_google_oauth();
+
+        // Resolve credentials for "default" user
+        // Should NOT attempt fallback (already looking up default)
+        let result = resolve_host_credentials(&caps, Some(&store), "default", None).await;
+
+        assert!(!result.is_empty(), "Should find default token"); // safety: test code only
+        assert_eq!(result[0].secret_value, "default_token"); // safety: test code only
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_missing_secret_warns() {
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Don't store any token
+
+        // Create capabilities expecting a credential
+        let caps = test_capabilities_with_google_oauth();
+
+        // Resolve credentials when neither user nor default has the token
+        let result = resolve_host_credentials(&caps, Some(&store), "user_456", None).await;
+
+        // Should return empty since credential can't be found anywhere
+        assert!(result.is_empty(), "no credentials found"); // safety: test code only
     }
 }

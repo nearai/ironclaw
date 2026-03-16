@@ -70,19 +70,21 @@ echo
 # This is a WARNING, not a hard violation.
 # --------------------------------------------------------------------------
 
-echo "--- Check 2: .unwrap() / .expect() in production code ---"
+echo "--- Check 2: .unwrap() / .expect() / assert!() in production code ---"
 
-# Collect raw matches excluding obvious test-only files and lines
-raw_results=$(grep -rn '\.unwrap()\|\.expect(' src/ \
+# Collect raw matches excluding obvious test-only files and lines.
+# Also catches assert!(), assert_eq!(), assert_ne!() but NOT debug_assert variants.
+raw_results=$(grep -rnE '\.(unwrap|expect)\(|[^_]assert(_eq|_ne)?!' src/ \
     --include='*.rs' \
     | grep -v 'src/main.rs' \
     | grep -v 'src/testing.rs' \
     | grep -v 'src/setup/' \
+    | grep -Ev 'debug_assert|// safety:' \
     || true)
 
 if [ -n "$raw_results" ]; then
     total=$(echo "$raw_results" | wc -l | tr -d ' ')
-    echo "WARNING: ~$total .unwrap()/.expect() calls found in src/ (excluding main/testing/setup)."
+    echo "WARNING: ~$total .unwrap()/.expect()/assert!() calls found in src/ (excluding main/testing/setup)."
     echo "Many are in test modules; a per-file breakdown helps triage:"
     echo
     # Show per-file counts, sorted by count descending, top 15

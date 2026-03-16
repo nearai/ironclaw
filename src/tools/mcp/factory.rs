@@ -18,6 +18,8 @@ pub enum McpFactoryError {
     UnixConnect { name: String, reason: String },
     #[error("Unix socket transport is not supported on this platform (server '{name}')")]
     UnixNotSupported { name: String },
+    #[error("Invalid configuration for MCP server '{name}': {reason}")]
+    InvalidConfig { name: String, reason: String },
 }
 
 /// Create an `McpClient` from a server configuration, dispatching on the
@@ -89,10 +91,18 @@ pub async fn create_client_from_config(
                     ))
                 } else {
                     Ok(McpClient::new_with_config(server)
+                        .map_err(|e| McpFactoryError::InvalidConfig {
+                            name: server_name.clone(),
+                            reason: e.to_string(),
+                        })?
                         .with_session_manager(Arc::clone(session_manager)))
                 }
             } else {
                 Ok(McpClient::new_with_config(server)
+                    .map_err(|e| McpFactoryError::InvalidConfig {
+                        name: server_name,
+                        reason: e.to_string(),
+                    })?
                     .with_session_manager(Arc::clone(session_manager)))
             }
         }
