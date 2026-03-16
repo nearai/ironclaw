@@ -429,7 +429,7 @@ fn create_cheap_provider_for_backend(
 
     let mut cheap_reg_config = reg_config.clone();
     cheap_reg_config.model = cheap_model.to_string();
-    let provider = create_registry_provider(&cheap_reg_config)?;
+    let provider = create_registry_provider(&cheap_reg_config, config.request_timeout_secs)?;
     Ok(Some(provider))
 }
 
