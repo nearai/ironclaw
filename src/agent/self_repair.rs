@@ -571,4 +571,148 @@ mod tests {
             result
         );
     }
+
+    /// Mock SoftwareBuilder that returns a successful build result.
+    struct MockBuilder {
+        build_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl MockBuilder {
+        fn new() -> Self {
+            Self {
+                build_count: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        fn builds(&self) -> u32 {
+            self.build_count.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl crate::tools::SoftwareBuilder for MockBuilder {
+        async fn analyze(
+            &self,
+            _description: &str,
+        ) -> Result<crate::tools::BuildRequirement, crate::error::ToolError> {
+            Ok(crate::tools::BuildRequirement {
+                name: "mock-tool".to_string(),
+                description: "mock".to_string(),
+                software_type: crate::tools::SoftwareType::WasmTool,
+                language: crate::tools::Language::Rust,
+                input_spec: None,
+                output_spec: None,
+                dependencies: vec![],
+                capabilities: vec![],
+            })
+        }
+
+        async fn build(
+            &self,
+            requirement: &crate::tools::BuildRequirement,
+        ) -> Result<crate::tools::BuildResult, crate::error::ToolError> {
+            self.build_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(crate::tools::BuildResult {
+                build_id: Uuid::new_v4(),
+                requirement: requirement.clone(),
+                artifact_path: std::path::PathBuf::from("/tmp/mock.wasm"),
+                logs: vec![],
+                success: true,
+                error: None,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                iterations: 1,
+                validation_warnings: vec![],
+                tests_passed: 1,
+                tests_failed: 0,
+                registered: true,
+            })
+        }
+
+        async fn repair(
+            &self,
+            _result: &crate::tools::BuildResult,
+            _error: &str,
+        ) -> Result<crate::tools::BuildResult, crate::error::ToolError> {
+            unimplemented!("not needed for this test")
+        }
+    }
+
+    /// E2E test: stuck job detected -> repaired -> transitions back to InProgress,
+    /// and broken tool detected -> builder invoked -> tool marked repaired.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn e2e_stuck_job_repair_and_tool_rebuild() {
+        // --- Setup ---
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("E2E stuck job", "desc").await.unwrap();
+
+        // Transition job: Pending -> InProgress -> Stuck
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("deadlocked".to_string()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Create a mock builder and a real test database (for store)
+        let builder = Arc::new(MockBuilder::new());
+        let tools = Arc::new(ToolRegistry::new());
+        let (db, _tmp_dir) = crate::testing::test_db().await;
+
+        // Create self-repair with zero threshold (detect immediately),
+        // wired with store, builder, and tools.
+        let repair = DefaultSelfRepair::new(Arc::clone(&cm), Duration::from_secs(0), 3)
+            .with_store(Arc::clone(&db))
+            .with_builder(
+                Arc::clone(&builder) as Arc<dyn crate::tools::SoftwareBuilder>,
+                tools,
+            );
+
+        // --- Phase 1: Detect and repair stuck job ---
+        let stuck_jobs = repair.detect_stuck_jobs().await;
+        assert_eq!(stuck_jobs.len(), 1, "Should detect the stuck job");
+        assert_eq!(stuck_jobs[0].job_id, job_id);
+
+        let result = repair.repair_stuck_job(&stuck_jobs[0]).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::Success { .. }),
+            "Job repair should succeed: {:?}",
+            result
+        );
+
+        // Verify job transitioned back to InProgress
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(
+            ctx.state,
+            JobState::InProgress,
+            "Job should be back to InProgress after repair"
+        );
+
+        // --- Phase 2: Repair a broken tool via builder ---
+        let broken = BrokenTool {
+            name: "broken-wasm-tool".to_string(),
+            failure_count: 10,
+            last_error: Some("panic in tool execution".to_string()),
+            first_failure: Utc::now() - chrono::Duration::hours(1),
+            last_failure: Utc::now(),
+            last_build_result: None,
+            repair_attempts: 0,
+        };
+
+        let tool_result = repair.repair_broken_tool(&broken).await.unwrap();
+        assert!(
+            matches!(tool_result, RepairResult::Success { .. }),
+            "Tool repair should succeed with mock builder: {:?}",
+            tool_result
+        );
+
+        // Verify builder was actually invoked
+        assert_eq!(builder.builds(), 1, "Builder should have been called once");
+    }
 }
