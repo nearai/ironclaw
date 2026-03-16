@@ -46,6 +46,15 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Parameter names that this provider does not support (e.g., `"temperature"`).
     /// These are stripped from requests before sending to avoid 400 errors.
     unsupported_params: HashSet<String>,
+    /// Whether to apply OpenAI strict-mode schema normalization to tool parameters.
+    ///
+    /// Strict mode adds `additionalProperties: false`, forces all properties into
+    /// `required`, and makes optional properties nullable via `"type": ["T", "null"]`.
+    /// Required for OpenAI and Anthropic strict function calling, but breaks Ollama
+    /// models that do not understand union type arrays.
+    ///
+    /// Defaults to `true`. Set to `false` for Ollama and non-strict providers.
+    strict_schema: bool,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -61,7 +70,20 @@ impl<M: CompletionModel> RigAdapter<M> {
             output_cost,
             cache_retention: CacheRetention::None,
             unsupported_params: HashSet::new(),
+            strict_schema: true,
         }
+    }
+
+    /// Control whether OpenAI strict-mode schema normalization is applied to tool parameters.
+    ///
+    /// Strict mode adds `additionalProperties: false`, forces all properties into
+    /// `required`, and makes optional properties nullable via `"type": ["T", "null"]`.
+    ///
+    /// Enable for OpenAI and Anthropic. Disable for Ollama and other providers that
+    /// use standard JSON Schema and choke on union type arrays.
+    pub fn with_strict_schema(mut self, strict: bool) -> Self {
+        self.strict_schema = strict;
+        self
     }
 
     /// Set Anthropic prompt cache retention policy.
@@ -383,15 +405,23 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
 
 /// Convert IronClaw tool definitions to rig-core format.
 ///
-/// Applies OpenAI strict-mode schema normalization to ensure all tool
-/// parameter schemas comply with OpenAI's function calling requirements.
-fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
+/// When `strict` is `true`, applies OpenAI strict-mode schema normalization
+/// (adds `additionalProperties: false`, all properties required, optional fields
+/// made nullable via `"type": ["T", "null"]`). Required for OpenAI / Anthropic.
+///
+/// When `strict` is `false`, passes schemas through unchanged. Use for Ollama and
+/// other providers that follow standard JSON Schema without OpenAI's strict constraints.
+fn convert_tools(tools: &[IronToolDefinition], strict: bool) -> Vec<RigToolDefinition> {
     tools
         .iter()
         .map(|t| RigToolDefinition {
             name: t.name.clone(),
             description: t.description.clone(),
-            parameters: normalize_schema_strict(&t.parameters),
+            parameters: if strict {
+                normalize_schema_strict(&t.parameters)
+            } else {
+                t.parameters.clone()
+            },
         })
         .collect()
 }
@@ -407,6 +437,11 @@ fn convert_tool_choice(choice: Option<&str>) -> Option<RigToolChoice> {
 }
 
 /// Extract text and tool calls from a rig-core completion response.
+///
+/// Ollama does not return tool call IDs; rig-core fakes one by using the function
+/// name as the ID. When the same tool is called multiple times in a single response,
+/// this produces duplicate IDs. We disambiguate by appending `_{n}` to any ID that
+/// appears more than once (e.g. `memory_search_0`, `memory_search_1`).
 fn extract_response(
     choice: &OneOrMany<AssistantContent>,
     _usage: &RigUsage,
@@ -430,6 +465,24 @@ fn extract_response(
             }
             // Reasoning and Image variants are not mapped to IronClaw types
             _ => {}
+        }
+    }
+
+    // Deduplicate tool call IDs. Ollama providers synthesize the ID from the
+    // function name, so parallel calls to the same tool produce identical IDs.
+    // Append `_{n}` suffix to make each ID unique within this response.
+    let mut id_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for tc in &tool_calls {
+        *id_counts.entry(tc.id.clone()).or_insert(0) += 1;
+    }
+    if id_counts.values().any(|&n| n > 1) {
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for tc in &mut tool_calls {
+            if id_counts[&tc.id] > 1 {
+                let count = seen.entry(tc.id.clone()).or_insert(0);
+                tc.id = format!("{}_{}", tc.id, count);
+                *count += 1;
+            }
         }
     }
 
@@ -648,7 +701,7 @@ where
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
-        let tools = convert_tools(&request.tools);
+        let tools = convert_tools(&request.tools, self.strict_schema);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let rig_req = build_rig_request(
@@ -857,7 +910,7 @@ mod tests {
                 }
             }),
         }];
-        let rig_tools = convert_tools(&tools);
+        let rig_tools = convert_tools(&tools, true);
         assert_eq!(rig_tools.len(), 1);
         assert_eq!(rig_tools[0].name, "search");
         assert_eq!(rig_tools[0].description, "Search the web");
@@ -1279,5 +1332,151 @@ mod tests {
         let adapter = RigAdapter::new(model, "test-model");
 
         assert!(adapter.unsupported_params.is_empty());
+    }
+
+    // -- Ollama-specific regression tests --
+
+    #[test]
+    fn test_convert_tools_strict_false_preserves_schema() {
+        // Ollama should receive the schema unchanged — no additionalProperties,
+        // no union types for optional fields.
+        let tools = vec![IronToolDefinition {
+            name: "memory_search".to_string(),
+            description: "Search memory".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["query"]
+            }),
+        }];
+
+        let rig_tools = convert_tools(&tools, false);
+        assert_eq!(rig_tools.len(), 1);
+        let params = &rig_tools[0].parameters;
+
+        // Optional field `limit` must NOT be turned into ["integer", "null"]
+        let limit_type = &params["properties"]["limit"]["type"];
+        assert_eq!(
+            limit_type,
+            &serde_json::json!("integer"),
+            "strict=false must not add null union to optional fields, got: {limit_type}"
+        );
+
+        // `additionalProperties` must NOT be injected
+        assert!(
+            params.get("additionalProperties").is_none(),
+            "strict=false must not inject additionalProperties"
+        );
+
+        // `required` must stay as provided by caller
+        let required = params["required"]
+            .as_array()
+            .expect("required must be array");
+        assert_eq!(
+            required.len(),
+            1,
+            "strict=false must not expand required list"
+        );
+        assert_eq!(required[0], "query");
+    }
+
+    #[test]
+    fn test_convert_tools_strict_true_normalizes_schema() {
+        // OpenAI/Anthropic path: strict normalization must apply.
+        let tools = vec![IronToolDefinition {
+            name: "search".to_string(),
+            description: "Search".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["query"]
+            }),
+        }];
+
+        let rig_tools = convert_tools(&tools, true);
+        let params = &rig_tools[0].parameters;
+
+        // Optional `limit` must become ["integer", "null"]
+        let limit_type = &params["properties"]["limit"]["type"];
+        assert!(
+            limit_type.is_array(),
+            "strict=true must make optional fields nullable, got: {limit_type}"
+        );
+
+        // additionalProperties must be injected
+        assert_eq!(
+            params["additionalProperties"],
+            serde_json::json!(false),
+            "strict=true must inject additionalProperties: false"
+        );
+
+        // All properties must be required
+        let required = params["required"]
+            .as_array()
+            .expect("required must be array");
+        assert_eq!(
+            required.len(),
+            2,
+            "strict=true must add all properties to required"
+        );
+    }
+
+    #[test]
+    fn test_extract_response_deduplicates_ollama_tool_call_ids() {
+        // Ollama uses function name as ID, so two calls to the same tool produce
+        // duplicate IDs. extract_response must suffix them to make them unique.
+        let content = OneOrMany::many(vec![
+            AssistantContent::tool_call(
+                "memory_search",
+                "memory_search",
+                serde_json::json!({"query": "foo"}),
+            ),
+            AssistantContent::tool_call(
+                "memory_search",
+                "memory_search",
+                serde_json::json!({"query": "bar"}),
+            ),
+        ])
+        .unwrap();
+        let usage = RigUsage::new();
+        let (_text, calls, finish) = extract_response(&content, &usage);
+
+        assert_eq!(calls.len(), 2);
+        assert_ne!(
+            calls[0].id, calls[1].id,
+            "duplicate IDs must be deduplicated"
+        );
+        assert!(
+            calls[0].id.starts_with("memory_search_"),
+            "first call ID should be suffixed, got: {}",
+            calls[0].id
+        );
+        assert!(
+            calls[1].id.starts_with("memory_search_"),
+            "second call ID should be suffixed, got: {}",
+            calls[1].id
+        );
+        assert_eq!(finish, FinishReason::ToolUse);
+    }
+
+    #[test]
+    fn test_extract_response_unique_ids_unchanged() {
+        // When IDs are already unique, they must pass through unchanged.
+        let content = OneOrMany::many(vec![
+            AssistantContent::tool_call("call_1", "search", serde_json::json!({})),
+            AssistantContent::tool_call("call_2", "fetch", serde_json::json!({})),
+        ])
+        .unwrap();
+        let usage = RigUsage::new();
+        let (_text, calls, _finish) = extract_response(&content, &usage);
+
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[1].id, "call_2");
     }
 }

@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
+  "description": "Free web search via DuckDuckGo — no API key required.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The search query"
+      },
+      "count": {
+        "type": "integer",
+        "description": "Number of results to return (1-20, default 5)",
+        "minimum": 1,
+        "maximum": 20
+      },
+      "region": {
+        "type": "string",
+        "description": "Region code (e.g. 'th-th', 'us-en'). Default: wt-wt"
+      }
+    },
+    "required": ["query"],
+    "additionalProperties": false
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "html.duckduckgo.com",
+          "path_prefix": "/html/",
+          "methods": ["POST"]
+        }
+      ],
+      "rate_limit": {
+        "requests_per_minute": 10,
+        "requests_per_hour": 100
+      }
+    }
+  }
+}

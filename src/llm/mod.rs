@@ -329,7 +329,10 @@ fn create_ollama_from_registry(
         "Using Ollama provider"
     );
 
+    // Ollama uses standard JSON Schema — disable OpenAI strict-mode normalization
+    // (additionalProperties:false + union-type optionals) which many Ollama models reject.
     let adapter = RigAdapter::new(model, &config.model)
+        .with_strict_schema(false)
         .with_unsupported_params(config.unsupported_params.clone());
     Ok(Arc::new(adapter))
 }
