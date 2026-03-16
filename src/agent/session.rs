@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::channels::web::util::truncate_preview;
 use crate::llm::{ChatMessage, ToolCall};
+use crate::llm::provider::generate_tool_call_id;
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,7 +371,9 @@ impl Thread {
                     .iter()
                     .enumerate()
                     .map(|(tc_idx, tc)| {
-                        (format!("turn-{}-tool-{}", turn_idx, tc_idx), tc)
+                        // Use provider-compatible tool call IDs derived from turn/tool indices.
+                        let seed = format!("{}-{}", turn_idx, tc_idx);
+                        (generate_tool_call_id(&seed), tc)
                     })
                     .collect();
 
