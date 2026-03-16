@@ -591,12 +591,6 @@ impl Guest for PrismerChannel {
             None => return,
         };
 
-        let jwt_for_requests =
-            match channel_host::workspace_read(JWT_PATH).filter(|t| !t.is_empty()) {
-                Some(t) => t,
-                None => return,
-            };
-
         for conv in &conversations {
             let unread = conv.unread_count.unwrap_or(0);
             if unread <= 0 {
@@ -614,8 +608,15 @@ impl Guest for PrismerChannel {
                 msg_url.push_str(&format!("?offset={}", cursor));
             }
 
+            // Re-read JWT each iteration — it may have been refreshed by a 401 retry
+            let current_jwt =
+                match channel_host::workspace_read(JWT_PATH).filter(|t| !t.is_empty()) {
+                    Some(t) => t,
+                    None => return,
+                };
+
             let (msg_status, msg_body) =
-                match api_request("GET", &msg_url, &jwt_for_requests, None) {
+                match api_request("GET", &msg_url, &current_jwt, None) {
                     Ok(r) => r,
                     Err(e) => {
                         channel_host::log(
@@ -724,7 +725,10 @@ impl Guest for PrismerChannel {
                 "{}/api/im/conversations/{}/read",
                 config.base_url, conv.id
             );
-            let _ = api_request("POST", &read_url, &jwt_for_requests, None);
+            // Re-read JWT for mark-as-read (may have been refreshed above)
+            let read_jwt =
+                channel_host::workspace_read(JWT_PATH).unwrap_or_default();
+            let _ = api_request("POST", &read_url, &read_jwt, None);
         }
     }
 
