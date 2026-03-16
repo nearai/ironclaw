@@ -17,10 +17,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::channels::web::util::truncate_preview;
-use crate::llm::{ChatMessage, ToolCall};
-use crate::llm::provider::generate_tool_call_id;
+use crate::llm::{ChatMessage, ToolCall, generate_tool_call_id};
 
 /// A session containing one or more threads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     /// Unique session ID.
