@@ -436,7 +436,7 @@ fn base36_id_from_u64(mut value: u64, len: usize) -> String {
     }
 
     // SAFETY: `DIGITS` only contains valid ASCII, so `buf` is valid UTF-8.
-    String::from_utf8(buf).unwrap_or_else(|_| "000000000".to_string())
+    String::from_utf8(buf).expect("base36_id_from_u64 produced non-UTF-8 bytes")
 }
 
 /// Convert IronClaw tool definitions to rig-core format.
