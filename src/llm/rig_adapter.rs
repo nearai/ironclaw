@@ -430,10 +430,6 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
 /// Applies OpenAI strict-mode schema normalization to ensure all tool
 /// parameter schemas comply with OpenAI's function calling requirements.
 fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
-///
-/// Applies OpenAI strict-mode schema normalization to ensure all tool
-/// parameter schemas comply with OpenAI's function calling requirements.
-fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
     tools
         .iter()
         .map(|t| RigToolDefinition {
