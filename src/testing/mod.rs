@@ -22,6 +22,8 @@ pub mod credentials;
 
 use std::sync::Arc;
 use std::sync::Mutex;
+pub mod fault_injection;
+
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use async_trait::async_trait;
@@ -84,6 +86,9 @@ pub struct StubLlm {
     call_count: AtomicU32,
     should_fail: AtomicBool,
     error_kind: StubErrorKind,
+    /// Optional fault injector for fine-grained failure control.
+    /// When set, takes precedence over the `should_fail` / `error_kind` fields.
+    fault_injector: Option<Arc<fault_injection::FaultInjector>>,
 }
 
 impl StubLlm {
@@ -95,6 +100,7 @@ impl StubLlm {
             call_count: AtomicU32::new(0),
             should_fail: AtomicBool::new(false),
             error_kind: StubErrorKind::Transient,
+            fault_injector: None,
         }
     }
 
@@ -106,6 +112,7 @@ impl StubLlm {
             call_count: AtomicU32::new(0),
             should_fail: AtomicBool::new(true),
             error_kind: StubErrorKind::Transient,
+            fault_injector: None,
         }
     }
 
@@ -117,6 +124,7 @@ impl StubLlm {
             call_count: AtomicU32::new(0),
             should_fail: AtomicBool::new(true),
             error_kind: StubErrorKind::NonTransient,
+            fault_injector: None,
         }
     }
 
@@ -129,6 +137,15 @@ impl StubLlm {
     /// Get the number of times `complete` or `complete_with_tools` was called.
     pub fn calls(&self) -> u32 {
         self.call_count.load(Ordering::Relaxed)
+    }
+
+    /// Attach a fault injector for fine-grained failure control.
+    ///
+    /// When set, the injector's `next_action()` is consulted on every call,
+    /// taking precedence over the `should_fail` / `error_kind` fields.
+    pub fn with_fault_injector(mut self, injector: Arc<fault_injection::FaultInjector>) -> Self {
+        self.fault_injector = Some(injector);
+        self
     }
 
     /// Toggle whether calls should fail at runtime.
@@ -168,9 +185,22 @@ impl LlmProvider for StubLlm {
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         self.call_count.fetch_add(1, Ordering::Relaxed);
-        if self.should_fail.load(Ordering::Relaxed) {
+
+        // Fault injector takes precedence over should_fail.
+        if let Some(ref injector) = self.fault_injector {
+            match injector.next_action() {
+                fault_injection::FaultAction::Fail(fault) => {
+                    return Err(fault.to_llm_error(&self.model_name));
+                }
+                fault_injection::FaultAction::Delay(duration) => {
+                    tokio::time::sleep(duration).await;
+                }
+                fault_injection::FaultAction::Succeed => {}
+            }
+        } else if self.should_fail.load(Ordering::Relaxed) {
             return Err(self.make_error());
         }
+
         Ok(CompletionResponse {
             content: self.response.clone(),
             input_tokens: 10,
@@ -186,9 +216,22 @@ impl LlmProvider for StubLlm {
         _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.call_count.fetch_add(1, Ordering::Relaxed);
-        if self.should_fail.load(Ordering::Relaxed) {
+
+        // Fault injector takes precedence over should_fail.
+        if let Some(ref injector) = self.fault_injector {
+            match injector.next_action() {
+                fault_injection::FaultAction::Fail(fault) => {
+                    return Err(fault.to_llm_error(&self.model_name));
+                }
+                fault_injection::FaultAction::Delay(duration) => {
+                    tokio::time::sleep(duration).await;
+                }
+                fault_injection::FaultAction::Succeed => {}
+            }
+        } else if self.should_fail.load(Ordering::Relaxed) {
             return Err(self.make_error());
         }
+
         Ok(ToolCompletionResponse {
             content: Some(self.response.clone()),
             tool_calls: Vec::new(),
