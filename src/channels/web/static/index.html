@@ -20,16 +20,16 @@
   <div id="auth-screen">
     <div class="auth-card-login">
       <div class="auth-brand">
-        <h1>IronClaw</h1>
-        <p class="auth-tagline">Secure AI Assistant</p>
+        <h1 data-i18n="auth.title">IronClaw</h1>
+        <p class="auth-tagline" data-i18n="auth.tagline">Secure AI Assistant</p>
       </div>
       <div class="auth-form">
-        <label for="token-input">Gateway Token</label>
-        <input type="password" id="token-input" placeholder="Paste your auth token" autofocus>
-        <button onclick="authenticate()">Connect</button>
+        <label for="token-input" data-i18n="auth.tokenLabel">Gateway Token</label>
+        <input type="password" id="token-input" placeholder="Paste your auth token" data-i18n-placeholder="auth.tokenPlaceholder" autofocus>
+        <button onclick="authenticate()" data-i18n="auth.connectBtn">Connect</button>
       </div>
       <div id="auth-error"></div>
-      <p class="auth-hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
+      <p class="auth-hint" data-i18n="auth.hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
     </div>
   </div>
 
@@ -37,14 +37,14 @@
   <div id="app">
     <!-- Tab Bar -->
     <div class="tab-bar">
-      <button class="active" data-tab="chat">Chat</button>
-      <button data-tab="memory">Memory</button>
-      <button data-tab="jobs">Jobs</button>
-      <button data-tab="routines">Routines</button>
-      <button data-tab="extensions">Extensions</button>
-      <button data-tab="skills">Skills</button>
+      <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
+      <button data-tab="memory" data-i18n="tab.memory">Memory</button>
+      <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
+      <button data-tab="routines" data-i18n="tab.routines">Routines</button>
+      <button data-tab="extensions" data-i18n="tab.extensions">Extensions</button>
+      <button data-tab="skills" data-i18n="tab.skills">Skills</button>
       <div class="spacer"></div>
-      <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
+      <button class="status-logs-btn" data-tab="logs" title="Logs" data-i18n="tab.logs">Logs</button>
       <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
@@ -63,16 +63,16 @@
     <div class="tab-panel active" id="tab-chat">
       <div class="thread-sidebar" id="thread-sidebar">
         <div class="thread-sidebar-header">
-          <span>Threads</span>
-          <button class="thread-new-btn" onclick="createNewThread()" title="New thread (Ctrl/Cmd+N)">+</button>
-          <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" title="Toggle sidebar">&laquo;</button>
+          <span data-i18n="thread.sidebarHeader">Threads</span>
+          <button class="thread-new-btn" onclick="createNewThread()" title="New thread (Ctrl/Cmd+N)" data-i18n-title="thread.newBtnTitle">+</button>
+          <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" title="Toggle sidebar" data-i18n-title="thread.toggleBtnTitle">&laquo;</button>
         </div>
         <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
-          <span class="assistant-label">Assistant</span>
+          <span class="assistant-label" data-i18n="thread.assistantLabel">Assistant</span>
           <span class="assistant-meta" id="assistant-meta"></span>
         </div>
         <div class="threads-section-header">
-          <span>Conversations</span>
+          <span data-i18n="thread.conversationsHeader">Conversations</span>
         </div>
         <div class="thread-list" id="thread-list"></div>
       </div>
@@ -80,8 +80,8 @@
         <div class="chat-messages" id="chat-messages"></div>
         <div id="slash-autocomplete" class="slash-autocomplete" style="display:none"></div>
         <div class="chat-input">
-          <textarea id="chat-input" placeholder="Message or / for commands..." rows="1"></textarea>
-          <button id="send-btn" onclick="sendMessage()">Send</button>
+          <textarea id="chat-input" placeholder="Message or / for commands..." data-i18n-placeholder="chat.inputPlaceholder" rows="1"></textarea>
+          <button id="send-btn" onclick="sendMessage()" data-i18n="chat.sendBtn">Send</button>
         </div>
       </div>
     </div>
@@ -91,23 +91,23 @@
       <div class="memory-container">
         <div class="memory-sidebar">
           <div class="search-box">
-            <input type="text" id="memory-search" placeholder="Search memory...">
+            <input type="text" id="memory-search" placeholder="Search memory..." data-i18n-placeholder="memory.searchPlaceholder">
           </div>
           <div class="memory-tree" id="memory-tree"></div>
         </div>
         <div class="memory-content">
           <div class="memory-breadcrumb" id="memory-breadcrumb">
             <span id="memory-breadcrumb-path">workspace /</span>
-            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" onclick="startMemoryEdit()">Edit</button>
+            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" onclick="startMemoryEdit()" data-i18n="memory.editBtn">Edit</button>
           </div>
           <div class="memory-viewer" id="memory-viewer">
-            <div class="empty">Select a file to view its contents</div>
+            <div class="empty" data-i18n="memory.emptySelect">Select a file to view its contents</div>
           </div>
           <div class="memory-editor" id="memory-editor" style="display:none">
             <textarea id="memory-edit-textarea"></textarea>
             <div class="memory-editor-actions">
-              <button class="btn-save" onclick="saveMemoryEdit()">Save</button>
-              <button class="btn-cancel-edit" onclick="cancelMemoryEdit()">Cancel</button>
+              <button class="btn-save" onclick="saveMemoryEdit()" data-i18n="memory.saveBtn">Save</button>
+              <button class="btn-cancel-edit" onclick="cancelMemoryEdit()" data-i18n="memory.cancelBtn">Cancel</button>
             </div>
           </div>
         </div>
@@ -121,17 +121,17 @@
         <table class="jobs-table" id="jobs-table">
           <thead>
             <tr>
-              <th>ID</th>
-              <th>Title</th>
-              <th>Source</th>
-              <th>Status</th>
-              <th>Created</th>
-              <th>Actions</th>
+              <th data-i18n="jobs.tableColId">ID</th>
+              <th data-i18n="jobs.tableColTitle">Title</th>
+              <th data-i18n="jobs.tableColSource">Source</th>
+              <th data-i18n="jobs.tableColStatus">Status</th>
+              <th data-i18n="jobs.tableColCreated">Created</th>
+              <th data-i18n="jobs.tableColActions">Actions</th>
             </tr>
           </thead>
           <tbody id="jobs-tbody"></tbody>
         </table>
-        <div class="empty-state" id="jobs-empty" style="display:none">No jobs found</div>
+        <div class="empty-state" id="jobs-empty" style="display:none" data-i18n="jobs.empty">No jobs found</div>
       </div>
     </div>
 
@@ -140,22 +140,22 @@
       <div class="logs-container">
         <div class="logs-toolbar">
           <select id="logs-server-level" onchange="setServerLogLevel(this.value)" title="Server-side log level (changes what the server emits)">
-            <option value="error">Server: ERROR</option>
-            <option value="warn">Server: WARN</option>
-            <option value="info" selected>Server: INFO</option>
-            <option value="debug">Server: DEBUG</option>
+            <option value="error" data-i18n="logs.serverLevelError">Server: ERROR</option>
+            <option value="warn" data-i18n="logs.serverLevelWarn">Server: WARN</option>
+            <option value="info" selected data-i18n="logs.serverLevelInfo">Server: INFO</option>
+            <option value="debug" data-i18n="logs.serverLevelDebug">Server: DEBUG</option>
           </select>
           <select id="logs-level-filter">
-            <option value="all">All Levels</option>
-            <option value="ERROR">Error</option>
-            <option value="WARN">Warn</option>
-            <option value="INFO">Info</option>
-            <option value="DEBUG">Debug</option>
+            <option value="all" data-i18n="logs.filterAllLevels">All Levels</option>
+            <option value="ERROR" data-i18n="logs.filterError">Error</option>
+            <option value="WARN" data-i18n="logs.filterWarn">Warn</option>
+            <option value="INFO" data-i18n="logs.filterInfo">Info</option>
+            <option value="DEBUG" data-i18n="logs.filterDebug">Debug</option>
           </select>
-          <input type="text" id="logs-target-filter" placeholder="Filter by target...">
-          <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> Auto-scroll</label>
-          <button id="logs-pause-btn" onclick="toggleLogsPause()">Pause</button>
-          <button onclick="clearLogs()">Clear</button>
+          <input type="text" id="logs-target-filter" placeholder="Filter by target..." data-i18n-placeholder="logs.targetFilterPlaceholder">
+          <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> <span data-i18n="logs.autoscrollLabel">Auto-scroll</span></label>
+          <button id="logs-pause-btn" onclick="toggleLogsPause()" data-i18n="logs.pauseBtn">Pause</button>
+          <button onclick="clearLogs()" data-i18n="logs.clearBtn">Clear</button>
         </div>
         <div class="logs-output" id="logs-output"></div>
       </div>
@@ -168,19 +168,19 @@
         <table class="routines-table" id="routines-table">
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Trigger</th>
-              <th>Action</th>
-              <th>Last Run</th>
-              <th>Next Run</th>
-              <th>Runs</th>
-              <th>Status</th>
-              <th>Actions</th>
+              <th data-i18n="routines.tableColName">Name</th>
+              <th data-i18n="routines.tableColTrigger">Trigger</th>
+              <th data-i18n="routines.tableColAction">Action</th>
+              <th data-i18n="routines.tableColLastRun">Last Run</th>
+              <th data-i18n="routines.tableColNextRun">Next Run</th>
+              <th data-i18n="routines.tableColRuns">Runs</th>
+              <th data-i18n="routines.tableColStatus">Status</th>
+              <th data-i18n="routines.tableColActions">Actions</th>
             </tr>
           </thead>
           <tbody id="routines-tbody"></tbody>
         </table>
-        <div class="empty-state" id="routines-empty" style="display:none">
+        <div class="empty-state" id="routines-empty" style="display:none" data-i18n="routines.empty">
           No routines configured. Ask the assistant to create one.
         </div>
         <div class="routine-detail" id="routine-detail" style="display:none"></div>
@@ -191,44 +191,44 @@
     <div class="tab-panel" id="tab-extensions">
       <div class="extensions-container">
         <div class="extensions-section">
-          <h3>Installed Extensions</h3>
+          <h3 data-i18n="ext.sectionInstalled">Installed Extensions</h3>
           <div class="extensions-list" id="extensions-list">
-            <div class="empty-state">Loading extensions...</div>
+            <div class="empty-state" data-i18n="ext.loadingExtensions">Loading extensions...</div>
           </div>
         </div>
         <div class="extensions-section" id="available-wasm-section">
-          <h3>Available WASM Extensions</h3>
+          <h3 data-i18n="ext.sectionAvailableWasm">Available WASM Extensions</h3>
           <div class="extensions-list" id="available-wasm-list">
-            <div class="empty-state">Loading...</div>
+            <div class="empty-state" data-i18n="ext.loadingList">Loading...</div>
           </div>
         </div>
         <div class="extensions-section">
-          <h3>Install WASM Extension</h3>
+          <h3 data-i18n="ext.sectionInstallWasm">Install WASM Extension</h3>
           <div class="ext-install-form">
-            <input type="text" id="wasm-install-name" placeholder="Extension name">
-            <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
-            <button onclick="installWasmExtension()">Install</button>
+            <input type="text" id="wasm-install-name" placeholder="Extension name" data-i18n-placeholder="ext.wasmNamePlaceholder">
+            <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle" data-i18n-placeholder="ext.wasmUrlPlaceholder">
+            <button onclick="installWasmExtension()" data-i18n="ext.installBtn">Install</button>
           </div>
         </div>
         <div class="extensions-section">
-          <h3>MCP Servers</h3>
+          <h3 data-i18n="ext.sectionMcpServers">MCP Servers</h3>
           <div class="extensions-list" id="mcp-servers-list">
-            <div class="empty-state">Loading...</div>
+            <div class="empty-state" data-i18n="ext.loadingList">Loading...</div>
           </div>
-          <h4>Add Custom MCP Server</h4>
+          <h4 data-i18n="ext.sectionAddMcp">Add Custom MCP Server</h4>
           <div class="ext-install-form">
-            <input type="text" id="mcp-install-name" placeholder="Server name">
-            <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
-            <button onclick="addMcpServer()">Add</button>
+            <input type="text" id="mcp-install-name" placeholder="Server name" data-i18n-placeholder="ext.mcpNamePlaceholder">
+            <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)" data-i18n-placeholder="ext.mcpUrlPlaceholder">
+            <button onclick="addMcpServer()" data-i18n="ext.installBtn">Add</button>
           </div>
         </div>
         <div class="extensions-section">
-          <h3>Registered Tools</h3>
+          <h3 data-i18n="ext.sectionTools">Registered Tools</h3>
           <table class="tools-table" id="tools-table">
-            <thead><tr><th>Name</th><th>Description</th></tr></thead>
+            <thead><tr><th data-i18n="ext.toolsTableColName">Name</th><th data-i18n="ext.toolsTableColDesc">Description</th></tr></thead>
             <tbody id="tools-tbody"></tbody>
           </table>
-          <div class="empty-state" id="tools-empty" style="display:none">No tools registered</div>
+          <div class="empty-state" id="tools-empty" style="display:none" data-i18n="ext.emptyTools">No tools registered</div>
         </div>
       </div>
     </div>
@@ -237,25 +237,25 @@
     <div class="tab-panel" id="tab-skills">
       <div class="extensions-container">
         <div class="extensions-section">
-          <h3>Search ClawHub</h3>
+          <h3 data-i18n="skills.sectionSearch">Search ClawHub</h3>
           <div class="skill-search-box">
-            <input type="text" id="skill-search-input" placeholder="Search for skills...">
-            <button onclick="searchClawHub()">Search</button>
+            <input type="text" id="skill-search-input" placeholder="Search for skills..." data-i18n-placeholder="skills.searchPlaceholder">
+            <button onclick="searchClawHub()" data-i18n="skills.searchBtn">Search</button>
           </div>
           <div class="extensions-list" id="skill-search-results"></div>
         </div>
         <div class="extensions-section">
-          <h3>Installed Skills</h3>
+          <h3 data-i18n="skills.sectionInstalled">Installed Skills</h3>
           <div class="extensions-list" id="skills-list">
-            <div class="empty-state">Loading skills...</div>
+            <div class="empty-state" data-i18n="skills.loadingSkills">Loading skills...</div>
           </div>
         </div>
         <div class="extensions-section">
-          <h3>Install Skill by URL</h3>
+          <h3 data-i18n="skills.sectionInstallUrl">Install Skill by URL</h3>
           <div class="ext-install-form">
-            <input type="text" id="skill-install-name" placeholder="Skill name or slug">
-            <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
-            <button onclick="installSkillFromForm()">Install</button>
+            <input type="text" id="skill-install-name" placeholder="Skill name or slug" data-i18n-placeholder="skills.nameOrSlugPlaceholder">
+            <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)" data-i18n-placeholder="skills.urlPlaceholder">
+            <button onclick="installSkillFromForm()" data-i18n="skills.installBtn">Install</button>
           </div>
         </div>
       </div>
@@ -263,6 +263,12 @@
   </div>
 
   <div id="toasts"></div>
+    <!-- i18n -->
+    <script src="/i18n/index.js"></script>
+    <script src="/i18n/en.js"></script>
+    <script src="/i18n/zh-CN.js"></script>
+    <script src="/i18n/zh-TW.js"></script>
+    <script src="/i18n-app.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
