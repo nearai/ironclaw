@@ -363,13 +363,12 @@ impl Thread {
             }
 
             if !turn.tool_calls.is_empty() {
-                // Build ToolCall objects with synthetic stable IDs
+                // Build ToolCall objects using the persisted call IDs
                 let tool_calls: Vec<ToolCall> = turn
                     .tool_calls
                     .iter()
-                    .enumerate()
-                    .map(|(i, tc)| ToolCall {
-                        id: crate::llm::generate_tool_call_id(turn.turn_number, i),
+                    .map(|tc| ToolCall {
+                        id: tc.call_id.clone(),
                         name: tc.name.clone(),
                         arguments: tc.parameters.clone(),
                     })
@@ -379,8 +378,8 @@ impl Thread {
                 messages.push(ChatMessage::assistant_with_tool_calls(None, tool_calls));
 
                 // Individual tool result messages, truncated to limit context size.
-                for (i, tc) in turn.tool_calls.iter().enumerate() {
-                    let call_id = crate::llm::generate_tool_call_id(turn.turn_number, i);
+                for tc in &turn.tool_calls {
+                    let call_id = tc.call_id.clone();
                     let content = if let Some(ref err) = tc.error {
                         // .error already contains the full error text;
                         // pass through without wrapping to avoid double-prefix.
