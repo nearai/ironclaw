@@ -2314,26 +2314,18 @@ mod tests {
     /// Helper function to test Retry-After header parsing logic
     /// (simulates the parsing done in send_request without actual HTTP, including fallback)
     fn parse_retry_after_for_test(header_value: &str) -> Option<std::time::Duration> {
-        let parsed = if header_value.is_empty() {
-            None
+        let trimmed = header_value.trim();
+        let parsed = if let Ok(secs) = trimmed.parse::<u64>() {
+            Some(std::time::Duration::from_secs(secs))
+        } else if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(trimmed) {
+            let now = chrono::Utc::now();
+            let delta = dt.signed_duration_since(now);
+            Some(std::time::Duration::from_secs(
+                delta.num_seconds().max(0) as u64
+            ))
         } else {
-            // Try delay-seconds first
-            if let Ok(secs) = header_value.trim().parse::<u64>() {
-                Some(std::time::Duration::from_secs(secs))
-            } else {
-                // Try HTTP-date
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(header_value.trim()) {
-                    let now = chrono::Utc::now();
-                    let delta = dt.signed_duration_since(now);
-                    Some(std::time::Duration::from_secs(
-                        delta.num_seconds().max(0) as u64
-                    ))
-                } else {
-                    None
-                }
-            }
+            None
         };
-
         // Apply fallback to 60s if parsing failed (matches actual code behavior)
         parsed.or(Some(std::time::Duration::from_secs(60)))
     }

@@ -685,17 +685,11 @@ mod tests {
     /// Helper function to test Retry-After header parsing logic for embeddings
     /// (simulates the parsing done in embed without actual HTTP, including fallback)
     fn parse_retry_after_embeddings_for_test(header_value: &str) -> Option<std::time::Duration> {
-        let parsed = if header_value.is_empty() {
-            None
-        } else {
-            header_value
-                .trim()
-                .parse::<u64>()
-                .ok()
-                .map(std::time::Duration::from_secs)
-        };
-
-        // Apply fallback to 60s if parsing failed (matches actual code behavior)
-        parsed.or(Some(std::time::Duration::from_secs(60)))
+        header_value
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(std::time::Duration::from_secs)
+            .or(Some(std::time::Duration::from_secs(60)))
     }
 }
