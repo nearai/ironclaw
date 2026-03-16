@@ -155,18 +155,34 @@ impl SelfRepair for DefaultSelfRepair {
                     }
                 }
 
-                let stuck_duration = ctx
-                    .started_at
-                    .map(|start| {
+                // Re-fetch context after potential InProgress->Stuck transition
+                // so that stuck_since picks up the new transition timestamp.
+                let ctx = match self.context_manager.get_context(job_id).await {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                // Use the timestamp of the most recent Stuck transition, not started_at.
+                // A job that ran for hours before becoming stuck should not immediately
+                // exceed the threshold — we measure from when it actually became stuck.
+                let stuck_since = ctx
+                    .transitions
+                    .iter()
+                    .rev()
+                    .find(|t| t.to == JobState::Stuck)
+                    .map(|t| t.timestamp);
+
+                let stuck_duration = stuck_since
+                    .map(|ts| {
                         let now = Utc::now();
-                        let duration = now.signed_duration_since(start);
+                        let duration = now.signed_duration_since(ts);
                         Duration::from_secs(duration.num_seconds().max(0) as u64)
                     })
                     .unwrap_or_default();
 
                 stuck_jobs.push(StuckJob {
                     job_id,
-                    last_activity: ctx.started_at.unwrap_or(ctx.created_at),
+                    last_activity: stuck_since.unwrap_or(ctx.created_at),
                     stuck_duration,
                     last_error: None,
                     repair_attempts: ctx.repair_attempts,
@@ -188,10 +204,17 @@ impl SelfRepair for DefaultSelfRepair {
             });
         }
 
-        // Try to recover the job
+        // Try to recover the job.
+        // If the job is still InProgress (detected via stuck_threshold), transition
+        // it to Stuck first so that attempt_recovery() can move it back to InProgress.
         let result = self
             .context_manager
-            .update_context(job.job_id, |ctx| ctx.attempt_recovery())
+            .update_context(job.job_id, |ctx| {
+                if ctx.state == JobState::InProgress {
+                    ctx.transition_to(JobState::Stuck, Some("exceeded stuck_threshold".into()))?;
+                }
+                ctx.attempt_recovery()
+            })
             .await;
 
         match result {
@@ -587,6 +610,50 @@ mod tests {
             matches!(result, RepairResult::ManualRequired { .. }),
             "Expected ManualRequired without builder, got: {:?}",
             result
+        );
+    }
+
+    /// Regression test: stuck_duration must be measured from the Stuck transition
+    /// timestamp, not from started_at. A job that ran for 2 hours before becoming
+    /// stuck (just now) should NOT be detected with a 5-minute threshold.
+    #[tokio::test]
+    async fn stuck_duration_measured_from_stuck_transition_not_started_at() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Long runner", "desc").await.unwrap();
+
+        // Transition to InProgress.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Backdate started_at to 2 hours ago to simulate a long-running job.
+        cm.update_context(job_id, |ctx| {
+            ctx.started_at = Some(Utc::now() - chrono::Duration::hours(2));
+        })
+        .await
+        .unwrap();
+
+        // Transition to Stuck right now.
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("test stuck".to_string()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // With a 5-minute threshold, the job should NOT be detected as stuck
+        // because it only became Stuck moments ago (even though started_at is 2h ago).
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(300), 3);
+        let stuck = repair.detect_stuck_jobs().await;
+
+        // The job IS in the list (it's in Stuck state), but its stuck_duration
+        // should be very small (near zero), not 2 hours.
+        assert_eq!(stuck.len(), 1);
+        assert!(
+            stuck[0].stuck_duration < Duration::from_secs(10),
+            "stuck_duration should be near zero (just became stuck), got {:?}",
+            stuck[0].stuck_duration
         );
     }
 }
