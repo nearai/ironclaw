@@ -119,11 +119,15 @@ pub struct Agent {
 
 impl Agent {
     pub(super) fn owner_id(&self) -> &str {
-        self.deps
-            .workspace
-            .as_ref()
-            .map(|workspace| workspace.user_id())
-            .unwrap_or(&self.deps.owner_id)
+        if let Some(workspace) = self.deps.workspace.as_ref() {
+            debug_assert_eq!(
+                workspace.user_id(),
+                self.deps.owner_id,
+                "workspace.user_id() must stay aligned with deps.owner_id"
+            );
+        }
+
+        &self.deps.owner_id
     }
 
     /// Create a new agent.
