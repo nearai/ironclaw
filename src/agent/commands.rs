@@ -836,7 +836,10 @@ impl Agent {
         // 1. Persist to DB if available.
         if let Some(store) = self.store() {
             let value = serde_json::Value::String(model.to_string());
-            if let Err(e) = store.set_setting("default", "selected_model", &value).await {
+            if let Err(e) = store
+                .set_setting(self.owner_id(), "selected_model", &value)
+                .await
+            {
                 tracing::warn!("Failed to persist model to DB: {}", e);
             }
         }

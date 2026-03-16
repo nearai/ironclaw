@@ -26,7 +26,7 @@ mod tunnel;
 mod wasm;
 
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, Once};
 
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -74,10 +74,12 @@ pub use self::helpers::{env_or_override, set_runtime_env};
 /// their data. Whichever runs first initialises the map; the second merges in.
 static INJECTED_VARS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static WARNED_EXPLICIT_DEFAULT_OWNER_ID: Once = Once::new();
 
 /// Main configuration for the agent.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub owner_id: String,
     pub database: DatabaseConfig,
     pub llm: LlmConfig,
     pub embeddings: EmbeddingsConfig,
@@ -118,6 +120,7 @@ impl Config {
         installed_skills_dir: std::path::PathBuf,
     ) -> Self {
         Self {
+            owner_id: "default".to_string(),
             database: DatabaseConfig {
                 backend: DatabaseBackend::LibSql,
                 url: secrecy::SecretString::from("unused://test".to_string()),
@@ -228,13 +231,7 @@ impl Config {
     pub async fn from_env_with_toml(
         toml_path: Option<&std::path::Path>,
     ) -> Result<Self, ConfigError> {
-        let _ = dotenvy::dotenv();
-        crate::bootstrap::load_ironclaw_env();
-        let mut settings = Settings::load();
-
-        // Overlay TOML config file (values win over JSON settings)
-        Self::apply_toml_overlay(&mut settings, toml_path)?;
-
+        let settings = load_bootstrap_settings(toml_path)?;
         Self::build(&settings).await
     }
 
@@ -306,16 +303,15 @@ impl Config {
 
     /// Build config from settings (shared by from_env and from_db).
     async fn build(settings: &Settings) -> Result<Self, ConfigError> {
-        // Resolve tunnel first so channels can default to loopback when a
-        // tunnel handles external exposure (no need to bind 0.0.0.0).
-        let tunnel = TunnelConfig::resolve(settings)?;
+        let owner_id = resolve_owner_id(settings)?;
 
         Ok(Self {
+            owner_id: owner_id.clone(),
             database: DatabaseConfig::resolve()?,
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
-            channels: ChannelsConfig::resolve(settings, tunnel.is_enabled())?,
-            tunnel,
+            tunnel: TunnelConfig::resolve(settings)?,
+            channels: ChannelsConfig::resolve(settings, &owner_id)?,
             agent: AgentConfig::resolve(settings)?,
             safety: resolve_safety_config(settings)?,
             wasm: WasmConfig::resolve(settings)?,
@@ -335,6 +331,43 @@ impl Config {
             relay: RelayConfig::from_env(),
         })
     }
+}
+
+pub(crate) fn load_bootstrap_settings(
+    toml_path: Option<&std::path::Path>,
+) -> Result<Settings, ConfigError> {
+    let _ = dotenvy::dotenv();
+    crate::bootstrap::load_ironclaw_env();
+
+    let mut settings = Settings::load();
+    Config::apply_toml_overlay(&mut settings, toml_path)?;
+    Ok(settings)
+}
+
+pub(crate) fn resolve_owner_id(settings: &Settings) -> Result<String, ConfigError> {
+    let env_owner_id = self::helpers::optional_env("IRONCLAW_OWNER_ID")?;
+    let settings_owner_id = settings.owner_id.clone();
+    let configured_owner_id = env_owner_id.clone().or(settings_owner_id.clone());
+
+    let owner_id = configured_owner_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+
+    if owner_id == "default"
+        && (env_owner_id.is_some()
+            || settings_owner_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()))
+    {
+        WARNED_EXPLICIT_DEFAULT_OWNER_ID.call_once(|| {
+            tracing::warn!(
+                "IRONCLAW_OWNER_ID resolved to the legacy 'default' scope explicitly; durable state will keep legacy owner behavior"
+            );
+        });
+    }
+
+    Ok(owner_id)
 }
 
 /// Load API keys from the encrypted secrets store into a thread-safe overlay.
