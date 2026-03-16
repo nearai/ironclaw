@@ -249,9 +249,7 @@ pub(crate) fn validate_base_url(url: &str, field_name: &str) -> Result<(), Confi
                         || v4.is_link_local()
                         || v4 == Ipv4Addr::new(169, 254, 169, 254)
                 } else {
-                    v6.is_loopback()
-                        || v6.is_unspecified()
-                        || (v6.octets()[0] & 0xfe) == 0xfc // ULA (fc00::/7)
+                    v6.is_loopback() || v6.is_unspecified() || (v6.octets()[0] & 0xfe) == 0xfc // ULA (fc00::/7)
                 }
             }
         }
