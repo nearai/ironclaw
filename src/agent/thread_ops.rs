@@ -226,9 +226,13 @@ impl Agent {
                     "Thread awaiting approval, rejecting new input"
                 );
                 let msg = match approval_context {
-                    Some((tool_name, description)) => format!(
-                        "Waiting for approval: {tool_name} — {description}. Use /interrupt to cancel."
-                    ),
+                    Some((tool_name, description)) => {
+                        let desc_preview =
+                            crate::agent::agent_loop::truncate_for_preview(&description, 80);
+                        format!(
+                            "Waiting for approval: {tool_name} — {desc_preview}. Use /interrupt to cancel."
+                        )
+                    }
                     None => "Waiting for approval. Use /interrupt to cancel.".to_string(),
                 };
                 return Ok(SubmissionResult::pending(msg));
