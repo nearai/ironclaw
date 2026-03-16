@@ -39,11 +39,50 @@ except Exception:
 # Temp directory for the libSQL database file (cleaned up automatically)
 _DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-")
 
+# Temp HOME so pairing/allowFrom state never touches the developer's real ~/.ironclaw
+_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-home-")
+
 # Temp directories for WASM extensions. These start empty and are populated by
 # the install pipeline during tests; fixtures do not pre-populate dev build
 # artifacts into them.
 _WASM_TOOLS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-tools-")
 _WASM_CHANNELS_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-wasm-channels-")
+
+
+def _latest_mtime(path: Path) -> float:
+    """Return the newest mtime under a file or directory."""
+    if not path.exists():
+        return 0.0
+    if path.is_file():
+        return path.stat().st_mtime
+
+    latest = path.stat().st_mtime
+    for root, dirnames, filenames in os.walk(path):
+        dirnames[:] = [dirname for dirname in dirnames if dirname != "target"]
+        for name in filenames:
+            child = Path(root) / name
+            try:
+                latest = max(latest, child.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+    return latest
+
+
+def _binary_needs_rebuild(binary: Path) -> bool:
+    """Rebuild when the binary is missing or older than embedded sources."""
+    if not binary.exists():
+        return True
+
+    binary_mtime = binary.stat().st_mtime
+    inputs = [
+        ROOT / "Cargo.toml",
+        ROOT / "Cargo.lock",
+        ROOT / "build.rs",
+        ROOT / "providers.json",
+        ROOT / "src",
+        ROOT / "channels-src",
+    ]
+    return any(_latest_mtime(path) > binary_mtime for path in inputs)
 
 
 def _find_free_port() -> int:
@@ -57,7 +96,7 @@ def _find_free_port() -> int:
 def ironclaw_binary():
     """Ensure ironclaw binary is built. Returns the binary path."""
     binary = ROOT / "target" / "debug" / "ironclaw"
-    if not binary.exists():
+    if _binary_needs_rebuild(binary):
         print("Building ironclaw (this may take a while)...")
         subprocess.run(
             ["cargo", "build", "--no-default-features", "--features", "libsql"],
@@ -141,10 +180,12 @@ def _wasm_build_symlinks():
 async def ironclaw_server(ironclaw_binary, mock_llm_server, wasm_tools_dir):
     """Start the ironclaw gateway. Yields the base URL."""
     gateway_port = _find_free_port()
+    home_dir = _HOME_TMPDIR.name
     env = {
         # Minimal env: PATH for process spawning, HOME for Rust/cargo defaults
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", "/tmp"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
         "RUST_LOG": "ironclaw=info",
         "RUST_BACKTRACE": "1",
         "GATEWAY_ENABLED": "true",

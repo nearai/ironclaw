@@ -1163,19 +1163,43 @@ async fn chat_auth_token_handler(
         .configure_token(&req.extension_name, &req.token)
         .await
     {
-        Ok(result) if result.activated => {
-            // Clear auth mode on the active thread
-            clear_auth_mode(&state).await;
+        Ok(result) => {
+            let mut resp = if result.verification.is_some() || result.activated {
+                ActionResponse::ok(result.message.clone())
+            } else {
+                ActionResponse::fail(result.message.clone())
+            };
+            resp.activated = Some(result.activated);
+            resp.auth_url = result.auth_url.clone();
+            resp.verification = result.verification.clone();
+            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
 
-            state.sse.broadcast(SseEvent::AuthCompleted {
-                extension_name: req.extension_name.clone(),
-                success: true,
-                message: result.message.clone(),
-            });
+            if result.verification.is_some() {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: req.extension_name.clone(),
+                    instructions: Some(result.message),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            } else if result.activated {
+                // Clear auth mode on the active thread
+                clear_auth_mode(&state).await;
 
-            Ok(Json(ActionResponse::ok(result.message)))
+                state.sse.broadcast(SseEvent::AuthCompleted {
+                    extension_name: req.extension_name.clone(),
+                    success: true,
+                    message: result.message,
+                });
+            } else {
+                state.sse.broadcast(SseEvent::AuthCompleted {
+                    extension_name: req.extension_name.clone(),
+                    success: false,
+                    message: result.message,
+                });
+            }
+
+            Ok(Json(resp))
         }
-        Ok(result) => Ok(Json(ActionResponse::fail(result.message))),
         Err(e) => {
             let msg = e.to_string();
             // Re-emit auth_required for retry on validation errors
@@ -1818,29 +1842,34 @@ async fn extensions_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let pairing_store = crate::pairing::PairingStore::new();
+    let mut owner_bound_channels = std::collections::HashSet::new();
+    for ext in &installed {
+        if ext.kind == crate::extensions::ExtensionKind::WasmChannel
+            && ext_mgr.has_wasm_channel_owner_binding(&ext.name).await
+        {
+            owner_bound_channels.insert(ext.name.clone());
+        }
+    }
     let extensions = installed
         .into_iter()
         .map(|ext| {
             let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-                Some(if ext.activation_error.is_some() {
-                    "failed".to_string()
-                } else if !ext.authenticated {
-                    // No credentials configured yet.
-                    "installed".to_string()
-                } else if ext.active {
-                    // Check pairing status for active channels.
-                    let has_paired = pairing_store
-                        .read_allow_from(&ext.name)
-                        .map(|list| !list.is_empty())
-                        .unwrap_or(false);
-                    if has_paired {
-                        "active".to_string()
-                    } else {
-                        "pairing".to_string()
-                    }
+                let has_paired = pairing_store
+                    .read_allow_from(&ext.name)
+                    .map(|list| !list.is_empty())
+                    .unwrap_or(false);
+                crate::channels::web::types::classify_wasm_channel_activation(
+                    &ext,
+                    has_paired,
+                    owner_bound_channels.contains(&ext.name),
+                )
+            } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
+                Some(if ext.active {
+                    ExtensionActivationStatus::Active
+                } else if ext.authenticated {
+                    ExtensionActivationStatus::Configured
                 } else {
-                    // Authenticated but not yet active.
-                    "configured".to_string()
+                    ExtensionActivationStatus::Installed
                 })
             } else {
                 None
@@ -2205,20 +2234,31 @@ async fn extensions_setup_submit_handler(
 
     match ext_mgr.configure(&name, &req.secrets).await {
         Ok(result) => {
-            // Broadcast completion status so chat UI can dismiss success cases while
-            // leaving failed auth/configuration flows visible for correction.
-            state.sse.broadcast(SseEvent::AuthCompleted {
-                extension_name: name.clone(),
-                success: result.activated,
-                message: result.message.clone(),
-            });
-            let mut resp = if result.activated {
+            let mut resp = if result.verification.is_some() || result.activated {
                 ActionResponse::ok(result.message)
             } else {
                 ActionResponse::fail(result.message)
             };
             resp.activated = Some(result.activated);
-            resp.auth_url = result.auth_url;
+            resp.auth_url = result.auth_url.clone();
+            resp.verification = result.verification.clone();
+            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
+            if result.verification.is_some() {
+                state.sse.broadcast(SseEvent::AuthRequired {
+                    extension_name: name.clone(),
+                    instructions: resp.instructions.clone(),
+                    auth_url: None,
+                    setup_url: None,
+                });
+            } else {
+                // Broadcast auth_completed so the chat UI can dismiss any in-progress
+                // auth card or setup modal that was triggered by tool_auth/tool_activate.
+                state.sse.broadcast(SseEvent::AuthCompleted {
+                    extension_name: name.clone(),
+                    success: result.activated,
+                    message: resp.message.clone(),
+                });
+            }
             Ok(Json(resp))
         }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
@@ -2743,7 +2783,11 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::web::types::{
+        ExtensionActivationStatus, classify_wasm_channel_activation,
+    };
     use crate::cli::oauth_defaults;
+    use crate::extensions::{ExtensionKind, InstalledExtension};
     use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
 
     #[test]
@@ -2820,6 +2864,85 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[test]
+    fn test_wasm_channel_activation_status_owner_bound_counts_as_active() -> Result<(), String> {
+        let ext = InstalledExtension {
+            name: "telegram".to_string(),
+            kind: ExtensionKind::WasmChannel,
+            display_name: Some("Telegram".to_string()),
+            description: None,
+            url: None,
+            authenticated: true,
+            active: true,
+            tools: Vec::new(),
+            needs_setup: true,
+            has_auth: false,
+            installed: true,
+            activation_error: None,
+            version: None,
+        };
+
+        let owner_bound = classify_wasm_channel_activation(&ext, false, true);
+        if owner_bound != Some(ExtensionActivationStatus::Active) {
+            return Err(format!(
+                "owner-bound channel should be active, got {:?}",
+                owner_bound
+            ));
+        }
+
+        let unbound = classify_wasm_channel_activation(&ext, false, false);
+        if unbound != Some(ExtensionActivationStatus::Pairing) {
+            return Err(format!(
+                "unbound channel should be pairing, got {:?}",
+                unbound
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_channel_relay_activation_status_is_preserved() -> Result<(), String> {
+        let relay = InstalledExtension {
+            name: "signal".to_string(),
+            kind: ExtensionKind::ChannelRelay,
+            display_name: Some("Signal".to_string()),
+            description: None,
+            url: None,
+            authenticated: true,
+            active: false,
+            tools: Vec::new(),
+            needs_setup: true,
+            has_auth: false,
+            installed: true,
+            activation_error: None,
+            version: None,
+        };
+
+        let status = if relay.kind == crate::extensions::ExtensionKind::WasmChannel {
+            classify_wasm_channel_activation(&relay, false, false)
+        } else if relay.kind == crate::extensions::ExtensionKind::ChannelRelay {
+            Some(if relay.active {
+                ExtensionActivationStatus::Active
+            } else if relay.authenticated {
+                ExtensionActivationStatus::Configured
+            } else {
+                ExtensionActivationStatus::Installed
+            })
+        } else {
+            None
+        };
+
+        if status != Some(ExtensionActivationStatus::Configured) {
+            return Err(format!(
+                "channel relay should retain configured status, got {:?}",
+                status
+            ));
+        }
+
+        Ok(())
     }
 
     // --- OAuth callback handler tests ---
