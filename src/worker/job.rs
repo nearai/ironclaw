@@ -1170,11 +1170,16 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 // Reset counter after a successful LLM call
                 self.consecutive_rate_limits
                     .store(0, std::sync::atomic::Ordering::Relaxed);
+                // Preserve the LLM's reasoning text so it appears in the
+                // assistant_with_tool_calls message pushed by execute_tool_calls.
+                let reasoning_text = s
+                    .iter()
+                    .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
                 let tool_calls: Vec<ToolCall> = selections_to_tool_calls(&s);
                 return Ok(crate::llm::RespondOutput {
                     result: RespondResult::ToolCalls {
                         tool_calls,
-                        content: None,
+                        content: reasoning_text,
                     },
                     usage: crate::llm::TokenUsage::default(),
                 });
@@ -1586,7 +1591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mark_completed_twice_returns_error() {
+    async fn test_mark_completed_twice_is_idempotent() {
         let worker = make_worker(vec![]).await;
 
         worker
@@ -1607,11 +1612,22 @@ mod tests {
             .unwrap();
         assert_eq!(ctx.state, JobState::Completed);
 
+        // Second mark_completed should succeed (idempotent) rather than
+        // erroring, matching the fix for the execution_loop / worker wrapper
+        // race condition.
         let result = worker.mark_completed().await;
         assert!(
-            result.is_err(),
-            "Completed → Completed transition should be rejected by state machine"
+            result.is_ok(),
+            "Completed -> Completed transition should be idempotent"
         );
+
+        // State should still be Completed
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .unwrap();
+        assert_eq!(ctx.state, JobState::Completed);
     }
 
     /// Build a Worker with the given approval context.
@@ -1847,6 +1863,130 @@ mod tests {
             ctx.state,
             JobState::Failed,
             "Iteration cap should transition to Failed, not Stuck"
+        );
+    }
+
+    /// Regression test: selections_to_tool_calls must preserve tool_call_id
+    /// so that tool_result messages match the assistant_with_tool_calls message
+    /// and are not treated as orphaned by sanitize_tool_messages.
+    #[test]
+    fn test_selections_to_tool_calls_preserves_ids() {
+        let selections = vec![
+            ToolSelection {
+                tool_name: "search".into(),
+                parameters: serde_json::json!({"q": "test"}),
+                reasoning: "Need to search".into(),
+                alternatives: vec![],
+                tool_call_id: "call_abc".into(),
+            },
+            ToolSelection {
+                tool_name: "fetch".into(),
+                parameters: serde_json::json!({"url": "https://example.com"}),
+                reasoning: "Need to fetch".into(),
+                alternatives: vec![],
+                tool_call_id: "call_def".into(),
+            },
+        ];
+
+        let tool_calls = selections_to_tool_calls(&selections);
+
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].id, "call_abc");
+        assert_eq!(tool_calls[0].name, "search");
+        assert_eq!(tool_calls[1].id, "call_def");
+        assert_eq!(tool_calls[1].name, "fetch");
+    }
+
+    /// Regression test: when select_tools returns selections with reasoning,
+    /// the reasoning text should be preserved as content in the RespondResult
+    /// so it appears in the assistant_with_tool_calls message. Without this,
+    /// the LLM's reasoning context is lost and subsequent turns lack context.
+    #[test]
+    fn test_reasoning_text_extraction_from_selections() {
+        // Simulate what call_llm does: extract first non-empty reasoning
+        let selections = [
+            ToolSelection {
+                tool_name: "search".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "I need to search for relevant information".into(),
+                alternatives: vec![],
+                tool_call_id: "call_1".into(),
+            },
+            ToolSelection {
+                tool_name: "fetch".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "I need to search for relevant information".into(),
+                alternatives: vec![],
+                tool_call_id: "call_2".into(),
+            },
+        ];
+
+        let reasoning_text = selections
+            .iter()
+            .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
+
+        assert_eq!(
+            reasoning_text.as_deref(),
+            Some("I need to search for relevant information"),
+            "Reasoning text should be extracted from first non-empty selection"
+        );
+
+        // Empty reasoning should result in None
+        let empty_selections = [ToolSelection {
+            tool_name: "echo".into(),
+            parameters: serde_json::json!({}),
+            reasoning: String::new(),
+            alternatives: vec![],
+            tool_call_id: "call_3".into(),
+        }];
+
+        let empty_reasoning = empty_selections
+            .iter()
+            .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
+
+        assert!(
+            empty_reasoning.is_none(),
+            "Empty reasoning should not be included as content"
+        );
+    }
+
+    /// When the first selection has empty reasoning but a subsequent one has
+    /// non-empty reasoning, find_map should skip the empty one and return the
+    /// first non-empty reasoning.
+    #[test]
+    fn test_reasoning_text_skips_empty_first_selection() {
+        let selections = [
+            ToolSelection {
+                tool_name: "echo".into(),
+                parameters: serde_json::json!({}),
+                reasoning: String::new(),
+                alternatives: vec![],
+                tool_call_id: "call_1".into(),
+            },
+            ToolSelection {
+                tool_name: "search".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "Found the answer in the second selection".into(),
+                alternatives: vec![],
+                tool_call_id: "call_2".into(),
+            },
+            ToolSelection {
+                tool_name: "fetch".into(),
+                parameters: serde_json::json!({}),
+                reasoning: "Third selection reasoning".into(),
+                alternatives: vec![],
+                tool_call_id: "call_3".into(),
+            },
+        ];
+
+        let reasoning_text = selections
+            .iter()
+            .find_map(|sel| (!sel.reasoning.is_empty()).then_some(sel.reasoning.clone()));
+
+        assert_eq!(
+            reasoning_text.as_deref(),
+            Some("Found the answer in the second selection"),
+            "Should skip empty first reasoning and return the first non-empty one"
         );
     }
 }

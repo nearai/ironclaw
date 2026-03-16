@@ -1540,7 +1540,8 @@ impl Agent {
             .configure_token(&pending.extension_name, token)
             .await
         {
-            Ok(result) => {
+            Ok(result) if result.activated => {
+                // Ensure extension is actually activated
                 tracing::info!(
                     "Extension '{}' configured via auth mode: {}",
                     pending.extension_name,
@@ -1554,6 +1555,28 @@ impl Agent {
                             extension_name: pending.extension_name.clone(),
                             success: true,
                             message: result.message.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+                Ok(Some(result.message))
+            }
+            Ok(result) => {
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thread.enter_auth_mode(pending.extension_name.clone());
+                    }
+                }
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::AuthRequired {
+                            extension_name: pending.extension_name.clone(),
+                            instructions: Some(result.message.clone()),
+                            auth_url: None,
+                            setup_url: None,
                         },
                         &message.metadata,
                     )

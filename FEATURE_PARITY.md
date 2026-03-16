@@ -74,7 +74,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Slack | ✅ | ✅ | - | WASM tool |
 | iMessage | ✅ | ❌ | P3 | BlueBubbles or Linq recommended |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
-| Feishu/Lark | ✅ | ❌ | P3 | Bitable create app/field tools, Docx table/image/file actions, rich-text media extraction |
+| Feishu/Lark | ✅ | 🚧 | P3 | WASM channel with Event Subscription v2.0; Bitable/Docx tools planned |
 | LINE | ✅ | ❌ | P3 | |
 | WebChat | ✅ | ✅ | - | Web gateway chat |
 | Matrix | ✅ | ❌ | P3 | E2EE support |
@@ -176,7 +176,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `browser` | ✅ | ❌ | P3 | Browser automation |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
 | `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
-| `logs` | ✅ | ❌ | P3 | Query logs |
+| `logs` | ✅ | 🚧 | P3 | `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). No DB-persisted log history. |
 | `update` | ✅ | ❌ | P3 | Self-update |
 | `completion` | ✅ | ✅ | - | Shell completion |
 | `/subagents spawn` | ✅ | ❌ | P3 | Spawn subagents from chat |

@@ -179,6 +179,12 @@ async fn register_channel(
         {
             config_updates.insert("bot_username".to_string(), serde_json::json!(username));
         }
+        // Inject channel-specific secrets into config for channels that need
+        // credentials in API request bodies (e.g., Feishu token exchange).
+        // The credential injection system only replaces placeholders in URLs
+        // and headers, so channels like Feishu that exchange app_id + app_secret
+        // for a tenant token need the raw values in their config.
+        inject_channel_secrets_into_config(&channel_name, secrets_store, &mut config_updates).await;
 
         if !config_updates.is_empty() {
             channel_arc.update_config(config_updates).await;
@@ -366,4 +372,63 @@ pub async fn inject_channel_credentials(
     }
 
     Ok(count)
+}
+
+/// Inject channel-specific secrets into the config JSON.
+///
+/// Some channels (e.g., Feishu) need raw credential values in their config
+/// because they perform token exchanges that require secrets in the HTTP
+/// request body. The standard credential injection system only replaces
+/// placeholders in URLs and headers, so this function fills config fields
+/// that map to secret names.
+///
+/// Mapping: for a channel named "feishu", secrets `feishu_app_id` and
+/// `feishu_app_secret` are injected as config keys `app_id` and `app_secret`.
+async fn inject_channel_secrets_into_config(
+    channel_name: &str,
+    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+    config_updates: &mut std::collections::HashMap<String, serde_json::Value>,
+) {
+    // Map of (config_key, secret_name) pairs per channel.
+    let secret_config_mappings: &[(&str, &str)] = match channel_name {
+        "feishu" => &[
+            ("app_id", "feishu_app_id"),
+            ("app_secret", "feishu_app_secret"),
+        ],
+        _ => return,
+    };
+
+    let Some(secrets) = secrets_store else {
+        return;
+    };
+
+    for &(config_key, secret_name) in secret_config_mappings {
+        match secrets.get_decrypted("default", secret_name).await {
+            Ok(decrypted) => {
+                config_updates.insert(
+                    config_key.to_string(),
+                    serde_json::Value::String(decrypted.expose().to_string()),
+                );
+                tracing::debug!(
+                    channel = %channel_name,
+                    config_key = %config_key,
+                    "Injected secret into channel config"
+                );
+            }
+            Err(_) => {
+                // Also try environment variable fallback.
+                let env_name = secret_name.to_uppercase();
+                if let Ok(val) = std::env::var(&env_name)
+                    && !val.is_empty()
+                {
+                    config_updates.insert(config_key.to_string(), serde_json::Value::String(val));
+                    tracing::debug!(
+                        channel = %channel_name,
+                        config_key = %config_key,
+                        "Injected secret from env into channel config"
+                    );
+                }
+            }
+        }
+    }
 }

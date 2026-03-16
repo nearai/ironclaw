@@ -343,7 +343,7 @@ impl near::agent::host::Host for StoreData {
                     .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?,
             );
         }
-        let rt = self.http_runtime.as_ref().expect("just initialized");
+        let rt = self.http_runtime.as_ref().expect("just initialized"); // safety: is_none branch above guarantees Some
         let result = rt.block_on(async {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))

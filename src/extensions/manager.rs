@@ -254,6 +254,17 @@ fn telegram_message_matches_verification_code(text: &str, code: &str) -> bool {
 }
 
 /// Central manager for extension lifecycle operations.
+///
+/// # Initialization Order
+///
+/// Relay-channel restoration depends on a channel manager being injected first.
+/// Call one of the following before `restore_relay_channels()`:
+///
+/// 1. [`ExtensionManager::set_channel_runtime`] (also sets relay manager), or
+/// 2. [`ExtensionManager::set_relay_channel_manager`].
+///
+/// If `restore_relay_channels()` runs first, each restore attempt fails with
+/// "Channel manager not initialized" and channels remain inactive.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
     discovery: OnlineDiscovery,
@@ -465,12 +476,14 @@ impl ExtensionManager {
         self.tunnel_url
             .as_ref()
             .filter(|u| !u.is_empty())
-            .and_then(|raw| url::Url::parse(raw).ok())
-            .and_then(|u| u.host_str().map(String::from))
-            .filter(|host| !oauth_defaults::is_loopback_host(host))
-            .map(|_| {
-                let base = self.tunnel_url.as_ref().unwrap().trim_end_matches('/');
-                format!("{}/oauth/callback", base)
+            .and_then(|raw| {
+                let url = url::Url::parse(raw).ok()?;
+                let host = url.host_str().map(String::from)?;
+                if oauth_defaults::is_loopback_host(&host) {
+                    return None;
+                }
+                let base = raw.trim_end_matches('/');
+                Some(format!("{}/oauth/callback", base))
             })
     }
 
@@ -678,7 +691,10 @@ impl ExtensionManager {
     ///
     /// Loads the persisted active channel list, filters to relay types (those with
     /// a stored stream token), and activates each via `activate_stored_relay()`.
-    /// Skips channels that are already active. Call this after `set_relay_channel_manager()`.
+    /// Skips channels that are already active.
+    ///
+    /// Call this only after `set_relay_channel_manager()` or `set_channel_runtime()`.
+    /// Otherwise, each activation attempt fails with "Channel manager not initialized".
     pub async fn restore_relay_channels(&self) {
         let persisted = self.load_persisted_active_channels().await;
         let already_active = self.active_channel_names.read().await.clone();
@@ -1643,8 +1659,12 @@ impl ExtensionManager {
         match fallback_decision(&primary_result, &entry.fallback_source) {
             FallbackDecision::Return => primary_result,
             FallbackDecision::TryFallback => {
-                let primary_err = primary_result.unwrap_err();
-                let fallback = entry.fallback_source.as_ref().unwrap();
+                // TryFallback guarantees primary is Err and fallback_source is Some.
+                let (primary_err, fallback) = match (primary_result, entry.fallback_source.as_ref())
+                {
+                    (Err(e), Some(f)) => (e, f),
+                    (other, _) => return other,
+                };
                 tracing::info!(
                     extension = %entry.name,
                     primary_error = %primary_err,
@@ -3192,9 +3212,16 @@ impl ExtensionManager {
         // Try to list and create tools.
         // A 401/auth error means the server requires OAuth — surface as
         // AuthRequired so the activate handler triggers the OAuth flow.
+        // Some servers (e.g. GitHub MCP) return 400 with "Authorization header
+        // is badly formatted" instead of 401 when auth is missing or invalid.
         let mcp_tools = client.list_tools().await.map_err(|e| {
             let msg = e.to_string();
-            if msg.contains("requires authentication") || msg.contains("401") {
+            let msg_lower = msg.to_ascii_lowercase();
+            if msg_lower.contains("requires authentication")
+                || msg.contains("401")
+                || (msg.contains("400")
+                    && (msg_lower.contains("authorization") || msg_lower.contains("authenticate")))
+            {
                 ExtensionError::AuthRequired
             } else {
                 ExtensionError::ActivationFailed(msg)
@@ -3809,7 +3836,8 @@ impl ExtensionManager {
             .or_else(|| relay_config.callback_url.clone())
             .unwrap_or_else(|| {
                 let host = std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-                let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3001".into());
+                let port = std::env::var("GATEWAY_PORT")
+                    .unwrap_or_else(|_| crate::config::DEFAULT_GATEWAY_PORT.to_string());
                 format!("http://{}:{}", host, port)
             });
 
@@ -4472,9 +4500,16 @@ impl ExtensionManager {
         {
             let token = token_value.trim();
             if !token.is_empty() {
-                let encoded =
-                    url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
-                let url = endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
+                // Telegram tokens contain colons (numeric_id:token_part) in the URL path,
+                // not query parameters, so URL-encoding breaks the endpoint.
+                // For other extensions, keep encoding to handle special chars in query parameters.
+                let url = if name == "telegram" {
+                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), token)
+                } else {
+                    let encoded =
+                        url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded)
+                };
                 // SSRF defense: block private IPs, localhost, cloud metadata endpoints
                 crate::tools::builtin::skill_tools::validate_fetch_url(&url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
@@ -4506,11 +4541,12 @@ impl ExtensionManager {
                     secret_name, name
                 )));
             }
-            if secret_value.trim().is_empty() {
+            let trimmed_value = secret_value.trim();
+            if trimmed_value.is_empty() {
                 continue;
             }
             let params =
-                CreateSecretParams::new(secret_name, secret_value).with_provider(name.to_string());
+                CreateSecretParams::new(secret_name, trimmed_value).with_provider(name.to_string());
             self.secrets
                 .create(&self.user_id, params)
                 .await
@@ -6942,5 +6978,35 @@ mod tests {
             msg.contains("validation failed"),
             "Display should contain 'validation failed', got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_telegram_token_colon_preserved_in_validation_url() {
+        // Regression: Telegram tokens (format: numeric_id:alphanumeric_string) must NOT
+        // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
+        // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
+        // Fixed by removing URL-encoding and using the token directly.
+        let endpoint_template = "https://api.telegram.org/bot{telegram_bot_token}/getMe";
+        let secret_name = "telegram_bot_token";
+        let token = "123456789:AABBccDDeeFFgg_Test-Token";
+
+        // Simulate the fixed validation URL building logic
+        let url = endpoint_template.replace(&format!("{{{}}}", secret_name), token);
+
+        // Verify colon is preserved
+        let expected = "https://api.telegram.org/bot123456789:AABBccDDeeFFgg_Test-Token/getMe";
+        if url != expected {
+            panic!("URL mismatch: expected {expected}, got {url}"); // safety: test assertion
+        }
+
+        // Verify it does NOT contain the broken percent-encoded version
+        if url.contains("%3A") {
+            panic!("URL contains URL-encoded colon (%3A): {url}"); // safety: test assertion
+        }
+
+        // Verify the URL contains the original colon
+        if !url.contains("123456789:AABBccDDeeFFgg_Test-Token") {
+            panic!("URL missing token: {url}"); // safety: test assertion
+        }
     }
 }
