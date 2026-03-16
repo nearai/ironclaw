@@ -8,6 +8,16 @@
 //! content containing any HTML comments, Markdown headers, or other markup
 //! round-trips exactly (byte-level fidelity).
 //!
+//! # Security
+//!
+//! The snapshot file contains sensitive workspace content in plaintext,
+//! including identity files (IDENTITY.md, SOUL.md, USER.md, AGENTS.md),
+//! memory (MEMORY.md), heartbeat configuration (HEARTBEAT.md), tool notes
+//! (TOOLS.md), and all context/\*\* documents. On Unix systems, snapshot and
+//! state files are automatically written with 0600 permissions (owner
+//! read/write only). The snapshot path should be in a user-controlled
+//! directory with appropriate access restrictions.
+//!
 //! ```text
 //! ┌───────────────────────────────────────────────┐
 //! │            Snapshot Pass                       │
@@ -23,6 +33,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
@@ -41,6 +52,8 @@ const SNAPSHOT_DOCS: &[&str] = &[
     paths::SOUL,
     paths::AGENTS,
     paths::USER,
+    paths::HEARTBEAT,
+    paths::TOOLS,
 ];
 
 /// Directory prefixes included in snapshot (prefix match on list_all results).
@@ -52,6 +65,15 @@ const SNAPSHOT_VERSION: &str = "v1";
 /// Global guard preventing concurrent snapshot passes.
 /// Independent of hygiene's `RUNNING` guard.
 static SNAPSHOT_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Regex matching well-formed begin markers with numeric length.
+static BEGIN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<!-- begin: (.+) length:(\d+) -->").expect("BEGIN_RE"));
+
+/// Regex matching begin markers with any (possibly non-numeric) length value.
+/// Used to detect malformed markers that `BEGIN_RE` would silently skip.
+static MALFORMED_BEGIN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<!-- begin: .+ length:\S+ -->").expect("MALFORMED_BEGIN_RE"));
 
 /// Workspace-side snapshot configuration (paths already resolved for a user).
 #[derive(Debug, Clone)]
@@ -139,7 +161,7 @@ pub async fn snapshot_if_due(
     let _guard = SnapshotRunningGuard;
 
     // Check cadence.
-    if let Some(state) = load_state(&config.state_path) {
+    if let Some(state) = load_state(&config.state_path).await {
         let elapsed = Utc::now().signed_duration_since(state.last_run);
         let cadence = chrono::Duration::hours(i64::from(config.cadence_hours));
         if elapsed < cadence {
@@ -206,22 +228,38 @@ pub async fn snapshot_if_due(
     // Atomic write: .tmp → rename.
     let tmp_path = config.snapshot_path.with_extension("md.tmp");
     if let Some(dir) = config.snapshot_path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| SnapshotError::Io {
-            reason: format!("create dir {}: {e}", dir.display()),
-        })?;
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|e| SnapshotError::Io {
+                reason: format!("create dir {}: {e}", dir.display()),
+            })?;
     }
-    std::fs::write(&tmp_path, &snapshot_text).map_err(|e| SnapshotError::Io {
-        reason: format!("write {}: {e}", tmp_path.display()),
-    })?;
-    std::fs::rename(&tmp_path, &config.snapshot_path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
-        SnapshotError::Io {
+    tokio::fs::write(&tmp_path, &snapshot_text)
+        .await
+        .map_err(|e| SnapshotError::Io {
+            reason: format!("write {}: {e}", tmp_path.display()),
+        })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        tokio::fs::set_permissions(&tmp_path, perms)
+            .await
+            .map_err(|e| SnapshotError::Io {
+                reason: format!("set permissions {}: {e}", tmp_path.display()),
+            })?;
+    }
+
+    if let Err(e) = tokio::fs::rename(&tmp_path, &config.snapshot_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(SnapshotError::Io {
             reason: format!("rename to {}: {e}", config.snapshot_path.display()),
-        }
-    })?;
+        });
+    }
 
     // Update cadence ONLY after successful write.
-    save_state(&config.state_path);
+    save_state(&config.state_path).await;
 
     tracing::info!(
         documents_exported = count,
@@ -245,9 +283,11 @@ pub async fn hydrate_from_snapshot(
     workspace: &Workspace,
     path: &Path,
 ) -> Result<HydrationReport, SnapshotError> {
-    let text = std::fs::read_to_string(path).map_err(|e| SnapshotError::Io {
-        reason: format!("read {}: {e}", path.display()),
-    })?;
+    let text = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| SnapshotError::Io {
+            reason: format!("read {}: {e}", path.display()),
+        })?;
 
     // Parse and validate metadata.
     let first_line = text.lines().next().ok_or_else(|| SnapshotError::Format {
@@ -338,6 +378,11 @@ fn is_snapshot_path(path: &str) -> bool {
 }
 
 /// Reject values that would break HTML comment syntax or line-based parsing.
+///
+/// The ` length:` check is a format-level constraint: the length-prefixed
+/// snapshot format uses ` length:` as the separator between path and byte
+/// count in begin markers, so paths containing this substring create
+/// ambiguity that neither greedy nor lazy regex matching can resolve.
 fn validate_marker_safe(value: &str, label: &str) -> Result<(), SnapshotError> {
     if value.contains("-->")
         || value.contains('\n')
@@ -349,21 +394,28 @@ fn validate_marker_safe(value: &str, label: &str) -> Result<(), SnapshotError> {
             reason: format!("{label} contains characters unsafe for snapshot markers: {value:?}"),
         });
     }
+    if value.contains(" length:") {
+        return Err(SnapshotError::Format {
+            reason: format!(
+                "{label} contains ' length:' which is ambiguous in the length-prefixed snapshot format: {value:?}"
+            ),
+        });
+    }
     Ok(())
 }
 
-fn load_state(path: &Path) -> Option<SnapshotState> {
-    let data = std::fs::read_to_string(path).ok()?;
+async fn load_state(path: &Path) -> Option<SnapshotState> {
+    let data = tokio::fs::read_to_string(path).await.ok()?;
     serde_json::from_str(&data).ok()
 }
 
 /// Save cadence state using atomic write (temp + rename).
-fn save_state(path: &Path) {
+async fn save_state(path: &Path) {
     let state = SnapshotState {
         last_run: Utc::now(),
     };
     if let Some(dir) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(dir)
+        && let Err(e) = tokio::fs::create_dir_all(dir).await
     {
         tracing::warn!("snapshot: failed to create state dir: {e}");
         return;
@@ -372,13 +424,21 @@ fn save_state(path: &Path) {
         return;
     };
     let tmp_path = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp_path, &json) {
+    if let Err(e) = tokio::fs::write(&tmp_path, &json).await {
         tracing::warn!("snapshot: failed to write temp state: {e}");
         return;
     }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = tokio::fs::set_permissions(&tmp_path, perms).await {
+            tracing::warn!("snapshot: failed to set state file permissions: {e}");
+        }
+    }
+    if let Err(e) = tokio::fs::rename(&tmp_path, path).await {
         tracing::warn!("snapshot: failed to rename state file: {e}");
-        let _ = std::fs::remove_file(&tmp_path);
+        let _ = tokio::fs::remove_file(&tmp_path).await;
     }
 }
 
@@ -448,26 +508,16 @@ fn parse_metadata(line: &str) -> Result<(String, String, DateTime<Utc>), Snapsho
 ///
 /// Strict: all format errors produce `SnapshotError::Format`.
 fn parse_snapshot_documents(text: &str) -> Result<Vec<(String, String)>, SnapshotError> {
-    let re =
-        Regex::new(r"<!-- begin: (.+) length:(\d+) -->").map_err(|e| SnapshotError::Format {
-            reason: format!("regex compile error: {e}"),
-        })?;
-
     let mut results = Vec::new();
     let mut pos = 0;
-
-    let malformed_re =
-        Regex::new(r"<!-- begin: .+ length:\S+ -->").map_err(|e| SnapshotError::Format {
-            reason: format!("regex compile error: {e}"),
-        })?;
 
     // Scan forward through text, using length to skip content regions so
     // that fake markers embedded inside document content are never matched.
     while pos < text.len() {
-        let Some(cap) = re.captures(&text[pos..]) else {
+        let Some(cap) = BEGIN_RE.captures(&text[pos..]) else {
             // No more strict matches. Check for malformed begin markers in
             // remaining text — if any exist, the snapshot is damaged.
-            if malformed_re.is_match(&text[pos..]) {
+            if MALFORMED_BEGIN_RE.is_match(&text[pos..]) {
                 return Err(SnapshotError::Format {
                     reason: "malformed begin marker with non-numeric length".into(),
                 });
@@ -702,6 +752,8 @@ mod tests {
         assert!(is_snapshot_path("SOUL.md"));
         assert!(is_snapshot_path("AGENTS.md"));
         assert!(is_snapshot_path("USER.md"));
+        assert!(is_snapshot_path("HEARTBEAT.md"));
+        assert!(is_snapshot_path("TOOLS.md"));
     }
 
     #[test]
@@ -713,8 +765,6 @@ mod tests {
     #[test]
     fn is_snapshot_path_rejects_non_allowlist() {
         assert!(!is_snapshot_path("README.md"));
-        assert!(!is_snapshot_path("HEARTBEAT.md"));
-        assert!(!is_snapshot_path("TOOLS.md"));
         assert!(!is_snapshot_path("BOOTSTRAP.md"));
         assert!(!is_snapshot_path("daily/2026-01-01.md"));
         assert!(!is_snapshot_path("conversations/chat.md"));
@@ -722,33 +772,33 @@ mod tests {
 
     // ─── State persistence ──────────────────────────────────────────
 
-    #[test]
-    fn save_and_load_state_roundtrip() {
+    #[tokio::test]
+    async fn save_and_load_state_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("snapshot_state.json");
 
-        save_state(&path);
-        let state = load_state(&path).expect("state should be loadable");
+        save_state(&path).await;
+        let state = load_state(&path).await.expect("state should be loadable");
         let elapsed = Utc::now().signed_duration_since(state.last_run);
         assert!(elapsed.num_seconds() < 2);
     }
 
-    #[test]
-    fn save_state_atomic_no_tmp_residue() {
+    #[tokio::test]
+    async fn save_state_atomic_no_tmp_residue() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         let tmp = dir.path().join("state.json.tmp");
 
-        save_state(&path);
+        save_state(&path).await;
         assert!(path.exists());
         assert!(!tmp.exists(), "temp file should be cleaned up");
     }
 
-    #[test]
-    fn save_state_creates_parent_dirs() {
+    #[tokio::test]
+    async fn save_state_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("deep").join("state.json");
-        save_state(&path);
+        save_state(&path).await;
         assert!(path.exists());
     }
 
@@ -788,5 +838,34 @@ mod tests {
         // We can only test parse_metadata + version check at unit level.
         let (version, _, _) = parse_metadata(text.lines().next().unwrap()).unwrap();
         assert_ne!(version, SNAPSHOT_VERSION);
+    }
+
+    // ─── I4: marker rejects ` length:` in paths ─────────────────────
+
+    #[test]
+    fn marker_rejects_path_with_length_keyword() {
+        let result = validate_marker_safe("context/ length:42 notes.md", "path");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("length:"),
+            "error should mention 'length:': {err}"
+        );
+    }
+
+    // ─── I2: file permissions ────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_state_sets_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        save_state(&path).await;
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "state file should have 0600 permissions");
     }
 }
