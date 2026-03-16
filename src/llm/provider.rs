@@ -250,7 +250,7 @@ pub fn generate_tool_call_id(seed_a: usize, seed_b: usize) -> String {
         *b = if digit < 10 { b'0' + digit } else { b'a' + digit - 10 };
         val /= 36;
     }
-    String::from_utf8(buf.to_vec()).unwrap()
+    String::from(std::str::from_utf8(&buf).unwrap())
 }
 
 /// Result of a tool execution to send back to the LLM.
