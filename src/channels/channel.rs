@@ -83,6 +83,11 @@ pub struct IncomingMessage {
     pub timezone: Option<String>,
     /// File or media attachments on this message.
     pub attachments: Vec<IncomingAttachment>,
+    /// Internal-only flag: message was generated inside the process (e.g. job
+    /// monitor) and must bypass the normal user-input pipeline.  This field is
+    /// **not** settable via `with_metadata()` — only trusted code paths inside
+    /// the binary can set it, preventing external channels from spoofing it.
+    pub(crate) is_internal: bool,
 }
 
 impl IncomingMessage {
@@ -103,6 +108,7 @@ impl IncomingMessage {
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: Vec::new(),
+            is_internal: false,
         }
     }
 
@@ -133,6 +139,12 @@ impl IncomingMessage {
     /// Set attachments.
     pub fn with_attachments(mut self, attachments: Vec<IncomingAttachment>) -> Self {
         self.attachments = attachments;
+        self
+    }
+
+    /// Mark this message as internal (bypasses user-input pipeline).
+    pub(crate) fn into_internal(mut self) -> Self {
+        self.is_internal = true;
         self
     }
 }
@@ -238,6 +250,8 @@ pub enum StatusUpdate {
         /// Optional workspace path where the image was saved.
         path: Option<String>,
     },
+    /// Suggested follow-up messages for the user.
+    Suggestions { suggestions: Vec<String> },
 }
 
 impl StatusUpdate {

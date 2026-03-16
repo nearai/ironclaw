@@ -750,6 +750,20 @@ impl Agent {
             "Message details"
         );
 
+        // Internal messages (e.g. job-monitor notifications) are already
+        // rendered text and should be forwarded directly to the user without
+        // entering the normal user-input pipeline (LLM/tool loop).
+        // The `is_internal` field and `into_internal()` setter are pub(crate),
+        // so external channels cannot spoof this flag.
+        if message.is_internal {
+            tracing::debug!(
+                message_id = %message.id,
+                channel = %message.channel,
+                "Forwarding internal message"
+            );
+            return Ok(Some(message.content.clone()));
+        }
+
         // Set message tool context for this turn (current channel and target)
         // For Signal, use signal_target from metadata (group:ID or phone number),
         // otherwise fall back to user_id
@@ -838,19 +852,42 @@ impl Agent {
         };
 
         if let Some(pending) = pending_auth {
-            match &submission {
-                Submission::UserInput { content } => {
-                    return self
-                        .process_auth_token(message, &pending, content, session, thread_id)
-                        .await;
-                }
-                _ => {
-                    // Any control submission (interrupt, undo, etc.) cancels auth mode
+            if pending.is_expired() {
+                // TTL exceeded — clear stale auth mode
+                tracing::warn!(
+                    extension = %pending.extension_name,
+                    "Auth mode expired after TTL, clearing"
+                );
+                {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
                         thread.pending_auth = None;
                     }
-                    // Fall through to normal handling
+                }
+                // If this was a user message (possibly a pasted token), return an
+                // explicit error instead of forwarding it to the LLM/history.
+                if matches!(submission, Submission::UserInput { .. }) {
+                    return Ok(Some(format!(
+                        "Authentication for **{}** expired. Please try again.",
+                        pending.extension_name
+                    )));
+                }
+                // Control submissions (interrupt, undo, etc.) fall through to normal handling
+            } else {
+                match &submission {
+                    Submission::UserInput { content } => {
+                        return self
+                            .process_auth_token(message, &pending, content, session, thread_id)
+                            .await;
+                    }
+                    _ => {
+                        // Any control submission (interrupt, undo, etc.) cancels auth mode
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.pending_auth = None;
+                        }
+                        // Fall through to normal handling
+                    }
                 }
             }
         }

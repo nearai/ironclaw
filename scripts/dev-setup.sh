@@ -56,6 +56,9 @@ if [ -n "$HOOKS_DIR" ]; then
     echo "  commit-msg hook installed (regression test enforcement)"
     ln -sf "$SCRIPTS_ABS/pre-commit-safety.sh" "$HOOKS_DIR/pre-commit"
     echo "  pre-commit hook installed (UTF-8, case-sensitivity, /tmp, redaction checks)"
+    REPO_ROOT="$(git rev-parse --show-toplevel)"
+    ln -sf "$REPO_ROOT/.githooks/pre-push" "$HOOKS_DIR/pre-push"
+    echo "  pre-push hook installed (quality gate + optional delta lint)"
 else
     echo "  Skipped: not a git repository"
 fi

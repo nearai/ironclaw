@@ -330,7 +330,11 @@ impl CreateJobTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let jm = self.job_manager.as_ref().expect("sandbox deps required");
+        let jm = self.job_manager.as_ref().ok_or_else(|| {
+            ToolError::ExecutionFailed(
+                "Sandbox execution requires a configured job manager (container runtime not available)".to_string(),
+            )
+        })?;
 
         let job_id = Uuid::new_v4();
         let (project_dir, browse_id) = resolve_project_dir(explicit_dir, job_id)?;
@@ -411,7 +415,19 @@ impl CreateJobTool {
             // loop stops consuming from inject_tx the send will fail and the
             // monitor terminates. No JoinHandle is retained.
             if let (Some(etx), Some(itx)) = (&self.event_tx, &self.inject_tx) {
-                crate::agent::job_monitor::spawn_job_monitor(job_id, etx.subscribe(), itx.clone());
+                if let Some(route) = monitor_route_from_ctx(ctx) {
+                    crate::agent::job_monitor::spawn_job_monitor(
+                        job_id,
+                        etx.subscribe(),
+                        itx.clone(),
+                        route,
+                    );
+                } else {
+                    tracing::debug!(
+                        job_id = %job_id,
+                        "Skipping job monitor injection due to missing route metadata"
+                    );
+                }
             }
 
             let result = serde_json::json!({
@@ -674,6 +690,36 @@ fn resolve_project_dir(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| project_id.to_string());
     Ok((canonical_dir, browse_id))
+}
+
+fn monitor_route_from_ctx(ctx: &JobContext) -> Option<crate::agent::job_monitor::JobMonitorRoute> {
+    // notify_channel is required — without it we don't know which channel to
+    // route the monitor output to, so return None to skip monitoring entirely.
+    let channel = ctx
+        .metadata
+        .get("notify_channel")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    // notify_user is optional — fall back to the job's own user_id, which is
+    // always present. The channel is the routing decision; the user is just
+    // for attribution and can default safely.
+    let user_id = ctx
+        .metadata
+        .get("notify_user")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&ctx.user_id)
+        .to_string();
+    let thread_id = ctx
+        .metadata
+        .get("notify_thread_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Some(crate::agent::job_monitor::JobMonitorRoute {
+        channel,
+        user_id,
+        thread_id,
+    })
 }
 
 #[async_trait]
@@ -1377,6 +1423,31 @@ mod tests {
         // Without sandbox: default timeout
         let tool = CreateJobTool::new(Arc::clone(&manager));
         assert_eq!(tool.execution_timeout(), Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_without_job_manager_returns_error() {
+        let manager = Arc::new(ContextManager::new(5));
+        // Create tool without sandbox deps — job_manager is None.
+        let tool = CreateJobTool::new(manager);
+        assert!(!tool.sandbox_enabled());
+
+        let result = tool
+            .execute_sandbox(
+                "test task",
+                None,
+                false,
+                JobMode::Worker,
+                vec![],
+                &JobContext::default(),
+            )
+            .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ToolError::ExecutionFailed(_)),
+            "expected ExecutionFailed, got: {err:?}"
+        );
     }
 
     #[tokio::test]
