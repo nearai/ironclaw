@@ -130,3 +130,62 @@ async def test_approval_params_toggle(page):
     await toggle.click()
     await page.wait_for_timeout(300)
     assert await params.is_hidden(), "Parameters should be hidden after second toggle"
+
+
+async def test_waiting_for_approval_message_no_error_prefix(page):
+    """Verify that input submitted while awaiting approval shows non-error status with tool context.
+
+    Tests the real flow: show approval card, then attempt to send input while approval is pending.
+    Backend rejects with Pending result (not Error), and message includes tool context.
+    """
+    # First, inject an approval card to simulate the thread being in AwaitingApproval state
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-req-waiting-approval',
+            thread_id: currentThreadId,
+            tool_name: 'shell',
+            description: 'Execute: echo hello',
+            parameters: '{"command": "echo hello"}'
+        })
+    """)
+
+    # Wait for approval card to be visible (thread is now in AwaitingApproval state)
+    card = page.locator('.approval-card[data-request-id="test-req-waiting-approval"]')
+    await card.wait_for(state="visible", timeout=5000)
+
+    # Record initial message count
+    initial_count = await page.locator(SEL["message_assistant"]).count()
+
+    # Now attempt to send input while approval is pending
+    # (the backend will reject this and return the "Waiting for approval" status message)
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.fill("Test input while awaiting approval")
+    await chat_input.press("Enter")
+
+    # Wait for the status message from the backend rejection
+    await page.wait_for_function(
+        f"() => document.querySelectorAll('{SEL['message_assistant']}').length > {initial_count}",
+        timeout=10000,
+    )
+
+    # Get the new status message
+    last_msg = page.locator(SEL["message_assistant"]).last
+    msg_text = await last_msg.text_content()
+
+    # Verify no "Error:" prefix
+    assert not msg_text.lower().startswith("error:"), (
+        f"Approval rejection must NOT have 'Error:' prefix. Got: {msg_text!r}"
+    )
+
+    # Verify it contains "waiting for approval"
+    assert "waiting for approval" in msg_text.lower(), (
+        f"Expected 'Waiting for approval' text. Got: {msg_text!r}"
+    )
+
+    # Verify it contains the tool name and description
+    assert "shell" in msg_text.lower(), (
+        f"Expected tool name 'shell' in message. Got: {msg_text!r}"
+    )
+    assert "echo hello" in msg_text, (
+        f"Expected tool description in message. Got: {msg_text!r}"
+    )

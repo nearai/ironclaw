@@ -13,13 +13,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(feature = "integration")]
 use futures::StreamExt;
+#[cfg(feature = "integration")]
 use ironclaw::channels::Channel;
 use ironclaw::channels::wasm::{
     ChannelCapabilities, PreparedChannelModule, WasmChannel, WasmChannelRuntime,
     WasmChannelRuntimeConfig,
 };
 use ironclaw::pairing::PairingStore;
+#[cfg(feature = "integration")]
 use tokio::time::{Duration, timeout};
 
 /// Skip the test if the Telegram WASM module hasn't been built.
@@ -305,6 +308,7 @@ async fn test_private_message_with_owner_id_set_uses_guest_pairing_flow() {
 }
 
 #[tokio::test]
+#[cfg(feature = "integration")]
 async fn test_private_messages_use_chat_id_as_thread_scope() {
     require_telegram_wasm!();
     let runtime = create_test_runtime();
@@ -319,7 +323,10 @@ async fn test_private_messages_use_chat_id_as_thread_scope() {
     .to_string();
 
     let channel = create_telegram_channel(runtime, &config).await;
-    let mut stream = channel.start().await.expect("Failed to start channel");
+    let mut stream = channel
+        .start_message_stream_for_test()
+        .await
+        .expect("Failed to bootstrap test message stream");
 
     for (update_id, message_id, text) in [(6, 105, "first"), (7, 106, "second")] {
         let update = build_telegram_update(
