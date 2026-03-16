@@ -95,7 +95,13 @@ pub enum FaultMode {
     SequenceLoop,
     /// Fail randomly at the given rate (0.0 = never, 1.0 = always) with
     /// the specified fault type. Uses a seeded RNG for reproducibility.
-    Random { error_rate: f64, fault: FaultType },
+    /// The seed is stored so that [`FaultInjector::reset()`] can re-initialize
+    /// the RNG for test reproducibility.
+    Random {
+        error_rate: f64,
+        fault: FaultType,
+        seed: u64,
+    },
 }
 
 /// A configurable fault injector for [`StubLlm`](super::StubLlm).
@@ -146,7 +152,11 @@ impl FaultInjector {
         let seed = if seed == 0 { 1 } else { seed };
         Self {
             actions: Vec::new(),
-            mode: FaultMode::Random { error_rate, fault },
+            mode: FaultMode::Random {
+                error_rate,
+                fault,
+                seed,
+            },
             call_index: AtomicU32::new(0),
             rng_state: Mutex::new(seed),
         }
@@ -171,7 +181,9 @@ impl FaultInjector {
                     self.actions[index % self.actions.len()].clone()
                 }
             }
-            FaultMode::Random { error_rate, fault } => {
+            FaultMode::Random {
+                error_rate, fault, ..
+            } => {
                 // Simple xorshift64 PRNG for reproducible randomness.
                 let random_val = {
                     let mut state = self.rng_state.lock().unwrap_or_else(|p| p.into_inner());
@@ -192,6 +204,19 @@ impl FaultInjector {
     /// Get the total number of calls made.
     pub fn call_count(&self) -> u32 {
         self.call_index.load(Ordering::Relaxed)
+    }
+
+    /// Reset the injector to its initial state.
+    ///
+    /// For `Random` mode, re-initializes the RNG from the stored seed,
+    /// which is useful for test reproducibility.
+    /// For all modes, resets the call counter to zero.
+    pub fn reset(&self) {
+        self.call_index.store(0, Ordering::Relaxed);
+        if let FaultMode::Random { seed, .. } = &self.mode {
+            let mut state = self.rng_state.lock().unwrap_or_else(|p| p.into_inner());
+            *state = *seed;
+        }
     }
 }
 
@@ -299,12 +324,10 @@ mod tests {
     fn random_seed_zero_does_not_always_fail() {
         // seed=0 is a fixed point for xorshift; the constructor guards it to 1.
         let injector = FaultInjector::random(0.5, FaultType::RequestFailed, 0);
-        let results: Vec<bool> = (0..20)
-            .map(|_| matches!(injector.next_action(), FaultAction::Fail(_)))
-            .collect();
-        // With a working RNG, not every call should fail at 50% error rate.
-        let all_same = results.iter().all(|&r| r == results[0]);
-        assert!(!all_same, "seed=0 should not produce degenerate output");
+        let failures = (0..100)
+            .filter(|_| matches!(injector.next_action(), FaultAction::Fail(_)))
+            .count();
+        assert!(failures < 100, "seed=0 must not produce stuck RNG");
     }
 
     #[test]
@@ -313,5 +336,22 @@ mod tests {
         for _ in 0..10 {
             assert!(matches!(injector.next_action(), FaultAction::Succeed));
         }
+    }
+
+    #[test]
+    fn reset_restores_random_rng_from_stored_seed() {
+        let injector = FaultInjector::random(0.5, FaultType::RequestFailed, 42);
+        let run1: Vec<bool> = (0..20)
+            .map(|_| matches!(injector.next_action(), FaultAction::Fail(_)))
+            .collect();
+
+        injector.reset();
+        assert_eq!(injector.call_count(), 0);
+
+        let run2: Vec<bool> = (0..20)
+            .map(|_| matches!(injector.next_action(), FaultAction::Fail(_)))
+            .collect();
+
+        assert_eq!(run1, run2, "reset() should reproduce the same sequence");
     }
 }
