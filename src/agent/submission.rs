@@ -396,12 +396,6 @@ pub enum SubmissionResult {
         message: String,
     },
 
-    /// Thread is in a non-error blocking state (e.g., awaiting approval).
-    Pending {
-        /// Status message to display.
-        message: String,
-    },
-
     /// Turn was interrupted.
     Interrupted,
 }
@@ -434,10 +428,11 @@ impl SubmissionResult {
         }
     }
 
-    /// Create a pending result (non-error status message).
+    /// Create a non-error status message (e.g., for blocking states like approval waiting).
+    /// Uses Ok variant to avoid "Error:" prefix in rendering.
     pub fn pending(message: impl Into<String>) -> Self {
-        Self::Pending {
-            message: message.into(),
+        Self::Ok {
+            message: Some(message.into()),
         }
     }
 }
@@ -858,13 +853,5 @@ mod tests {
         ));
         assert!(matches!(SubmissionParser::parse("/QUIT"), Submission::Quit));
         assert!(matches!(SubmissionParser::parse("/Exit"), Submission::Quit));
-    }
-
-    #[test]
-    fn test_pending_result_is_not_error() {
-        let result = SubmissionResult::pending("Waiting for approval.");
-        assert!(matches!(result, SubmissionResult::Pending { .. }));
-        // Ensure it's NOT treated as Error
-        assert!(!matches!(result, SubmissionResult::Error { .. }));
     }
 }

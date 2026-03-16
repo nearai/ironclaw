@@ -133,8 +133,12 @@ async def test_approval_params_toggle(page):
 
 
 async def test_waiting_for_approval_message_no_error_prefix(page):
-    """Verify that 'Waiting for approval' status message doesn't have 'Error:' prefix
-    and includes tool context (tool name and description)."""
+    """Verify UI correctly renders 'Waiting for approval' messages without 'Error:' prefix.
+
+    This is a frontend rendering test that verifies the SSE → DOM pipeline.
+    The backend behavior (rejecting input during AwaitingApproval with non-error Pending result)
+    is covered by the Rust integration test in src/agent/thread_ops.rs.
+    """
     # Inject a status message that simulates what the fixed backend code produces
     # when a user tries to send input while the thread is awaiting approval.
     # The message should have tool context and NOT be prefixed with "Error:".

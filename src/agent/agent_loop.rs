@@ -1021,7 +1021,6 @@ impl Agent {
             }
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
-            SubmissionResult::Pending { message } => Ok(Some(message)),
             SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
             SubmissionResult::NeedApproval { .. } => {
                 // ApprovalNeeded status was already sent by thread_ops.rs before
