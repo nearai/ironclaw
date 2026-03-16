@@ -26,6 +26,59 @@ DEFAULT_RESPONSE = "I understand your request."
 TOOL_CALL_PATTERNS = [
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
+    (
+        re.compile(
+            r"create lightweight owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Owner-scope routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Confirm that {m.group('name')} executed.",
+            "action_type": "lightweight",
+            "use_tools": False,
+        },
+    ),
+    (
+        re.compile(
+            r"create full[- ]job owner routine (?P<name>[a-z0-9][a-z0-9_-]*)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Owner-scope full-job routine {m.group('name')}",
+            "trigger_type": "manual",
+            "prompt": f"Complete the routine job for {m.group('name')}.",
+            "action_type": "full_job",
+        },
+    ),
+    (
+        re.compile(
+            r"create event routine (?P<name>[a-z0-9][a-z0-9_-]*) "
+            r"channel (?P<channel>[a-z0-9_-]+) pattern (?P<pattern>[a-z0-9_|-]+)",
+            re.IGNORECASE,
+        ),
+        "routine_create",
+        lambda m: {
+            "name": m.group("name"),
+            "description": f"Event routine {m.group('name')}",
+            "trigger_type": "event",
+            "event_channel": None if m.group("channel").lower() == "any" else m.group("channel"),
+            "event_pattern": m.group("pattern"),
+            "prompt": f"Acknowledge that {m.group('name')} fired.",
+            "action_type": "lightweight",
+            "use_tools": False,
+            "cooldown_secs": 0,
+        },
+    ),
+    (
+        re.compile(r"list owner routines", re.IGNORECASE),
+        "routine_list",
+        lambda _: {},
+    ),
 ]
 
 

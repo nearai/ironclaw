@@ -6,17 +6,21 @@
 //! 1. When owner_id is null and dm_policy is "allowlist", unauthorized users in
 //!    group chats are dropped even if they @mention the bot
 //! 2. When owner_id is null and dm_policy is "open", all users can interact
-//! 3. When owner_id is set, only that user can interact
+//! 3. When owner_id is set, the owner gets instance-global access while
+//!    non-owner senders remain channel-scoped guests subject to authorization
 //! 4. Authorization works correctly for both private and group chats
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::StreamExt;
+use ironclaw::channels::Channel;
 use ironclaw::channels::wasm::{
     ChannelCapabilities, PreparedChannelModule, WasmChannel, WasmChannelRuntime,
     WasmChannelRuntimeConfig,
 };
 use ironclaw::pairing::PairingStore;
+use tokio::time::{Duration, timeout};
 
 /// Skip the test if the Telegram WASM module hasn't been built.
 /// In CI (detected via the `CI` env var), panic instead of skipping so a
@@ -98,6 +102,14 @@ async fn create_telegram_channel(
     runtime: Arc<WasmChannelRuntime>,
     config_json: &str,
 ) -> WasmChannel {
+    create_telegram_channel_with_store(runtime, config_json, Arc::new(PairingStore::new())).await
+}
+
+async fn create_telegram_channel_with_store(
+    runtime: Arc<WasmChannelRuntime>,
+    config_json: &str,
+    pairing_store: Arc<PairingStore>,
+) -> WasmChannel {
     let module = load_telegram_module(&runtime)
         .await
         .expect("Failed to load Telegram WASM module");
@@ -106,8 +118,9 @@ async fn create_telegram_channel(
         runtime,
         module,
         ChannelCapabilities::for_channel("telegram").with_path("/webhook/telegram"),
+        "default",
         config_json.to_string(),
-        Arc::new(PairingStore::new()),
+        pairing_store,
         None,
     )
 }
@@ -245,31 +258,29 @@ async fn test_group_message_authorized_user_allowed() {
 }
 
 #[tokio::test]
-async fn test_group_message_with_owner_id_set() {
+async fn test_private_message_with_owner_id_set_uses_guest_pairing_flow() {
     require_telegram_wasm!();
     let runtime = create_test_runtime();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pairing_store = Arc::new(PairingStore::with_base_dir(dir.path().to_path_buf()));
 
-    // Config: owner_id=123 (only this user can interact)
+    // Config: owner_id=123, non-owner private DMs should enter the guest
+    // pairing flow instead of being rejected solely for not being the owner.
     let config = serde_json::json!({
-        "bot_username": "test_bot",
+        "bot_username": null,
         "owner_id": 123,
-        "dm_policy": "allowlist",
-        "allow_from": ["anyone"],  // ignored when owner_id is set
+        "dm_policy": "pairing",
+        "allow_from": [],
         "respond_to_all_group_messages": false
     })
     .to_string();
 
-    let channel = create_telegram_channel(runtime, &config).await;
+    let channel = create_telegram_channel_with_store(runtime, &config, pairing_store.clone()).await;
 
-    // Message from different user (should be dropped)
+    // Non-owner private message should produce a pairing request.
     let update = build_telegram_update(
-        3,
-        102,
-        -123456789,
-        "group",
-        999, // Not the owner
-        "Other",
-        "Hey @test_bot hello",
+        3, 102, 999, "private", 999, // Not the owner
+        "Other", "hello",
     );
 
     let response = channel
@@ -286,8 +297,64 @@ async fn test_group_message_with_owner_id_set() {
 
     assert_eq!(response.status, 200);
 
-    // REGRESSION TEST: Non-owner messages are dropped when owner_id is set
-    // This behavior is consistent and not affected by the fix
+    let pending = pairing_store
+        .list_pending("telegram")
+        .expect("pairing store should be readable");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, "999");
+}
+
+#[tokio::test]
+async fn test_private_messages_use_chat_id_as_thread_scope() {
+    require_telegram_wasm!();
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": null,
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": false
+    })
+    .to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel.start().await.expect("Failed to start channel");
+
+    for (update_id, message_id, text) in [(6, 105, "first"), (7, 106, "second")] {
+        let update = build_telegram_update(
+            update_id,
+            message_id,
+            999,
+            "private",
+            999,
+            "ThreadUser",
+            text,
+        );
+
+        let response = channel
+            .call_on_http_request(
+                "POST",
+                "/webhook/telegram",
+                &HashMap::new(),
+                &HashMap::new(),
+                &update,
+                true,
+            )
+            .await
+            .expect("HTTP callback failed");
+
+        assert_eq!(response.status, 200);
+
+        let msg = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("message should arrive")
+            .expect("stream should yield a message");
+        assert_eq!(msg.thread_id.as_deref(), Some("999"));
+        assert_eq!(msg.conversation_scope(), Some("999"));
+    }
+
+    channel.shutdown().await.expect("Shutdown failed");
 }
 
 #[tokio::test]

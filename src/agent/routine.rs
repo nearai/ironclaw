@@ -422,8 +422,8 @@ impl Default for RoutineGuardrails {
 pub struct NotifyConfig {
     /// Channel to notify on (None = default/broadcast all).
     pub channel: Option<String>,
-    /// User to notify.
-    pub user: String,
+    /// Explicit target to notify. None means "resolve the owner's last-seen target".
+    pub user: Option<String>,
     /// Notify when routine produces actionable output.
     pub on_attention: bool,
     /// Notify when routine errors.
@@ -436,7 +436,7 @@ impl Default for NotifyConfig {
     fn default() -> Self {
         Self {
             channel: None,
-            user: "default".to_string(),
+            user: None,
             on_attention: true,
             on_failure: true,
             on_success: false,

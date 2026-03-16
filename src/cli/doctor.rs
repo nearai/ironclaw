@@ -405,10 +405,11 @@ fn check_routines_config() -> CheckResult {
 fn check_gateway_config(settings: &Settings) -> CheckResult {
     // Use the same resolve() path as runtime so invalid env values
     // (e.g. GATEWAY_PORT=abc) are caught here too.
-    let tunnel_enabled = crate::config::TunnelConfig::resolve(settings)
-        .map(|t| t.is_enabled())
-        .unwrap_or(false);
-    match crate::config::ChannelsConfig::resolve(settings, tunnel_enabled) {
+    let owner_id = match crate::config::resolve_owner_id(settings) {
+        Ok(owner_id) => owner_id,
+        Err(e) => return CheckResult::Fail(format!("config error: {e}")),
+    };
+    match crate::config::ChannelsConfig::resolve(settings, &owner_id) {
         Ok(channels) => match channels.gateway {
             Some(gw) => {
                 if gw.auth_token.is_some() {

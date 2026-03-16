@@ -172,6 +172,11 @@ impl RoutineEngine {
                 EventMatcher::Message { routine, regex } => (routine, regex),
                 EventMatcher::System { .. } => continue,
             };
+
+            if routine.user_id != message.user_id {
+                continue;
+            }
+
             // Channel filter
             if let Trigger::Event {
                 channel: Some(ch), ..
@@ -650,6 +655,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     send_notification(
         &ctx.notify_tx,
         &routine.notify,
+        &routine.user_id,
         &routine.name,
         status,
         summary.as_deref(),
@@ -694,7 +700,8 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let mut metadata = serde_json::json!({ "max_iterations": max_iterations });
+    let mut metadata =
+        serde_json::json!({ "max_iterations": max_iterations, "owner_id": routine.user_id });
     // Carry the routine's notify config in job metadata so the message tool
     // can resolve channel/target per-job without global state mutation.
     if let Some(channel) = &routine.notify.channel {
@@ -1207,6 +1214,7 @@ async fn execute_routine_tool(
 async fn send_notification(
     tx: &mpsc::Sender<OutgoingResponse>,
     notify: &NotifyConfig,
+    owner_id: &str,
     routine_name: &str,
     status: RunStatus,
     summary: Option<&str>,
@@ -1243,6 +1251,7 @@ async fn send_notification(
             "source": "routine",
             "routine_name": routine_name,
             "status": status.to_string(),
+            "owner_id": owner_id,
             "notify_user": notify.user,
             "notify_channel": notify.channel,
         }),
