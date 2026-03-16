@@ -5,13 +5,22 @@
 //! certificates — the same TLS stack that `reqwest` already uses for HTTP.
 
 use deadpool_postgres::{Pool, Runtime};
+use thiserror::Error;
 use tokio_postgres::NoTls;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::config::SslMode;
 
+#[derive(Debug, Error)]
+pub enum CreatePoolError {
+    #[error("{0}")]
+    Pool(#[from] deadpool_postgres::CreatePoolError),
+    #[error("postgres TLS configuration failed: {0}")]
+    TlsConfig(#[from] rustls::Error),
+}
+
 /// Build a rustls-based TLS connector using the platform's root certificate store.
-fn make_rustls_connector() -> MakeRustlsConnect {
+fn make_rustls_connector() -> Result<MakeRustlsConnect, rustls::Error> {
     let mut root_store = rustls::RootCertStore::empty();
     let native = rustls_native_certs::load_native_certs();
     for e in &native.errors {
@@ -30,11 +39,10 @@ fn make_rustls_connector() -> MakeRustlsConnect {
     let config = rustls::ClientConfig::builder_with_provider(
         rustls::crypto::ring::default_provider().into(),
     )
-    .with_safe_default_protocol_versions()
-    .expect("ring provider should support rustls default protocol versions") // safety: ring's default provider is explicitly selected above and supports rustls safe default protocol versions
+    .with_safe_default_protocol_versions()?
     .with_root_certificates(root_store)
     .with_no_client_auth();
-    MakeRustlsConnect::new(config)
+    Ok(MakeRustlsConnect::new(config))
 }
 
 /// Create a [`deadpool_postgres::Pool`] with the appropriate TLS connector.
@@ -51,12 +59,16 @@ fn make_rustls_connector() -> MakeRustlsConnect {
 pub fn create_pool(
     config: &deadpool_postgres::Config,
     ssl_mode: SslMode,
-) -> Result<Pool, deadpool_postgres::CreatePoolError> {
+) -> Result<Pool, CreatePoolError> {
     match ssl_mode {
-        SslMode::Disable => config.create_pool(Some(Runtime::Tokio1), NoTls),
+        SslMode::Disable => config
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .map_err(CreatePoolError::from),
         SslMode::Prefer | SslMode::Require => {
-            let tls = make_rustls_connector();
-            config.create_pool(Some(Runtime::Tokio1), tls)
+            let tls = make_rustls_connector()?;
+            config
+                .create_pool(Some(Runtime::Tokio1), tls)
+                .map_err(CreatePoolError::from)
         }
     }
 }
