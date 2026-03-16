@@ -377,7 +377,7 @@ impl LoopDelegate for ContainerDelegate {
         // assistant message (no assistant prefill allowed). If handle_text_response
         // pushed an assistant message and no follow-up user prompt was polled,
         // inject a sentinel user message to satisfy the API requirement.
-        if matches!(reason_ctx.messages.last(), Some(m) if m.role == crate::llm::Role::Assistant) {
+        if !matches!(reason_ctx.messages.last(), Some(m) if m.role == crate::llm::Role::User) {
             reason_ctx.messages.push(ChatMessage::user("Continue."));
         }
 
