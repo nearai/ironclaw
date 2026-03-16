@@ -7,8 +7,12 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | File | Role |
 |------|------|
 | `mod.rs` | Provider factory (`create_llm_provider`, `build_provider_chain`); `LlmBackend` enum |
+| `config.rs` | LLM config types (`LlmConfig`, `RegistryProviderConfig`, `NearAiConfig`, `BedrockConfig`) |
+| `error.rs` | `LlmError` enum used by all providers |
 | `provider.rs` | `LlmProvider` trait, `ChatMessage`, `ToolCall`, `CompletionRequest`, `sanitize_tool_messages` |
 | `nearai_chat.rs` | NEAR AI Chat Completions provider (dual auth: session token or API key) |
+| `codex_auth.rs` | Reads Codex CLI `auth.json`, extracts tokens, refreshes ChatGPT OAuth access tokens |
+| `codex_chatgpt.rs` | Custom Responses API provider for Codex ChatGPT backend (`/backend-api/codex`) |
 | `reasoning.rs` | `Reasoning` struct, `ReasoningContext`, `RespondResult`, `ActionPlan`, `ToolSelection`; thinking-tag stripping; `SILENT_REPLY_TOKEN` |
 | `session.rs` | NEAR AI session token management with disk + DB persistence, OAuth login flow |
 | `circuit_breaker.rs` | Circuit breaker: Closed → Open → HalfOpen state machine |
@@ -35,6 +39,12 @@ Set via `LLM_BACKEND` env var:
 | `openai_compatible` | Any OpenAI-compatible endpoint | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
 | `tinfoil` | Tinfoil TEE inference | `TINFOIL_API_KEY`, `TINFOIL_MODEL` |
 | `bedrock` | AWS Bedrock (requires `--features bedrock`) | `BEDROCK_REGION`, `BEDROCK_MODEL`, `AWS_PROFILE` |
+
+Codex auth reuse:
+- Set `LLM_USE_CODEX_AUTH=true` to load credentials from `~/.codex/auth.json` (override with `CODEX_AUTH_PATH`).
+- If Codex is logged in with API-key mode, IronClaw uses the standard OpenAI endpoint.
+- If Codex is logged in with ChatGPT OAuth mode, IronClaw routes to the private `chatgpt.com/backend-api/codex` Responses API via `codex_chatgpt.rs`.
+- ChatGPT mode supports one automatic 401 refresh using the refresh token persisted in `auth.json`.
 
 ## AWS Bedrock Provider
 

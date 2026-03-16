@@ -12,6 +12,8 @@ mod anthropic_oauth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
 pub mod circuit_breaker;
+pub(crate) mod codex_auth;
+mod codex_chatgpt;
 pub mod config;
 pub mod costs;
 pub mod error;
@@ -31,6 +33,7 @@ pub mod session;
 pub mod smart_routing;
 
 pub mod image_models;
+pub mod models;
 pub mod reasoning_models;
 pub mod vision_models;
 
@@ -103,7 +106,7 @@ pub async fn create_llm_provider(
             provider: config.backend.clone(),
         })?;
 
-    create_registry_provider(reg_config)
+    create_registry_provider(reg_config, timeout)
 }
 
 /// Create an LLM provider from a `NearAiConfig` directly.
@@ -141,7 +144,13 @@ pub fn create_llm_provider_with_config(
 /// `create_*_provider` functions.
 fn create_registry_provider(
     config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    // Codex ChatGPT mode: use the Responses API provider
+    if config.is_codex_chatgpt {
+        return create_codex_chatgpt_from_registry(config, request_timeout_secs);
+    }
+
     match config.protocol {
         ProviderProtocol::OpenAiCompletions => create_openai_compat_from_registry(config),
         ProviderProtocol::Anthropic => create_anthropic_from_registry(config),
@@ -159,6 +168,36 @@ fn create_registry_provider(
     }
 }
 
+fn create_codex_chatgpt_from_registry(
+    config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let api_key = config
+        .api_key
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "codex_chatgpt".to_string(),
+        })?;
+
+    tracing::info!(
+        configured_model = %config.model,
+        base_url = %config.base_url,
+        "Using Codex ChatGPT provider (Responses API) — model detection deferred to first call"
+    );
+
+    let provider = codex_chatgpt::CodexChatGptProvider::with_lazy_model(
+        &config.base_url,
+        api_key,
+        &config.model,
+        config.refresh_token.clone(),
+        config.auth_path.clone(),
+        request_timeout_secs,
+    );
+
+    Ok(Arc::new(provider))
+}
+
 #[cfg(feature = "bedrock")]
 async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let br = config
@@ -174,6 +213,7 @@ async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvid
         br.region,
         provider.active_model_name(),
     );
+
     Ok(Arc::new(provider))
 }
 

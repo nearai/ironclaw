@@ -306,22 +306,26 @@ impl Config {
 
     /// Build config from settings (shared by from_env and from_db).
     async fn build(settings: &Settings) -> Result<Self, ConfigError> {
+        // Resolve tunnel first so channels can default to loopback when a
+        // tunnel handles external exposure (no need to bind 0.0.0.0).
+        let tunnel = TunnelConfig::resolve(settings)?;
+
         Ok(Self {
             database: DatabaseConfig::resolve()?,
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
-            tunnel: TunnelConfig::resolve(settings)?,
-            channels: ChannelsConfig::resolve(settings)?,
+            channels: ChannelsConfig::resolve(settings, tunnel.is_enabled())?,
+            tunnel,
             agent: AgentConfig::resolve(settings)?,
-            safety: resolve_safety_config()?,
-            wasm: WasmConfig::resolve()?,
+            safety: resolve_safety_config(settings)?,
+            wasm: WasmConfig::resolve(settings)?,
             secrets: SecretsConfig::resolve().await?,
-            builder: BuilderModeConfig::resolve()?,
+            builder: BuilderModeConfig::resolve(settings)?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             hygiene: HygieneConfig::resolve()?,
             routines: RoutineConfig::resolve()?,
-            sandbox: SandboxModeConfig::resolve()?,
-            claude_code: ClaudeCodeConfig::resolve()?,
+            sandbox: SandboxModeConfig::resolve(settings)?,
+            claude_code: ClaudeCodeConfig::resolve(settings)?,
             skills: SkillsConfig::resolve()?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve()?,

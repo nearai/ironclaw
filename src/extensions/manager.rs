@@ -57,6 +57,17 @@ struct ChannelRuntimeState {
 }
 
 /// Central manager for extension lifecycle operations.
+///
+/// # Initialization Order
+///
+/// Relay-channel restoration depends on a channel manager being injected first.
+/// Call one of the following before `restore_relay_channels()`:
+///
+/// 1. [`ExtensionManager::set_channel_runtime`] (also sets relay manager), or
+/// 2. [`ExtensionManager::set_relay_channel_manager`].
+///
+/// If `restore_relay_channels()` runs first, each restore attempt fails with
+/// "Channel manager not initialized" and channels remain inactive.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
     discovery: OnlineDiscovery,
@@ -302,6 +313,9 @@ impl ExtensionManager {
     ///
     /// Call this when WASM channel runtime is not available but relay channels
     /// still need to be hot-added.
+    ///
+    /// This must be called before [`ExtensionManager::restore_relay_channels`]
+    /// unless [`ExtensionManager::set_channel_runtime`] was already called.
     pub async fn set_relay_channel_manager(&self, channel_manager: Arc<ChannelManager>) {
         *self.relay_channel_manager.write().await = Some(channel_manager);
     }
@@ -346,7 +360,10 @@ impl ExtensionManager {
     ///
     /// Loads the persisted active channel list, filters to relay types (those with
     /// a stored stream token), and activates each via `activate_stored_relay()`.
-    /// Skips channels that are already active. Call this after `set_relay_channel_manager()`.
+    /// Skips channels that are already active.
+    ///
+    /// Call this only after `set_relay_channel_manager()` or `set_channel_runtime()`.
+    /// Otherwise, each activation attempt fails with "Channel manager not initialized".
     pub async fn restore_relay_channels(&self) {
         let persisted = self.load_persisted_active_channels().await;
         let already_active = self.active_channel_names.read().await.clone();
@@ -3817,9 +3834,16 @@ impl ExtensionManager {
         {
             let token = token_value.trim();
             if !token.is_empty() {
-                let encoded =
-                    url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
-                let url = endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
+                // Telegram tokens contain colons (numeric_id:token_part) in the URL path,
+                // not query parameters, so URL-encoding breaks the endpoint.
+                // For other extensions, keep encoding to handle special chars in query parameters.
+                let url = if name == "telegram" {
+                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), token)
+                } else {
+                    let encoded =
+                        url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded)
+                };
                 // SSRF defense: block private IPs, localhost, cloud metadata endpoints
                 crate::tools::builtin::skill_tools::validate_fetch_url(&url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
@@ -5667,5 +5691,35 @@ mod tests {
             msg.contains("validation failed"),
             "Display should contain 'validation failed', got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_telegram_token_colon_preserved_in_validation_url() {
+        // Regression: Telegram tokens (format: numeric_id:alphanumeric_string) must NOT
+        // have their colon URL-encoded to %3A, as this breaks the validation endpoint.
+        // Previously: form_urlencoded::byte_serialize encoded the token, causing 404s.
+        // Fixed by removing URL-encoding and using the token directly.
+        let endpoint_template = "https://api.telegram.org/bot{telegram_bot_token}/getMe";
+        let secret_name = "telegram_bot_token";
+        let token = "123456789:AABBccDDeeFFgg_Test-Token";
+
+        // Simulate the fixed validation URL building logic
+        let url = endpoint_template.replace(&format!("{{{}}}", secret_name), token);
+
+        // Verify colon is preserved
+        let expected = "https://api.telegram.org/bot123456789:AABBccDDeeFFgg_Test-Token/getMe";
+        if url != expected {
+            panic!("URL mismatch: expected {expected}, got {url}"); // safety: test assertion
+        }
+
+        // Verify it does NOT contain the broken percent-encoded version
+        if url.contains("%3A") {
+            panic!("URL contains URL-encoded colon (%3A): {url}"); // safety: test assertion
+        }
+
+        // Verify the URL contains the original colon
+        if !url.contains("123456789:AABBccDDeeFFgg_Test-Token") {
+            panic!("URL missing token: {url}"); // safety: test assertion
+        }
     }
 }

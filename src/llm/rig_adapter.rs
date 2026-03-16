@@ -357,15 +357,31 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 }
             }
             crate::llm::Role::Tool => {
-                // Tool result message: wrap as User { ToolResult }
+                // Tool result message: wrap as User { ToolResult }.
+                // Merge consecutive tool results into a single User message
+                // so the API sees one multi-result message instead of
+                // multiple consecutive User messages (which Anthropic rejects).
                 let tool_id = normalized_tool_call_id(msg.tool_call_id.as_deref(), history.len());
-                history.push(RigMessage::User {
-                    content: OneOrMany::one(UserContent::ToolResult(RigToolResult {
-                        id: tool_id.clone(),
-                        call_id: Some(tool_id),
-                        content: OneOrMany::one(ToolResultContent::text(&msg.content)),
-                    })),
+                let tool_result = UserContent::ToolResult(RigToolResult {
+                    id: tool_id.clone(),
+                    call_id: Some(tool_id),
+                    content: OneOrMany::one(ToolResultContent::text(&msg.content)),
                 });
+
+                let should_merge = matches!(
+                    history.last(),
+                    Some(RigMessage::User { content }) if content.iter().all(|c| matches!(c, UserContent::ToolResult(_)))
+                );
+
+                if should_merge {
+                    if let Some(RigMessage::User { content }) = history.last_mut() {
+                        content.push(tool_result);
+                    }
+                } else {
+                    history.push(RigMessage::User {
+                        content: OneOrMany::one(tool_result),
+                    });
+                }
             }
         }
     }
@@ -1279,5 +1295,69 @@ mod tests {
         let adapter = RigAdapter::new(model, "test-model");
 
         assert!(adapter.unsupported_params.is_empty());
+    }
+
+    /// Regression test: consecutive tool_result messages from parallel tool
+    /// execution must be merged into a single User message with multiple
+    /// ToolResult content items. Without merging, APIs like Anthropic reject
+    /// the request due to consecutive User messages.
+    #[test]
+    fn test_consecutive_tool_results_merged_into_single_user_message() {
+        let tc1 = IronToolCall {
+            id: "call_a".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"q": "rust"}),
+        };
+        let tc2 = IronToolCall {
+            id: "call_b".to_string(),
+            name: "fetch".to_string(),
+            arguments: serde_json::json!({"url": "https://example.com"}),
+        };
+        let assistant = ChatMessage::assistant_with_tool_calls(None, vec![tc1, tc2]);
+        let result_a = ChatMessage::tool_result("call_a", "search", "search results");
+        let result_b = ChatMessage::tool_result("call_b", "fetch", "fetch results");
+
+        let messages = vec![assistant, result_a, result_b];
+        let (_preamble, history) = convert_messages(&messages);
+
+        // Should be: 1 assistant + 1 merged user (not 1 assistant + 2 users)
+        assert_eq!(
+            history.len(),
+            2,
+            "Expected 2 messages (assistant + merged user), got {}",
+            history.len()
+        );
+
+        // The second message should contain both tool results
+        match &history[1] {
+            RigMessage::User { content } => {
+                assert_eq!(
+                    content.len(),
+                    2,
+                    "Expected 2 tool results in merged user message, got {}",
+                    content.len()
+                );
+                for item in content.iter() {
+                    assert!(
+                        matches!(item, UserContent::ToolResult(_)),
+                        "Expected ToolResult content"
+                    );
+                }
+            }
+            other => panic!("Expected User message, got: {:?}", other),
+        }
+    }
+
+    /// Verify that a tool_result after a non-tool User message is NOT merged.
+    #[test]
+    fn test_tool_result_after_user_text_not_merged() {
+        let user_msg = ChatMessage::user("hello");
+        let tool_msg = ChatMessage::tool_result("call_1", "search", "results");
+
+        let messages = vec![user_msg, tool_msg];
+        let (_preamble, history) = convert_messages(&messages);
+
+        // Should be 2 separate User messages (text user + tool result user)
+        assert_eq!(history.len(), 2);
     }
 }
