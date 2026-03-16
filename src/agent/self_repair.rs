@@ -125,6 +125,36 @@ impl SelfRepair for DefaultSelfRepair {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await
                 && matches!(ctx.state, JobState::Stuck | JobState::InProgress)
             {
+                // InProgress jobs detected by threshold need to be transitioned
+                // to Stuck before they can be repaired (attempt_recovery requires
+                // Stuck state).
+                if ctx.state == JobState::InProgress {
+                    let reason = "exceeded stuck_threshold";
+                    let transition = self
+                        .context_manager
+                        .update_context(job_id, |ctx| ctx.mark_stuck(reason))
+                        .await;
+                    match transition {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                job = %job_id,
+                                "Failed to mark InProgress job as Stuck: {}",
+                                e
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                job = %job_id,
+                                "Failed to transition InProgress job to Stuck: {}",
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                }
+
                 let stuck_duration = ctx
                     .started_at
                     .map(|start| {
@@ -482,6 +512,49 @@ mod tests {
             "Expected ManualRequired, got: {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn detect_and_repair_in_progress_job_via_threshold() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Long running", "desc").await.unwrap();
+
+        // Transition to InProgress.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Backdate started_at to simulate a job running for 10 minutes.
+        cm.update_context(job_id, |ctx| {
+            ctx.started_at = Some(Utc::now() - chrono::Duration::seconds(600));
+        })
+        .await
+        .unwrap();
+
+        // Use a 5-minute threshold so the 10-minute job is detected.
+        let repair = DefaultSelfRepair::new(Arc::clone(&cm), Duration::from_secs(300), 3);
+
+        // detect_stuck_jobs should find it and transition InProgress -> Stuck.
+        let stuck = repair.detect_stuck_jobs().await;
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0].job_id, job_id);
+
+        // After detection the job should now be in Stuck state.
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Stuck);
+
+        // Repair should recover it: Stuck -> InProgress.
+        let result = repair.repair_stuck_job(&stuck[0]).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::Success { .. }),
+            "Expected Success, got: {:?}",
+            result
+        );
+
+        // Job should be back to InProgress after recovery.
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::InProgress);
     }
 
     #[tokio::test]

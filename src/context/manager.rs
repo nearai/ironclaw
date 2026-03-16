@@ -1,6 +1,7 @@
 //! Context manager for handling multiple job contexts.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -207,17 +208,17 @@ impl ContextManager {
     /// Find stuck jobs.
     ///
     /// Returns jobs that are explicitly in `Stuck` state, plus `InProgress`
-    /// jobs that have been running longer than `idle_threshold` (if provided).
+    /// jobs that have been running longer than `elapsed_threshold` (if provided).
     /// The threshold-based detection catches jobs that never transitioned to
     /// `Stuck` (e.g., due to a deadlock or unhandled timeout).
     pub async fn find_stuck_jobs(&self) -> Vec<Uuid> {
         self.find_stuck_jobs_with_threshold(None).await
     }
 
-    /// Find stuck jobs with an optional idle threshold for `InProgress` detection.
+    /// Find stuck jobs with an optional elapsed threshold for `InProgress` detection.
     pub async fn find_stuck_jobs_with_threshold(
         &self,
-        idle_threshold: Option<std::time::Duration>,
+        elapsed_threshold: Option<Duration>,
     ) -> Vec<Uuid> {
         let now = chrono::Utc::now();
         self.contexts
@@ -229,9 +230,9 @@ impl ContextManager {
                 if c.state == crate::context::JobState::Stuck {
                     return true;
                 }
-                // Detect InProgress jobs idle beyond the threshold.
+                // Detect InProgress jobs that have been running beyond the elapsed threshold.
                 if c.state == crate::context::JobState::InProgress
-                    && let Some(threshold) = idle_threshold
+                    && let Some(threshold) = elapsed_threshold
                     && let Some(started) = c.started_at
                 {
                     let elapsed = now.signed_duration_since(started);
@@ -690,7 +691,7 @@ mod tests {
 
         // With a 5-minute threshold, only id2 (10 min) should be detected
         let stuck = manager
-            .find_stuck_jobs_with_threshold(Some(std::time::Duration::from_secs(300)))
+            .find_stuck_jobs_with_threshold(Some(Duration::from_secs(300)))
             .await;
         assert_eq!(stuck.len(), 1);
         assert_eq!(stuck[0], id2);
