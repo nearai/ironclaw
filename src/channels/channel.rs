@@ -93,6 +93,10 @@ pub struct IncomingMessage {
     pub timezone: Option<String>,
     /// File or media attachments on this message.
     pub attachments: Vec<IncomingAttachment>,
+    /// Internal-only flag: message was generated inside the process (e.g. job
+    /// monitor) and must bypass the normal user-input pipeline. This field is
+    /// not settable via metadata, so external channels cannot spoof it.
+    pub(crate) is_internal: bool,
 }
 
 impl IncomingMessage {
@@ -117,6 +121,7 @@ impl IncomingMessage {
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: Vec::new(),
+            is_internal: false,
         }
     }
 
@@ -167,6 +172,12 @@ impl IncomingMessage {
     /// Set attachments.
     pub fn with_attachments(mut self, attachments: Vec<IncomingAttachment>) -> Self {
         self.attachments = attachments;
+        self
+    }
+
+    /// Mark this message as internal (bypasses user-input pipeline).
+    pub(crate) fn into_internal(mut self) -> Self {
+        self.is_internal = true;
         self
     }
 

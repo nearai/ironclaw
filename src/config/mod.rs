@@ -34,7 +34,9 @@ use crate::settings::Settings;
 // Re-export all public types so `crate::config::FooConfig` continues to work.
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
-pub use self::channels::{ChannelsConfig, CliConfig, GatewayConfig, HttpConfig, SignalConfig};
+pub use self::channels::{
+    ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, HttpConfig, SignalConfig,
+};
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
@@ -311,15 +313,15 @@ impl Config {
             tunnel: TunnelConfig::resolve(settings)?,
             channels: ChannelsConfig::resolve(settings, &owner_id)?,
             agent: AgentConfig::resolve(settings)?,
-            safety: resolve_safety_config()?,
-            wasm: WasmConfig::resolve()?,
+            safety: resolve_safety_config(settings)?,
+            wasm: WasmConfig::resolve(settings)?,
             secrets: SecretsConfig::resolve().await?,
-            builder: BuilderModeConfig::resolve()?,
+            builder: BuilderModeConfig::resolve(settings)?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             hygiene: HygieneConfig::resolve()?,
             routines: RoutineConfig::resolve()?,
-            sandbox: SandboxModeConfig::resolve()?,
-            claude_code: ClaudeCodeConfig::resolve()?,
+            sandbox: SandboxModeConfig::resolve(settings)?,
+            claude_code: ClaudeCodeConfig::resolve(settings)?,
             skills: SkillsConfig::resolve()?,
             transcription: TranscriptionConfig::resolve(settings)?,
             search: WorkspaceSearchConfig::resolve()?,

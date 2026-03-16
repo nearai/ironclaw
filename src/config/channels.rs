@@ -107,7 +107,7 @@ impl ChannelsConfig {
         let gateway = if gateway_enabled {
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
-                port: parse_optional_env("GATEWAY_PORT", 3000)?,
+                port: parse_optional_env("GATEWAY_PORT", DEFAULT_GATEWAY_PORT)?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?,
                 user_id: owner_id.to_string(),
             })
@@ -199,6 +199,10 @@ impl ChannelsConfig {
         })
     }
 }
+
+/// Default gateway port — used both in `resolve()` and as the fallback in
+/// other modules that need to construct a gateway URL.
+pub const DEFAULT_GATEWAY_PORT: u16 = 3000;
 
 /// Get the default channels directory (~/.ironclaw/channels/).
 fn default_channels_dir() -> PathBuf {
