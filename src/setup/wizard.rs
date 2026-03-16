@@ -683,6 +683,7 @@ impl SetupWizard {
     async fn auto_setup_database(&mut self) -> Result<(), SetupError> {
         use crate::config::{DatabaseBackend, DatabaseConfig};
 
+        const POSTGRES_AVAILABLE: bool = cfg!(feature = "postgres");
         const LIBSQL_AVAILABLE: bool = cfg!(feature = "libsql");
 
         let env_backend = std::env::var("DATABASE_BACKEND").ok();
@@ -704,8 +705,10 @@ impl SetupWizard {
             return self.step_database().await;
         }
 
-        // If DATABASE_URL exists (no explicit backend): connect+migrate as postgres
-        if env_backend.is_none()
+        // If DATABASE_URL exists (no explicit backend): connect+migrate as postgres,
+        // but only when the postgres feature is actually compiled in.
+        if POSTGRES_AVAILABLE
+            && env_backend.is_none()
             && let Ok(url) = std::env::var("DATABASE_URL")
         {
             print_info("Using existing PostgreSQL configuration");
@@ -767,8 +770,11 @@ impl SetupWizard {
                 crate::secrets::crypto_from_hex(&key_hex)
                     .map_err(|e| SetupError::Config(e.to_string()))?,
             );
-            // Determine source: env var or keychain
-            let (source, label) = if std::env::var("SECRETS_MASTER_KEY").is_ok() {
+            // Determine source: env var or keychain (filter empty to match resolve_master_key)
+            let (source, label) = if std::env::var("SECRETS_MASTER_KEY")
+                .ok()
+                .is_some_and(|v| !v.is_empty())
+            {
                 (KeySource::Env, "env var")
             } else {
                 (KeySource::Keychain, "keychain")

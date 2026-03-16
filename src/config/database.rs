@@ -184,11 +184,15 @@ impl DatabaseConfig {
     }
 
     /// Create a config for a libSQL database (for wizard/testing).
+    ///
+    /// Empty strings for `turso_url` and `turso_token` are treated as `None`.
     pub fn from_libsql_path(
         path: &str,
         turso_url: Option<&str>,
         turso_token: Option<&str>,
     ) -> Self {
+        let turso_url = turso_url.filter(|s| !s.is_empty());
+        let turso_token = turso_token.filter(|s| !s.is_empty());
         Self {
             backend: DatabaseBackend::LibSql,
             url: SecretString::from("unused://libsql".to_string()),
