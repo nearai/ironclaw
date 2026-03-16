@@ -352,7 +352,7 @@ impl Thread {
     /// completed actions in subsequent turns.
     pub fn messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
-        for turn in &self.turns {
+        for (turn_idx, turn) in self.turns.iter().enumerate() {
             if turn.image_content_parts.is_empty() {
                 messages.push(ChatMessage::user(&turn.user_input));
             } else {
@@ -363,12 +363,22 @@ impl Thread {
             }
 
             if !turn.tool_calls.is_empty() {
-                // Build ToolCall objects using the persisted call IDs
-                let tool_calls: Vec<ToolCall> = turn
+                // Assign synthetic call IDs for this turn's tool calls, so that
+                // declarations and results can be consistently correlated.
+                let tool_calls_with_ids: Vec<(String, &_)> = turn
                     .tool_calls
                     .iter()
-                    .map(|tc| ToolCall {
-                        id: tc.call_id.clone(),
+                    .enumerate()
+                    .map(|(tc_idx, tc)| {
+                        (format!("turn-{}-tool-{}", turn_idx, tc_idx), tc)
+                    })
+                    .collect();
+
+                // Build ToolCall objects using the synthetic call IDs.
+                let tool_calls: Vec<ToolCall> = tool_calls_with_ids
+                    .iter()
+                    .map(|(call_id, tc)| ToolCall {
+                        id: call_id.clone(),
                         name: tc.name.clone(),
                         arguments: tc.parameters.clone(),
                     })
@@ -378,8 +388,7 @@ impl Thread {
                 messages.push(ChatMessage::assistant_with_tool_calls(None, tool_calls));
 
                 // Individual tool result messages, truncated to limit context size.
-                for tc in &turn.tool_calls {
-                    let call_id = tc.call_id.clone();
+                for (call_id, tc) in tool_calls_with_ids {
                     let content = if let Some(ref err) = tc.error {
                         // .error already contains the full error text;
                         // pass through without wrapping to avoid double-prefix.
