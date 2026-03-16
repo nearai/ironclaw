@@ -24,7 +24,7 @@ use crate::agent::Scheduler;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
 };
-use crate::channels::OutgoingResponse;
+use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
 use crate::context::{JobContext, JobState};
 use crate::db::Database;
@@ -54,6 +54,38 @@ pub enum SandboxReadiness {
     DisabledByConfig,
     /// Sandbox is enabled but Docker is not running or not installed.
     DockerUnavailable,
+}
+
+/// Check whether a routine's user/channel filters match an incoming message.
+///
+/// Returns `true` if:
+/// - The routine's `user_id` matches the message sender
+/// - The routine's channel filter (if any) matches the message channel
+///   case-insensitively
+///
+/// This is a pure function extracted from `check_event_triggers` so the
+/// filter logic can be unit-tested without async infrastructure.
+pub(crate) fn routine_matches_message(routine: &Routine, message: &IncomingMessage) -> bool {
+    // Only Event-triggered routines can match incoming messages.
+    if !matches!(routine.trigger, Trigger::Event { .. }) {
+        return false;
+    }
+
+    // User ownership filter — only fire routines owned by the message sender.
+    if routine.user_id != message.user_id {
+        return false;
+    }
+
+    // Channel filter (case-insensitive, matching emit_system_event behavior)
+    if let Trigger::Event {
+        channel: Some(ch), ..
+    } = &routine.trigger
+        && !ch.eq_ignore_ascii_case(&message.channel)
+    {
+        return false;
+    }
+
+    true
 }
 
 /// The routine execution engine.
@@ -167,10 +199,8 @@ impl RoutineEngine {
     }
 
     /// Check incoming message against event triggers. Returns number of routines fired.
-    ///
-    /// Accepts only the three fields needed for matching (user scope, channel,
-    /// message content) so callers never need to clone a full `IncomingMessage`.
-    pub async fn check_event_triggers(&self, user_id: &str, channel: &str, content: &str) -> usize {
+    pub async fn check_event_triggers(&self, message: &IncomingMessage) -> usize {
+        let content = &message.content;
         let cache = self.event_cache.read().await;
 
         // Early return if there are no message matchers at all.
@@ -208,28 +238,13 @@ impl RoutineEngine {
                 EventMatcher::System { .. } => continue,
             };
 
-            // User ownership filter — only fire routines owned by the message sender.
-            if routine.user_id != user_id {
-                tracing::debug!(
+            // User ownership + channel filter (extracted for testability).
+            if !routine_matches_message(routine, message) {
+                tracing::trace!(
                     routine = %routine.name,
                     routine_user = %routine.user_id,
-                    message_user = %user_id,
-                    "Skipped: user mismatch"
-                );
-                continue;
-            }
-
-            // Channel filter (case-insensitive, matching emit_system_event behavior)
-            if let Trigger::Event {
-                channel: Some(ch), ..
-            } = &routine.trigger
-                && !ch.eq_ignore_ascii_case(channel)
-            {
-                tracing::debug!(
-                    routine = %routine.name,
-                    expected_channel = %ch,
-                    actual_channel = %channel,
-                    "Skipped: channel mismatch"
+                    message_user = %message.user_id,
+                    "Skipped: user or channel mismatch"
                 );
                 continue;
             }
@@ -1859,7 +1874,13 @@ fn strip_html_tags(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::routine::{NotifyConfig, RunStatus};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use crate::agent::routine::{
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RunStatus, Trigger,
+    };
+    use crate::channels::IncomingMessage;
     use crate::config::RoutineConfig;
 
     #[test]
@@ -2057,24 +2078,15 @@ mod tests {
         }
     }
 
-    /// Regression test for issue #1051: event triggers used case-sensitive
-    /// channel comparison, so "Telegram" != "telegram" caused silent mismatch.
-    #[test]
-    fn test_channel_filter_is_case_insensitive() {
-        use crate::agent::routine::{Routine, RoutineAction, RoutineGuardrails, Trigger};
-        use chrono::Utc;
-        use uuid::Uuid;
-
-        let routine = Routine {
+    /// Helper to build a test routine with the given user_id and trigger.
+    fn make_routine(user_id: &str, trigger: Trigger) -> Routine {
+        Routine {
             id: Uuid::new_v4(),
             name: "test".to_string(),
             description: String::new(),
-            user_id: "user1".to_string(),
+            user_id: user_id.to_string(),
             enabled: true,
-            trigger: Trigger::Event {
-                pattern: ".*".to_string(),
-                channel: Some("Telegram".to_string()),
-            },
+            trigger,
             action: RoutineAction::Lightweight {
                 prompt: String::new(),
                 context_paths: vec![],
@@ -2091,38 +2103,86 @@ mod tests {
             state: serde_json::Value::Null,
             created_at: Utc::now(),
             updated_at: Utc::now(),
-        };
+        }
+    }
 
-        // The channel filter in the trigger is "Telegram", but the message
-        // arrives on "telegram" (lowercase). This must still match.
-        let trigger_channel = match &routine.trigger {
+    /// Helper to build a test IncomingMessage.
+    fn make_message(user_id: &str, channel: &str, content: &str) -> IncomingMessage {
+        IncomingMessage {
+            id: Uuid::new_v4(),
+            channel: channel.to_string(),
+            user_id: user_id.to_string(),
+            user_name: None,
+            content: content.to_string(),
+            thread_id: None,
+            received_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+            timezone: None,
+            attachments: vec![],
+        }
+    }
+
+    /// Regression test for issue #1051: event triggers used case-sensitive
+    /// channel comparison, so "Telegram" != "telegram" caused silent mismatch.
+    /// Tests the actual `routine_matches_message` function used in `check_event_triggers`.
+    #[test]
+    fn test_channel_filter_is_case_insensitive() {
+        let routine = make_routine(
+            "user1",
             Trigger::Event {
-                channel: Some(ch), ..
-            } => ch,
-            _ => panic!("expected event trigger"),
-        };
-        let message_channel = "telegram";
+                pattern: ".*".to_string(),
+                channel: Some("Telegram".to_string()),
+            },
+        );
+        let msg = make_message("user1", "telegram", "hello");
 
-        // Old (broken): exact match would fail
-        assert_ne!(trigger_channel, message_channel);
-        // New (fixed): case-insensitive match succeeds
-        assert!(trigger_channel.eq_ignore_ascii_case(message_channel));
+        // Case-insensitive channel match must succeed
+        assert!(super::routine_matches_message(&routine, &msg));
+
+        // Exact case must also work
+        let msg_exact = make_message("user1", "Telegram", "hello");
+        assert!(super::routine_matches_message(&routine, &msg_exact));
+
+        // Different channel must not match
+        let msg_wrong = make_message("user1", "discord", "hello");
+        assert!(!super::routine_matches_message(&routine, &msg_wrong));
     }
 
     /// Regression test for issue #1051: event triggers did not filter by
     /// user_id, so routines from user A could fire on messages from user B.
+    /// Tests the actual `routine_matches_message` function used in `check_event_triggers`.
     #[test]
     fn test_event_trigger_requires_user_match() {
-        // The check_event_triggers method now compares routine.user_id
-        // against message.user_id. Routines owned by a different user
-        // must be skipped.
-        let routine_user = "alice";
-        let message_user = "bob";
-        assert_ne!(routine_user, message_user);
+        let routine = make_routine(
+            "alice",
+            Trigger::Event {
+                pattern: ".*".to_string(),
+                channel: None,
+            },
+        );
+
+        // Different user must not match
+        let msg_bob = make_message("bob", "telegram", "hello");
+        assert!(!super::routine_matches_message(&routine, &msg_bob));
 
         // Same user must match
-        let same_user = "alice";
-        assert_eq!(routine_user, same_user);
+        let msg_alice = make_message("alice", "telegram", "hello");
+        assert!(super::routine_matches_message(&routine, &msg_alice));
+    }
+
+    /// When no channel filter is set, any channel should match (given user matches).
+    #[test]
+    fn test_no_channel_filter_matches_any_channel() {
+        let routine = make_routine(
+            "user1",
+            Trigger::Event {
+                pattern: ".*".to_string(),
+                channel: None,
+            },
+        );
+
+        let msg = make_message("user1", "whatever_channel", "hello");
+        assert!(super::routine_matches_message(&routine, &msg));
     }
 
     #[test]

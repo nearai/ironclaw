@@ -1137,7 +1137,7 @@ impl Agent {
             && let Some(engine) = self.routine_engine().await
         {
             let fired = engine
-                .check_event_triggers(&message.user_id, &message.channel, content)
+                .check_event_triggers(&message)
                 .await;
             if fired > 0 {
                 tracing::debug!(
