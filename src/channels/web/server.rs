@@ -26,7 +26,6 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
-use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
@@ -36,6 +35,7 @@ use crate::channels::web::handlers::jobs::{
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
     jobs_summary_handler,
 };
+use crate::channels::web::handlers::routines::{routines_delete_handler, routines_toggle_handler};
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
@@ -2468,83 +2468,6 @@ async fn routines_trigger_handler(
         "routine_id": routine_id,
         "run_id": run_id,
     })))
-}
-
-#[derive(Deserialize)]
-struct ToggleRequest {
-    enabled: Option<bool>,
-}
-
-async fn routines_toggle_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(id): Path<String>,
-    body: Option<Json<ToggleRequest>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
-    let mut routine = store
-        .get_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    let was_enabled = routine.enabled;
-    // If a specific value was provided, use it; otherwise toggle.
-    routine.enabled = match body {
-        Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
-        None => !routine.enabled,
-    };
-
-    if routine.enabled
-        && !was_enabled
-        && let Trigger::Cron { schedule, timezone } = &routine.trigger
-    {
-        routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    store
-        .update_routine(&routine)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(serde_json::json!({
-        "status": if routine.enabled { "enabled" } else { "disabled" },
-        "routine_id": routine_id,
-    })))
-}
-
-async fn routines_delete_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
-    let deleted = store
-        .delete_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if deleted {
-        Ok(Json(serde_json::json!({
-            "status": "deleted",
-            "routine_id": routine_id,
-        })))
-    } else {
-        Err((StatusCode::NOT_FOUND, "Routine not found".to_string()))
-    }
 }
 
 async fn routines_runs_handler(

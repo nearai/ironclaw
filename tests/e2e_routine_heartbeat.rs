@@ -553,4 +553,144 @@ mod tests {
             "Expected Skipped for empty checklist, got: {result:?}"
         );
     }
+
+    /// Regression test for issue #1076: disabling an event routine via a DB mutation
+    /// followed by refresh_event_cache() (the path now taken by the web toggle handler)
+    /// must immediately stop the routine from firing.
+    #[tokio::test]
+    async fn toggle_disabling_event_routine_removes_from_cache() {
+        let (db, _dir) = create_test_db().await;
+        let ws = create_workspace(&db);
+        let (notify_tx, _rx) = tokio::sync::mpsc::channel(16);
+        let tools = Arc::new(ToolRegistry::new());
+
+        let safety_config = SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        };
+        let safety = Arc::new(SafetyLayer::new(&safety_config));
+
+        let trace = LlmTrace::single_turn(
+            "test-toggle",
+            "test",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "ROUTINE_OK".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        // Create and cache an event routine.
+        let mut routine = make_routine(
+            "disable-me",
+            Trigger::Event {
+                pattern: "DISABLE_ME".to_string(),
+                channel: None,
+            },
+            "Handle DISABLE_ME event",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let msg = IncomingMessage::new("test", "default", "DISABLE_ME");
+        let fired_before = engine.check_event_triggers(&msg).await;
+        assert!(fired_before >= 1, "Expected routine to fire before disable");
+
+        // Simulate what routines_toggle_handler now does: update DB, then refresh.
+        routine.enabled = false;
+        routine.updated_at = Utc::now();
+        db.update_routine(&routine).await.expect("update_routine");
+        engine.refresh_event_cache().await;
+
+        let fired_after = engine.check_event_triggers(&msg).await;
+        assert_eq!(
+            fired_after, 0,
+            "Disabled routine must not fire after cache refresh"
+        );
+    }
+
+    /// Regression test for issue #1076: deleting an event routine via a DB mutation
+    /// followed by refresh_event_cache() must immediately stop the routine from firing.
+    #[tokio::test]
+    async fn delete_event_routine_removes_from_cache() {
+        let (db, _dir) = create_test_db().await;
+        let ws = create_workspace(&db);
+        let (notify_tx, _rx) = tokio::sync::mpsc::channel(16);
+        let tools = Arc::new(ToolRegistry::new());
+
+        let safety_config = SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        };
+        let safety = Arc::new(SafetyLayer::new(&safety_config));
+
+        let trace = LlmTrace::single_turn(
+            "test-delete",
+            "test",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "ROUTINE_OK".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        let routine = make_routine(
+            "delete-me",
+            Trigger::Event {
+                pattern: "DELETE_ME".to_string(),
+                channel: None,
+            },
+            "Handle DELETE_ME event",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let msg = IncomingMessage::new("test", "default", "DELETE_ME");
+        assert!(
+            engine.check_event_triggers(&msg).await >= 1,
+            "Expected routine to fire before delete"
+        );
+
+        // Simulate what routines_delete_handler now does: delete from DB, then refresh.
+        db.delete_routine(routine.id).await.expect("delete_routine");
+        engine.refresh_event_cache().await;
+
+        assert_eq!(
+            engine.check_event_triggers(&msg).await,
+            0,
+            "Deleted routine must not fire after cache refresh"
+        );
+    }
 }
