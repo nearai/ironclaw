@@ -787,11 +787,15 @@ async fn relay_events_handler(
     };
 
     // Check timestamp freshness (5 min window)
-    if let Ok(ts) = timestamp.parse::<i64>() {
-        let now = chrono::Utc::now().timestamp();
-        if (now - ts).abs() > 300 {
-            return (StatusCode::UNAUTHORIZED, "stale timestamp").into_response();
+    let ts: i64 = match timestamp.parse() {
+        Ok(t) => t,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "malformed timestamp").into_response();
         }
+    };
+    let now = chrono::Utc::now().timestamp();
+    if (now - ts).abs() > 300 {
+        return (StatusCode::UNAUTHORIZED, "stale timestamp").into_response();
     }
 
     // Verify HMAC: sha256(secret, timestamp + "." + body)
@@ -820,10 +824,11 @@ async fn relay_events_handler(
         Some(tx) => {
             if let Err(e) = tx.try_send(event) {
                 tracing::warn!(error = %e, "relay event channel full or closed");
+                return (StatusCode::SERVICE_UNAVAILABLE, "event queue full").into_response();
             }
         }
         None => {
-            tracing::debug!("relay event received but no channel active");
+            return (StatusCode::SERVICE_UNAVAILABLE, "relay channel not active").into_response();
         }
     }
 

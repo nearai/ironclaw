@@ -708,8 +708,14 @@ impl ExtensionManager {
         *self.relay_channel_manager.write().await = Some(channel_manager);
     }
 
-    /// Check if a channel name corresponds to a relay extension (has stored team_id).
+    /// Check if a channel name corresponds to a relay extension (has stored team_id
+    /// or is tracked in the installed relay extensions set).
     pub async fn is_relay_channel(&self, name: &str) -> bool {
+        // Check in-memory installed set first (supports no-store mode)
+        if self.installed_relay_extensions.read().await.contains(name) {
+            return true;
+        }
+        // Then check persistent settings
         if let Some(ref store) = self.store {
             let team_id_key = format!("relay:{}:team_id", name);
             store
@@ -3924,10 +3930,6 @@ impl ExtensionManager {
         } else {
             String::new()
         };
-
-        if team_id.is_empty() {
-            return Err(ExtensionError::AuthRequired);
-        }
 
         // Use relay config captured at startup
         let relay_config = self.relay_config()?;

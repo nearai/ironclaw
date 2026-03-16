@@ -594,13 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_status_non_approval_is_noop() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
         let metadata = serde_json::json!({});
         let result = channel
             .send_status(
@@ -615,13 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_status_approval_non_dm_skips() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
         let metadata = serde_json::json!({
             "event_type": "message",
             "channel_id": "C456",
@@ -644,13 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_status_approval_dm_missing_channel_id_errors() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
         let metadata = serde_json::json!({
             "event_type": "direct_message",
             "sender_id": "U789",
@@ -676,13 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_status_approval_dm_missing_sender_id_errors() {
-        let channel = RelayChannel::new(
-            test_client(),
-            "token".into(),
-            "T123".into(),
-            "inst1".into(),
-            "user1".into(),
-        );
+        let channel = make_channel();
         let metadata = serde_json::json!({
             "event_type": "direct_message",
             "channel_id": "C456",
