@@ -855,19 +855,42 @@ impl Agent {
         };
 
         if let Some(pending) = pending_auth {
-            match &submission {
-                Submission::UserInput { content } => {
-                    return self
-                        .process_auth_token(message, &pending, content, session, thread_id)
-                        .await;
-                }
-                _ => {
-                    // Any control submission (interrupt, undo, etc.) cancels auth mode
+            if pending.is_expired() {
+                // TTL exceeded — clear stale auth mode
+                tracing::warn!(
+                    extension = %pending.extension_name,
+                    "Auth mode expired after TTL, clearing"
+                );
+                {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
                         thread.pending_auth = None;
                     }
-                    // Fall through to normal handling
+                }
+                // If this was a user message (possibly a pasted token), return an
+                // explicit error instead of forwarding it to the LLM/history.
+                if matches!(submission, Submission::UserInput { .. }) {
+                    return Ok(Some(format!(
+                        "Authentication for **{}** expired. Please try again.",
+                        pending.extension_name
+                    )));
+                }
+                // Control submissions (interrupt, undo, etc.) fall through to normal handling
+            } else {
+                match &submission {
+                    Submission::UserInput { content } => {
+                        return self
+                            .process_auth_token(message, &pending, content, session, thread_id)
+                            .await;
+                    }
+                    _ => {
+                        // Any control submission (interrupt, undo, etc.) cancels auth mode
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.pending_auth = None;
+                        }
+                        // Fall through to normal handling
+                    }
                 }
             }
         }

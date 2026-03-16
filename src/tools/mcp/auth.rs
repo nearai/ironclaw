@@ -24,7 +24,7 @@ use crate::tools::mcp::config::McpServerConfig;
 /// Per-request timeouts can override the default via `.timeout()` on
 /// the request builder.
 fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
-    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, AuthError>> =
         std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -32,10 +32,10 @@ fn oauth_http_client() -> Result<&'static reqwest::Client, AuthError> {
                 .timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .map_err(|e| e.to_string())
+                .map_err(|e| AuthError::Http(e.to_string()))
         })
         .as_ref()
-        .map_err(|e| AuthError::Http(e.clone()))
+        .map_err(Clone::clone)
 }
 
 /// Log a debug message when a discovery/auth response is a redirect.
@@ -57,7 +57,7 @@ fn log_redirect_if_applicable(url: &str, response: &reqwest::Response) {
 }
 
 /// OAuth authorization error.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AuthError {
     #[error("Server does not support OAuth authorization")]
     NotSupported,
@@ -443,6 +443,11 @@ async fn fetch_resource_metadata(url: &str) -> Result<ProtectedResourceMetadata,
 }
 
 /// Try to discover OAuth metadata via 401 challenge response.
+///
+/// Also accepts 400 responses, since some servers return 400 for
+/// unauthenticated requests.  In practice the 400 path rarely yields a
+/// `WWW-Authenticate` header (GitHub's MCP does not), so discovery
+/// typically falls through to strategy 2 (RFC 9728) or 3 (direct).
 async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadata, AuthError> {
     validate_url_safe(server_url).await?;
 
@@ -459,9 +464,13 @@ async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadat
 
     log_redirect_if_applicable(server_url, &response);
 
-    if response.status().as_u16() != 401 {
+    let status = response.status().as_u16();
+
+    // Accept 401 (standard) and 400 (some servers like GitHub MCP use this).
+    // In both cases, look for WWW-Authenticate header with discovery metadata.
+    if status != 401 && status != 400 {
         return Err(AuthError::DiscoveryFailed(format!(
-            "Expected 401, got {}",
+            "Expected 401 or 400, got {}",
             response.status()
         )));
     }
@@ -471,7 +480,7 @@ async fn discover_via_401(server_url: &str) -> Result<AuthorizationServerMetadat
         .get("WWW-Authenticate")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| {
-            AuthError::DiscoveryFailed("No WWW-Authenticate header in 401 response".to_string())
+            AuthError::DiscoveryFailed(format!("No WWW-Authenticate header in {} response", status))
         })?;
 
     let resource_metadata_url = parse_resource_metadata_url(www_auth).ok_or_else(|| {
@@ -1508,6 +1517,17 @@ mod tests {
                 "AuthError display mismatch for {:?}",
                 error
             );
+        }
+    }
+
+    #[test]
+    fn test_auth_error_clone_preserves_http_variant_and_payload() {
+        let original = AuthError::Http("builder failed".to_string());
+        let cloned = original.clone();
+
+        match cloned {
+            AuthError::Http(message) => assert_eq!(message, "builder failed"), // safety: test assertion in #[cfg(test)] module; not production panic path
+            other => panic!("expected AuthError::Http variant, got {other:?}"),
         }
     }
 

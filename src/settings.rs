@@ -220,7 +220,7 @@ pub struct TunnelSettings {
 }
 
 /// Channel-specific settings.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelSettings {
     /// Whether HTTP webhook channel is enabled.
     #[serde(default)]
@@ -233,6 +233,30 @@ pub struct ChannelSettings {
     /// HTTP webhook host.
     #[serde(default)]
     pub http_host: Option<String>,
+
+    /// Whether the web gateway is enabled.
+    #[serde(default = "default_true")]
+    pub gateway_enabled: bool,
+
+    /// Web gateway listen host.
+    #[serde(default)]
+    pub gateway_host: Option<String>,
+
+    /// Web gateway listen port.
+    #[serde(default)]
+    pub gateway_port: Option<u16>,
+
+    /// Web gateway bearer auth token. Auto-generated at gateway startup if unset.
+    #[serde(default)]
+    pub gateway_auth_token: Option<String>,
+
+    /// Web gateway user ID.
+    #[serde(default)]
+    pub gateway_user_id: Option<String>,
+
+    /// Whether the CLI channel is enabled.
+    #[serde(default = "default_true")]
+    pub cli_enabled: bool,
 
     /// Whether Signal channel is enabled.
     #[serde(default)]
@@ -287,6 +311,34 @@ pub struct ChannelSettings {
     /// Directory containing WASM channel modules.
     #[serde(default)]
     pub wasm_channels_dir: Option<PathBuf>,
+}
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            http_enabled: false,
+            http_port: None,
+            http_host: None,
+            gateway_enabled: true,
+            gateway_host: None,
+            gateway_port: None,
+            gateway_auth_token: None,
+            gateway_user_id: None,
+            cli_enabled: true,
+            signal_enabled: false,
+            signal_http_url: None,
+            signal_account: None,
+            signal_allow_from: None,
+            signal_allow_from_groups: None,
+            signal_dm_policy: None,
+            signal_group_policy: None,
+            signal_group_allow_from: None,
+            wasm_channel_owner_ids: std::collections::HashMap::new(),
+            wasm_channels: Vec::new(),
+            wasm_channels_enabled: true,
+            wasm_channels_dir: None,
+        }
+    }
 }
 
 /// Heartbeat configuration.
