@@ -208,7 +208,8 @@ pub async fn start_server(
         .route(
             "/oauth/slack/callback",
             get(slack_relay_oauth_callback_handler),
-        );
+        )
+        .route("/relay/events", post(relay_events_handler));
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -742,11 +743,98 @@ async fn oauth_callback_handler(
     axum::response::Html(html).into_response()
 }
 
+/// Webhook endpoint for receiving relay events from channel-relay.
+///
+/// PUBLIC route — authenticated via HMAC signature (X-Relay-Signature header).
+async fn relay_events_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let ext_mgr = match state.extension_manager.as_ref() {
+        Some(mgr) => mgr,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response();
+        }
+    };
+
+    let signing_secret = match ext_mgr.relay_signing_secret() {
+        Some(s) => s,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, "relay not configured").into_response();
+        }
+    };
+
+    // Verify signature
+    let signature = match headers
+        .get("x-relay-signature")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(s) => s.to_string(),
+        None => {
+            return (StatusCode::UNAUTHORIZED, "missing signature").into_response();
+        }
+    };
+
+    let timestamp = match headers
+        .get("x-relay-timestamp")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(t) => t.to_string(),
+        None => {
+            return (StatusCode::UNAUTHORIZED, "missing timestamp").into_response();
+        }
+    };
+
+    // Check timestamp freshness (5 min window)
+    if let Ok(ts) = timestamp.parse::<i64>() {
+        let now = chrono::Utc::now().timestamp();
+        if (now - ts).abs() > 300 {
+            return (StatusCode::UNAUTHORIZED, "stale timestamp").into_response();
+        }
+    }
+
+    // Verify HMAC: sha256(secret, timestamp + "." + body)
+    if !crate::channels::relay::webhook::verify_relay_signature(
+        &signing_secret,
+        &timestamp,
+        &body,
+        &signature,
+    ) {
+        return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
+    }
+
+    // Parse event
+    let event: crate::channels::relay::client::ChannelEvent = match serde_json::from_slice(&body) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "relay callback invalid JSON");
+            return (StatusCode::BAD_REQUEST, "invalid JSON").into_response();
+        }
+    };
+
+    // Push to relay channel
+    let event_tx_guard = ext_mgr.relay_event_tx();
+    let event_tx = event_tx_guard.lock().await;
+    match event_tx.as_ref() {
+        Some(tx) => {
+            if let Err(e) = tx.try_send(event) {
+                tracing::warn!(error = %e, "relay event channel full or closed");
+            }
+        }
+        None => {
+            tracing::debug!("relay event received but no channel active");
+        }
+    }
+
+    Json(serde_json::json!({"ok": true})).into_response()
+}
+
 /// OAuth callback for Slack via channel-relay.
 ///
 /// This is a PUBLIC route (no Bearer token required) because channel-relay
 /// redirects the user's browser here after Slack OAuth completes.
-/// Query params: `stream_token`, `provider`, `team_id`.
+/// Query params: `provider`, `team_id`.
 async fn slack_relay_oauth_callback_handler(
     State(state): State<Arc<GatewayState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -762,27 +850,6 @@ async fn slack_relay_oauth_callback_handler(
         )
         .into_response();
     }
-
-    // Validate stream_token: required, non-empty, max 2048 bytes
-    let stream_token = match params.get("stream_token") {
-        Some(t) if !t.is_empty() && t.len() <= 2048 => t.clone(),
-        Some(t) if t.len() > 2048 => {
-            return axum::response::Html(
-                "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
-                 <h2>Error</h2><p>Invalid callback parameters.</p></body></html>"
-                    .to_string(),
-            )
-            .into_response();
-        }
-        _ => {
-            return axum::response::Html(
-                "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
-                 <h2>Error</h2><p>Invalid callback parameters.</p></body></html>"
-                    .to_string(),
-            )
-            .into_response();
-        }
-    };
 
     // Validate team_id format: empty or T followed by alphanumeric (max 20 chars)
     let team_id = params.get("team_id").cloned().unwrap_or_default();
@@ -869,23 +936,6 @@ async fn slack_relay_oauth_callback_handler(
     let _ = ext_mgr.secrets().delete(&state.user_id, &state_key).await;
 
     let result: Result<(), String> = async {
-        // Store the stream token as a secret
-        let token_key = format!("relay:{}:stream_token", DEFAULT_RELAY_NAME);
-        let _ = ext_mgr.secrets().delete(&state.user_id, &token_key).await;
-        ext_mgr
-            .secrets()
-            .create(
-                &state.user_id,
-                crate::secrets::CreateSecretParams {
-                    name: token_key,
-                    value: secrecy::SecretString::from(stream_token),
-                    provider: Some(provider.clone()),
-                    expires_at: None,
-                },
-            )
-            .await
-            .map_err(|e| format!("Failed to store stream token: {}", e))?;
-
         // Store team_id in settings
         if let Some(ref store) = state.store {
             let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
@@ -3514,7 +3564,7 @@ mod tests {
 
         // Callback without state param should be rejected
         let req = axum::http::Request::builder()
-            .uri("/oauth/slack/callback?stream_token=tok123&team_id=T123&provider=slack")
+            .uri("/oauth/slack/callback?team_id=T123&provider=slack")
             .body(Body::empty())
             .expect("request");
 
@@ -3558,7 +3608,7 @@ mod tests {
 
         // Callback with wrong state param
         let req = axum::http::Request::builder()
-            .uri("/oauth/slack/callback?stream_token=tok123&team_id=T123&provider=slack&state=wrong-nonce")
+            .uri("/oauth/slack/callback?team_id=T123&provider=slack&state=wrong-nonce")
             .body(Body::empty())
             .expect("request");
 
@@ -3606,7 +3656,7 @@ mod tests {
         // we just verify it doesn't return a CSRF error.
         let req = axum::http::Request::builder()
             .uri(format!(
-                "/oauth/slack/callback?stream_token=tok123&team_id=T123&provider=slack&state={}",
+                "/oauth/slack/callback?team_id=T123&provider=slack&state={}",
                 nonce
             ))
             .body(Body::empty())

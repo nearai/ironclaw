@@ -316,6 +316,14 @@ pub struct ExtensionManager {
     /// Relay config captured at startup. Used by `auth_channel_relay` and
     /// `activate_channel_relay` instead of re-reading env vars.
     relay_config: Option<crate::config::RelayConfig>,
+    /// Shared event sender for the relay webhook endpoint.
+    /// Populated by `activate_channel_relay`, consumed by the web gateway's
+    /// `/relay/events` handler.
+    relay_event_tx: Arc<
+        tokio::sync::Mutex<
+            Option<tokio::sync::mpsc::Sender<crate::channels::relay::client::ChannelEvent>>,
+        >,
+    >,
     /// When `true`, OAuth flows always return an auth URL to the caller
     /// instead of opening a browser on the server via `open::that()`.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
@@ -401,6 +409,7 @@ impl ExtensionManager {
             pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
             gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
             relay_config: crate::config::RelayConfig::from_env(),
+            relay_event_tx: Arc::new(tokio::sync::Mutex::new(None)),
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
             pending_telegram_verification: RwLock::new(HashMap::new()),
@@ -493,6 +502,26 @@ impl ExtensionManager {
             ExtensionError::Config(
                 "CHANNEL_RELAY_URL and CHANNEL_RELAY_API_KEY must be set".to_string(),
             )
+        })
+    }
+
+    /// Get the shared relay event sender for the webhook endpoint.
+    pub fn relay_event_tx(
+        &self,
+    ) -> Arc<
+        tokio::sync::Mutex<
+            Option<tokio::sync::mpsc::Sender<crate::channels::relay::client::ChannelEvent>>,
+        >,
+    > {
+        Arc::clone(&self.relay_event_tx)
+    }
+
+    /// Get the relay signing secret (API key bytes) for webhook signature verification.
+    pub fn relay_signing_secret(&self) -> Option<Vec<u8>> {
+        self.relay_config.as_ref().map(|c| {
+            secrecy::ExposeSecret::expose_secret(&c.api_key)
+                .as_bytes()
+                .to_vec()
         })
     }
 
@@ -679,12 +708,19 @@ impl ExtensionManager {
         *self.relay_channel_manager.write().await = Some(channel_manager);
     }
 
-    /// Check if a channel name corresponds to a relay extension (has stored stream token).
+    /// Check if a channel name corresponds to a relay extension (has stored team_id).
     pub async fn is_relay_channel(&self, name: &str) -> bool {
-        self.secrets
-            .exists(&self.user_id, &format!("relay:{}:stream_token", name))
-            .await
-            .unwrap_or(false)
+        if let Some(ref store) = self.store {
+            let team_id_key = format!("relay:{}:team_id", name);
+            store
+                .get_setting(&self.user_id, &team_id_key)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        } else {
+            false
+        }
     }
 
     /// Restore persisted relay channels after startup.
@@ -1093,11 +1129,7 @@ impl ExtensionManager {
             let active_names = self.active_channel_names.read().await;
             for name in installed.iter() {
                 let active = active_names.contains(name);
-                let has_token = self
-                    .secrets
-                    .exists(&self.user_id, &format!("relay:{}:stream_token", name))
-                    .await
-                    .unwrap_or(false);
+                let has_token = self.is_relay_channel(name).await;
                 let registry_entry = self
                     .registry
                     .get_with_kind(name, Some(ExtensionKind::ChannelRelay))
@@ -1292,11 +1324,12 @@ impl ExtensionManager {
                 self.active_channel_names.write().await.remove(name);
                 self.persist_active_channels().await;
 
-                // Remove stored stream token
-                let _ = self
-                    .secrets
-                    .delete(&self.user_id, &format!("relay:{}:stream_token", name))
-                    .await;
+                // Remove stored team_id
+                if let Some(ref store) = self.store {
+                    let _ = store
+                        .delete_setting(&self.user_id, &format!("relay:{}:team_id", name))
+                        .await;
+                }
 
                 // Shut down the channel (check both runtime paths for WASM+relay and relay-only modes)
                 let mut shut_down = false;
@@ -3803,14 +3836,8 @@ impl ExtensionManager {
     /// For Telegram: accepts a bot token, registers it with channel-relay,
     /// and stores the returned stream token.
     async fn auth_channel_relay(&self, name: &str) -> Result<AuthResult, ExtensionError> {
-        // Check if already authenticated (stream token exists)
-        let token_key = format!("relay:{}:stream_token", name);
-        if self
-            .secrets
-            .exists(&self.user_id, &token_key)
-            .await
-            .unwrap_or(false)
-        {
+        // Check if already authenticated (has stored team_id)
+        if self.is_relay_channel(name).await {
             return Ok(AuthResult::authenticated(name, ExtensionKind::ChannelRelay));
         }
 
@@ -3841,6 +3868,9 @@ impl ExtensionManager {
                 format!("http://{}:{}", host, port)
             });
 
+        // Build event callback URL for channel-relay to POST events to
+        let event_callback_url = format!("{}{}", callback_base, relay_config.webhook_path);
+
         // Generate CSRF nonce for OAuth state parameter
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
@@ -3860,7 +3890,12 @@ impl ExtensionManager {
         );
 
         match client
-            .initiate_oauth(&instance_id, &user_id_uuid, &callback_url)
+            .initiate_oauth(
+                &instance_id,
+                &user_id_uuid,
+                &callback_url,
+                Some(&event_callback_url),
+            )
             .await
         {
             Ok(auth_url) => Ok(AuthResult::awaiting_authorization(
@@ -3875,18 +3910,9 @@ impl ExtensionManager {
 
     /// Activate a channel-relay extension.
     async fn activate_channel_relay(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
-        let token_key = format!("relay:{}:stream_token", name);
         let team_id_key = format!("relay:{}:team_id", name);
 
-        // Check if we have a stream token
-        let stream_token = match self.secrets.get_decrypted(&self.user_id, &token_key).await {
-            Ok(secret) => secret.expose().to_string(),
-            Err(_) => {
-                return Err(ExtensionError::AuthRequired);
-            }
-        };
-
-        // Get team_id from settings
+        // Get team_id from settings (required — means OAuth was completed)
         let team_id = if let Some(ref store) = self.store {
             store
                 .get_setting(&self.user_id, &team_id_key)
@@ -3898,6 +3924,10 @@ impl ExtensionManager {
         } else {
             String::new()
         };
+
+        if team_id.is_empty() {
+            return Err(ExtensionError::AuthRequired);
+        }
 
         // Use relay config captured at startup
         let relay_config = self.relay_config()?;
@@ -3911,19 +3941,43 @@ impl ExtensionManager {
         )
         .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
 
+        // Create the event channel for webhook callbacks
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
+
         let channel = crate::channels::relay::RelayChannel::new_with_provider(
-            client,
+            client.clone(),
             crate::channels::relay::channel::RelayProvider::Slack,
-            stream_token,
-            team_id,
-            instance_id,
-            self.user_id.clone(),
-        )
-        .with_timeouts(
-            relay_config.stream_timeout_secs,
-            relay_config.backoff_initial_ms,
-            relay_config.backoff_max_ms,
+            team_id.clone(),
+            instance_id.clone(),
+            event_tx.clone(),
+            event_rx,
         );
+
+        // Register webhook callback URL with channel-relay
+        let callback_base = self
+            .tunnel_url
+            .clone()
+            .or_else(|| relay_config.callback_url.clone())
+            .unwrap_or_else(|| {
+                let host = std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+                let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3001".into());
+                format!("http://{}:{}", host, port)
+            });
+        let event_callback_url = format!("{}{}", callback_base, relay_config.webhook_path);
+
+        // Best-effort registration — relay may be unreachable at startup
+        if let Err(e) = client
+            .register_callback(&instance_id, "slack", &team_id, &event_callback_url)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                "Failed to register callback URL with channel-relay (will retry on next event)"
+            );
+        }
+
+        // Store the event sender so the web gateway's relay webhook endpoint can push events
+        *self.relay_event_tx.lock().await = Some(event_tx);
 
         // Hot-add to channel manager
         let cm_guard = self.relay_channel_manager.read().await;
@@ -3993,13 +4047,8 @@ impl ExtensionManager {
         if self.installed_relay_extensions.read().await.contains(name) {
             return Ok(ExtensionKind::ChannelRelay);
         }
-        // Also check if there's a stored stream token (persisted across restarts)
-        if self
-            .secrets
-            .exists(&self.user_id, &format!("relay:{}:stream_token", name))
-            .await
-            .unwrap_or(false)
-        {
+        // Also check if there's a stored team_id (persisted across restarts)
+        if self.is_relay_channel(name).await {
             return Ok(ExtensionKind::ChannelRelay);
         }
 
@@ -6257,24 +6306,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_is_relay_channel_detects_stored_token() {
+    async fn test_is_relay_channel_returns_false_without_store() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mgr = make_test_manager(None, dir.path().to_path_buf());
 
-        // No token stored → not a relay channel
+        // With no DB store, is_relay_channel always returns false
         assert!(!mgr.is_relay_channel("slack-relay").await);
-
-        // Store a stream token
-        mgr.secrets
-            .create(
-                "test",
-                crate::secrets::CreateSecretParams::new("relay:slack-relay:stream_token", "tok123"),
-            )
-            .await
-            .expect("store token");
-
-        // Now it's detected as a relay channel
-        assert!(mgr.is_relay_channel("slack-relay").await);
     }
 
     #[tokio::test]
@@ -6290,18 +6327,21 @@ mod tests {
         cm.add(Box::new(stub)).await;
         mgr.set_relay_channel_manager(Arc::clone(&cm)).await;
 
-        // Mark as installed + store a token so determine_installed_kind finds it
+        // Mark as installed + store team_id so determine_installed_kind finds it
         mgr.installed_relay_extensions
             .write()
             .await
             .insert("slack-relay".to_string());
-        mgr.secrets
-            .create(
-                "test",
-                crate::secrets::CreateSecretParams::new("relay:slack-relay:stream_token", "tok123"),
-            )
-            .await
-            .expect("store token");
+        if let Some(ref store) = mgr.store {
+            store
+                .set_setting(
+                    "test",
+                    "relay:slack-relay:team_id",
+                    &serde_json::json!("T123"),
+                )
+                .await
+                .expect("store team_id");
+        }
 
         // Verify channel exists before removal
         assert!(cm.get_channel("slack-relay").await.is_some());

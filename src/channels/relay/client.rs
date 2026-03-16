@@ -1,15 +1,10 @@
 //! HTTP client for the channel-relay service.
 //!
 //! Wraps reqwest for all channel-relay API calls: OAuth initiation,
-//! SSE streaming, token renewal, and Slack API proxy.
+//! callback registration, and Slack API proxy.
 
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
-use futures::Stream;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
 /// Known relay event types.
 pub mod event_types {
@@ -18,7 +13,7 @@ pub mod event_types {
     pub const MENTION: &str = "mention";
 }
 
-/// A parsed SSE event from the channel-relay stream.
+/// A parsed event from the channel-relay webhook callback.
 ///
 /// Field names match the channel-relay `ChannelEvent` struct exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,16 +123,22 @@ impl RelayClient {
         instance_id: &str,
         user_id: &str,
         callback_url: &str,
+        event_callback_url: Option<&str>,
     ) -> Result<String, RelayError> {
+        let mut query: Vec<(&str, &str)> = vec![
+            ("instance_id", instance_id),
+            ("user_id", user_id),
+            ("callback", callback_url),
+        ];
+        if let Some(ecb) = event_callback_url {
+            query.push(("event_callback_url", ecb));
+        }
+
         let resp = self
             .http
             .get(format!("{}/oauth/slack/auth", self.base_url))
             .header("X-API-Key", self.api_key.expose_secret())
-            .query(&[
-                ("instance_id", instance_id),
-                ("user_id", user_id),
-                ("callback", callback_url),
-            ])
+            .query(&query)
             .send()
             .await
             .map_err(|e| RelayError::Network(e.to_string()))?;
@@ -173,83 +174,40 @@ impl RelayClient {
         }
     }
 
-    /// Connect to the SSE event stream.
+    /// Register a callback URL with channel-relay for receiving events.
     ///
-    /// Returns a stream of parsed `ChannelEvent`s and the `JoinHandle` of the
-    /// background SSE parser task. The caller is responsible for reconnection
-    /// logic on stream end/error and for aborting the handle on shutdown.
-    pub async fn connect_stream(
-        &self,
-        stream_token: &str,
-        stream_timeout_secs: u64,
-    ) -> Result<(ChannelEventStream, tokio::task::JoinHandle<()>), RelayError> {
-        let resp = self
-            .http
-            .get(format!("{}/stream", self.base_url))
-            .query(&[("token", stream_token)])
-            .timeout(std::time::Duration::from_secs(stream_timeout_secs))
-            .send()
-            .await
-            .map_err(|e| RelayError::Network(e.to_string()))?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(RelayError::TokenExpired);
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RelayError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
-
-        // Spawn a background task that reads the SSE stream and sends parsed events
-        let (tx, rx) = mpsc::channel(64);
-        let byte_stream = resp.bytes_stream();
-        let handle = tokio::spawn(parse_sse_stream(byte_stream, tx));
-
-        Ok((ChannelEventStream { rx }, handle))
-    }
-
-    /// Renew an expired stream token.
-    ///
-    /// Calls `POST /stream/renew` with API key auth, returns a new stream token.
-    pub async fn renew_token(
+    /// Calls `PUT /callbacks` with API key auth.
+    pub async fn register_callback(
         &self,
         instance_id: &str,
-        user_id: &str,
-    ) -> Result<String, RelayError> {
+        provider: &str,
+        provider_scope: &str,
+        callback_url: &str,
+    ) -> Result<(), RelayError> {
         let resp = self
             .http
-            .post(format!("{}/stream/renew", self.base_url))
+            .put(format!("{}/callbacks", self.base_url))
             .header("X-API-Key", self.api_key.expose_secret())
             .json(&serde_json::json!({
                 "instance_id": instance_id,
-                "user_id": user_id,
+                "provider": provider,
+                "provider_scope": provider_scope,
+                "callback_url": callback_url,
             }))
             .send()
             .await
             .map_err(|e| RelayError::Network(e.to_string()))?;
 
-        let status = resp.status();
-        if !status.is_success() {
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
             return Err(RelayError::Api {
-                status: status.as_u16(),
+                status,
                 message: body,
             });
         }
 
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| RelayError::Protocol(e.to_string()))?;
-        body.get("stream_token")
-            .or_else(|| body.get("token"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| RelayError::Protocol("Response missing stream_token field".to_string()))
+        Ok(())
     }
 
     /// Proxy an API call through channel-relay for any provider.
@@ -317,91 +275,6 @@ impl RelayClient {
     }
 }
 
-/// Async stream of parsed channel events from SSE.
-pub struct ChannelEventStream {
-    rx: mpsc::Receiver<ChannelEvent>,
-}
-
-impl Stream for ChannelEventStream {
-    type Item = ChannelEvent;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
-/// Parse SSE format from a reqwest bytes stream.
-///
-/// SSE format:
-/// ```text
-/// event: message
-/// data: {"key": "value"}
-///
-/// ```
-/// Blank line terminates an event.
-async fn parse_sse_stream(
-    byte_stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
-    tx: mpsc::Sender<ChannelEvent>,
-) {
-    use futures::StreamExt;
-
-    let mut buffer = Vec::<u8>::new();
-    let mut event_type = String::new();
-    let mut data_lines = Vec::new();
-
-    let mut byte_stream = std::pin::pin!(byte_stream);
-    while let Some(chunk_result) = byte_stream.next().await {
-        let chunk = match chunk_result {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::debug!(error = %e, "SSE stream chunk error");
-                break;
-            }
-        };
-
-        buffer.extend_from_slice(&chunk);
-
-        // Process complete lines (decode UTF-8 only on full lines to avoid
-        // corruption when multi-byte characters span chunk boundaries)
-        while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
-            let line = String::from_utf8_lossy(&buffer[..newline_pos])
-                .trim_end_matches('\r')
-                .to_string();
-            buffer.drain(..=newline_pos);
-
-            if line.is_empty() {
-                // Blank line = end of event
-                if !data_lines.is_empty() {
-                    let data = data_lines.join("\n");
-                    if let Ok(mut event) = serde_json::from_str::<ChannelEvent>(&data) {
-                        if event.event_type.is_empty() && !event_type.is_empty() {
-                            event.event_type = event_type.clone();
-                        }
-                        if tx.send(event).await.is_err() {
-                            return; // receiver dropped
-                        }
-                    } else {
-                        tracing::debug!(
-                            event_type = %event_type,
-                            data_len = data.len(),
-                            "Failed to parse SSE event data as ChannelEvent"
-                        );
-                    }
-                }
-                event_type.clear();
-                data_lines.clear();
-            } else if let Some(value) = line.strip_prefix("event:") {
-                event_type = value.trim().to_string();
-            } else if let Some(value) = line.strip_prefix("data:") {
-                data_lines.push(value.trim().to_string());
-            }
-            // Ignore other fields (id:, retry:, comments)
-        }
-    }
-
-    tracing::debug!("SSE stream ended");
-}
-
 /// Errors from relay client operations.
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
@@ -413,9 +286,6 @@ pub enum RelayError {
 
     #[error("Protocol error: {0}")]
     Protocol(String),
-
-    #[error("Stream token expired")]
-    TokenExpired,
 }
 
 #[cfg(test)]
@@ -494,9 +364,6 @@ mod tests {
             message: "unauthorized".into(),
         };
         assert_eq!(err.to_string(), "API error (HTTP 401): unauthorized");
-
-        let err = RelayError::TokenExpired;
-        assert_eq!(err.to_string(), "Stream token expired");
     }
 
     #[test]
@@ -517,33 +384,5 @@ mod tests {
         assert!(make(event_types::MESSAGE).is_message());
         assert!(make(event_types::DIRECT_MESSAGE).is_message());
         assert!(make(event_types::MENTION).is_message());
-    }
-
-    #[tokio::test]
-    async fn parse_sse_handles_multibyte_utf8_across_chunks() {
-        // The crab emoji (🦀) is 4 bytes: [0xF0, 0x9F, 0xA6, 0x80].
-        // Split it across two chunks to verify no U+FFFD corruption.
-        let event_json = r#"{"event_type":"message","content":"hello 🦀 world","provider_scope":"T1","channel_id":"C1","sender_id":"U1"}"#;
-        let full = format!("event: message\ndata: {}\n\n", event_json);
-        let bytes = full.as_bytes();
-
-        // Find the crab emoji and split mid-character
-        let crab_pos = bytes
-            .windows(4)
-            .position(|w| w == [0xF0, 0x9F, 0xA6, 0x80])
-            .expect("crab emoji not found");
-        let split_at = crab_pos + 2; // split in the middle of the 4-byte emoji
-
-        let chunk1 = bytes::Bytes::copy_from_slice(&bytes[..split_at]);
-        let chunk2 = bytes::Bytes::copy_from_slice(&bytes[split_at..]);
-
-        let chunks: Vec<Result<bytes::Bytes, reqwest::Error>> = vec![Ok(chunk1), Ok(chunk2)];
-        let stream = futures::stream::iter(chunks);
-
-        let (tx, mut rx) = mpsc::channel(8);
-        parse_sse_stream(stream, tx).await;
-
-        let event = rx.recv().await.expect("should receive event");
-        assert_eq!(event.text(), "hello 🦀 world");
     }
 }

@@ -15,12 +15,8 @@ pub struct RelayConfig {
     pub instance_id: Option<String>,
     /// HTTP request timeout in seconds (default: 30).
     pub request_timeout_secs: u64,
-    /// SSE stream long-poll timeout in seconds (default: 86400 = 24 h).
-    pub stream_timeout_secs: u64,
-    /// Initial exponential backoff in milliseconds (default: 1000).
-    pub backoff_initial_ms: u64,
-    /// Maximum exponential backoff in milliseconds (default: 60000).
-    pub backoff_max_ms: u64,
+    /// Path for the webhook callback endpoint (default: `/relay/events`).
+    pub webhook_path: String,
 }
 
 impl std::fmt::Debug for RelayConfig {
@@ -31,9 +27,7 @@ impl std::fmt::Debug for RelayConfig {
             .field("callback_url", &self.callback_url)
             .field("instance_id", &self.instance_id)
             .field("request_timeout_secs", &self.request_timeout_secs)
-            .field("stream_timeout_secs", &self.stream_timeout_secs)
-            .field("backoff_initial_ms", &self.backoff_initial_ms)
-            .field("backoff_max_ms", &self.backoff_max_ms)
+            .field("webhook_path", &self.webhook_path)
             .finish()
     }
 }
@@ -55,9 +49,7 @@ impl RelayConfig {
             callback_url: None,
             instance_id: None,
             request_timeout_secs: 30,
-            stream_timeout_secs: 86400,
-            backoff_initial_ms: 1000,
-            backoff_max_ms: 60000,
+            webhook_path: "/relay/events".into(),
         }
     }
 
@@ -73,15 +65,7 @@ impl RelayConfig {
             request_timeout_secs: env("RELAY_REQUEST_TIMEOUT_SECS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
-            stream_timeout_secs: env("RELAY_STREAM_TIMEOUT_SECS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(86400),
-            backoff_initial_ms: env("RELAY_BACKOFF_INITIAL_MS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1000),
-            backoff_max_ms: env("RELAY_BACKOFF_MAX_MS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60000),
+            webhook_path: env("RELAY_WEBHOOK_PATH").unwrap_or_else(|| "/relay/events".into()),
         })
     }
 }
@@ -107,9 +91,7 @@ mod tests {
 
         assert_eq!(config.url, "http://localhost:3001");
         assert_eq!(config.request_timeout_secs, 30);
-        assert_eq!(config.stream_timeout_secs, 86400);
-        assert_eq!(config.backoff_initial_ms, 1000);
-        assert_eq!(config.backoff_max_ms, 60000);
+        assert_eq!(config.webhook_path, "/relay/events");
         assert!(config.callback_url.is_none());
         assert!(config.instance_id.is_none());
     }
@@ -122,9 +104,7 @@ mod tests {
             "IRONCLAW_OAUTH_CALLBACK_URL" => Some("https://tunnel.example.com".into()),
             "IRONCLAW_INSTANCE_ID" => Some("my-instance".into()),
             "RELAY_REQUEST_TIMEOUT_SECS" => Some("60".into()),
-            "RELAY_STREAM_TIMEOUT_SECS" => Some("43200".into()),
-            "RELAY_BACKOFF_INITIAL_MS" => Some("2000".into()),
-            "RELAY_BACKOFF_MAX_MS" => Some("120000".into()),
+            "RELAY_WEBHOOK_PATH" => Some("/custom/events".into()),
             _ => None,
         })
         .expect("config should be Some");
@@ -135,9 +115,7 @@ mod tests {
         );
         assert_eq!(config.instance_id.as_deref(), Some("my-instance"));
         assert_eq!(config.request_timeout_secs, 60);
-        assert_eq!(config.stream_timeout_secs, 43200);
-        assert_eq!(config.backoff_initial_ms, 2000);
-        assert_eq!(config.backoff_max_ms, 120000);
+        assert_eq!(config.webhook_path, "/custom/events");
     }
 
     #[test]

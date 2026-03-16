@@ -2,18 +2,12 @@
 //!
 //! Uses real HTTP servers on random ports (no mock framework).
 
-use std::convert::Infallible;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use axum::{
     Json, Router,
     extract::Query,
-    http::StatusCode,
-    response::sse::{Event, KeepAlive, Sse},
-    routing::{get, post},
+    routing::{get, post, put},
 };
-use futures::stream;
-use ironclaw::channels::relay::client::{RelayClient, RelayError};
+use ironclaw::channels::relay::client::{ChannelEvent, RelayClient};
 use secrecy::SecretString;
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -37,109 +31,33 @@ fn test_client(base_url: &str) -> RelayClient {
     .expect("client build")
 }
 
-// ── SSE stream mock ─────────────────────────────────────────────────────
+// ── Callback registration ─────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_sse_stream_receives_events() {
+async fn test_register_callback() {
     let app = Router::new().route(
-        "/stream",
-        get(
-            |Query(params): Query<std::collections::HashMap<String, String>>| async move {
-                // Verify token is passed
-                assert!(params.contains_key("token"));
-
-                let events = vec![
-                    Ok::<_, Infallible>(
-                        Event::default().event("message").data(
-                            serde_json::json!({
-                                "event_type": "message",
-                                "provider": "slack",
-                                "provider_scope": "T123",
-                                "channel_id": "C456",
-                                "sender_id": "U789",
-                                "content": "hello world"
-                            })
-                            .to_string(),
-                        ),
-                    ),
-                    Ok(Event::default().event("message").data(
-                        serde_json::json!({
-                            "event_type": "direct_message",
-                            "provider": "slack",
-                            "provider_scope": "T123",
-                            "channel_id": "D001",
-                            "sender_id": "U789",
-                            "content": "dm text"
-                        })
-                        .to_string(),
-                    )),
-                ];
-
-                Sse::new(stream::iter(events)).keep_alive(KeepAlive::default())
-            },
-        ),
-    );
-
-    let base_url = start_server(app).await;
-    let client = test_client(&base_url);
-
-    let (mut event_stream, handle) = client.connect_stream("test-token", 30).await.unwrap();
-
-    use futures::StreamExt;
-    let first = event_stream.next().await.expect("first event");
-    assert_eq!(first.event_type, "message");
-    assert_eq!(first.text(), "hello world");
-    assert_eq!(first.team_id(), "T123");
-
-    let second = event_stream.next().await.expect("second event");
-    assert_eq!(second.event_type, "direct_message");
-    assert_eq!(second.text(), "dm text");
-
-    handle.abort();
-}
-
-// ── Token renewal flow ──────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_token_expired_returns_error() {
-    let app = Router::new().route("/stream", get(|| async { StatusCode::UNAUTHORIZED }));
-
-    let base_url = start_server(app).await;
-    let client = test_client(&base_url);
-
-    match client.connect_stream("expired-token", 30).await {
-        Err(RelayError::TokenExpired) => {} // expected
-        Err(other) => panic!("expected TokenExpired, got: {other}"),
-        Ok(_) => panic!("expected error, got Ok"),
-    }
-}
-
-#[tokio::test]
-async fn test_token_renewal() {
-    let call_count = std::sync::Arc::new(AtomicUsize::new(0));
-    let call_count_clone = call_count.clone();
-
-    let app = Router::new().route(
-        "/stream/renew",
-        post(move |Json(body): Json<serde_json::Value>| {
-            let count = call_count_clone.clone();
-            async move {
-                count.fetch_add(1, Ordering::SeqCst);
-                assert!(body.get("instance_id").is_some());
-                assert!(body.get("user_id").is_some());
-                Json(serde_json::json!({
-                    "stream_token": "renewed-token-123"
-                }))
-            }
+        "/callbacks",
+        put(|Json(body): Json<serde_json::Value>| async move {
+            assert_eq!(body["instance_id"], "inst-1");
+            assert_eq!(body["provider"], "slack");
+            assert_eq!(body["provider_scope"], "T123");
+            assert_eq!(body["callback_url"], "http://localhost:8000/relay/events");
+            Json(serde_json::json!({"ok": true}))
         }),
     );
 
     let base_url = start_server(app).await;
     let client = test_client(&base_url);
 
-    let new_token = client.renew_token("inst-1", "user-1").await.unwrap();
-    assert_eq!(new_token, "renewed-token-123");
-    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    client
+        .register_callback(
+            "inst-1",
+            "slack",
+            "T123",
+            "http://localhost:8000/relay/events",
+        )
+        .await
+        .unwrap();
 }
 
 // ── Proxy call ──────────────────────────────────────────────────────────
@@ -233,82 +151,10 @@ fn test_relay_client_new_succeeds() {
     assert!(client.is_ok());
 }
 
-// ── SSE UTF-8 chunk boundary ────────────────────────────────────────────
-
-/// Verify that multi-byte UTF-8 characters split across SSE chunks are
-/// not corrupted (no U+FFFD replacement characters).
-#[tokio::test]
-async fn test_sse_stream_preserves_multibyte_utf8_across_chunks() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let sent = std::sync::Arc::new(AtomicBool::new(false));
-    let sent_clone = sent.clone();
-
-    let app = Router::new().route(
-        "/stream",
-        get(move |_: Query<std::collections::HashMap<String, String>>| {
-            let sent = sent_clone.clone();
-            async move {
-                // Build SSE payload with emoji that will be split mid-character
-                let event_data = serde_json::json!({
-                    "event_type": "message",
-                    "provider": "slack",
-                    "provider_scope": "T1",
-                    "channel_id": "C1",
-                    "sender_id": "U1",
-                    "content": "hello 🦀 world"
-                });
-                let payload = format!("event: message\ndata: {}\n\n", event_data);
-                let bytes = payload.into_bytes();
-
-                // Split in the middle of the 4-byte crab emoji
-                let crab_pos = bytes
-                    .windows(4)
-                    .position(|w| w == [0xF0, 0x9F, 0xA6, 0x80])
-                    .unwrap();
-                let split_at = crab_pos + 2;
-
-                let chunk1 = bytes[..split_at].to_vec();
-                let chunk2 = bytes[split_at..].to_vec();
-
-                sent.store(true, Ordering::SeqCst);
-
-                let events = vec![
-                    Ok::<_, Infallible>(axum::body::Bytes::from(chunk1)),
-                    Ok(axum::body::Bytes::from(chunk2)),
-                ];
-
-                axum::response::Response::builder()
-                    .header("content-type", "text/event-stream")
-                    .body(axum::body::Body::from_stream(stream::iter(events)))
-                    .unwrap()
-            }
-        }),
-    );
-
-    let base_url = start_server(app).await;
-    let client = test_client(&base_url);
-
-    let (mut event_stream, handle) = client.connect_stream("tok", 30).await.unwrap();
-
-    use futures::StreamExt;
-    let event = event_stream.next().await.expect("should get event");
-    assert_eq!(
-        event.text(),
-        "hello 🦀 world",
-        "emoji should not be corrupted"
-    );
-    assert!(sent.load(Ordering::SeqCst));
-
-    handle.abort();
-}
-
 // ── Channel event field validation ──────────────────────────────────────
 
 #[test]
 fn test_channel_event_missing_fields_detected() {
-    use ironclaw::channels::relay::client::ChannelEvent;
-
     // Event with empty sender_id should be detectable
     let json = r#"{"event_type": "message", "provider_scope": "T1", "channel_id": "C1", "sender_id": "", "content": "test"}"#;
     let event: ChannelEvent = serde_json::from_str(json).unwrap();
