@@ -653,7 +653,7 @@ impl TestRigBuilder {
 
         // 7b. Register message tool so routines can send messages to channels.
         deps.tools
-            .register_message_tools(Arc::clone(&channels))
+            .register_message_tools(Arc::clone(&channels), deps.extension_manager.clone())
             .await;
 
         // 8. Create Agent.

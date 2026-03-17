@@ -2952,6 +2952,28 @@ body {
   text-decoration: underline;
 }
 
+.configure-inline-error {
+  margin: 16px 0 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(220, 38, 38, 0.12);
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  color: #fca5a5;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.configure-inline-status {
+  margin: 16px 0 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .configure-form {
   display: flex;
   flex-direction: column;

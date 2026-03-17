@@ -620,7 +620,7 @@ async fn async_main() -> anyhow::Result<()> {
     // Register message tool for sending messages to connected channels
     components
         .tools
-        .register_message_tools(Arc::clone(&channels))
+        .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
     // Wire up channel runtime for hot-activation of WASM channels.
