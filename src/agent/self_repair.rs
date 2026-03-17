@@ -118,11 +118,18 @@ impl SelfRepair for DefaultSelfRepair {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await
                 && ctx.state == JobState::Stuck
             {
-                let stuck_duration = ctx
-                    .started_at
-                    .map(|start| {
-                        let now = Utc::now();
-                        let duration = now.signed_duration_since(start);
+                // Measure stuck_duration from the most recent Stuck transition,
+                // not from started_at (which reflects when the job first ran).
+                let stuck_since = ctx
+                    .transitions
+                    .iter()
+                    .rev()
+                    .find(|t| t.to == JobState::Stuck)
+                    .map(|t| t.timestamp);
+
+                let stuck_duration = stuck_since
+                    .map(|ts| {
+                        let duration = Utc::now().signed_duration_since(ts);
                         Duration::from_secs(duration.num_seconds().max(0) as u64)
                     })
                     .unwrap_or_default();
@@ -134,7 +141,7 @@ impl SelfRepair for DefaultSelfRepair {
 
                 stuck_jobs.push(StuckJob {
                     job_id,
-                    last_activity: ctx.started_at.unwrap_or(ctx.created_at),
+                    last_activity: stuck_since.unwrap_or(ctx.created_at),
                     stuck_duration,
                     last_error: None,
                     repair_attempts: ctx.repair_attempts,
@@ -272,14 +279,8 @@ impl SelfRepair for DefaultSelfRepair {
                     tracing::warn!("Failed to mark tool as repaired: {}", e);
                 }
 
-                // Hot-reload: if the tool was registered by the builder and
-                // we have access to the registry, log the reload.
                 if result.registered {
-                    if self.tools.is_some() {
-                        tracing::info!("Repaired tool '{}' hot-reloaded into registry", tool.name);
-                    } else {
-                        tracing::info!("Repaired tool '{}' auto-registered", tool.name);
-                    }
+                    tracing::info!("Repaired tool '{}' auto-registered by builder", tool.name);
                 }
 
                 Ok(RepairResult::Success {
@@ -537,6 +538,47 @@ mod tests {
         let stuck = repair.detect_stuck_jobs().await;
         assert_eq!(stuck.len(), 1, "Job should be detected with zero threshold");
         assert_eq!(stuck[0].job_id, job_id);
+    }
+
+    /// Regression: stuck_duration must be measured from the Stuck transition,
+    /// not from started_at. A job that ran for 2 hours before becoming stuck
+    /// should NOT immediately exceed a 5-minute threshold.
+    #[tokio::test]
+    async fn stuck_duration_measured_from_stuck_transition_not_started_at() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Long runner", "desc").await.unwrap();
+
+        // Transition to InProgress (sets started_at to now).
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Backdate started_at to 2 hours ago to simulate a long-running job.
+        cm.update_context(job_id, |ctx| {
+            ctx.started_at = Some(Utc::now() - chrono::Duration::hours(2));
+            Ok(())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Now transition to Stuck (stuck transition timestamp is ~now).
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("wedged".into()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // With a 5-minute threshold, the job JUST became stuck — should NOT be detected.
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(300), 3);
+        let stuck = repair.detect_stuck_jobs().await;
+        assert!(
+            stuck.is_empty(),
+            "Job stuck for <1s should not exceed 5min threshold, \
+             but stuck_duration was computed from started_at (2h ago)"
+        );
     }
 
     #[tokio::test]
