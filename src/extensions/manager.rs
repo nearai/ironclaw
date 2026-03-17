@@ -516,10 +516,10 @@ impl ExtensionManager {
         Arc::clone(&self.relay_event_tx)
     }
 
-    /// Get the relay signing secret (API key bytes) for webhook signature verification.
+    /// Get the relay signing secret for webhook signature verification.
     pub fn relay_signing_secret(&self) -> Option<Vec<u8>> {
         self.relay_config.as_ref().map(|c| {
-            secrecy::ExposeSecret::expose_secret(&c.api_key)
+            secrecy::ExposeSecret::expose_secret(&c.signing_secret)
                 .as_bytes()
                 .to_vec()
         })
@@ -3874,9 +3874,6 @@ impl ExtensionManager {
                 format!("http://{}:{}", host, port)
             });
 
-        // Build event callback URL for channel-relay to POST events to
-        let event_callback_url = format!("{}{}", callback_base, relay_config.webhook_path);
-
         // Generate CSRF nonce for OAuth state parameter
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
@@ -3896,12 +3893,7 @@ impl ExtensionManager {
         );
 
         match client
-            .initiate_oauth(
-                &instance_id,
-                &user_id_uuid,
-                &callback_url,
-                Some(&event_callback_url),
-            )
+            .initiate_oauth(&instance_id, &user_id_uuid, &callback_url)
             .await
         {
             Ok(auth_url) => Ok(AuthResult::awaiting_authorization(
@@ -3955,28 +3947,12 @@ impl ExtensionManager {
             event_rx,
         );
 
-        // Register webhook callback URL with channel-relay
-        let callback_base = self
-            .tunnel_url
-            .clone()
-            .or_else(|| relay_config.callback_url.clone())
-            .unwrap_or_else(|| {
-                let host = std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-                let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3001".into());
-                format!("http://{}:{}", host, port)
-            });
-        let event_callback_url = format!("{}{}", callback_base, relay_config.webhook_path);
-
-        // Best-effort registration — relay may be unreachable at startup
-        if let Err(e) = client
-            .register_callback(&instance_id, "slack", &team_id, &event_callback_url)
-            .await
-        {
-            tracing::warn!(
-                error = %e,
-                "Failed to register callback URL with channel-relay (will retry on next event)"
-            );
-        }
+        // Callback URL is now set during OAuth flow, not via PUT /callbacks.
+        // The relay webhook endpoint path is still needed for the web gateway.
+        tracing::info!(
+            webhook_path = %relay_config.webhook_path,
+            "Relay channel activated (callback URL set during OAuth)"
+        );
 
         // Store the event sender so the web gateway's relay webhook endpoint can push events
         *self.relay_event_tx.lock().await = Some(event_tx);

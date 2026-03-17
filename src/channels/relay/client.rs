@@ -123,21 +123,17 @@ impl RelayClient {
         instance_id: &str,
         user_id: &str,
         callback_url: &str,
-        event_callback_url: Option<&str>,
     ) -> Result<String, RelayError> {
-        let mut query: Vec<(&str, &str)> = vec![
+        let query: Vec<(&str, &str)> = vec![
             ("instance_id", instance_id),
             ("user_id", user_id),
             ("callback", callback_url),
         ];
-        if let Some(ecb) = event_callback_url {
-            query.push(("event_callback_url", ecb));
-        }
 
         let resp = self
             .http
             .get(format!("{}/oauth/slack/auth", self.base_url))
-            .header("X-API-Key", self.api_key.expose_secret())
+            .bearer_auth(self.api_key.expose_secret())
             .query(&query)
             .send()
             .await
@@ -174,42 +170,6 @@ impl RelayClient {
         }
     }
 
-    /// Register a callback URL with channel-relay for receiving events.
-    ///
-    /// Calls `PUT /callbacks` with API key auth.
-    pub async fn register_callback(
-        &self,
-        instance_id: &str,
-        provider: &str,
-        provider_scope: &str,
-        callback_url: &str,
-    ) -> Result<(), RelayError> {
-        let resp = self
-            .http
-            .put(format!("{}/callbacks", self.base_url))
-            .header("X-API-Key", self.api_key.expose_secret())
-            .json(&serde_json::json!({
-                "instance_id": instance_id,
-                "provider": provider,
-                "provider_scope": provider_scope,
-                "callback_url": callback_url,
-            }))
-            .send()
-            .await
-            .map_err(|e| RelayError::Network(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(RelayError::Api {
-                status,
-                message: body,
-            });
-        }
-
-        Ok(())
-    }
-
     /// Proxy an API call through channel-relay for any provider.
     ///
     /// Calls `POST /proxy/{provider}/{method}?team_id=X&instance_id=Y` with the given JSON body.
@@ -228,7 +188,7 @@ impl RelayClient {
         let resp = self
             .http
             .post(format!("{}/proxy/{}/{}", self.base_url, provider, method))
-            .header("X-API-Key", self.api_key.expose_secret())
+            .bearer_auth(self.api_key.expose_secret())
             .query(&query)
             .json(&body)
             .send()
@@ -254,7 +214,7 @@ impl RelayClient {
         let resp = self
             .http
             .get(format!("{}/connections", self.base_url))
-            .header("X-API-Key", self.api_key.expose_secret())
+            .bearer_auth(self.api_key.expose_secret())
             .query(&[("instance_id", instance_id)])
             .send()
             .await

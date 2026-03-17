@@ -5,7 +5,7 @@
 use axum::{
     Json, Router,
     extract::Query,
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use ironclaw::channels::relay::client::{ChannelEvent, RelayClient};
 use secrecy::SecretString;
@@ -29,35 +29,6 @@ fn test_client(base_url: &str) -> RelayClient {
         5,
     )
     .expect("client build")
-}
-
-// ── Callback registration ─────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_register_callback() {
-    let app = Router::new().route(
-        "/callbacks",
-        put(|Json(body): Json<serde_json::Value>| async move {
-            assert_eq!(body["instance_id"], "inst-1");
-            assert_eq!(body["provider"], "slack");
-            assert_eq!(body["provider_scope"], "T123");
-            assert_eq!(body["callback_url"], "http://localhost:8000/relay/events");
-            Json(serde_json::json!({"ok": true}))
-        }),
-    );
-
-    let base_url = start_server(app).await;
-    let client = test_client(&base_url);
-
-    client
-        .register_callback(
-            "inst-1",
-            "slack",
-            "T123",
-            "http://localhost:8000/relay/events",
-        )
-        .await
-        .unwrap();
 }
 
 // ── Proxy call ──────────────────────────────────────────────────────────
@@ -118,18 +89,18 @@ async fn test_list_connections() {
     assert!(!conns[1].connected);
 }
 
-// ── API key header ──────────────────────────────────────────────────────
+// ── Bearer token auth ────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_api_key_sent_in_header() {
+async fn test_bearer_token_sent_in_header() {
     let app = Router::new().route(
         "/connections",
         get(|headers: axum::http::HeaderMap| async move {
-            let key = headers
-                .get("X-API-Key")
+            let auth = headers
+                .get("authorization")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            assert_eq!(key, "test-api-key");
+            assert_eq!(auth, "Bearer test-api-key");
             Json(serde_json::json!([]))
         }),
     );
