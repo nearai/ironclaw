@@ -2112,13 +2112,17 @@ mod tests {
             id: Uuid::new_v4(),
             channel: channel.to_string(),
             user_id: user_id.to_string(),
+            owner_id: user_id.to_string(),
+            sender_id: user_id.to_string(),
             user_name: None,
             content: content.to_string(),
             thread_id: None,
+            conversation_scope_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
             timezone: None,
             attachments: vec![],
+            is_internal: false,
         }
     }
 
