@@ -788,7 +788,6 @@ impl Agent {
                     }
                 }
             }
-
         }
 
         // Cleanup
