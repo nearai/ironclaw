@@ -125,6 +125,8 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
     phase = {"value": "installed"}
     captured_setup_payloads = []
     post_count = {"value": 0}
+    second_request_started = asyncio.Event()
+    allow_second_response = asyncio.Event()
 
     async def handle_ext_list(route):
         extensions = {
@@ -170,16 +172,18 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
                     {
                         "success": True,
                         "activated": False,
-                        "message": "Configuration saved for 'telegram'. Send `/start iclaw-7qk2m9` to @test_hot_bot, then click Verify owner.",
+                        "message": "Configuration saved for 'telegram'. Send `/start iclaw-7qk2m9` to @test_hot_bot in Telegram. IronClaw will finish setup automatically.",
                         "verification": {
                             "code": "iclaw-7qk2m9",
-                            "instructions": "Send `/start iclaw-7qk2m9` to @test_hot_bot, then click Verify owner.",
+                            "instructions": "Send `/start iclaw-7qk2m9` to @test_hot_bot in Telegram. IronClaw will finish setup automatically.",
                             "deep_link": "https://t.me/test_hot_bot?start=iclaw-7qk2m9",
                         },
                     }
                 ),
             )
         else:
+            second_request_started.set()
+            await allow_second_response.wait()
             await route.fulfill(
                 status=200,
                 content_type="application/json",
@@ -203,16 +207,19 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
     await modal.wait_for(state="visible", timeout=5000)
     await modal.locator(_CONFIGURE_SECRET_INPUT).fill("123456789:ABCdefGhI")
     await modal.locator(_CONFIGURE_SAVE_BUTTON).click()
-    await modal.locator(_CONFIGURE_SAVE_BUTTON, has_text="Verify owner").wait_for(
+    await second_request_started.wait()
+    await modal.locator(".configure-inline-status", has_text="Waiting for Telegram owner verification...").wait_for(
         state="visible", timeout=5000
     )
-    assert "Verify owner" in (
-        await modal.locator(_CONFIGURE_SAVE_BUTTON).text_content()
-    )
     assert "iclaw-7qk2m9" in (await modal.text_content())
+    assert "/start iclaw-7qk2m9" in (await modal.text_content())
     assert await modal.locator(".configure-verification-link").count() == 1
+    await modal.locator(_CONFIGURE_SAVE_BUTTON).wait_for(state="hidden", timeout=5000)
 
-    await modal.locator(_CONFIGURE_SAVE_BUTTON).click()
+    await page.locator(SEL["configure_overlay"]).click(position={"x": 1, "y": 1})
+    assert await page.locator(SEL["configure_overlay"]).is_visible()
+
+    allow_second_response.set()
     await page.locator(SEL["configure_overlay"]).wait_for(state="hidden", timeout=5000)
 
     phase["value"] = "active"
