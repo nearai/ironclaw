@@ -564,8 +564,9 @@ impl TestHarnessBuilder {
             document_extraction: None,
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
-            llm_backend: "nearai".to_string(),
+llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+    channel_routing: None,
         };
 
         TestHarness {

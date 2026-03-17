@@ -936,11 +936,15 @@ async fn async_main() -> anyhow::Result<()> {
             ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
         },
         builder: components.builder,
-        llm_backend: config.llm.backend.clone(),
+llm_backend: config.llm.backend.clone(),
         tenant_rates: Arc::new(ironclaw::tenant::TenantRateRegistry::new(
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
         )),
+    channel_routing: ironclaw::agent::channel_routing::ChannelRoutingConfig::load(
+            &ironclaw::bootstrap::ironclaw_base_dir(),
+        )
+        .map(Arc::new),
     };
 
     let channels_for_warnings = Arc::clone(&channels);
