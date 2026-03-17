@@ -99,19 +99,16 @@ pub async fn webhook_trigger_handler(
         ))?
     };
 
-    let run_id = engine
-        .fire_webhook(routine.id, &path)
-        .await
-        .map_err(|e| {
-            let status = match &e {
-                crate::error::RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
-                crate::error::RoutineError::Disabled { .. }
-                | crate::error::RoutineError::Cooldown { .. }
-                | crate::error::RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (status, e.to_string())
-        })?;
+    let run_id = engine.fire_webhook(routine.id, &path).await.map_err(|e| {
+        let status = match &e {
+            crate::error::RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
+            crate::error::RoutineError::Disabled { .. }
+            | crate::error::RoutineError::Cooldown { .. }
+            | crate::error::RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, e.to_string())
+    })?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",
