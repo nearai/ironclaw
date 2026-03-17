@@ -578,7 +578,7 @@ impl TestRigBuilder {
                     None,
                     components.tools.clone(),
                     components.safety.clone(),
-                    true, // sandbox_available: true in tests (no real Docker needed)
+                    ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
                 ));
                 components
                     .tools
@@ -643,7 +643,7 @@ impl TestRigBuilder {
             },
             transcription: None,
             document_extraction: None,
-            sandbox_available: true, // tests don't use real Docker
+            sandbox_readiness: ironclaw::agent::SandboxReadiness::Available, // tests don't use real Docker
         };
 
         // 7. Create TestChannel and ChannelManager.

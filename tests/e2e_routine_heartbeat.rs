@@ -400,7 +400,7 @@ mod tests {
             None,
             tools,
             safety,
-            false, // sandbox_available
+            ironclaw::agent::SandboxReadiness::DisabledByConfig,
         ));
 
         let mut filters = std::collections::HashMap::new();

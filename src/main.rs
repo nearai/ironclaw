@@ -742,7 +742,13 @@ async fn async_main() -> anyhow::Result<()> {
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
-        sandbox_available: config.sandbox.enabled && docker_status.is_ok(),
+        sandbox_readiness: if !config.sandbox.enabled {
+            ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig
+        } else if docker_status.is_ok() {
+            ironclaw::agent::routine_engine::SandboxReadiness::Available
+        } else {
+            ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
+        },
     };
 
     let channels_for_warnings = Arc::clone(&channels);
