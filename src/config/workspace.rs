@@ -78,3 +78,131 @@ impl WorkspaceConfig {
         Ok(Self { memory_layers })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serialize env-var-dependent tests to avoid races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env(key: &str, val: Option<&str>, f: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var(key).ok();
+        match val {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        f();
+        match prev {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    #[test]
+    fn valid_json_parses_correctly() {
+        let json = r#"[{"name":"private","scope":"alice","writable":true,"sensitivity":"private"},{"name":"shared","scope":"shared","writable":true,"sensitivity":"shared"}]"#;
+        with_env("MEMORY_LAYERS", Some(json), || {
+            let config = WorkspaceConfig::resolve("alice").expect("should parse");
+            assert_eq!(config.memory_layers.len(), 2);
+            assert_eq!(config.memory_layers[0].name, "private");
+            assert_eq!(config.memory_layers[1].name, "shared");
+        });
+    }
+
+    #[test]
+    fn invalid_json_returns_error() {
+        with_env("MEMORY_LAYERS", Some("not json"), || {
+            let result = WorkspaceConfig::resolve("alice");
+            assert!(result.is_err(), "invalid JSON should fail");
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("valid JSON"), "error should mention JSON: {err}");
+        });
+    }
+
+    #[test]
+    fn empty_layer_name_returns_error() {
+        let json = r#"[{"name":"","scope":"alice"}]"#;
+        with_env("MEMORY_LAYERS", Some(json), || {
+            let result = WorkspaceConfig::resolve("alice");
+            assert!(result.is_err(), "empty layer name should fail");
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("empty"), "error should mention empty: {err}");
+        });
+    }
+
+    #[test]
+    fn layer_name_exceeding_64_chars_returns_error() {
+        let long_name = "a".repeat(65);
+        let json = format!(r#"[{{"name":"{long_name}","scope":"alice"}}]"#);
+        with_env("MEMORY_LAYERS", Some(&json), || {
+            let result = WorkspaceConfig::resolve("alice");
+            assert!(result.is_err(), "long layer name should fail");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("exceeds 64"),
+                "error should mention 64 chars: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn layer_name_with_invalid_chars_returns_error() {
+        for bad_name in ["has space", "has@at", "has.dot", "has/slash"] {
+            let json = format!(r#"[{{"name":"{bad_name}","scope":"alice"}}]"#);
+            with_env("MEMORY_LAYERS", Some(&json), || {
+                let result = WorkspaceConfig::resolve("alice");
+                assert!(
+                    result.is_err(),
+                    "layer name '{bad_name}' should fail validation"
+                );
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("invalid characters"),
+                    "error for '{bad_name}' should mention invalid characters: {err}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn empty_scope_returns_error() {
+        let json = r#"[{"name":"private","scope":""}]"#;
+        with_env("MEMORY_LAYERS", Some(json), || {
+            let result = WorkspaceConfig::resolve("alice");
+            assert!(result.is_err(), "empty scope should fail");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("empty scope"),
+                "error should mention empty scope: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn duplicate_layer_names_returns_error() {
+        let json = r#"[{"name":"private","scope":"alice"},{"name":"private","scope":"bob"}]"#;
+        with_env("MEMORY_LAYERS", Some(json), || {
+            let result = WorkspaceConfig::resolve("alice");
+            assert!(result.is_err(), "duplicate names should fail");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("duplicate"),
+                "error should mention duplicate: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn missing_env_defaults_to_single_private_layer() {
+        with_env("MEMORY_LAYERS", None, || {
+            let config = WorkspaceConfig::resolve("alice").expect("should default");
+            assert_eq!(config.memory_layers.len(), 1);
+            assert_eq!(config.memory_layers[0].name, "private");
+            assert_eq!(config.memory_layers[0].scope, "alice");
+            assert!(config.memory_layers[0].writable);
+        });
+    }
+}

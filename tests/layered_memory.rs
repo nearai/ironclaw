@@ -321,8 +321,15 @@ async fn write_empty_path_to_layer() {
     let (db, _dir) = setup().await;
     let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
 
-    let result = ws.write_to_layer("private", "", "content", false).await;
-    assert!(result.is_ok() || result.is_err());
+    let result = ws
+        .write_to_layer("private", "", "content", false)
+        .await;
+    // normalize_path("") returns "" — the write succeeds with an empty-string path
+    assert!(result.is_ok(), "write with empty path should succeed");
+    let write_result = result.unwrap();
+    assert_eq!(write_result.document.content, "content");
+    assert!(!write_result.redirected);
+    assert_eq!(write_result.actual_layer, "private");
 }
 
 #[tokio::test]
