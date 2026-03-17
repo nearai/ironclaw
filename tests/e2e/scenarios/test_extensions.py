@@ -885,6 +885,36 @@ async def test_auth_and_configure_helpers_escape_selector_sensitive_extension_na
     assert result["configureStillPresent"] is False
 
 
+async def test_auth_required_does_not_reopen_existing_configure_modal(page):
+    """Regression: auth_required SSE should not clobber an already-open configure modal."""
+    result = await page.evaluate(
+        """() => {
+            const overlay = document.createElement('div');
+            overlay.className = 'configure-overlay';
+            overlay.setAttribute('data-extension-name', 'telegram');
+            document.body.appendChild(overlay);
+
+            const originalShowConfigureModal = window.showConfigureModal;
+            const originalSetAuthFlowPending = window.setAuthFlowPending;
+            let showCalls = 0;
+            let pendingCalls = 0;
+
+            window.showConfigureModal = () => { showCalls += 1; };
+            window.setAuthFlowPending = () => { pendingCalls += 1; };
+
+            handleAuthRequired({ extension_name: 'telegram', instructions: 'pending', auth_url: null });
+
+            window.showConfigureModal = originalShowConfigureModal;
+            window.setAuthFlowPending = originalSetAuthFlowPending;
+            overlay.remove();
+            return { showCalls, pendingCalls };
+        }"""
+    )
+
+    assert result["showCalls"] == 0
+    assert result["pendingCalls"] == 0
+
+
 async def test_auth_completed_sse_dismisses_card(page):
     """Simulating the auth_completed SSE event removes the auth card."""
     await _show_auth_card(page, extension_name="myext")

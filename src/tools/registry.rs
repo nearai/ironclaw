@@ -501,9 +501,14 @@ impl ToolRegistry {
     pub async fn register_message_tools(
         &self,
         channel_manager: Arc<crate::channels::ChannelManager>,
+        extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     ) {
         use crate::tools::builtin::MessageTool;
-        let tool = Arc::new(MessageTool::new(channel_manager));
+        let mut tool = MessageTool::new(channel_manager);
+        if let Some(extension_manager) = extension_manager {
+            tool = tool.with_extension_manager(extension_manager);
+        }
+        let tool = Arc::new(tool);
         *self.message_tool.write().await = Some(Arc::clone(&tool));
         self.tools
             .write()
