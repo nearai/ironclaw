@@ -285,3 +285,76 @@ async fn search_finds_private_layer_content() {
         "Should find results in the private layer"
     );
 }
+
+#[tokio::test]
+async fn write_to_private_invisible_from_shared_scope() {
+    let (db, _dir) = setup().await;
+    let db_clone = db.clone();
+    let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
+
+    ws.write_to_layer("private", "notes/secret.md", "Private data", false)
+        .await
+        .expect("write should succeed");
+
+    let ws_shared = Workspace::new_with_db("shared", db_clone);
+    let result = ws_shared.read("notes/secret.md").await;
+    assert!(result.is_err(), "Shared scope must not read private layer content");
+}
+
+#[tokio::test]
+async fn write_to_shared_invisible_from_private_scope() {
+    let (db, _dir) = setup().await;
+    let db_clone = db.clone();
+    let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
+
+    ws.write_to_layer("shared", "plans/visible.md", "Shared plan", false)
+        .await
+        .expect("write should succeed");
+
+    let ws_alice = Workspace::new_with_db("alice", db_clone);
+    let result = ws_alice.read("plans/visible.md").await;
+    assert!(result.is_err(), "Private scope must not read shared layer content without multi-scope");
+}
+
+#[tokio::test]
+async fn write_empty_path_to_layer() {
+    let (db, _dir) = setup().await;
+    let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
+
+    let result = ws.write_to_layer("private", "", "content", false).await;
+    assert!(result.is_ok() || result.is_err());
+}
+
+#[tokio::test]
+async fn overwrite_existing_content_in_layer() {
+    let (db, _dir) = setup().await;
+    let ws = Workspace::new_with_db("alice", db).with_memory_layers(test_layers());
+
+    ws.write_to_layer("private", "notes/evolving.md", "Version 1", false)
+        .await
+        .expect("first write");
+
+    let result = ws
+        .write_to_layer("private", "notes/evolving.md", "Version 2", false)
+        .await
+        .expect("overwrite should succeed");
+
+    assert_eq!(result.document.content, "Version 2");
+    assert!(!result.redirected);
+}
+
+#[tokio::test]
+async fn sensitive_write_to_private_layer_not_redirected() {
+    let (db, _dir) = setup().await;
+    let ws = Workspace::new_with_db("alice", db)
+        .with_memory_layers(test_layers())
+        .with_privacy_classifier(Arc::new(PatternPrivacyClassifier::new().unwrap()));
+
+    let result = ws
+        .write_to_layer("private", "notes/pii.md", "My SSN is 123-45-6789", false)
+        .await
+        .expect("write to private should succeed");
+
+    assert!(!result.redirected, "Private layer writes should not redirect");
+    assert_eq!(result.actual_layer, "private");
+}

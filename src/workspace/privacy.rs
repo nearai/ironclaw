@@ -189,4 +189,49 @@ mod tests {
         let c = ConfigurablePrivacyClassifier::new(vec![]).unwrap();
         assert!(!c.classify("My SSN is 123-45-6789").is_sensitive);
     }
+
+    // Format variants
+    #[test]
+    fn detects_credit_card_no_separators() {
+        assert!(classifier().classify("card 4111111111111111 on file").is_sensitive);
+    }
+
+    #[test]
+    fn detects_credit_card_with_dashes() {
+        assert!(classifier().classify("Card: 4111-1111-1111-1111").is_sensitive);
+    }
+
+    #[test]
+    fn detects_ssn_bare() {
+        assert!(classifier().classify("123-45-6789").is_sensitive);
+    }
+
+    #[test]
+    fn detects_auth_token_keyword() {
+        assert!(classifier().classify("set auth_token to abc123").is_sensitive);
+    }
+
+    #[test]
+    fn detects_secret_key_keyword() {
+        assert!(classifier().classify("the secret_key is sk-prod-xyz").is_sensitive);
+    }
+
+    #[test]
+    fn detects_pii_in_longer_document() {
+        let content = "Meeting notes from Thursday.\n\
+                        Discussed budget and timeline.\n\
+                        SSN is 999-88-7777 for the insurance form.\n\
+                        Action items: follow up with vendor.";
+        assert!(classifier().classify(content).is_sensitive);
+    }
+
+    #[test]
+    fn empty_string_is_not_sensitive() {
+        assert!(!classifier().classify("").is_sensitive);
+    }
+
+    #[test]
+    fn partial_ssn_not_sensitive() {
+        assert!(!classifier().classify("code 123-45 in the system").is_sensitive);
+    }
 }
