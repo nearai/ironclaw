@@ -2116,9 +2116,16 @@ impl ExtensionManager {
         // 100 MB cap on decompressed entry size to prevent decompression bombs
         const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
-        let wasm_filenames = archive_filename_candidates(name, archive_crate_name, ".wasm");
-        let caps_filenames =
-            archive_filename_candidates(name, archive_crate_name, ".capabilities.json");
+        let wasm_filenames = crate::registry::artifacts::archive_filename_candidates(
+            name,
+            archive_crate_name,
+            ".wasm",
+        );
+        let caps_filenames = crate::registry::artifacts::archive_filename_candidates(
+            name,
+            archive_crate_name,
+            ".capabilities.json",
+        );
         let mut found_wasm = false;
 
         let entries = archive
@@ -5027,31 +5034,6 @@ impl ExtensionManager {
         }
         removed
     }
-}
-
-fn archive_filename_candidates(
-    extension_name: &str,
-    archive_crate_name: Option<&str>,
-    suffix: &str,
-) -> Vec<String> {
-    let mut candidates = Vec::new();
-
-    for base in [Some(extension_name), archive_crate_name]
-        .into_iter()
-        .flatten()
-    {
-        let raw = format!("{}{}", base, suffix);
-        if !candidates.contains(&raw) {
-            candidates.push(raw);
-        }
-
-        let snake = format!("{}{}", base.replace('-', "_"), suffix);
-        if !candidates.contains(&snake) {
-            candidates.push(snake);
-        }
-    }
-
-    candidates
 }
 
 fn preferred_archive_crate_name<'a>(

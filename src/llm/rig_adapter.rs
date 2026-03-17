@@ -631,12 +631,15 @@ where
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body_preview = match response.text().await {
+                Ok(body) => crate::agent::truncate_for_preview(&body, 512),
+                Err(error) => format!("<failed to read response body: {error}>"),
+            };
             tracing::warn!(
                 model = %self.model_name,
                 base_url,
                 %status,
-                body,
+                body_preview,
                 "Ollama /api/tags returned an error; falling back to configured model"
             );
             return Ok(self.ollama_model_list_fallback());

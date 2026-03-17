@@ -476,11 +476,16 @@ impl RegistryInstaller {
         // Detect format and extract
         let has_capabilities = if is_gzip(&bytes) {
             // tar.gz bundle: extract {name}.wasm and {name}.capabilities.json
+            let archive_crate_name = manifest.source.as_ref().map(|source| source.crate_name.as_str());
+            let archive_caps_name = manifest
+                .source
+                .as_ref()
+                .map(|source| source.capabilities.as_str());
             let extracted = extract_tar_gz(
                 &bytes,
                 &manifest.name,
-                Some(&manifest.source.crate_name),
-                Some(&manifest.source.capabilities),
+                archive_crate_name,
+                archive_caps_name,
                 &target_wasm,
                 &target_caps,
                 url,
@@ -722,7 +727,8 @@ fn extract_tar_gz(
     // 100 MB cap on decompressed entry size to prevent decompression bombs
     const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
-    let wasm_filenames = archive_filename_candidates(name, archive_crate_name, ".wasm");
+    let wasm_filenames =
+        crate::registry::artifacts::archive_filename_candidates(name, archive_crate_name, ".wasm");
     let caps_filenames = archive_capability_candidates(name, archive_crate_name, archive_caps_name);
     let mut found_wasm = false;
     let mut found_caps = false;
@@ -804,38 +810,16 @@ fn extract_tar_gz(
     })
 }
 
-fn archive_filename_candidates(
-    extension_name: &str,
-    archive_crate_name: Option<&str>,
-    suffix: &str,
-) -> Vec<String> {
-    let mut candidates = Vec::new();
-
-    for base in [Some(extension_name), archive_crate_name]
-        .into_iter()
-        .flatten()
-    {
-        let raw = format!("{}{}", base, suffix);
-        if !candidates.contains(&raw) {
-            candidates.push(raw);
-        }
-
-        let snake = format!("{}{}", base.replace('-', "_"), suffix);
-        if !candidates.contains(&snake) {
-            candidates.push(snake);
-        }
-    }
-
-    candidates
-}
-
 fn archive_capability_candidates(
     extension_name: &str,
     archive_crate_name: Option<&str>,
     archive_caps_name: Option<&str>,
 ) -> Vec<String> {
-    let mut candidates =
-        archive_filename_candidates(extension_name, archive_crate_name, ".capabilities.json");
+    let mut candidates = crate::registry::artifacts::archive_filename_candidates(
+        extension_name,
+        archive_crate_name,
+        ".capabilities.json",
+    );
 
     if let Some(caps_name) = archive_caps_name {
         let caps_name = std::path::Path::new(caps_name)

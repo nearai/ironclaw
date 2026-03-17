@@ -2010,7 +2010,7 @@ fn is_start_command_token(command: &str, bot_username: Option<&str>) -> bool {
         let expected = format!("/start@{}", bot);
         command.eq_ignore_ascii_case(&expected)
     } else {
-        command.len() > "/start@".len() && command[..7].eq_ignore_ascii_case("/start@")
+        false
     }
 }
 
@@ -2132,6 +2132,14 @@ mod tests {
         assert_eq!(
             content_to_emit_for_agent("/start@MyBot", Some("MyBot")),
             Some("[User started the bot]".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/start@OtherBot", None),
+            Some("/start@OtherBot".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/start@OtherBot hello", None),
+            Some("/start@OtherBot hello".to_string())
         );
 
         // /start with args → pass args through

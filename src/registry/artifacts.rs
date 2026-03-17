@@ -42,6 +42,32 @@ pub fn resolve_target_dir(crate_dir: &Path) -> PathBuf {
     crate_dir.join("target")
 }
 
+/// Build candidate archive filenames for an extension artifact or sidecar.
+pub fn archive_filename_candidates(
+    extension_name: &str,
+    archive_crate_name: Option<&str>,
+    suffix: &str,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    for base in [Some(extension_name), archive_crate_name]
+        .into_iter()
+        .flatten()
+    {
+        let raw = format!("{}{}", base, suffix);
+        if !candidates.contains(&raw) {
+            candidates.push(raw);
+        }
+
+        let snake = format!("{}{}", base.replace('-', "_"), suffix);
+        if !candidates.contains(&snake) {
+            candidates.push(snake);
+        }
+    }
+
+    candidates
+}
+
 /// Find a compiled WASM artifact by searching across all target triples.
 ///
 /// Tries exact name match first (with hyphen-to-underscore normalization),
@@ -254,6 +280,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn archive_filename_candidates_include_raw_and_snake_case_names() {
+        let candidates = archive_filename_candidates(
+            "my-extension",
+            Some("my_extension_channel"),
+            ".wasm",
+        );
+
+        assert_eq!(
+            candidates,
+            vec![
+                "my-extension.wasm",
+                "my_extension.wasm",
+                "my_extension_channel.wasm",
+            ]
+        );
+    }
 
     #[test]
     fn test_resolve_target_dir_default() {

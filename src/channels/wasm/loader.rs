@@ -434,13 +434,15 @@ pub fn default_channels_dir() -> PathBuf {
 mod tests {
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use tempfile::TempDir;
 
     use crate::channels::wasm::loader::{WasmChannelLoader, discover_channels};
     use crate::channels::wasm::runtime::{WasmChannelRuntime, WasmChannelRuntimeConfig};
     use crate::pairing::PairingStore;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
     async fn test_discover_channels_empty_dir() {
@@ -555,6 +557,7 @@ mod tests {
 
     #[test]
     fn resolve_capabilities_path_falls_back_to_bundled_sidecar() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         let install_dir = TempDir::new().unwrap();
         let bundled_root = TempDir::new().unwrap();
         let channel_dir = bundled_root.path().join("telegram");
@@ -570,6 +573,7 @@ mod tests {
         std::fs::File::create(&bundled_cap).unwrap();
 
         let previous = std::env::var_os("IRONCLAW_CHANNELS_SRC");
+        // SAFETY: Under ENV_MUTEX, no concurrent env access from sibling tests.
         unsafe {
             std::env::set_var("IRONCLAW_CHANNELS_SRC", bundled_root.path());
         }
@@ -577,6 +581,7 @@ mod tests {
         let resolved = super::resolve_capabilities_path("telegram", &installed_wasm);
 
         match previous {
+            // SAFETY: Under ENV_MUTEX, restoring the process env is serialized.
             Some(value) => unsafe {
                 std::env::set_var("IRONCLAW_CHANNELS_SRC", value);
             },
