@@ -557,7 +557,7 @@ mod tests {
         // Backdate started_at to 2 hours ago to simulate a long-running job.
         cm.update_context(job_id, |ctx| {
             ctx.started_at = Some(Utc::now() - chrono::Duration::hours(2));
-            Ok(())
+            Ok::<(), crate::error::Error>(())
         })
         .await
         .unwrap()
