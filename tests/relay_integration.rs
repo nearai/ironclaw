@@ -48,7 +48,7 @@ async fn test_get_signing_secret_returns_decoded_bytes() {
     let base_url = start_server(app).await;
     let client = test_client(&base_url);
 
-    let secret = client.get_signing_secret().await.unwrap();
+    let secret = client.get_signing_secret("T123").await.unwrap();
     assert_eq!(secret, vec![1u8; 32]);
 }
 
@@ -62,7 +62,7 @@ async fn test_get_signing_secret_404_returns_error() {
     let base_url = start_server(app).await;
     let client = test_client(&base_url);
 
-    let result = client.get_signing_secret().await;
+    let result = client.get_signing_secret("T123").await;
     assert!(result.is_err());
 }
 

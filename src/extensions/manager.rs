@@ -3920,7 +3920,7 @@ impl ExtensionManager {
 
         // Fetch the per-instance signing secret from channel-relay.
         // This must succeed — there is no fallback.
-        let signing_secret = client.get_signing_secret().await.map_err(|e| {
+        let signing_secret = client.get_signing_secret(&team_id).await.map_err(|e| {
             ExtensionError::Config(format!("Failed to fetch relay signing secret: {e}"))
         })?;
         if let Ok(mut cache) = self.relay_signing_secret_cache.lock() {

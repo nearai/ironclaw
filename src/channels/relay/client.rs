@@ -256,11 +256,12 @@ impl RelayClient {
     /// Calls `GET /relay/signing-secret` (authenticated) and returns the decoded
     /// 32-byte secret. Called once at activation time; the result is cached in the
     /// extension manager so subsequent calls to `relay_signing_secret()` use it.
-    pub async fn get_signing_secret(&self) -> Result<Vec<u8>, RelayError> {
+    pub async fn get_signing_secret(&self, team_id: &str) -> Result<Vec<u8>, RelayError> {
         let resp = self
             .http
             .get(format!("{}/relay/signing-secret", self.base_url))
             .bearer_auth(self.api_key.expose_secret())
+            .query(&[("team_id", team_id)])
             .send()
             .await
             .map_err(|e| RelayError::Network(e.to_string()))?;
