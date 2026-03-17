@@ -5893,6 +5893,8 @@ mod tests {
             ExtensionManager::new(
                 Arc::new(McpSessionManager::new()),
                 Arc::new(McpProcessManager::new()),
+                None,
+                None,
                 Arc::new(InMemorySecretsStore::new(crypto)),
                 Arc::new(ToolRegistry::new()),
                 None,
@@ -5902,6 +5904,7 @@ mod tests {
                 None,
                 "test".to_string(),
                 Some(db),
+                None,
                 Vec::new(),
             )
         };
