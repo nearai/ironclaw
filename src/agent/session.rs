@@ -352,6 +352,11 @@ impl Thread {
     /// completed actions in subsequent turns.
     pub fn messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
+        // We use the enumeration index (`turn_idx`) rather than `turn.turn_number`
+        // intentionally: after `truncate_turns()`, the remaining turns are
+        // re-numbered starting from 0, so the enumeration index and turn_number
+        // are equivalent. Using the index avoids coupling to the field and keeps
+        // tool-call ID generation deterministic for the current message window.
         for (turn_idx, turn) in self.turns.iter().enumerate() {
             if turn.image_content_parts.is_empty() {
                 messages.push(ChatMessage::user(&turn.user_input));

@@ -241,7 +241,9 @@ pub struct ToolCall {
 /// deterministic (for replayed history) and provider-compatible.
 pub fn generate_tool_call_id(seed_a: usize, seed_b: usize) -> String {
     // Mix the two seeds into a single u64 using a simple hash-like combine.
-    let combined = (seed_a as u64).wrapping_mul(6364136223846793005).wrapping_add(seed_b as u64);
+    let combined = (seed_a as u64)
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(seed_b as u64);
     // Format as 9-char zero-padded base-62 (0-9, a-z, A-Z).
     let mut buf = [b'0'; 9];
     let mut val = combined;
@@ -254,7 +256,7 @@ pub fn generate_tool_call_id(seed_a: usize, seed_b: usize) -> String {
         };
         val /= 62;
     }
-    String::from(std::str::from_utf8(&buf).unwrap())
+    buf.iter().map(|&b| b as char).collect::<String>()
 }
 
 /// Result of a tool execution to send back to the LLM.
@@ -264,82 +266,6 @@ pub struct ToolResult {
     pub name: String,
     pub content: String,
     pub is_error: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn generate_tool_call_id_has_valid_format() {
-        let samples = [
-            (0usize, 0usize),
-            (1usize, 2usize),
-            (42usize, 999usize),
-            (usize::MAX, usize::MAX),
-        ];
-
-        for (a, b) in samples {
-            let id = generate_tool_call_id(a, b);
-            assert_eq!(
-                id.len(),
-                9,
-                "tool-call ID must be exactly 9 characters for seeds ({a}, {b})"
-            );
-            assert!(
-                id.chars().all(|c| c.is_ascii_alphanumeric()),
-                "tool-call ID must be ASCII alphanumeric for seeds ({a}, {b}), got: {id}"
-            );
-        }
-    }
-
-    #[test]
-    fn generate_tool_call_id_is_deterministic_for_same_seeds() {
-        let pairs = [
-            (0usize, 0usize),
-            (1usize, 2usize),
-            (123usize, 456usize),
-            (usize::MAX, 0usize),
-        ];
-
-        for (a, b) in pairs {
-            let id1 = generate_tool_call_id(a, b);
-            let id2 = generate_tool_call_id(a, b);
-            let id3 = generate_tool_call_id(a, b);
-            assert_eq!(
-                id1, id2,
-                "tool-call ID must be deterministic for seeds ({a}, {b})"
-            );
-            assert_eq!(
-                id2, id3,
-                "tool-call ID must be deterministic across multiple calls for seeds ({a}, {b})"
-            );
-        }
-    }
-
-    #[test]
-    fn generate_tool_call_id_differs_for_different_seeds_in_small_sample() {
-        let seed_pairs = [
-            (0usize, 1usize),
-            (1usize, 0usize),
-            (1usize, 2usize),
-            (2usize, 3usize),
-            (10usize, 20usize),
-            (100usize, 200usize),
-        ];
-
-        let mut ids = HashSet::new();
-        for (a, b) in seed_pairs {
-            let id = generate_tool_call_id(a, b);
-            let inserted = ids.insert(id.clone());
-            assert!(
-                inserted,
-                "expected distinct tool-call IDs for different seeds, \
-                 but duplicate ID '{id}' found for seeds ({a}, {b})"
-            );
-        }
-    }
 }
 
 /// Request for a completion with tool use.
@@ -633,6 +559,77 @@ pub fn strip_unsupported_tool_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn generate_tool_call_id_has_valid_format() {
+        let samples = [
+            (0usize, 0usize),
+            (1usize, 2usize),
+            (42usize, 999usize),
+            (usize::MAX, usize::MAX),
+        ];
+
+        for (a, b) in samples {
+            let id = generate_tool_call_id(a, b);
+            assert_eq!(
+                id.len(),
+                9,
+                "tool-call ID must be exactly 9 characters for seeds ({a}, {b})"
+            );
+            assert!(
+                id.chars().all(|c| c.is_ascii_alphanumeric()),
+                "tool-call ID must be ASCII alphanumeric for seeds ({a}, {b}), got: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_tool_call_id_is_deterministic_for_same_seeds() {
+        let pairs = [
+            (0usize, 0usize),
+            (1usize, 2usize),
+            (123usize, 456usize),
+            (usize::MAX, 0usize),
+        ];
+
+        for (a, b) in pairs {
+            let id1 = generate_tool_call_id(a, b);
+            let id2 = generate_tool_call_id(a, b);
+            let id3 = generate_tool_call_id(a, b);
+            assert_eq!(
+                id1, id2,
+                "tool-call ID must be deterministic for seeds ({a}, {b})"
+            );
+            assert_eq!(
+                id2, id3,
+                "tool-call ID must be deterministic across multiple calls for seeds ({a}, {b})"
+            );
+        }
+    }
+
+    #[test]
+    fn generate_tool_call_id_differs_for_different_seeds_in_small_sample() {
+        let seed_pairs = [
+            (0usize, 1usize),
+            (1usize, 0usize),
+            (1usize, 2usize),
+            (2usize, 3usize),
+            (10usize, 20usize),
+            (100usize, 200usize),
+        ];
+
+        let mut ids = HashSet::new();
+        for (a, b) in seed_pairs {
+            let id = generate_tool_call_id(a, b);
+            let inserted = ids.insert(id.clone());
+            assert!(
+                inserted,
+                "expected distinct tool-call IDs for different seeds, \
+                 but duplicate ID '{id}' found for seeds ({a}, {b})"
+            );
+        }
+    }
 
     #[test]
     fn test_sanitize_preserves_valid_pairs() {
