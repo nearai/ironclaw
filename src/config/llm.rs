@@ -81,9 +81,11 @@ impl LlmConfig {
         }
 
         // Session config (used by NearAI provider for OAuth/session-token auth)
+        let nearai_auth_url = optional_env("NEARAI_AUTH_URL")?
+            .unwrap_or_else(|| "https://private.near.ai".to_string());
+        validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
         let session = SessionConfig {
-            auth_base_url: optional_env("NEARAI_AUTH_URL")?
-                .unwrap_or_else(|| "https://private.near.ai".to_string()),
+            auth_base_url: nearai_auth_url,
             session_path: optional_env("NEARAI_SESSION_PATH")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_session_path),
@@ -327,6 +329,12 @@ impl LlmConfig {
                 key: env_var.to_string(),
                 hint: format!("Set {env_var} when LLM_BACKEND={backend}"),
             });
+        }
+
+        // Validate base URL to prevent SSRF (#1103).
+        if !base_url.is_empty() {
+            let field = base_url_env.unwrap_or("LLM_BASE_URL");
+            validate_base_url(&base_url, field)?;
         }
 
         // Resolve model
