@@ -2,7 +2,7 @@
 //!
 //! `POST /api/webhooks/{path}` — matches the path against routines with
 //! `Trigger::Webhook { path, secret }`, validates the secret via constant-time
-//! comparison, and fires the matching routine through the message pipeline.
+//! comparison, and fires the matching routine through the `RoutineEngine`.
 
 use std::sync::Arc;
 
@@ -13,8 +13,7 @@ use axum::{
 };
 use subtle::ConstantTimeEq;
 
-use crate::agent::routine::{RoutineAction, Trigger};
-use crate::channels::IncomingMessage;
+use crate::agent::routine::Trigger;
 use crate::channels::web::server::GatewayState;
 
 /// Validate the webhook secret for a routine.
@@ -90,39 +89,35 @@ pub async fn webhook_trigger_handler(
 
     validate_webhook_secret(&routine.trigger, provided_secret)?;
 
-    // Build the prompt from the routine action.
-    let prompt = match &routine.action {
-        RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
-        RoutineAction::FullJob {
-            title, description, ..
-        } => format!("{}: {}", title, description),
+    // Fire through the RoutineEngine so guardrails, run tracking,
+    // notifications, and FullJob dispatch all work correctly.
+    let engine = {
+        let guard = state.routine_engine.read().await;
+        guard.as_ref().cloned().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Routine engine not available".to_string(),
+        ))?
     };
 
-    let content = format!("[routine:{}] {}", routine.name, prompt);
-    let thread_id = format!(
-        "routine-{}-{}",
-        routine.id,
-        chrono::Utc::now().timestamp_millis()
-    );
-    let msg = IncomingMessage::new("gateway", &routine.user_id, content).with_thread(thread_id);
-
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
-
-    tx.send(msg).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
-        )
-    })?;
+    let run_id = engine
+        .fire_webhook(routine.id, &path)
+        .await
+        .map_err(|e| {
+            let status = match &e {
+                crate::error::RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
+                crate::error::RoutineError::Disabled { .. }
+                | crate::error::RoutineError::Cooldown { .. }
+                | crate::error::RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",
         "routine_id": routine.id,
         "routine_name": routine.name,
+        "run_id": run_id,
     })))
 }
 

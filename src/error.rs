@@ -370,6 +370,9 @@ pub enum RoutineError {
     #[error("Not authorized to trigger routine {id}")]
     NotAuthorized { id: Uuid },
 
+    #[error("Routine {name} is in cooldown period")]
+    Cooldown { name: String },
+
     #[error("Routine {name} at max concurrent runs")]
     MaxConcurrent { name: String },
 
