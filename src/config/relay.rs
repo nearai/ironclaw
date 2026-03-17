@@ -150,7 +150,8 @@ mod tests {
 
     #[test]
     fn debug_redacts_secrets() {
-        let config = RelayConfig::from_values("http://localhost:3001", "super-secret", "sign-secret");
+        let config =
+            RelayConfig::from_values("http://localhost:3001", "super-secret", "sign-secret");
         let debug = format!("{:?}", config);
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("super-secret"));

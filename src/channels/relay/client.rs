@@ -118,10 +118,7 @@ impl RelayClient {
     ///
     /// Calls `GET /oauth/slack/auth` with `redirect(Policy::none())` and
     /// returns the `Location` header (Slack OAuth URL) without following it.
-    pub async fn initiate_oauth(
-        &self,
-        callback_url: &str,
-    ) -> Result<String, RelayError> {
+    pub async fn initiate_oauth(&self, callback_url: &str) -> Result<String, RelayError> {
         let query: Vec<(&str, &str)> = vec![("callback", callback_url)];
 
         let resp = self
@@ -199,7 +196,10 @@ impl RelayClient {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            return Err(RelayError::Api { status, message: body });
+            return Err(RelayError::Api {
+                status,
+                message: body,
+            });
         }
 
         let result: serde_json::Value = resp

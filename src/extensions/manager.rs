@@ -3850,8 +3850,6 @@ impl ExtensionManager {
         // Use relay config captured at startup
         let relay_config = self.relay_config()?;
 
-
-
         let client = crate::channels::relay::RelayClient::new(
             relay_config.url.clone(),
             relay_config.api_key.clone(),
@@ -3889,10 +3887,7 @@ impl ExtensionManager {
             callback_base, state_nonce
         );
 
-        match client
-            .initiate_oauth(&callback_url)
-            .await
-        {
+        match client.initiate_oauth(&callback_url).await {
             Ok(auth_url) => Ok(AuthResult::awaiting_authorization(
                 name,
                 ExtensionKind::ChannelRelay,
