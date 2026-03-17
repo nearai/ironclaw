@@ -260,6 +260,7 @@ impl GatewayWorkflowHarness {
                 document_extraction: None,
                 sandbox_readiness: ironclaw::agent::SandboxReadiness::DisabledByConfig,
                 builder: None,
+                channel_routing: None,
             },
             channels,
             None,

@@ -169,6 +169,8 @@ pub struct AgentDeps {
     pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// Per-channel tool routing config (loaded from channel-routing.json).
+    pub channel_routing: Option<Arc<crate::agent::channel_routing::ChannelRoutingConfig>>,
 }
 
 /// The main agent that coordinates all components.
