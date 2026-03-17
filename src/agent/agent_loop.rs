@@ -100,7 +100,9 @@ async fn resolve_routine_notification_target(
 ) -> Option<String> {
     resolve_channel_notification_user(
         extension_manager,
-        metadata.get("notify_channel").and_then(|value| value.as_str()),
+        metadata
+            .get("notify_channel")
+            .and_then(|value| value.as_str()),
         metadata.get("notify_user").and_then(|value| value.as_str()),
         metadata.get("owner_id").and_then(|value| value.as_str()),
     )
@@ -438,17 +440,16 @@ impl Agent {
                         .timezone
                         .clone()
                         .or_else(|| Some(self.config.default_timezone.clone()));
-                    if let Some(channel) = &hb_config.notify_channel {
-                        if let Some(user) = resolve_channel_notification_user(
+                    if let Some(channel) = &hb_config.notify_channel
+                        && let Some(user) = resolve_channel_notification_user(
                             self.deps.extension_manager.as_ref(),
                             Some(channel),
                             hb_config.notify_user.as_deref(),
                             Some(self.owner_id()),
                         )
                         .await
-                        {
-                            config = config.with_notify(user, channel);
-                        }
+                    {
+                        config = config.with_notify(user, channel);
                     }
 
                     // Set up notification channel

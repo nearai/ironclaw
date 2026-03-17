@@ -24,14 +24,16 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
 
     use crate::support::test_channel::{TestChannel, TestChannelHandle};
-    use crate::support::trace_llm::{LlmTrace, TraceResponse, TraceStep, TraceToolCall, TraceLlm};
+    use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep, TraceToolCall};
+
+    type TelegramCaptures = Arc<Mutex<Vec<(String, OutgoingResponse)>>>;
 
     struct RecordingTelegramChannel {
-        captures: Arc<Mutex<Vec<(String, OutgoingResponse)>>>,
+        captures: TelegramCaptures,
     }
 
     impl RecordingTelegramChannel {
-        fn new() -> (Self, Arc<Mutex<Vec<(String, OutgoingResponse)>>>) {
+        fn new() -> (Self, TelegramCaptures) {
             let captures = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
@@ -290,21 +292,33 @@ mod tests {
 
         harness.store_telegram_owner_binding(424242).await;
 
-        harness.gateway.send_message("remind me to walk conan").await;
+        harness
+            .gateway
+            .send_message("remind me to walk conan")
+            .await;
         let responses = harness
             .gateway
             .wait_for_responses(1, Duration::from_secs(10))
             .await;
         assert!(
-            responses.iter().any(|response| response.content.contains("Sent on Telegram")),
+            responses
+                .iter()
+                .any(|response| response.content.contains("Sent on Telegram")),
             "expected assistant confirmation, got: {:?}",
-            responses.iter().map(|response| &response.content).collect::<Vec<_>>()
+            responses
+                .iter()
+                .map(|response| &response.content)
+                .collect::<Vec<_>>()
         );
 
         let broadcasts = harness
             .wait_for_telegram_broadcasts(1, Duration::from_secs(10))
             .await;
-        assert_eq!(broadcasts.len(), 1, "expected exactly one telegram broadcast");
+        assert_eq!(
+            broadcasts.len(),
+            1,
+            "expected exactly one telegram broadcast"
+        );
         assert_eq!(broadcasts[0].0, "424242");
         assert_eq!(broadcasts[0].1.content, "Walk Conan");
     }
@@ -332,7 +346,11 @@ mod tests {
         let broadcasts = harness
             .wait_for_telegram_broadcasts(1, Duration::from_secs(10))
             .await;
-        assert_eq!(broadcasts.len(), 1, "expected exactly one telegram broadcast");
+        assert_eq!(
+            broadcasts.len(),
+            1,
+            "expected exactly one telegram broadcast"
+        );
         assert_eq!(broadcasts[0].0, "999999");
         assert_eq!(broadcasts[0].1.content, "Walk Conan");
     }

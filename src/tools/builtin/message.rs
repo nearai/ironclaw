@@ -146,12 +146,12 @@ impl Tool for MessageTool {
             (Some(explicit), Some(current)) if explicit == current => true,
             _ => false,
         };
-        let can_use_metadata_target = match (explicit_channel.as_deref(), metadata_channel.as_deref())
-        {
-            (None, _) => true,
-            (Some(explicit), Some(current)) if explicit == current => true,
-            _ => false,
-        };
+        let can_use_metadata_target =
+            match (explicit_channel.as_deref(), metadata_channel.as_deref()) {
+                (None, _) => true,
+                (Some(explicit), Some(current)) if explicit == current => true,
+                _ => false,
+            };
 
         // Get target: use param → conversation default → job metadata → owner scope
         // fallback when a specific channel is known.
@@ -159,10 +159,10 @@ impl Tool for MessageTool {
             Some(t.to_string())
         } else if can_use_default_target
             && let Some(t) = self
-            .default_target
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+                .default_target
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
         {
             Some(t)
         } else if can_use_metadata_target

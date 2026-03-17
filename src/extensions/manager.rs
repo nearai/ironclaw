@@ -4446,9 +4446,9 @@ impl ExtensionManager {
         }
 
         self.clear_pending_telegram_verification(name).await;
-        Err(ExtensionError::ValidationFailed(format!(
-            "Telegram owner verification timed out. Request a new code and try again."
-        )))
+        Err(ExtensionError::ValidationFailed(
+            "Telegram owner verification timed out. Request a new code and try again.".to_string(),
+        ))
     }
 
     async fn notify_telegram_owner_verified(
