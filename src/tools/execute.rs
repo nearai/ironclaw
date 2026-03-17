@@ -296,6 +296,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_empty_tool_name_returns_not_found() {
+        // Regression: execute_tool_with_safety must reject empty tool names before
+        // even attempting a registry lookup (the debug_assert guards this invariant).
+        let registry = registry_with(vec![]).await;
+        let safety = test_safety();
+
+        let result = execute_tool_with_safety(
+            &registry,
+            &safety,
+            "",
+            &serde_json::json!({}),
+            &test_job_ctx(),
+        )
+        .await;
+
+        assert!(result.is_err(), "Empty tool name should return an error"); // safety: test-only assertion
+    }
+
+    #[tokio::test]
     async fn test_execute_success() {
         let registry = registry_with(vec![Arc::new(EchoTool)]).await;
         let safety = test_safety();
