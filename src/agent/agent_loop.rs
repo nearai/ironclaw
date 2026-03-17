@@ -228,7 +228,7 @@ impl Agent {
             heartbeat_config,
             hygiene_config,
             routine_config,
-            routine_engine_slot: None,
+            routine_engine_slot: Some(Arc::new(tokio::sync::RwLock::new(None))),
         }
     }
 
@@ -238,6 +238,11 @@ impl Agent {
         slot: Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
     ) {
         self.routine_engine_slot = Some(slot);
+    }
+
+    async fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
+        let slot = self.routine_engine_slot.as_ref()?;
+        slot.read().await.clone()
     }
 
     // Convenience accessors
@@ -655,9 +660,6 @@ impl Agent {
             None
         };
 
-        // Extract engine ref for use in message loop
-        let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
-
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
 
@@ -692,29 +694,6 @@ impl Agent {
 
             // Store successfully extracted document text in workspace for indexing
             self.store_extracted_documents(&message).await;
-
-            // Event-triggered routines consume plain user input before it enters
-            // the normal chat/tool pipeline. This avoids a duplicate turn where
-            // the main agent responds and the routine also fires on the same
-            // inbound message.
-            if !message.is_internal
-                && matches!(
-                    SubmissionParser::parse(&message.content),
-                    Submission::UserInput { .. }
-                )
-                && let Some(ref engine) = routine_engine_for_loop
-            {
-                let fired = engine.check_event_triggers(&message).await;
-                if fired > 0 {
-                    tracing::debug!(
-                        channel = %message.channel,
-                        user = %message.user_id,
-                        fired,
-                        "Consumed inbound user message with matching event-triggered routine(s)"
-                    );
-                    continue;
-                }
-            }
 
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
@@ -1031,6 +1010,21 @@ impl Agent {
             message.channel,
             message.content.len()
         );
+
+        if matches!(submission, Submission::UserInput { .. })
+            && let Some(engine) = self.routine_engine().await
+        {
+            let fired = engine.check_event_triggers(message).await;
+            if fired > 0 {
+                tracing::debug!(
+                    channel = %message.channel,
+                    user = %message.user_id,
+                    fired,
+                    "Consumed inbound user message with matching event-triggered routine(s)"
+                );
+                return Ok(Some(String::new()));
+            }
+        }
 
         // Process based on submission type
         let result = match submission {
