@@ -146,12 +146,11 @@ impl Tool for MessageTool {
             (Some(explicit), Some(current)) if explicit == current => true,
             _ => false,
         };
-        let can_use_metadata_target =
-            match (explicit_channel.as_deref(), metadata_channel.as_deref()) {
-                (None, _) => true,
-                (Some(explicit), Some(current)) if explicit == current => true,
-                _ => false,
-            };
+        let can_use_metadata_target = match (channel.as_deref(), metadata_channel.as_deref()) {
+            (None, _) => true,
+            (Some(resolved), Some(current)) if resolved == current => true,
+            _ => false,
+        };
 
         // Get target: use param → conversation default → job metadata → owner scope
         // fallback when a specific channel is known.
@@ -778,6 +777,35 @@ mod tests {
         assert!(
             err.contains("No channels connected") || err.contains("All channels failed"),
             "Expected channel delivery error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn message_tool_does_not_apply_metadata_target_to_different_default_channel() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("telegram".to_string()), None).await;
+
+        let mut ctx = crate::context::JobContext::with_user("owner-scope", "test", "test");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "metadata-user",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "hello"}), &ctx)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            !err.contains("metadata-user"),
+            "metadata target should not be applied to a different default channel: {}",
+            err
+        );
+        assert!(
+            err.contains("owner-scope"),
+            "expected owner-scope fallback target when metadata channel differs: {}",
             err
         );
     }
