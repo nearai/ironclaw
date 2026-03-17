@@ -121,8 +121,12 @@ impl RelayClient {
     pub async fn initiate_oauth(
         &self,
         callback_url: &str,
+        webhook_url: Option<&str>,
     ) -> Result<String, RelayError> {
-        let query: Vec<(&str, &str)> = vec![("callback", callback_url)];
+        let mut query: Vec<(&str, &str)> = vec![("callback", callback_url)];
+        if let Some(wh) = webhook_url {
+            query.push(("webhook_url", wh));
+        }
 
         let resp = self
             .http
