@@ -467,8 +467,16 @@ impl LlmProvider for NearAiChatProvider {
         let model = req.model.unwrap_or_else(|| self.active_model_name());
         let mut raw_messages = req.messages;
         crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
-        let messages: Vec<ChatCompletionMessage> =
+        let raw: Vec<ChatCompletionMessage> =
             raw_messages.into_iter().map(|m| m.into()).collect();
+
+        // NEAR AI rejects `role:"tool"` messages even on text-only completion paths.
+        // Apply the same flattening used by complete_with_tools().
+        let messages = if self.flatten_tool_messages {
+            flatten_tool_messages(raw)
+        } else {
+            raw
+        };
 
         let request = ChatCompletionRequest {
             model,
@@ -2195,6 +2203,61 @@ mod tests {
         assert_eq!(deserialized.call_type, "function");
         assert_eq!(deserialized.function.name, "get_weather");
         assert_eq!(deserialized.function.arguments, r#"{"city":"London"}"#);
+    }
+
+    // -- flatten_tool_messages in complete() path ----------------------------
+
+    #[test]
+    fn test_flatten_applied_on_text_only_path() {
+        // Verify that flatten_tool_messages converts tool-role messages to user
+        // messages (mirrors the complete_with_tools path).
+        let messages = vec![
+            ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("run it".to_string())),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            },
+            ChatCompletionMessage {
+                role: "tool".to_string(),
+                content: Some(MessageContent::Text("ok".to_string())),
+                tool_call_id: Some("call_1".to_string()),
+                name: Some("run_cmd".to_string()),
+                tool_calls: None,
+            },
+        ];
+        let flattened = flatten_tool_messages(messages);
+        assert_eq!(flattened.len(), 2);
+        assert_eq!(flattened[1].role, "user");
+        let text = flattened[1].content.as_ref().and_then(|c| c.as_text()).unwrap();
+        assert!(text.contains("run_cmd"), "should reference tool name");
+        assert!(text.contains("ok"), "should include tool result");
+    }
+
+    #[test]
+    fn test_no_flatten_when_no_tool_messages() {
+        // When there are no tool-role messages, flatten_tool_messages is a no-op.
+        let messages = vec![
+            ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some(MessageContent::Text("hi".to_string())),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            },
+            ChatCompletionMessage {
+                role: "assistant".to_string(),
+                content: Some(MessageContent::Text("hello".to_string())),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            },
+        ];
+        let result = flatten_tool_messages(messages);
+        // No tool messages → unchanged roles
+        assert_eq!(result[0].role, "user");
+        assert_eq!(result[1].role, "assistant");
     }
 
     // -- api_url edge cases ---------------------------------------------------

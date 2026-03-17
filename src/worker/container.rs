@@ -373,13 +373,9 @@ impl LoopDelegate for ContainerDelegate {
         // Poll for follow-up prompts from the user
         self.poll_and_inject_prompt(reason_ctx).await;
 
-        // Claude 4.6 and NEAR AI reject LLM calls where the last message is an
-        // assistant message (no assistant prefill allowed). If handle_text_response
-        // pushed an assistant message and no follow-up user prompt was polled,
-        // inject a sentinel user message to satisfy the API requirement.
-        if !matches!(reason_ctx.messages.last(), Some(m) if m.role == crate::llm::Role::User) {
-            reason_ctx.messages.push(ChatMessage::user("Continue."));
-        }
+        // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
+        // conversation. Ensure the last message is user-role before calling the LLM.
+        crate::util::ensure_ends_with_user_message(&mut reason_ctx.messages);
 
         // Refresh tools (in case WASM tools were built)
         reason_ctx.available_tools = self.tools.tool_definitions().await;
