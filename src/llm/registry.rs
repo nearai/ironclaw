@@ -358,6 +358,31 @@ mod tests {
     }
 
     #[test]
+    fn test_novita_provider_metadata() {
+        let registry = ProviderRegistry::new(
+            serde_json::from_str(include_str!("../../providers.json")).unwrap(),
+        );
+        let novita = registry.find("novita").expect("novita should exist");
+        assert_eq!(novita.id, "novita");
+        assert_eq!(
+            novita.default_base_url.as_deref(),
+            Some("https://api.novita.ai/v1")
+        );
+        assert_eq!(
+            novita
+                .setup
+                .as_ref()
+                .map(|setup| setup.can_list_models()),
+            Some(true)
+        );
+
+        let aliased = registry
+            .find("novita_ai")
+            .expect("novita alias should resolve");
+        assert_eq!(aliased.id, "novita");
+    }
+
+    #[test]
     fn test_find_case_insensitive() {
         let registry = ProviderRegistry::new(
             serde_json::from_str(include_str!("../../providers.json")).unwrap(),

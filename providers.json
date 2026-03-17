@@ -425,9 +425,11 @@
   },
   {
     "id": "novita",
-    "aliases": [],
+    "aliases": [
+      "novita_ai"
+    ],
     "protocol": "open_ai_completions",
-    "default_base_url": "https://api.novita.ai/openai",
+    "default_base_url": "https://api.novita.ai/v1",
     "api_key_env": "NOVITA_API_KEY",
     "api_key_required": true,
     "model_env": "NOVITA_MODEL",
