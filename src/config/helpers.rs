@@ -384,4 +384,41 @@ mod tests {
         assert!(validate_base_url("https://192.168.1.1", "TEST").is_err());
         assert!(validate_base_url("https://172.16.0.1", "TEST").is_err());
     }
+
+    #[test]
+    fn validate_base_url_rejects_cgn_range() {
+        // Carrier-grade NAT: 100.64.0.0/10
+        assert!(validate_base_url("https://100.64.0.1", "TEST").is_err());
+        assert!(validate_base_url("https://100.127.255.254", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ipv4_mapped_ipv6() {
+        // ::ffff:10.0.0.1 is an IPv4-mapped IPv6 address pointing to private IP
+        assert!(validate_base_url("https://[::ffff:10.0.0.1]", "TEST").is_err());
+        assert!(validate_base_url("https://[::ffff:169.254.169.254]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_ula_ipv6() {
+        // fc00::/7 — unique local addresses
+        assert!(validate_base_url("https://[fc00::1]", "TEST").is_err());
+        assert!(validate_base_url("https://[fd12:3456:789a::1]", "TEST").is_err());
+    }
+
+    #[test]
+    fn validate_base_url_handles_url_with_credentials() {
+        // URLs with embedded credentials — validate_base_url checks the host,
+        // not the credentials. The host is a valid public HTTPS endpoint.
+        let result = validate_base_url("https://user:pass@api.example.com", "TEST");
+        // Should succeed since the host itself is a valid public HTTPS endpoint.
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_base_url_rejects_empty_and_invalid() {
+        assert!(validate_base_url("", "TEST").is_err());
+        assert!(validate_base_url("not-a-url", "TEST").is_err());
+        assert!(validate_base_url("://missing-scheme", "TEST").is_err());
+    }
 }
