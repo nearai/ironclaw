@@ -346,6 +346,31 @@
     </div>
   </div>
 
+  <!-- Omnisearch Command Palette -->
+  <div id="omnisearch-overlay" class="omnisearch-overlay hidden"
+       role="dialog" aria-modal="true" aria-label="Search">
+    <div class="omnisearch-backdrop" id="omnisearch-backdrop"></div>
+    <div class="omnisearch-modal">
+      <div class="omnisearch-input-row">
+        <span class="omnisearch-icon">⌕</span>
+        <input type="text" id="omnisearch-input"
+               placeholder="Search memory, threads, tools..."
+               autocomplete="off"
+               aria-label="Search"
+               aria-controls="omnisearch-listbox"
+               aria-activedescendant="" />
+        <kbd class="omnisearch-hotkey" id="omnisearch-hotkey-badge">⌘K</kbd>
+      </div>
+      <div id="omnisearch-results" class="omnisearch-results"
+           role="listbox" aria-label="Search results"></div>
+      <div class="omnisearch-footer">
+        <span>↵ Open</span>
+        <span>⇧↵ New thread</span>
+        <span>Esc Close</span>
+      </div>
+    </div>
+  </div>
+
   <div id="toasts"></div>
   <script src="/app.js"></script>
   <script src="/i18n-app.js"></script>

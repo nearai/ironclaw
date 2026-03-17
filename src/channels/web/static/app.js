@@ -22,6 +22,12 @@ let stagedImages = [];
 let authFlowPending = false;
 let _ghostSuggestion = '';
 
+// --- Omnisearch State ---
+let omnisearchController = null;
+let omnisearchDebounceTimer = null;
+let omnisearchSelectedIndex = -1;
+let omnisearchResults = [];
+
 // --- Slash Commands ---
 
 const SLASH_COMMANDS = [
@@ -4684,4 +4690,344 @@ document.addEventListener('click', function(e) {
 
 document.getElementById('language-btn').addEventListener('click', function() {
   if (typeof toggleLanguageMenu === 'function') toggleLanguageMenu();
+});
+
+// --- Omnisearch Command Palette ---
+
+const _omnisearchIsMac = (navigator.platform || '').includes('Mac');
+(function initOmnisearchBadge() {
+  const badge = document.getElementById('omnisearch-hotkey-badge');
+  if (badge) badge.textContent = _omnisearchIsMac ? '⌘K' : 'Ctrl+K';
+})();
+
+function toggleOmnisearch() {
+  const overlay = document.getElementById('omnisearch-overlay');
+  if (!overlay) return;
+  if (overlay.classList.contains('hidden')) {
+    openOmnisearch();
+  } else {
+    closeOmnisearch();
+  }
+}
+
+function openOmnisearch() {
+  const overlay = document.getElementById('omnisearch-overlay');
+  if (!overlay) return;
+  overlay.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  const input = document.getElementById('omnisearch-input');
+  if (input) {
+    input.value = '';
+    input.focus();
+  }
+  const results = document.getElementById('omnisearch-results');
+  if (results) results.innerHTML = '';
+  omnisearchSelectedIndex = -1;
+  omnisearchResults = [];
+}
+
+function closeOmnisearch() {
+  const overlay = document.getElementById('omnisearch-overlay');
+  if (!overlay) return;
+  overlay.classList.add('hidden');
+  document.body.style.overflow = '';
+  if (omnisearchController) {
+    omnisearchController.abort();
+    omnisearchController = null;
+  }
+  clearTimeout(omnisearchDebounceTimer);
+  omnisearchSelectedIndex = -1;
+  omnisearchResults = [];
+}
+
+function onOmnisearchInput(e) {
+  const query = e.target.value.trim();
+  clearTimeout(omnisearchDebounceTimer);
+  if (query.length < 2) {
+    const results = document.getElementById('omnisearch-results');
+    if (results) results.innerHTML = '';
+    omnisearchResults = [];
+    omnisearchSelectedIndex = -1;
+    return;
+  }
+  omnisearchDebounceTimer = setTimeout(function() {
+    executeOmnisearch(query);
+  }, 250);
+}
+
+async function executeOmnisearch(query) {
+  if (omnisearchController) omnisearchController.abort();
+  omnisearchController = new AbortController();
+  showOmnisearchSpinner();
+  try {
+    const opts = {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ query: query, limit: 10 }),
+      signal: omnisearchController.signal,
+    };
+    const resp = await fetch('/api/search', opts);
+    if (!resp.ok) throw new Error('Search failed');
+    const data = await resp.json();
+    renderOmnisearchResults(data);
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      showOmnisearchError();
+    }
+  }
+}
+
+function showOmnisearchSpinner() {
+  const el = document.getElementById('omnisearch-results');
+  if (el) el.innerHTML = '<div class="omnisearch-spinner">Searching…</div>';
+}
+
+function showOmnisearchEmpty() {
+  const el = document.getElementById('omnisearch-results');
+  if (el) el.innerHTML = '<div class="omnisearch-empty">No results found</div>';
+}
+
+function showOmnisearchError() {
+  const el = document.getElementById('omnisearch-results');
+  if (el) el.innerHTML = '<div class="omnisearch-error">Search unavailable</div>';
+}
+
+function renderOmnisearchResults(data) {
+  const container = document.getElementById('omnisearch-results');
+  if (!container) return;
+  container.innerHTML = '';
+  omnisearchResults = [];
+  omnisearchSelectedIndex = -1;
+
+  const results = data.results || [];
+  if (results.length === 0) {
+    showOmnisearchEmpty();
+    return;
+  }
+
+  // Group by source category
+  var groups = {};
+  var groupOrder = [];
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    var cat = omnisearchCategoryLabel(r.source);
+    if (!groups[cat]) {
+      groups[cat] = [];
+      groupOrder.push(cat);
+    }
+    groups[cat].push(r);
+  }
+
+  var flatIndex = 0;
+  for (var g = 0; g < groupOrder.length; g++) {
+    var catName = groupOrder[g];
+    var catEl = document.createElement('div');
+    catEl.className = 'omnisearch-category';
+    catEl.textContent = catName;
+    container.appendChild(catEl);
+
+    var items = groups[catName];
+    for (var j = 0; j < items.length; j++) {
+      var item = items[j];
+      var el = document.createElement('div');
+      el.className = 'omnisearch-result-item';
+      el.setAttribute('role', 'option');
+      el.id = 'omnisearch-item-' + flatIndex;
+      el.dataset.index = flatIndex;
+
+      var header = document.createElement('div');
+      header.className = 'omnisearch-result-header';
+
+      var title = document.createElement('span');
+      title.className = 'omnisearch-result-title';
+      title.textContent = item.title || '';
+      header.appendChild(title);
+
+      // Time for thread results
+      if (item.source === 'conversations' && item.metadata && item.metadata.created_at) {
+        var timeEl = document.createElement('span');
+        timeEl.className = 'omnisearch-result-time';
+        timeEl.textContent = omnisearchRelativeTime(item.metadata.created_at);
+        header.appendChild(timeEl);
+      }
+
+      if (typeof item.score === 'number') {
+        var score = document.createElement('span');
+        score.className = 'omnisearch-result-score';
+        score.textContent = item.score.toFixed(2);
+        header.appendChild(score);
+      }
+
+      el.appendChild(header);
+
+      if (item.snippet) {
+        var snippet = document.createElement('div');
+        snippet.className = 'omnisearch-result-snippet';
+        snippet.textContent = item.snippet.length > 120
+          ? item.snippet.substring(0, 120) + '…'
+          : item.snippet;
+        el.appendChild(snippet);
+      }
+
+      el.addEventListener('click', (function(idx) {
+        return function(ev) {
+          omnisearchSelectedIndex = idx;
+          activateOmnisearchResult(ev.shiftKey);
+        };
+      })(flatIndex));
+
+      container.appendChild(el);
+      omnisearchResults.push(item);
+      flatIndex++;
+    }
+  }
+}
+
+function omnisearchCategoryLabel(source) {
+  if (source === 'memory') return 'Memory';
+  if (source === 'conversations') return 'Threads';
+  if (source && source.startsWith('tool:')) return 'Tools';
+  return source || 'Other';
+}
+
+function omnisearchRelativeTime(isoString) {
+  var diff = Date.now() - new Date(isoString).getTime();
+  var mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  var hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + 'h ago';
+  var days = Math.floor(hours / 24);
+  return days + 'd ago';
+}
+
+function navigateOmnisearchResults(direction) {
+  if (omnisearchResults.length === 0) return;
+  if (direction > 0) {
+    omnisearchSelectedIndex = Math.min(omnisearchSelectedIndex + 1, omnisearchResults.length - 1);
+  } else {
+    omnisearchSelectedIndex = Math.max(omnisearchSelectedIndex - 1, -1);
+  }
+  // Update selected class
+  var items = document.querySelectorAll('.omnisearch-result-item');
+  items.forEach(function(el, i) {
+    el.classList.toggle('selected', i === omnisearchSelectedIndex);
+  });
+  // Scroll into view
+  if (omnisearchSelectedIndex >= 0 && items[omnisearchSelectedIndex]) {
+    items[omnisearchSelectedIndex].scrollIntoView({ block: 'nearest' });
+  }
+  // Update aria-activedescendant
+  var input = document.getElementById('omnisearch-input');
+  if (input) {
+    input.setAttribute('aria-activedescendant',
+      omnisearchSelectedIndex >= 0 ? 'omnisearch-item-' + omnisearchSelectedIndex : '');
+  }
+}
+
+function activateOmnisearchResult(shiftKey) {
+  var input = document.getElementById('omnisearch-input');
+  var query = input ? input.value.trim() : '';
+
+  // Shift+Enter: always create new thread with query
+  if (shiftKey) {
+    closeOmnisearch();
+    omnisearchNewThreadWithQuery(query);
+    return;
+  }
+
+  // No selection: do nothing
+  if (omnisearchSelectedIndex < 0 || omnisearchSelectedIndex >= omnisearchResults.length) return;
+
+  var result = omnisearchResults[omnisearchSelectedIndex];
+  closeOmnisearch();
+
+  if (result.source === 'conversations') {
+    // Switch to thread
+    var threadId = result.metadata && result.metadata.thread_id;
+    if (threadId) {
+      switchThread(threadId);
+      switchTab('chat');
+    }
+  } else if (result.source === 'memory') {
+    // Switch to memory tab and open file
+    switchTab('memory');
+    var path = result.metadata && result.metadata.path;
+    if (path && typeof readMemoryFile === 'function') {
+      readMemoryFile(path);
+    }
+  } else {
+    // Tool result or unknown: create new thread with query
+    omnisearchNewThreadWithQuery(query);
+  }
+}
+
+function omnisearchNewThreadWithQuery(query) {
+  if (!query) return;
+  apiFetch('/api/chat/thread/new', { method: 'POST' }).then(function(data) {
+    var newId = data.id || null;
+    if (newId) {
+      currentThreadId = newId;
+      document.getElementById('chat-messages').innerHTML = '';
+      loadThreads();
+      switchTab('chat');
+      // Send the query as the first message
+      var chatInput = document.getElementById('chat-input');
+      if (chatInput) chatInput.value = query;
+      sendMessage();
+    }
+  }).catch(function(err) {
+    showToast('Failed to create thread: ' + err.message, 'error');
+  });
+}
+
+function handleOmnisearchKeydown(e) {
+  switch (e.key) {
+    case 'ArrowDown':
+      e.preventDefault();
+      navigateOmnisearchResults(1);
+      break;
+    case 'ArrowUp':
+      e.preventDefault();
+      navigateOmnisearchResults(-1);
+      break;
+    case 'Enter':
+      e.preventDefault();
+      activateOmnisearchResult(e.shiftKey);
+      break;
+    case 'Escape':
+      e.preventDefault();
+      closeOmnisearch();
+      break;
+    case 'Tab':
+      // Focus trap: keep Tab within the overlay
+      e.preventDefault();
+      var input = document.getElementById('omnisearch-input');
+      if (input) input.focus();
+      break;
+  }
+}
+
+// Wire omnisearch events
+(function initOmnisearch() {
+  var input = document.getElementById('omnisearch-input');
+  if (input) {
+    input.addEventListener('input', onOmnisearchInput);
+    input.addEventListener('keydown', handleOmnisearchKeydown);
+  }
+  var backdrop = document.getElementById('omnisearch-backdrop');
+  if (backdrop) {
+    backdrop.addEventListener('click', closeOmnisearch);
+  }
+})();
+
+// Global Cmd+K / Ctrl+K hotkey
+document.addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault();
+    toggleOmnisearch();
+  }
 });
