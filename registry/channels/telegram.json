@@ -2,7 +2,7 @@
   "name": "telegram",
   "display_name": "Telegram Channel",
   "kind": "channel",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "wit_version": "0.4.0",
   "description": "Talk to your agent through a Telegram bot",
   "keywords": [
