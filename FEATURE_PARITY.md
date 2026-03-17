@@ -96,6 +96,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron/heartbeat topic targeting | ✅ | ❌ | Messages land in correct topic |
 | DM topics support | ✅ | ❌ | Agent/topic bindings in DMs and agent-scoped SessionKeys |
 | Persistent ACP topic binding | ✅ | ❌ | ACP harness sessions can pin to Telegram forum or DM topics |
+| sendVoice (voice note replies) | ✅ | ✅ | audio/ogg attachments sent as voice notes; prerequisite for TTS (#90) |
 
 ### Discord-Specific Features (since Feb 2025)
 
