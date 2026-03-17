@@ -16,6 +16,14 @@ pub struct Settings {
     #[serde(default, alias = "setup_completed")]
     pub onboard_completed: bool,
 
+    /// Stable owner scope for this IronClaw instance.
+    ///
+    /// This is bootstrap configuration loaded from env / disk / TOML. We do
+    /// not persist it in the per-user DB settings table because the DB lookup
+    /// itself already requires the owner scope to be known.
+    #[serde(default)]
+    pub owner_id: Option<String>,
+
     // === Step 1: Database ===
     /// Database backend: "postgres" or "libsql".
     #[serde(default)]
@@ -360,6 +368,10 @@ pub struct HeartbeatSettings {
     #[serde(default)]
     pub notify_user: Option<String>,
 
+    /// Fixed time-of-day to fire (HH:MM, 24h). When set, interval_secs is ignored.
+    #[serde(default)]
+    pub fire_at: Option<String>,
+
     /// Hour (0-23) when quiet hours start (heartbeat skipped).
     #[serde(default)]
     pub quiet_hours_start: Option<u32>,
@@ -368,7 +380,7 @@ pub struct HeartbeatSettings {
     #[serde(default)]
     pub quiet_hours_end: Option<u32>,
 
-    /// Timezone for quiet hours evaluation (IANA name, e.g. "America/New_York").
+    /// Timezone for fire_at and quiet hours (IANA name, e.g. "Pacific/Auckland").
     #[serde(default)]
     pub timezone: Option<String>,
 }
@@ -384,6 +396,7 @@ impl Default for HeartbeatSettings {
             interval_secs: default_heartbeat_interval(),
             notify_channel: None,
             notify_user: None,
+            fire_at: None,
             quiet_hours_start: None,
             quiet_hours_end: None,
             timezone: None,
@@ -728,6 +741,10 @@ impl Settings {
         let mut settings = Self::default();
 
         for (key, value) in map {
+            if key == "owner_id" {
+                continue;
+            }
+
             // Convert the JSONB value to a string for the existing set() method
             let value_str = match value {
                 serde_json::Value::String(s) => s.clone(),
@@ -767,6 +784,7 @@ impl Settings {
 
         let mut map = std::collections::HashMap::new();
         collect_settings_json(&json, String::new(), &mut map);
+        map.remove("owner_id");
         map
     }
 

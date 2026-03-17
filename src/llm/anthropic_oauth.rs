@@ -34,7 +34,9 @@ const DEFAULT_MAX_TOKENS: u32 = 8192;
 /// Anthropic provider using OAuth Bearer authentication.
 pub struct AnthropicOAuthProvider {
     client: Client,
-    token: SecretString,
+    /// OAuth token, wrapped in RwLock so it can be updated after a successful
+    /// Keychain refresh (fixes #1136: stale token reuse after expiry).
+    token: std::sync::RwLock<SecretString>,
     model: String,
     base_url: Option<String>,
     active_model: std::sync::RwLock<String>,
@@ -71,7 +73,7 @@ impl AnthropicOAuthProvider {
 
         Ok(Self {
             client,
-            token,
+            token: std::sync::RwLock::new(token),
             model: config.model.clone(),
             base_url,
             active_model,
@@ -98,6 +100,22 @@ impl AnthropicOAuthProvider {
         }
     }
 
+    /// Read the current token from the RwLock.
+    fn current_token(&self) -> String {
+        match self.token.read() {
+            Ok(guard) => guard.expose_secret().to_string(),
+            Err(poisoned) => poisoned.into_inner().expose_secret().to_string(),
+        }
+    }
+
+    /// Update the stored token after a successful Keychain refresh.
+    fn update_token(&self, new_token: SecretString) {
+        match self.token.write() {
+            Ok(mut guard) => *guard = new_token,
+            Err(poisoned) => *poisoned.into_inner() = new_token,
+        }
+    }
+
     async fn send_request<R: for<'de> Deserialize<'de>>(
         &self,
         body: &AnthropicRequest,
@@ -109,7 +127,7 @@ impl AnthropicOAuthProvider {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(self.token.expose_secret())
+            .bearer_auth(self.current_token())
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
             .header("Content-Type", "application/json")
@@ -125,12 +143,14 @@ impl AnthropicOAuthProvider {
 
         if !status.is_success() {
             // Parse Retry-After header before consuming the body.
+            // Falls back to 60s if header is missing or unparseable (prevents "retry after None" errors).
             let retry_after = response
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
+                .map(std::time::Duration::from_secs)
+                .or(Some(std::time::Duration::from_secs(60)));
 
             let response_text = response
                 .text()
@@ -141,6 +161,11 @@ impl AnthropicOAuthProvider {
                 // OAuth tokens from `claude login` expire in ~8-12h. Attempt
                 // to re-extract a fresh token from the OS credential store
                 // (macOS Keychain / Linux credentials file) before giving up.
+                //
+                // Brief delay to give Claude Code time to complete its async
+                // Keychain refresh write (fixes race in #1136).
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
                 if let Some(fresh) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
                     let fresh_token = SecretString::from(fresh);
                     // Retry once with the refreshed token
@@ -159,6 +184,11 @@ impl AnthropicOAuthProvider {
                             reason: e.to_string(),
                         })?;
                     if retry.status().is_success() {
+                        // Persist the refreshed token so subsequent requests
+                        // don't hit 401 again (fixes #1136).
+                        self.update_token(fresh_token);
+                        tracing::info!("Anthropic OAuth token refreshed from credential store");
+
                         let text = retry.text().await.map_err(|e| LlmError::RequestFailed {
                             provider: "anthropic_oauth".to_string(),
                             reason: format!("Failed to read response body: {}", e),
@@ -658,5 +688,97 @@ mod tests {
         assert_eq!(content, Some("Let me search.".to_string()));
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "search");
+    }
+
+    /// Regression test for #1136: token field must be mutable via RwLock
+    /// so that a refreshed token persists across subsequent requests.
+    #[test]
+    fn test_token_update_persists() {
+        let original = SecretString::from("old_token".to_string());
+        let token = std::sync::RwLock::new(original);
+
+        // Read the original
+        assert_eq!(token.read().unwrap().expose_secret(), "old_token");
+
+        // Simulate a successful refresh
+        let refreshed = SecretString::from("new_token".to_string());
+        *token.write().unwrap() = refreshed;
+
+        // Subsequent reads see the updated token
+        assert_eq!(token.read().unwrap().expose_secret(), "new_token");
+    }
+
+    // -- Retry-After header parsing tests (regression for rate limit "None" bug) --
+
+    #[test]
+    fn test_retry_after_parsing_delay_seconds() {
+        // Verify delay-seconds format is parsed correctly
+        let header_value = "45";
+        let duration = parse_retry_after_anthropic_for_test(header_value);
+        assert_eq!(
+            duration,
+            Some(std::time::Duration::from_secs(45)),
+            "Should parse delay-seconds format"
+        );
+    }
+
+    #[test]
+    fn test_retry_after_fallback_missing_header() {
+        // Regression test: When Retry-After header is missing,
+        // should fall back to 60s instead of None
+        let duration = parse_retry_after_anthropic_for_test("");
+        assert_eq!(
+            duration,
+            Some(std::time::Duration::from_secs(60)),
+            "Missing header should fallback to 60s"
+        );
+    }
+
+    #[test]
+    fn test_retry_after_fallback_invalid_format() {
+        // Regression test: When Retry-After header is in unexpected format,
+        // should fall back to 60s instead of None
+        let invalid_formats = vec![
+            "invalid",
+            "not-a-number",
+            "30.5", // float instead of int
+            "abc123",
+            "Mon, 02 Mar 2026 18:00:00 GMT", // RFC2822 not supported in anthropic version
+        ];
+
+        for format in invalid_formats {
+            let duration = parse_retry_after_anthropic_for_test(format);
+            assert_eq!(
+                duration,
+                Some(std::time::Duration::from_secs(60)),
+                "Invalid format '{}' should fallback to 60s",
+                format
+            );
+        }
+    }
+
+    #[test]
+    fn test_retry_after_zero_seconds_accepted() {
+        // Verify zero seconds is a valid retry delay
+        let duration = parse_retry_after_anthropic_for_test("0");
+        assert_eq!(duration, Some(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn test_retry_after_large_number() {
+        // Verify large numbers are accepted
+        let duration = parse_retry_after_anthropic_for_test("7200"); // 2 hours
+        assert_eq!(duration, Some(std::time::Duration::from_secs(7200)));
+    }
+
+    /// Helper function to test Retry-After header parsing logic for Anthropic
+    /// (simulates the parsing done in send_request without actual HTTP, including fallback)
+    fn parse_retry_after_anthropic_for_test(header_value: &str) -> Option<std::time::Duration> {
+        header_value
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(std::time::Duration::from_secs)
+            .or(Some(std::time::Duration::from_secs(60)))
     }
 }

@@ -5,6 +5,8 @@
 //! extracted into a standalone crate. Resolution logic (reading env vars,
 //! settings) lives in `crate::config::llm`.
 
+use std::path::PathBuf;
+
 use secrecy::SecretString;
 
 use crate::llm::registry::ProviderProtocol;
@@ -85,6 +87,13 @@ pub struct RegistryProviderConfig {
     /// OAuth token for providers that support Bearer auth (e.g. Anthropic via `claude login`).
     /// When set, the provider factory routes to the OAuth-specific provider implementation.
     pub oauth_token: Option<SecretString>,
+    /// When true, route OpenAI-compatible traffic to the Codex ChatGPT
+    /// Responses API provider instead of rig-core's Chat Completions path.
+    pub is_codex_chatgpt: bool,
+    /// OAuth refresh token for Codex ChatGPT token refresh.
+    pub refresh_token: Option<SecretString>,
+    /// Path to Codex auth.json for persisting refreshed tokens.
+    pub auth_path: Option<PathBuf>,
     /// Prompt cache retention (Anthropic-specific).
     pub cache_retention: CacheRetention,
     /// Parameter names that this provider does not support (e.g., `["temperature"]`).
@@ -129,6 +138,30 @@ pub struct LlmConfig {
     /// Default: 120. Increase for local LLMs (Ollama, vLLM, LM Studio) that
     /// need more time for prompt evaluation on consumer hardware.
     pub request_timeout_secs: u64,
+    /// Generic cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
+    /// Works with any backend. Set via `LLM_CHEAP_MODEL` env var.
+    /// When set, takes priority over the NearAI-specific `NEARAI_CHEAP_MODEL`.
+    pub cheap_model: Option<String>,
+    /// Enable cascade mode for smart routing (retry with primary if cheap model
+    /// response seems uncertain). Default: true. Set via `SMART_ROUTING_CASCADE`.
+    pub smart_routing_cascade: bool,
+}
+
+impl LlmConfig {
+    /// Resolve the effective cheap model name.
+    ///
+    /// Resolution order:
+    /// 1. `LLM_CHEAP_MODEL` (generic, works with any backend)
+    /// 2. `NEARAI_CHEAP_MODEL` (NearAI-only, backward compatibility)
+    pub fn cheap_model_name(&self) -> Option<&str> {
+        self.cheap_model.as_deref().or_else(|| {
+            if self.backend == "nearai" {
+                self.nearai.cheap_model.as_deref()
+            } else {
+                None
+            }
+        })
+    }
 }
 
 /// NEAR AI configuration.

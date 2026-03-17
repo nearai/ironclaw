@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::context::JobContext;
+use crate::extensions::ExtensionManager;
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
 };
@@ -17,6 +18,7 @@ use crate::tools::tool::{
 /// Tool for sending messages to channels.
 pub struct MessageTool {
     channel_manager: Arc<ChannelManager>,
+    extension_manager: Option<Arc<ExtensionManager>>,
     /// Default channel for current conversation (set per-turn).
     /// Uses std::sync::RwLock because requires_approval() is sync and called from async context.
     default_channel: Arc<RwLock<Option<String>>>,
@@ -32,10 +34,16 @@ impl MessageTool {
 
         Self {
             channel_manager,
+            extension_manager: None,
             default_channel: Arc::new(RwLock::new(None)),
             default_target: Arc::new(RwLock::new(None)),
             base_dir,
         }
+    }
+
+    pub fn with_extension_manager(mut self, extension_manager: Arc<ExtensionManager>) -> Self {
+        self.extension_manager = Some(extension_manager);
+        self
     }
 
     /// Set the base directory for attachment validation.
@@ -111,39 +119,76 @@ impl Tool for MessageTool {
 
         let content = require_str(&params, "content")?;
 
+        let explicit_channel = params
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string());
+        let default_channel = self
+            .default_channel
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let metadata_channel = ctx
+            .metadata
+            .get("notify_channel")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string());
+
         // Get channel: use param → conversation default → job metadata → None (broadcast all)
-        let channel: Option<String> =
-            if let Some(c) = params.get("channel").and_then(|v| v.as_str()) {
-                Some(c.to_string())
-            } else if let Some(c) = self
-                .default_channel
+        let channel: Option<String> = explicit_channel
+            .clone()
+            .or_else(|| default_channel.clone())
+            .or_else(|| metadata_channel.clone());
+
+        let can_use_default_target = match (explicit_channel.as_deref(), default_channel.as_deref())
+        {
+            (None, _) => true,
+            (Some(explicit), Some(current)) if explicit == current => true,
+            _ => false,
+        };
+        let can_use_metadata_target = match (channel.as_deref(), metadata_channel.as_deref()) {
+            (None, _) => true,
+            (Some(resolved), Some(current)) if resolved == current => true,
+            _ => false,
+        };
+
+        // Get target: use param → conversation default → job metadata → owner scope
+        // fallback when a specific channel is known.
+        let target = if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
+            Some(t.to_string())
+        } else if can_use_default_target
+            && let Some(t) = self
+                .default_target
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
-            {
-                Some(c)
-            } else {
-                ctx.metadata
-                    .get("notify_channel")
-                    .and_then(|v| v.as_str())
-                    .map(|c| c.to_string())
-            };
-
-        // Get target: use param → conversation default → job metadata
-        let target = if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
-            t.to_string()
-        } else if let Some(t) = self
-            .default_target
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
         {
-            t
-        } else if let Some(t) = ctx.metadata.get("notify_user").and_then(|v| v.as_str()) {
-            t.to_string()
+            Some(t)
+        } else if can_use_metadata_target
+            && let Some(t) = ctx.metadata.get("notify_user").and_then(|v| v.as_str())
+        {
+            Some(t.to_string())
+        } else if channel.is_some() {
+            if let Some(channel_name) = channel.as_deref() {
+                if let Some(extension_manager) = self.extension_manager.as_ref()
+                    && let Some(target) = extension_manager
+                        .notification_target_for_channel(channel_name)
+                        .await
+                {
+                    Some(target)
+                } else {
+                    Some(ctx.user_id.clone())
+                }
+            } else {
+                Some(ctx.user_id.clone())
+            }
         } else {
+            None
+        };
+
+        let Some(target) = target else {
             return Err(ToolError::ExecutionFailed(
-                "No target specified and no active conversation. Provide target parameter."
+                "No target specified and no channel-scoped routing target could be resolved. Provide target parameter."
                     .to_string(),
             ));
         };
@@ -660,6 +705,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_tool_falls_back_to_ctx_user_when_channel_known() {
+        // Regression for owner-scoped notifications: a channel can be known
+        // even when the concrete delivery target is omitted, so the message
+        // tool should pass ctx.user_id through to the channel layer.
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+
+        let mut ctx =
+            crate::context::JobContext::with_user("owner-scope", "routine-job", "price alert");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "telegram",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "NEAR price is $5"}), &ctx)
+            .await;
+
+        assert!(result.is_err()); // safety: test-only assertion
+        let err = result.unwrap_err().to_string();
+        let mentions_missing_target = err.contains("No target specified");
+        assert!(!mentions_missing_target); // safety: test-only assertion
+        let mentions_missing_channel = err.contains("No channel specified");
+        assert!(!mentions_missing_channel); // safety: test-only assertion
+    }
+
+    #[tokio::test]
     async fn message_tool_no_metadata_still_errors() {
         // When neither conversation context nor metadata is set, should still
         // return a clear error (target resolution fails).
@@ -707,6 +777,35 @@ mod tests {
         assert!(
             err.contains("No channels connected") || err.contains("All channels failed"),
             "Expected channel delivery error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn message_tool_does_not_apply_metadata_target_to_different_default_channel() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("telegram".to_string()), None).await;
+
+        let mut ctx = crate::context::JobContext::with_user("owner-scope", "test", "test");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "metadata-user",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "hello"}), &ctx)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            !err.contains("metadata-user"),
+            "metadata target should not be applied to a different default channel: {}",
+            err
+        );
+        assert!(
+            err.contains("owner-scope"),
+            "expected owner-scope fallback target when metadata channel differs: {}",
             err
         );
     }
