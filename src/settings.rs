@@ -16,6 +16,14 @@ pub struct Settings {
     #[serde(default, alias = "setup_completed")]
     pub onboard_completed: bool,
 
+    /// Stable owner scope for this IronClaw instance.
+    ///
+    /// This is bootstrap configuration loaded from env / disk / TOML. We do
+    /// not persist it in the per-user DB settings table because the DB lookup
+    /// itself already requires the owner scope to be known.
+    #[serde(default)]
+    pub owner_id: Option<String>,
+
     // === Step 1: Database ===
     /// Database backend: "postgres" or "libsql".
     #[serde(default)]
@@ -733,6 +741,10 @@ impl Settings {
         let mut settings = Self::default();
 
         for (key, value) in map {
+            if key == "owner_id" {
+                continue;
+            }
+
             // Convert the JSONB value to a string for the existing set() method
             let value_str = match value {
                 serde_json::Value::String(s) => s.clone(),
@@ -772,6 +784,7 @@ impl Settings {
 
         let mut map = std::collections::HashMap::new();
         collect_settings_json(&json, String::new(), &mut map);
+        map.remove("owner_id");
         map
     }
 

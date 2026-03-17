@@ -427,6 +427,14 @@ impl SubmissionResult {
             message: message.into(),
         }
     }
+
+    /// Create a non-error status message (e.g., for blocking states like approval waiting).
+    /// Uses Ok variant to avoid "Error:" prefix in rendering.
+    pub fn pending(message: impl Into<String>) -> Self {
+        Self::Ok {
+            message: Some(message.into()),
+        }
+    }
 }
 
 #[cfg(test)]

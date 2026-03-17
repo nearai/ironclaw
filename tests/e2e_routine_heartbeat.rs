@@ -48,6 +48,19 @@ mod tests {
         Arc::new(Workspace::new_with_db("default", db.clone()))
     }
 
+    fn make_message(
+        channel: &str,
+        user_id: &str,
+        owner_id: &str,
+        sender_id: &str,
+        content: &str,
+    ) -> IncomingMessage {
+        IncomingMessage::new(channel, user_id, content)
+            .with_owner_id(owner_id)
+            .with_sender_id(sender_id)
+            .with_metadata(serde_json::json!({}))
+    }
+
     /// Helper to insert a routine directly into the database.
     fn make_routine(name: &str, trigger: Trigger, prompt: &str) -> Routine {
         Routine {
@@ -218,7 +231,13 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // Positive match: message containing "deploy to production".
-        let matching_msg = IncomingMessage::new("test", "default", "deploy to production now");
+        let matching_msg = make_message(
+            "test",
+            "default",
+            "default",
+            "default",
+            "deploy to production now",
+        );
         let fired = engine.check_event_triggers(&matching_msg).await;
         assert!(
             fired >= 1,
@@ -229,10 +248,112 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Negative match: message that doesn't match.
-        let non_matching_msg =
-            IncomingMessage::new("test", "default", "check the staging environment");
+        let non_matching_msg = make_message(
+            "test",
+            "default",
+            "default",
+            "default",
+            "check the staging environment",
+        );
         let fired_neg = engine.check_event_triggers(&non_matching_msg).await;
         assert_eq!(fired_neg, 0, "Expected 0 routines fired on non-match");
+    }
+
+    #[tokio::test]
+    async fn event_trigger_respects_message_user_scope() {
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        let trace = LlmTrace::single_turn(
+            "test-event-user-scope",
+            "deploy",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "Owner event handled".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 8,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        let routine = make_routine(
+            "owner-deploy-watcher",
+            Trigger::Event {
+                channel: None,
+                pattern: "deploy.*production".to_string(),
+            },
+            "Report on deployment.",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let guest_msg = make_message(
+            "telegram",
+            "guest",
+            "default",
+            "guest-sender",
+            "deploy to production now",
+        );
+        let guest_fired = engine.check_event_triggers(&guest_msg).await;
+        assert_eq!(
+            guest_fired, 0,
+            "Guest scope must not fire owner event routines"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let guest_runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs after guest message");
+        assert!(
+            guest_runs.is_empty(),
+            "Guest message should not create routine runs"
+        );
+
+        let owner_msg = make_message(
+            "telegram",
+            "default",
+            "default",
+            "owner-sender",
+            "deploy to production now",
+        );
+        let owner_fired = engine.check_event_triggers(&owner_msg).await;
+        assert!(
+            owner_fired >= 1,
+            "Owner scope should fire matching owner event routine"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let owner_runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs after owner message");
+        assert_eq!(
+            owner_runs.len(),
+            1,
+            "Owner message should create exactly one run"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -434,7 +555,13 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // First fire should work.
-        let msg = IncomingMessage::new("test", "default", "test-cooldown trigger");
+        let msg = make_message(
+            "test",
+            "default",
+            "default",
+            "default",
+            "test-cooldown trigger",
+        );
         let fired1 = engine.check_event_triggers(&msg).await;
         assert!(fired1 >= 1, "First fire should work");
 
@@ -551,6 +678,120 @@ mod tests {
         assert!(
             matches!(result, ironclaw::agent::HeartbeatResult::Skipped),
             "Expected Skipped for empty checklist, got: {result:?}"
+        );
+    }
+
+    /// Helper to set up a test environment for routine engine mutation tests.
+    /// Returns the engine, database, and temp directory.
+    async fn setup_routine_mutation_test()
+    -> (Arc<RoutineEngine>, Arc<dyn Database>, tempfile::TempDir) {
+        let (db, dir) = create_test_db().await;
+        let ws = create_workspace(&db);
+        let (notify_tx, _rx) = tokio::sync::mpsc::channel(16);
+        let tools = Arc::new(ToolRegistry::new());
+
+        let safety_config = SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        };
+        let safety = Arc::new(SafetyLayer::new(&safety_config));
+
+        let trace = LlmTrace::single_turn(
+            "test-routine-mutation",
+            "test",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "ROUTINE_OK".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
+        ));
+
+        (engine, db, dir)
+    }
+
+    /// Regression test for issue #1076: disabling an event routine via a DB mutation
+    /// followed by refresh_event_cache() (the path now taken by the web toggle handler)
+    /// must immediately stop the routine from firing.
+    #[tokio::test]
+    async fn toggle_disabling_event_routine_removes_from_cache() {
+        let (engine, db, _dir) = setup_routine_mutation_test().await;
+
+        // Create and cache an event routine.
+        let mut routine = make_routine(
+            "disable-me",
+            Trigger::Event {
+                pattern: "DISABLE_ME".to_string(),
+                channel: None,
+            },
+            "Handle DISABLE_ME event",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let msg = IncomingMessage::new("test", "default", "DISABLE_ME");
+        let fired_before = engine.check_event_triggers(&msg).await;
+        assert!(fired_before >= 1, "Expected routine to fire before disable");
+
+        // Simulate what routines_toggle_handler now does: update DB, then refresh.
+        routine.enabled = false;
+        routine.updated_at = Utc::now();
+        db.update_routine(&routine).await.expect("update_routine");
+        engine.refresh_event_cache().await;
+
+        let fired_after = engine.check_event_triggers(&msg).await;
+        assert_eq!(
+            fired_after, 0,
+            "Disabled routine must not fire after cache refresh"
+        );
+    }
+
+    /// Regression test for issue #1076: deleting an event routine via a DB mutation
+    /// followed by refresh_event_cache() must immediately stop the routine from firing.
+    #[tokio::test]
+    async fn delete_event_routine_removes_from_cache() {
+        let (engine, db, _dir) = setup_routine_mutation_test().await;
+
+        let routine = make_routine(
+            "delete-me",
+            Trigger::Event {
+                pattern: "DELETE_ME".to_string(),
+                channel: None,
+            },
+            "Handle DELETE_ME event",
+        );
+        db.create_routine(&routine).await.expect("create_routine");
+        engine.refresh_event_cache().await;
+
+        let msg = IncomingMessage::new("test", "default", "DELETE_ME");
+        assert!(
+            engine.check_event_triggers(&msg).await >= 1,
+            "Expected routine to fire before delete"
+        );
+
+        // Simulate what routines_delete_handler now does: delete from DB, then refresh.
+        db.delete_routine(routine.id).await.expect("delete_routine");
+        engine.refresh_event_cache().await;
+
+        assert_eq!(
+            engine.check_event_triggers(&msg).await,
+            0,
+            "Deleted routine must not fire after cache refresh"
         );
     }
 }

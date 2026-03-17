@@ -222,10 +222,16 @@ postgres = [
     "rust_decimal/db-tokio-postgres",
 ]
 libsql = ["dep:libsql"]
+# Opt-in feature for especially heavy integration-test targets that run in a
+# dedicated CI job instead of the default Rust test matrix.
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 import = ["dep:json5", "libsql"]
+
+[[test]]
+name = "e2e_thread_scheduling"
+required-features = ["libsql", "integration"]
 
 [[test]]
 name = "html_to_markdown"

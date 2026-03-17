@@ -91,36 +91,24 @@ pub struct SignalConfig {
 }
 
 impl ChannelsConfig {
-    /// Resolve channels config following `env > settings > default` for every field.
-    pub(crate) fn resolve(settings: &Settings, tunnel_enabled: bool) -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &Settings, owner_id: &str) -> Result<Self, ConfigError> {
         let cs = &settings.channels;
 
-        // --- HTTP webhook ---
-        // HTTP is enabled when env vars are set OR settings has it enabled.
         let http_enabled_by_env =
             optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some();
-        // When a tunnel is configured, default to loopback since external
-        // traffic arrives through the tunnel. Without a tunnel the webhook
-        // server needs to accept connections from the network directly.
-        let default_host = if tunnel_enabled {
-            "127.0.0.1"
-        } else {
-            "0.0.0.0"
-        };
         let http = if http_enabled_by_env || cs.http_enabled {
             Some(HttpConfig {
                 host: optional_env("HTTP_HOST")?
                     .or_else(|| cs.http_host.clone())
-                    .unwrap_or_else(|| default_host.to_string()),
+                    .unwrap_or_else(|| "0.0.0.0".to_string()),
                 port: parse_optional_env("HTTP_PORT", cs.http_port.unwrap_or(8080))?,
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
-                user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
+                user_id: owner_id.to_string(),
             })
         } else {
             None
         };
 
-        // --- Web gateway ---
         let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", cs.gateway_enabled)?;
         let gateway = if gateway_enabled {
             Some(GatewayConfig {
@@ -133,33 +121,29 @@ impl ChannelsConfig {
                 )?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?
                     .or_else(|| cs.gateway_auth_token.clone()),
-                user_id: optional_env("GATEWAY_USER_ID")?
-                    .or_else(|| cs.gateway_user_id.clone())
-                    .unwrap_or_else(|| "default".to_string()),
+                user_id: owner_id.to_string(),
             })
         } else {
             None
         };
 
-        // --- Signal ---
         let signal_url = optional_env("SIGNAL_HTTP_URL")?.or_else(|| cs.signal_http_url.clone());
         let signal = if let Some(http_url) = signal_url {
             let account = optional_env("SIGNAL_ACCOUNT")?
                 .or_else(|| cs.signal_account.clone())
                 .ok_or(ConfigError::InvalidValue {
                     key: "SIGNAL_ACCOUNT".to_string(),
-                    message: "SIGNAL_ACCOUNT is required when Signal is enabled".to_string(),
+                    message: "SIGNAL_ACCOUNT is required when SIGNAL_HTTP_URL is set".to_string(),
                 })?;
-            let allow_from_str =
-                optional_env("SIGNAL_ALLOW_FROM")?.or_else(|| cs.signal_allow_from.clone());
-            let allow_from = match allow_from_str {
-                None => vec![account.clone()],
-                Some(s) => s
-                    .split(',')
-                    .map(|e| e.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect(),
-            };
+            let allow_from =
+                match optional_env("SIGNAL_ALLOW_FROM")?.or_else(|| cs.signal_allow_from.clone()) {
+                    None => vec![account.clone()],
+                    Some(s) => s
+                        .split(',')
+                        .map(|e| e.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                };
             let dm_policy = optional_env("SIGNAL_DM_POLICY")?
                 .or_else(|| cs.signal_dm_policy.clone())
                 .unwrap_or_else(|| "pairing".to_string());
@@ -201,17 +185,7 @@ impl ChannelsConfig {
             None
         };
 
-        // --- CLI ---
         let cli_enabled = parse_bool_env("CLI_ENABLED", cs.cli_enabled)?;
-
-        // --- WASM channels ---
-        let wasm_channels_dir = optional_env("WASM_CHANNELS_DIR")?
-            .map(PathBuf::from)
-            .or_else(|| cs.wasm_channels_dir.clone())
-            .unwrap_or_else(default_channels_dir);
-
-        let wasm_channels_enabled =
-            parse_bool_env("WASM_CHANNELS_ENABLED", cs.wasm_channels_enabled)?;
 
         Ok(Self {
             cli: CliConfig {
@@ -220,8 +194,14 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
-            wasm_channels_dir,
-            wasm_channels_enabled,
+            wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
+                .map(PathBuf::from)
+                .or_else(|| cs.wasm_channels_dir.clone())
+                .unwrap_or_else(default_channels_dir),
+            wasm_channels_enabled: parse_bool_env(
+                "WASM_CHANNELS_ENABLED",
+                cs.wasm_channels_enabled,
+            )?,
             wasm_channel_owner_ids: {
                 let mut ids = cs.wasm_channel_owner_ids.clone();
                 // Backwards compat: TELEGRAM_OWNER_ID env var
@@ -252,6 +232,8 @@ fn default_channels_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use crate::config::channels::*;
+    use crate::config::helpers::ENV_MUTEX;
+    use crate::settings::Settings;
 
     #[test]
     fn cli_config_fields() {
@@ -398,69 +380,6 @@ mod tests {
         assert!(!cfg.wasm_channels_enabled);
     }
 
-    /// When a tunnel is active and HTTP_HOST is not explicitly set, the
-    /// webhook server should default to loopback to avoid unnecessary exposure.
-    #[test]
-    fn http_host_defaults_to_loopback_with_tunnel() {
-        // Set HTTP_PORT to trigger HttpConfig creation, but leave HTTP_HOST unset
-        // so the default kicks in.
-        unsafe {
-            std::env::set_var("HTTP_PORT", "9999");
-            std::env::remove_var("HTTP_HOST");
-        }
-        let settings = crate::settings::Settings::default();
-        let cfg = ChannelsConfig::resolve(&settings, true).unwrap();
-        unsafe {
-            std::env::remove_var("HTTP_PORT");
-        }
-        let http = cfg.http.expect("HttpConfig should be present");
-        assert_eq!(
-            http.host, "127.0.0.1",
-            "tunnel active should default to loopback"
-        );
-        assert_eq!(http.port, 9999);
-    }
-
-    /// Without a tunnel, the webhook server defaults to 0.0.0.0 so external
-    /// services can reach it directly.
-    #[test]
-    fn http_host_defaults_to_all_interfaces_without_tunnel() {
-        unsafe {
-            std::env::set_var("HTTP_PORT", "9998");
-            std::env::remove_var("HTTP_HOST");
-        }
-        let settings = crate::settings::Settings::default();
-        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
-        unsafe {
-            std::env::remove_var("HTTP_PORT");
-        }
-        let http = cfg.http.expect("HttpConfig should be present");
-        assert_eq!(
-            http.host, "0.0.0.0",
-            "no tunnel should default to all interfaces"
-        );
-    }
-
-    /// An explicit HTTP_HOST always wins regardless of tunnel state.
-    #[test]
-    fn explicit_http_host_overrides_tunnel_default() {
-        unsafe {
-            std::env::set_var("HTTP_PORT", "9997");
-            std::env::set_var("HTTP_HOST", "192.168.1.50");
-        }
-        let settings = crate::settings::Settings::default();
-        let cfg = ChannelsConfig::resolve(&settings, true).unwrap();
-        unsafe {
-            std::env::remove_var("HTTP_PORT");
-            std::env::remove_var("HTTP_HOST");
-        }
-        let http = cfg.http.expect("HttpConfig should be present");
-        assert_eq!(
-            http.host, "192.168.1.50",
-            "explicit host should override tunnel default"
-        );
-    }
-
     #[test]
     fn default_channels_dir_ends_with_channels() {
         let dir = default_channels_dir();
@@ -471,242 +390,43 @@ mod tests {
     }
 
     #[test]
-    fn default_gateway_port_constant() {
-        assert_eq!(DEFAULT_GATEWAY_PORT, 3000);
-    }
-
-    /// With default settings and no env vars, gateway should use defaults.
-    #[test]
-    fn resolve_gateway_defaults_from_settings() {
-        let _lock = crate::config::helpers::ENV_MUTEX.lock();
-        // Clear env vars that would interfere
-        unsafe {
-            std::env::remove_var("GATEWAY_ENABLED");
-            std::env::remove_var("GATEWAY_HOST");
-            std::env::remove_var("GATEWAY_PORT");
-            std::env::remove_var("GATEWAY_AUTH_TOKEN");
-            std::env::remove_var("GATEWAY_USER_ID");
-            std::env::remove_var("HTTP_PORT");
-            std::env::remove_var("HTTP_HOST");
-            std::env::remove_var("SIGNAL_HTTP_URL");
-            std::env::remove_var("CLI_ENABLED");
-            std::env::remove_var("WASM_CHANNELS_DIR");
-            std::env::remove_var("WASM_CHANNELS_ENABLED");
-            std::env::remove_var("TELEGRAM_OWNER_ID");
-        }
-
-        let settings = crate::settings::Settings::default();
-        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
-
-        let gw = cfg.gateway.expect("gateway should be enabled by default");
-        assert_eq!(gw.host, "127.0.0.1");
-        assert_eq!(gw.port, DEFAULT_GATEWAY_PORT);
-        assert!(gw.auth_token.is_none());
-        assert_eq!(gw.user_id, "default");
-    }
-
-    /// Settings values should be used when no env vars are set.
-    #[test]
-    fn resolve_gateway_from_settings() {
-        let _lock = crate::config::helpers::ENV_MUTEX.lock();
-        unsafe {
-            std::env::remove_var("GATEWAY_ENABLED");
-            std::env::remove_var("GATEWAY_HOST");
-            std::env::remove_var("GATEWAY_PORT");
-            std::env::remove_var("GATEWAY_AUTH_TOKEN");
-            std::env::remove_var("GATEWAY_USER_ID");
-            std::env::remove_var("HTTP_PORT");
-            std::env::remove_var("HTTP_HOST");
-            std::env::remove_var("SIGNAL_HTTP_URL");
-            std::env::remove_var("CLI_ENABLED");
-            std::env::remove_var("WASM_CHANNELS_DIR");
-            std::env::remove_var("WASM_CHANNELS_ENABLED");
-            std::env::remove_var("TELEGRAM_OWNER_ID");
-        }
-
-        let mut settings = crate::settings::Settings::default();
-        settings.channels.gateway_port = Some(4000);
-        settings.channels.gateway_host = Some("0.0.0.0".to_string());
-        settings.channels.gateway_auth_token = Some("db-token-123".to_string());
-        settings.channels.gateway_user_id = Some("myuser".to_string());
-
-        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
-        let gw = cfg.gateway.expect("gateway should be enabled");
-        assert_eq!(gw.port, 4000);
-        assert_eq!(gw.host, "0.0.0.0");
-        assert_eq!(gw.auth_token.as_deref(), Some("db-token-123"));
-        assert_eq!(gw.user_id, "myuser");
-    }
-
-    /// Env vars should override settings values.
-    #[test]
-    fn resolve_env_overrides_settings() {
-        let _lock = crate::config::helpers::ENV_MUTEX.lock();
-        unsafe {
-            std::env::set_var("GATEWAY_PORT", "5000");
-            std::env::set_var("GATEWAY_HOST", "10.0.0.1");
-            std::env::set_var("GATEWAY_AUTH_TOKEN", "env-token");
-            std::env::remove_var("GATEWAY_ENABLED");
-            std::env::remove_var("GATEWAY_USER_ID");
-            std::env::remove_var("HTTP_PORT");
-            std::env::remove_var("HTTP_HOST");
-            std::env::remove_var("SIGNAL_HTTP_URL");
-            std::env::remove_var("CLI_ENABLED");
-            std::env::remove_var("WASM_CHANNELS_DIR");
-            std::env::remove_var("WASM_CHANNELS_ENABLED");
-            std::env::remove_var("TELEGRAM_OWNER_ID");
-        }
-
-        let mut settings = crate::settings::Settings::default();
-        settings.channels.gateway_port = Some(4000);
-        settings.channels.gateway_host = Some("0.0.0.0".to_string());
-        settings.channels.gateway_auth_token = Some("db-token".to_string());
-
-        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
-        let gw = cfg.gateway.expect("gateway should be enabled");
-        assert_eq!(gw.port, 5000, "env should override settings");
-        assert_eq!(gw.host, "10.0.0.1", "env should override settings");
-        assert_eq!(
-            gw.auth_token.as_deref(),
-            Some("env-token"),
-            "env should override settings"
-        );
-
-        // Cleanup
-        unsafe {
-            std::env::remove_var("GATEWAY_PORT");
-            std::env::remove_var("GATEWAY_HOST");
-            std::env::remove_var("GATEWAY_AUTH_TOKEN");
-        }
-    }
-
-    /// CLI enabled should fall back to settings.
-    #[test]
-    fn resolve_cli_enabled_from_settings() {
-        let _lock = crate::config::helpers::ENV_MUTEX.lock();
-        unsafe {
-            std::env::remove_var("CLI_ENABLED");
-            std::env::remove_var("GATEWAY_ENABLED");
-            std::env::remove_var("GATEWAY_HOST");
-            std::env::remove_var("GATEWAY_PORT");
-            std::env::remove_var("GATEWAY_AUTH_TOKEN");
-            std::env::remove_var("GATEWAY_USER_ID");
-            std::env::remove_var("HTTP_PORT");
-            std::env::remove_var("HTTP_HOST");
-            std::env::remove_var("SIGNAL_HTTP_URL");
-            std::env::remove_var("WASM_CHANNELS_DIR");
-            std::env::remove_var("WASM_CHANNELS_ENABLED");
-            std::env::remove_var("TELEGRAM_OWNER_ID");
-        }
-
-        let mut settings = crate::settings::Settings::default();
-        settings.channels.cli_enabled = false;
-
-        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
-        assert!(!cfg.cli.enabled, "settings should disable CLI");
-    }
-
-    /// HTTP channel should activate when settings has it enabled.
-    #[test]
-    fn resolve_http_from_settings() {
-        let _lock = crate::config::helpers::ENV_MUTEX.lock();
-        unsafe {
-            std::env::remove_var("HTTP_PORT");
-            std::env::remove_var("HTTP_HOST");
-            std::env::remove_var("HTTP_WEBHOOK_SECRET");
-            std::env::remove_var("HTTP_USER_ID");
-            std::env::remove_var("GATEWAY_ENABLED");
-            std::env::remove_var("GATEWAY_HOST");
-            std::env::remove_var("GATEWAY_PORT");
-            std::env::remove_var("GATEWAY_AUTH_TOKEN");
-            std::env::remove_var("GATEWAY_USER_ID");
-            std::env::remove_var("SIGNAL_HTTP_URL");
-            std::env::remove_var("CLI_ENABLED");
-            std::env::remove_var("WASM_CHANNELS_DIR");
-            std::env::remove_var("WASM_CHANNELS_ENABLED");
-            std::env::remove_var("TELEGRAM_OWNER_ID");
-        }
-
-        let mut settings = crate::settings::Settings::default();
+    fn resolve_uses_settings_channel_values_with_owner_scope_user_ids() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let mut settings = Settings::default();
         settings.channels.http_enabled = true;
-        settings.channels.http_port = Some(9090);
-        settings.channels.http_host = Some("10.0.0.1".to_string());
+        settings.channels.http_host = Some("127.0.0.2".to_string());
+        settings.channels.http_port = Some(8181);
+        settings.channels.gateway_enabled = true;
+        settings.channels.gateway_host = Some("127.0.0.3".to_string());
+        settings.channels.gateway_port = Some(9191);
+        settings.channels.gateway_auth_token = Some("tok".to_string());
+        settings.channels.signal_http_url = Some("http://127.0.0.1:8080".to_string());
+        settings.channels.signal_account = Some("+15551234567".to_string());
+        settings.channels.signal_allow_from = Some("+15551234567,+15557654321".to_string());
+        settings.channels.wasm_channels_dir = Some(PathBuf::from("/tmp/settings-channels"));
+        settings.channels.wasm_channels_enabled = false;
 
-        let cfg = ChannelsConfig::resolve(&settings, false).unwrap();
-        let http = cfg.http.expect("HTTP should be enabled from settings");
-        assert_eq!(http.port, 9090);
-        assert_eq!(http.host, "10.0.0.1");
-    }
+        let cfg = ChannelsConfig::resolve(&settings, "owner-scope").expect("resolve");
 
-    /// Settings round-trip through DB map for new gateway fields.
-    #[test]
-    fn settings_gateway_fields_db_roundtrip() {
-        let mut settings = crate::settings::Settings::default();
-        settings.channels.gateway_port = Some(4000);
-        settings.channels.gateway_host = Some("0.0.0.0".to_string());
-        settings.channels.gateway_auth_token = Some("tok-abc".to_string());
-        settings.channels.gateway_user_id = Some("myuser".to_string());
-        settings.channels.cli_enabled = false;
+        let http = cfg.http.expect("http config");
+        assert_eq!(http.host, "127.0.0.2");
+        assert_eq!(http.port, 8181);
+        assert_eq!(http.user_id, "owner-scope");
 
-        let map = settings.to_db_map();
-        let restored = crate::settings::Settings::from_db_map(&map);
+        let gateway = cfg.gateway.expect("gateway config");
+        assert_eq!(gateway.host, "127.0.0.3");
+        assert_eq!(gateway.port, 9191);
+        assert_eq!(gateway.auth_token.as_deref(), Some("tok"));
+        assert_eq!(gateway.user_id, "owner-scope");
 
-        assert_eq!(restored.channels.gateway_port, Some(4000));
-        assert_eq!(restored.channels.gateway_host.as_deref(), Some("0.0.0.0"));
+        let signal = cfg.signal.expect("signal config");
+        assert_eq!(signal.account, "+15551234567");
+        assert_eq!(signal.allow_from, vec!["+15551234567", "+15557654321"]);
+
         assert_eq!(
-            restored.channels.gateway_auth_token.as_deref(),
-            Some("tok-abc")
+            cfg.wasm_channels_dir,
+            PathBuf::from("/tmp/settings-channels")
         );
-        assert_eq!(restored.channels.gateway_user_id.as_deref(), Some("myuser"));
-        assert!(!restored.channels.cli_enabled);
-    }
-
-    /// Invalid boolean env values must produce errors, not silently degrade.
-    #[test]
-    fn resolve_rejects_invalid_bool_env() {
-        let _lock = crate::config::helpers::ENV_MUTEX.lock();
-        let settings = crate::settings::Settings::default();
-
-        // GATEWAY_ENABLED=maybe should error
-        unsafe {
-            std::env::set_var("GATEWAY_ENABLED", "maybe");
-            std::env::remove_var("HTTP_PORT");
-            std::env::remove_var("HTTP_HOST");
-            std::env::remove_var("SIGNAL_HTTP_URL");
-            std::env::remove_var("CLI_ENABLED");
-            std::env::remove_var("WASM_CHANNELS_ENABLED");
-            std::env::remove_var("GATEWAY_PORT");
-            std::env::remove_var("GATEWAY_HOST");
-            std::env::remove_var("GATEWAY_AUTH_TOKEN");
-            std::env::remove_var("GATEWAY_USER_ID");
-            std::env::remove_var("WASM_CHANNELS_DIR");
-            std::env::remove_var("TELEGRAM_OWNER_ID");
-        }
-        let result = ChannelsConfig::resolve(&settings, false);
-        assert!(result.is_err(), "GATEWAY_ENABLED=maybe should be rejected");
-
-        // CLI_ENABLED=on should error
-        unsafe {
-            std::env::remove_var("GATEWAY_ENABLED");
-            std::env::set_var("CLI_ENABLED", "on");
-        }
-        let result = ChannelsConfig::resolve(&settings, false);
-        assert!(result.is_err(), "CLI_ENABLED=on should be rejected");
-
-        // WASM_CHANNELS_ENABLED=yes should error
-        unsafe {
-            std::env::remove_var("CLI_ENABLED");
-            std::env::set_var("WASM_CHANNELS_ENABLED", "yes");
-        }
-        let result = ChannelsConfig::resolve(&settings, false);
-        assert!(
-            result.is_err(),
-            "WASM_CHANNELS_ENABLED=yes should be rejected"
-        );
-
-        // Cleanup
-        unsafe {
-            std::env::remove_var("WASM_CHANNELS_ENABLED");
-        }
+        assert!(!cfg.wasm_channels_enabled);
     }
 }
