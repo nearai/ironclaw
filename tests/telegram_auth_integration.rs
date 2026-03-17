@@ -351,7 +351,7 @@ async fn test_private_messages_use_chat_id_as_thread_scope() {
             .await
             .expect("HTTP callback failed");
 
-        assert_eq!(response.status, 200);
+        assert_eq!(response.0.status, 200);
 
         let msg = timeout(Duration::from_secs(1), stream.next())
             .await

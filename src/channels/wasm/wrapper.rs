@@ -1893,9 +1893,12 @@ impl WasmChannel {
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let credentials = self.get_credentials().await;
-        let host_credentials =
-            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref(), &self.owner_scope_id)
-                .await;
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &self.owner_scope_id,
+        )
+        .await;
         let pairing_store = self.pairing_store.clone();
         let metadata_json = metadata_json.to_string();
         let channel_name = self.name.clone();
@@ -2307,7 +2310,6 @@ impl WasmChannel {
             }
 
             // Parse metadata JSON
-<<<<<<< HEAD
             msg = apply_emitted_metadata(msg, &emitted.metadata_json);
             if is_owner_sender {
                 // Store for owner-target routing (chat_id etc.).
@@ -2316,17 +2318,6 @@ impl WasmChannel {
 
             // Extract metadata for ACK mechanism (after apply_emitted_metadata)
             let metadata = msg.metadata.clone();
-=======
-            let metadata: serde_json::Value =
-                if let Ok(m) = serde_json::from_str::<serde_json::Value>(&emitted.metadata_json) {
-                    msg = msg.with_metadata(m.clone());
-                    // Store for broadcast routing (chat_id etc.)
-                    self.update_broadcast_metadata(&emitted.metadata_json).await;
-                    m
-                } else {
-                    serde_json::Value::Null
-                };
->>>>>>> 6b200e8 (style: fix formatting issues)
 
             // Send to stream — no locks held across this await
             tracing::info!(

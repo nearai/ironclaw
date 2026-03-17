@@ -49,6 +49,7 @@ impl Hook for MessagePersistedHook {
         _ctx: &HookContext,
     ) -> Result<HookOutcome, HookError> {
         if let HookEvent::MessagePersisted {
+            user_id: _,
             channel,
             message_id,
             metadata,
@@ -110,7 +111,10 @@ mod tests {
         // Hook should return ok() even though it ignores non-MessagePersisted events
         let result = hook.execute(&event, &ctx).await;
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), HookOutcome::Continue { modified: None }));
+        assert!(matches!(
+            result.unwrap(),
+            HookOutcome::Continue { modified: None }
+        ));
     }
 
     #[tokio::test]

@@ -517,6 +517,7 @@ enum OutboundWebhookEventSummary {
         response_length: usize,
     },
     MessagePersisted {
+        user_id: String,
         channel: String,
         message_id: String,
     },
@@ -640,10 +641,12 @@ fn summarize_webhook_event(event: &HookEvent) -> OutboundWebhookEventSummary {
             }
         }
         HookEvent::MessagePersisted {
+            user_id,
             channel,
             message_id,
             ..
         } => OutboundWebhookEventSummary::MessagePersisted {
+            user_id: user_id.clone(),
             channel: channel.clone(),
             message_id: message_id.clone(),
         },
@@ -892,8 +895,8 @@ fn event_user_id(event: &HookEvent) -> &str {
         | HookEvent::Outbound { user_id, .. }
         | HookEvent::SessionStart { user_id, .. }
         | HookEvent::SessionEnd { user_id, .. }
-        | HookEvent::ResponseTransform { user_id, .. } => user_id,
-        HookEvent::MessagePersisted { .. } => "",
+        | HookEvent::ResponseTransform { user_id, .. }
+        | HookEvent::MessagePersisted { user_id, .. } => user_id,
     }
 }
 

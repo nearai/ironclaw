@@ -79,6 +79,7 @@ pub enum HookEvent {
     },
     /// A user message was persisted to the database.
     MessagePersisted {
+        user_id: String,
         channel: String,
         message_id: String,
         metadata: serde_json::Value,

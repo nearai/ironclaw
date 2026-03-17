@@ -613,6 +613,7 @@ impl Agent {
         use crate::hooks::hook::HookEvent;
         let hooks = self.hooks();
         let event = HookEvent::MessagePersisted {
+            user_id: user_id.to_string(),
             channel: channel.to_string(),
             message_id: message_id.to_string(),
             metadata: metadata.clone(),
