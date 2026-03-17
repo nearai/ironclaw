@@ -187,13 +187,18 @@ impl Agent {
         );
 
         // First check thread state without holding lock during I/O
-        let thread_state = {
+        let (thread_state, approval_context) = {
             let sess = session.lock().await;
             let thread = sess
                 .threads
                 .get(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thread.state
+            let approval_context = thread.pending_approval.as_ref().map(|a| {
+                let desc_preview =
+                    crate::agent::agent_loop::truncate_for_preview(&a.description, 80);
+                (a.tool_name.clone(), desc_preview)
+            });
+            (thread.state, approval_context)
         };
 
         tracing::debug!(
@@ -221,9 +226,13 @@ impl Agent {
                     thread_id = %thread_id,
                     "Thread awaiting approval, rejecting new input"
                 );
-                return Ok(SubmissionResult::error(
-                    "Waiting for approval. Use /interrupt to cancel.",
-                ));
+                let msg = match approval_context {
+                    Some((tool_name, desc_preview)) => format!(
+                        "Waiting for approval: {tool_name} — {desc_preview}. Use /interrupt to cancel."
+                    ),
+                    None => "Waiting for approval. Use /interrupt to cancel.".to_string(),
+                };
+                return Ok(SubmissionResult::pending(msg));
             }
             ThreadState::Completed => {
                 tracing::warn!(
@@ -924,7 +933,8 @@ impl Agent {
 
             // Execute the approved tool and continue the loop
             let mut job_ctx =
-                JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+                JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+                    .with_requester_id(&message.sender_id);
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
             // Prefer a valid timezone from the approval message, fall back to the
             // resolved timezone stored when the approval was originally requested.
@@ -1540,7 +1550,8 @@ impl Agent {
             .configure_token(&pending.extension_name, token)
             .await
         {
-            Ok(result) => {
+            Ok(result) if result.activated => {
+                // Ensure extension is actually activated
                 tracing::info!(
                     "Extension '{}' configured via auth mode: {}",
                     pending.extension_name,
@@ -1554,6 +1565,28 @@ impl Agent {
                             extension_name: pending.extension_name.clone(),
                             success: true,
                             message: result.message.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+                Ok(Some(result.message))
+            }
+            Ok(result) => {
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        thread.enter_auth_mode(pending.extension_name.clone());
+                    }
+                }
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::AuthRequired {
+                            extension_name: pending.extension_name.clone(),
+                            instructions: Some(result.message.clone()),
+                            auth_url: None,
+                            setup_url: None,
                         },
                         &message.metadata,
                     )
@@ -1891,6 +1924,105 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
             created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_awaiting_approval_rejection_includes_tool_context() {
+        // Test that when a thread is in AwaitingApproval state and receives a new message,
+        // process_user_input rejects it with a non-error status that includes tool context.
+        use crate::agent::session::{PendingApproval, Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+
+        // Set thread to AwaitingApproval with a pending tool approval
+        let pending = PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "echo hello"}),
+            display_parameters: serde_json::json!({"command": "[REDACTED]"}),
+            description: "Execute: echo hello".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+        };
+        thread.await_approval(pending);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+
+        // Verify thread is in AwaitingApproval state
+        assert_eq!(
+            session.threads[&thread_id].state,
+            ThreadState::AwaitingApproval
+        );
+
+        let result = extract_approval_message(&session, thread_id);
+
+        // Verify result is an Ok with a message (not an Error)
+        match result {
+            Ok(Some(msg)) => {
+                // Should NOT start with "Error:"
+                assert!(
+                    !msg.to_lowercase().starts_with("error:"),
+                    "Approval rejection should not have 'Error:' prefix. Got: {}",
+                    msg
+                );
+
+                // Should contain "waiting for approval"
+                assert!(
+                    msg.to_lowercase().contains("waiting for approval"),
+                    "Should contain 'waiting for approval'. Got: {}",
+                    msg
+                );
+
+                // Should contain the tool name
+                assert!(
+                    msg.contains("shell"),
+                    "Should contain tool name 'shell'. Got: {}",
+                    msg
+                );
+
+                // Should contain the description (or truncated version)
+                assert!(
+                    msg.contains("echo hello"),
+                    "Should contain description 'echo hello'. Got: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected approval rejection message"),
+        }
+    }
+
+    // Helper function to extract the approval message without needing a full Agent instance
+    fn extract_approval_message(
+        session: &crate::agent::session::Session,
+        thread_id: Uuid,
+    ) -> Result<Option<String>, crate::error::Error> {
+        let thread = session.threads.get(&thread_id).ok_or_else(|| {
+            crate::error::Error::from(crate::error::JobError::NotFound { id: thread_id })
+        })?;
+
+        if thread.state == ThreadState::AwaitingApproval {
+            let approval_context = thread.pending_approval.as_ref().map(|a| {
+                let desc_preview =
+                    crate::agent::agent_loop::truncate_for_preview(&a.description, 80);
+                (a.tool_name.clone(), desc_preview)
+            });
+
+            let msg = match approval_context {
+                Some((tool_name, desc_preview)) => format!(
+                    "Waiting for approval: {tool_name} — {desc_preview}. Use /interrupt to cancel."
+                ),
+                None => "Waiting for approval. Use /interrupt to cancel.".to_string(),
+            };
+            Ok(Some(msg))
+        } else {
+            Ok(None)
         }
     }
 }

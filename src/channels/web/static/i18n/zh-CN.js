@@ -342,6 +342,12 @@ I18n.register('zh-CN', {
   
   // 配置
   'config.title': '配置 {name}',
+  'config.telegramOwnerHint': '保存后，IronClaw 会显示一次性验证码。将 `/start CODE` 发送给你的 Telegram 机器人，IronClaw 会自动完成设置。',
+  'config.telegramChallengeTitle': 'Telegram 所有者验证',
+  'config.telegramOwnerWaiting': '正在等待 Telegram 所有者验证...',
+  'config.telegramCommandLabel': '请在 Telegram 中发送：',
+  'config.telegramStartOver': '重新开始',
+  'config.telegramStartOverHint': 'Telegram 验证未完成。点击“重新开始”以生成新的验证码并重试。',
   'config.optional': '（可选）',
   'config.alreadySet': '（已设置 — 留空以保持不变）',
   'config.alreadyConfigured': '已配置',

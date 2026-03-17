@@ -693,11 +693,16 @@ fn resolve_project_dir(
 }
 
 fn monitor_route_from_ctx(ctx: &JobContext) -> Option<crate::agent::job_monitor::JobMonitorRoute> {
+    // notify_channel is required — without it we don't know which channel to
+    // route the monitor output to, so return None to skip monitoring entirely.
     let channel = ctx
         .metadata
         .get("notify_channel")
         .and_then(|v| v.as_str())?
         .to_string();
+    // notify_user is optional — fall back to the job's own user_id, which is
+    // always present. The channel is the routing decision; the user is just
+    // for attribution and can default safely.
     let user_id = ctx
         .metadata
         .get("notify_user")
@@ -709,17 +714,11 @@ fn monitor_route_from_ctx(ctx: &JobContext) -> Option<crate::agent::job_monitor:
         .get("notify_thread_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let metadata = ctx
-        .metadata
-        .get("notify_metadata")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
 
     Some(crate::agent::job_monitor::JobMonitorRoute {
         channel,
         user_id,
         thread_id,
-        metadata,
     })
 }
 

@@ -27,25 +27,6 @@ pub struct JobMonitorRoute {
     pub channel: String,
     pub user_id: String,
     pub thread_id: Option<String>,
-    pub metadata: serde_json::Value,
-}
-
-fn build_internal_metadata(route: &JobMonitorRoute, job_id: Uuid) -> serde_json::Value {
-    let mut metadata = route.metadata.clone();
-    if !metadata.is_object() {
-        metadata = serde_json::json!({});
-    }
-    if let Some(obj) = metadata.as_object_mut() {
-        obj.insert(
-            "__internal_job_monitor".to_string(),
-            serde_json::Value::Bool(true),
-        );
-        obj.insert(
-            "__job_monitor_job_id".to_string(),
-            serde_json::Value::String(job_id.to_string()),
-        );
-    }
-    metadata
 }
 
 /// Spawn a background task that watches for events from a specific job and
@@ -83,7 +64,7 @@ pub fn spawn_job_monitor(
                                 route.user_id.clone(),
                                 format!("[Job {}] Claude Code: {}", short_id, content),
                             )
-                            .with_metadata(build_internal_metadata(&route, job_id));
+                            .into_internal();
                             if let Some(ref thread_id) = route.thread_id {
                                 msg = msg.with_thread(thread_id.clone());
                             }
@@ -104,7 +85,7 @@ pub fn spawn_job_monitor(
                                     short_id, status
                                 ),
                             )
-                            .with_metadata(build_internal_metadata(&route, job_id));
+                            .into_internal();
                             if let Some(ref thread_id) = route.thread_id {
                                 msg = msg.with_thread(thread_id.clone());
                             }
@@ -149,9 +130,6 @@ mod tests {
             channel: "cli".to_string(),
             user_id: "user-1".to_string(),
             thread_id: Some("thread-1".to_string()),
-            metadata: serde_json::json!({
-                "source": "test",
-            }),
         }
     }
 
@@ -184,12 +162,7 @@ mod tests {
         assert_eq!(msg.user_id, "user-1");
         assert_eq!(msg.thread_id, Some("thread-1".to_string()));
         assert!(msg.content.contains("I found a bug"));
-        assert_eq!(
-            msg.metadata
-                .get("__internal_job_monitor")
-                .and_then(|v| v.as_bool()),
-            Some(true)
-        );
+        assert!(msg.is_internal, "monitor messages must be marked internal");
     }
 
     #[tokio::test]
@@ -295,5 +268,29 @@ mod tests {
             result.is_err(),
             "should have timed out, no message expected"
         );
+    }
+
+    /// Regression test: external channels must not be able to spoof the
+    /// `is_internal` flag via metadata keys. A message created through
+    /// the normal `IncomingMessage::new` + `with_metadata` path must
+    /// always have `is_internal == false`, regardless of metadata content.
+    #[test]
+    fn test_external_metadata_cannot_spoof_internal_flag() {
+        let msg = IncomingMessage::new("wasm_channel", "attacker", "pwned").with_metadata(
+            serde_json::json!({
+                "__internal_job_monitor": true,
+                "is_internal": true,
+            }),
+        );
+        assert!(
+            !msg.is_internal,
+            "with_metadata must not set is_internal — only into_internal() can"
+        );
+    }
+
+    #[test]
+    fn test_into_internal_sets_flag() {
+        let msg = IncomingMessage::new("monitor", "system", "test").into_internal();
+        assert!(msg.is_internal);
     }
 }
