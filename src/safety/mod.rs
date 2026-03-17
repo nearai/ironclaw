@@ -1,20 +1,15 @@
 //! Safety layer re-export shim.
 //!
-//! Re-exports all public types from `ironclaw_safety` plus the LLM-as-Judge
-//! components. Use `crate::safety::*` imports throughout the codebase.
-//!
-//! The LLM judge ([`LlmJudge`]) lives as a standalone field on [`crate::agent::AgentDeps`]
-//! and is invoked directly in `execute_chat_tool_standalone` — it is not baked
-//! into `SafetyLayer` so that adding methods to the upstream crate never
-//! requires manual re-delegation here.
+//! Re-exports all public types from `ironclaw_safety` (prompt injection
+//! defense, validation, leak detection, policy, and the LLM-as-Judge).
+//! New code should import from `ironclaw_safety` directly per CLAUDE.md;
+//! this shim exists for backward compatibility with existing `crate::safety`
+//! import paths.
 
-mod llm_judge;
+pub mod judge_adapter;
 
 pub use ironclaw_safety::*;
-
-pub use llm_judge::{
-    AmbiguousPolicy, JudgeRecord, JudgeVerdict, LlmJudge, LlmJudgeConfig, ToolCallRequest,
-};
+pub use judge_adapter::LlmProviderJudge;
 
 #[cfg(test)]
 mod tests {

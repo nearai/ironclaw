@@ -9,6 +9,7 @@
 
 mod credential_detect;
 mod leak_detector;
+pub mod llm_judge;
 mod policy;
 mod sanitizer;
 mod validator;
@@ -17,6 +18,9 @@ pub use credential_detect::params_contain_manual_credentials;
 pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,
     LeakSeverity,
+};
+pub use llm_judge::{
+    AmbiguousPolicy, JudgeLlm, JudgeRecord, JudgeVerdict, LlmJudge, LlmJudgeConfig, ToolCallRequest,
 };
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};

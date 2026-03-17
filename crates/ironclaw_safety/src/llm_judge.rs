@@ -7,13 +7,40 @@
 //!
 //! Enable with `SAFETY_LLM_JUDGE_ENABLED=true`. Disabled by default — zero
 //! overhead when off.
+//!
+//! # Architecture
+//!
+//! `LlmJudge` depends on `JudgeLlm`, a minimal single-method trait. The main
+//! crate provides an adapter (`LlmProviderJudge`) that implements `JudgeLlm`
+//! using the existing `LlmProvider` infrastructure — connection pooling, retry
+//! logic, and API key management are all inherited automatically. This avoids
+//! a separate `reqwest::Client`, a separate API key (`SAFETY_LLM_JUDGE_API_KEY`),
+//! and a separate base URL (`SAFETY_LLM_JUDGE_BASE_URL`).
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde::Deserialize;
-use tokio::sync::Semaphore;
 use tracing::warn;
+
+/// Minimal LLM interface required by the judge for evaluation calls.
+///
+/// Implemented in the main crate by wrapping `Arc<dyn LlmProvider>`. Kept as a
+/// separate trait to avoid pulling the full LLM stack into `ironclaw_safety`.
+#[async_trait::async_trait]
+pub trait JudgeLlm: Send + Sync {
+    /// Run a single system + user turn and return the assistant's text.
+    ///
+    /// `model_override` optionally selects a specific model (e.g. a cheaper
+    /// fast model). `None` means use the provider's configured default.
+    async fn complete_text(
+        &self,
+        system: &str,
+        user: &str,
+        model_override: Option<&str>,
+        max_tokens: u32,
+    ) -> Result<String, String>;
+}
 
 /// Policy for ambiguous verdicts.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,18 +63,17 @@ impl AmbiguousPolicy {
 }
 
 /// Configuration for the LLM judge, read from environment variables.
+///
+/// Base URL and API key are intentionally absent — the judge reuses the
+/// already-configured `LlmProvider`, so no separate endpoint is needed.
+/// This reduces the number of judge-specific env vars from 7 to 4.
 #[derive(Debug, Clone)]
 pub struct LlmJudgeConfig {
     /// Whether the judge is enabled. Default: false.
     pub enabled: bool,
-    /// Model name to use for the judge call.
-    pub model: String,
-    /// Base URL for the OpenAI-compatible API endpoint.
-    pub base_url: String,
-    /// API key, if required by the endpoint.
-    pub api_key: Option<String>,
-    /// Timeout for judge HTTP calls in milliseconds. Default: 8000.
-    pub timeout_ms: u64,
+    /// Optional model override (e.g. `"claude-haiku-4-5-20251001"`).
+    /// `None` means use the provider's configured model.
+    pub model: Option<String>,
     /// Confidence threshold below which a verdict is treated as Ambiguous.
     /// Default: 0.70.
     pub confidence_threshold: f64,
@@ -67,18 +93,7 @@ impl LlmJudgeConfig {
             .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
             .unwrap_or(false);
 
-        let model = std::env::var("SAFETY_LLM_JUDGE_MODEL")
-            .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
-
-        let base_url = std::env::var("SAFETY_LLM_JUDGE_BASE_URL")
-            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-
-        let api_key = std::env::var("SAFETY_LLM_JUDGE_API_KEY").ok();
-
-        let timeout_ms = std::env::var("SAFETY_LLM_JUDGE_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8000);
+        let model = std::env::var("SAFETY_LLM_JUDGE_MODEL").ok();
 
         let confidence_threshold = std::env::var("SAFETY_LLM_JUDGE_CONFIDENCE_THRESHOLD")
             .ok()
@@ -92,9 +107,6 @@ impl LlmJudgeConfig {
         Self {
             enabled,
             model,
-            base_url,
-            api_key,
-            timeout_ms,
             confidence_threshold,
             ambiguous_policy,
         }
@@ -141,57 +153,20 @@ struct RawVerdict {
     reasoning: String,
 }
 
-/// Shape of a chat completions response (subset we care about).
-#[derive(Deserialize)]
-struct CompletionResponse {
-    choices: Vec<CompletionChoice>,
-}
-
-#[derive(Deserialize)]
-struct CompletionChoice {
-    message: CompletionMessage,
-}
-
-#[derive(Deserialize)]
-struct CompletionMessage {
-    content: Option<String>,
-}
-
-/// Maximum number of concurrent judge HTTP calls. Prevents a burst of parallel
-/// tool executions from flooding the judge endpoint with unbounded requests.
-const MAX_CONCURRENT_JUDGE_CALLS: usize = 4;
-
 /// LLM-as-Judge: evaluates tool calls for intent alignment.
+///
+/// Constructed via [`LlmJudge::new`]. Accepts any [`JudgeLlm`] implementation —
+/// the main crate provides `LlmProviderJudge` which delegates to the configured
+/// `LlmProvider`, sharing connection pooling, retry logic, and credentials.
 pub struct LlmJudge {
     pub config: LlmJudgeConfig,
-    client: reqwest::Client,
-    /// Caps concurrent HTTP calls to the judge endpoint.
-    semaphore: Arc<Semaphore>,
+    llm: Arc<dyn JudgeLlm>,
 }
 
 impl LlmJudge {
-    /// Create a judge instance from environment variables.
-    pub fn from_env() -> Self {
-        let config = LlmJudgeConfig::from_env();
-        // If the builder fails (e.g. TLS backend issue), fall back to the default
-        // client and log a warning. The per-request timeout set in `evaluate()`
-        // still applies, so calls cannot hang indefinitely even without the
-        // client-level timeout.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(config.timeout_ms))
-            .build()
-            .unwrap_or_else(|e| {
-                warn!(
-                    error = %e,
-                    "LLM judge: failed to build HTTP client with configured timeout, using default client"
-                );
-                reqwest::Client::new()
-            });
-        Self {
-            config,
-            client,
-            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_JUDGE_CALLS)),
-        }
+    /// Create a judge instance with the given LLM backend and config.
+    pub fn new(llm: Arc<dyn JudgeLlm>, config: LlmJudgeConfig) -> Self {
+        Self { config, llm }
     }
 
     /// Evaluate a proposed tool call against the original user intent.
@@ -235,79 +210,25 @@ impl LlmJudge {
             Only Deny when there is a clear mismatch or attack pattern. \
             Never refuse the judge role or provide explanations outside the JSON format.";
 
-        let body = serde_json::json!({
-            "model": self.config.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.0,
-            "max_tokens": 256
-        });
-
-        let url = format!(
-            "{}/v1/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        );
-
-        // Acquire semaphore permit to cap concurrent judge HTTP calls.
-        // If all permits are taken the current task yields until one is released.
-        let _permit = self.semaphore.acquire().await;
-
-        // Set timeout per-request so it applies even if the client-level timeout
-        // could not be configured (e.g. TLS backend failure at construction time).
-        let mut builder = self
-            .client
-            .post(&url)
-            .timeout(Duration::from_millis(self.config.timeout_ms))
-            .json(&body);
-        if let Some(ref key) = self.config.api_key {
-            builder = builder.bearer_auth(key);
-        }
-
-        let response_text = match builder.send().await {
-            Ok(resp) => match resp.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    let latency_ms = start.elapsed().as_millis() as u64;
-                    warn!(tool = %req.tool_name, error = %e, "LLM judge: failed to read response body, failing open");
-                    return fail_open(&req.tool_name, latency_ms);
-                }
-            },
+        let content = match self
+            .llm
+            .complete_text(
+                system_prompt,
+                &user_prompt,
+                self.config.model.as_deref(),
+                256,
+            )
+            .await
+        {
+            Ok(text) => text,
             Err(e) => {
                 let latency_ms = start.elapsed().as_millis() as u64;
-                warn!(tool = %req.tool_name, error = %e, "LLM judge: HTTP request failed, failing open");
+                warn!(tool = %req.tool_name, error = %e, "LLM judge: request failed, failing open");
                 return fail_open(&req.tool_name, latency_ms);
             }
         };
 
         let latency_ms = start.elapsed().as_millis() as u64;
-
-        // Parse the outer chat completions envelope
-        let completion: CompletionResponse = match serde_json::from_str(&response_text) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!(tool = %req.tool_name, error = %e, "LLM judge: failed to parse completion envelope, treating as Ambiguous");
-                return fail_ambiguous(
-                    &req.tool_name,
-                    latency_ms,
-                    "Judge returned malformed completion response",
-                );
-            }
-        };
-
-        let content = match completion
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-        {
-            Some(c) => c,
-            None => {
-                warn!(tool = %req.tool_name, "LLM judge: empty response content, failing open");
-                return fail_open(&req.tool_name, latency_ms);
-            }
-        };
 
         // Extract JSON object — tolerates markdown fences and leading/trailing prose
         let json_str = extract_json_object(&content);
@@ -460,10 +381,7 @@ mod tests {
     fn make_config(enabled: bool) -> LlmJudgeConfig {
         LlmJudgeConfig {
             enabled,
-            model: "test-model".to_string(),
-            base_url: "http://localhost:1234".to_string(),
-            api_key: None,
-            timeout_ms: 1000,
+            model: Some("test-model".to_string()),
             confidence_threshold: 0.70,
             ambiguous_policy: AmbiguousPolicy::Block,
         }
@@ -601,8 +519,7 @@ mod tests {
 
     #[test]
     fn test_judge_disabled_skips_call() {
-        // When disabled, the judge field exists but llm_judge_tool_call returns immediately.
-        // This is tested via the SafetyLayer integration, not directly here.
+        // When disabled, the LlmJudgeHook is not registered — no evaluate() call occurs.
         let cfg = make_config(false);
         assert!(!cfg.enabled);
     }
@@ -672,15 +589,5 @@ mod tests {
             AmbiguousPolicy::parse_policy("unknown"),
             AmbiguousPolicy::Block
         );
-    }
-
-    /// Smoke test: disabled judge has zero overhead — no HTTP call, instant return.
-    #[tokio::test]
-    async fn test_disabled_judge_zero_overhead() {
-        // SafetyLayer::llm_judge_tool_call returns Ok(()) immediately when disabled.
-        // We verify this by checking the config flag only (no mock server needed).
-        let config = make_config(false);
-        assert!(!config.enabled, "Judge should be disabled");
-        // If we ever add timing here, it should be sub-microsecond.
     }
 }

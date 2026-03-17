@@ -4,15 +4,16 @@
 //! `SAFETY_LLM_JUDGE_ENABLED=true`. Runs AFTER heuristic safety checks and
 //! BEFORE tool execution. Disabled by default — zero overhead when off.
 //!
-//! On approval-resumed calls the `intent` field is `""` — the hook skips
+//! On approval-resumed calls the `intent` field is `None` — the hook skips
 //! evaluation because the user already explicitly authorised the tool.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use ironclaw_safety::{AmbiguousPolicy, JudgeVerdict, LlmJudge, ToolCallRequest};
+
 use crate::hooks::{Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint};
-use crate::safety::{AmbiguousPolicy, JudgeVerdict, LlmJudge, ToolCallRequest};
 
 /// Hook that runs the LLM judge before every tool call.
 pub struct LlmJudgeHook {
@@ -50,10 +51,10 @@ impl Hook for LlmJudgeHook {
             return Ok(HookOutcome::ok());
         };
 
-        // Skip when intent is empty (approval-resumed calls where user already authorised).
-        if intent.is_empty() {
+        // Skip when intent is None (approval-resumed calls where user already authorised).
+        let Some(intent) = intent else {
             return Ok(HookOutcome::ok());
-        }
+        };
 
         let req = ToolCallRequest {
             tool_name: tool_name.clone(),

@@ -17,7 +17,7 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
-use crate::safety::{LlmJudge, SafetyLayer};
+use crate::safety::{LlmProviderJudge, SafetyLayer};
 use crate::secrets::SecretsStore;
 use crate::skills::SkillRegistry;
 use crate::skills::catalog::SkillCatalog;
@@ -26,6 +26,7 @@ use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
+use ironclaw_safety::{LlmJudge, LlmJudgeConfig};
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -750,19 +751,22 @@ impl AppBuilder {
             self.init_llm().await?
         };
         let (safety, tools, embeddings, workspace, builder) = self.init_tools(&llm).await?;
-        let llm_judge = Arc::new(LlmJudge::from_env());
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
         let agent_session_manager =
             Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
 
-        // Register LLM-as-Judge hook (no-op when disabled).
-        if llm_judge.config.enabled {
+        // Register LLM-as-Judge hook when enabled.
+        // Uses the cheap LLM if available (falls back to the primary LLM) so
+        // that judge calls don't consume the same model budget as user turns.
+        let judge_config = LlmJudgeConfig::from_env();
+        if judge_config.enabled {
+            let judge_provider = cheap_llm.clone().unwrap_or_else(|| Arc::clone(&llm));
+            let judge_llm = Arc::new(LlmProviderJudge::new(judge_provider));
+            let llm_judge = Arc::new(LlmJudge::new(judge_llm, judge_config));
             hooks
-                .register(Arc::new(crate::hooks::LlmJudgeHook::new(Arc::clone(
-                    &llm_judge,
-                ))))
+                .register(Arc::new(crate::hooks::LlmJudgeHook::new(llm_judge)))
                 .await;
             tracing::debug!("LLM-as-Judge hook registered");
         }
