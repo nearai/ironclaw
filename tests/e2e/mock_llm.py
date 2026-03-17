@@ -31,7 +31,7 @@ TOOL_CALL_PATTERNS = [
         lambda m: {
             "method": "POST",
             "url": f"https://example.com/{m.group('label')}",
-            "json": {"label": m.group("label")},
+            "body": {"label": m.group("label")},
         },
     ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),

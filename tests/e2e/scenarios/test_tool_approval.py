@@ -141,6 +141,7 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
     """
     assistant_messages = page.locator(SEL["message_assistant"])
     chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
 
     # Trigger a real HTTP tool call that pauses for approval in the default E2E harness.
     await chat_input.fill("make approval post approval-required")
