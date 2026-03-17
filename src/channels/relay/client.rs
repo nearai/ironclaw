@@ -118,14 +118,13 @@ impl RelayClient {
     ///
     /// Calls `GET /oauth/slack/auth` with `redirect(Policy::none())` and
     /// returns the `Location` header (Slack OAuth URL) without following it.
-    pub async fn initiate_oauth(&self, callback_url: &str) -> Result<String, RelayError> {
-        let query: Vec<(&str, &str)> = vec![("callback", callback_url)];
-
+    /// Initiate Slack OAuth. Channel-relay derives all URLs from the trusted
+    /// instance_url in chat-api. IronClaw supplies no URLs.
+    pub async fn initiate_oauth(&self) -> Result<String, RelayError> {
         let resp = self
             .http
             .get(format!("{}/oauth/slack/auth", self.base_url))
             .bearer_auth(self.api_key.expose_secret())
-            .query(&query)
             .send()
             .await
             .map_err(|e| RelayError::Network(e.to_string()))?;

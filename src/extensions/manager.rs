@@ -3857,37 +3857,9 @@ impl ExtensionManager {
         )
         .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
-        // OAuth redirect flow
-        let callback_base = self
-            .tunnel_url
-            .clone()
-            .or_else(|| relay_config.callback_url.clone())
-            .unwrap_or_else(|| {
-                let host = std::env::var("GATEWAY_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-                let port = std::env::var("GATEWAY_PORT")
-                    .unwrap_or_else(|_| crate::config::DEFAULT_GATEWAY_PORT.to_string());
-                format!("http://{}:{}", host, port)
-            });
-
-        // Generate CSRF nonce for OAuth state parameter
-        let state_nonce = uuid::Uuid::new_v4().to_string();
-        let state_key = format!("relay:{}:oauth_state", name);
-        // Delete any stale nonce before storing the new one
-        let _ = self.secrets.delete(&self.user_id, &state_key).await;
-        self.secrets
-            .create(
-                &self.user_id,
-                CreateSecretParams::new(&state_key, &state_nonce),
-            )
-            .await
-            .map_err(|e| ExtensionError::AuthFailed(format!("Failed to store OAuth state: {e}")))?;
-
-        let callback_url = format!(
-            "{}/oauth/slack/callback?state={}",
-            callback_base, state_nonce
-        );
-
-        match client.initiate_oauth(&callback_url).await {
+        // Channel-relay derives all OAuth URLs from the trusted instance_url
+        // in chat-api. IronClaw supplies nothing — it just triggers the flow.
+        match client.initiate_oauth().await {
             Ok(auth_url) => Ok(AuthResult::awaiting_authorization(
                 name,
                 ExtensionKind::ChannelRelay,
