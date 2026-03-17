@@ -516,6 +516,14 @@ impl Guest for TelegramChannel {
             None
         };
 
+        // Register bot commands so they appear in Telegram's "/" command menu
+        if let Err(e) = register_bot_commands() {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to register bot commands (non-fatal): {}", e),
+            );
+        }
+
         // Webhook secret validation is handled by the host
         let require_secret = config.webhook_secret.is_some();
 
@@ -1434,6 +1442,92 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
     );
 
     Ok(())
+}
+
+// ============================================================================
+// Bot Command Menu
+// ============================================================================
+
+/// Bot commands registered with Telegram's command menu (the "/" button in chat).
+///
+/// These correspond to commands recognized by `SubmissionParser::parse()` in the
+/// agent core. Only user-facing commands with clear Telegram-appropriate
+/// descriptions are included.
+const BOT_COMMANDS: &[(&str, &str)] = &[
+    ("new", "Start a new conversation"),
+    ("status", "Check job status"),
+    ("help", "Show available commands"),
+    ("stop", "Stop current processing"),
+    ("clear", "Clear conversation history"),
+    ("compact", "Compact conversation context"),
+    ("summarize", "Summarize the conversation"),
+    ("suggest", "Suggest next steps"),
+    ("tools", "List available tools"),
+    ("skills", "List available skills"),
+    ("model", "Show or change AI model"),
+];
+
+/// Register bot commands with Telegram so they appear in the "/" command menu.
+///
+/// Calls the `setMyCommands` Bot API method with default scope (all chats).
+/// This is non-fatal: failure only logs a warning and does not block startup.
+fn register_bot_commands() -> Result<(), String> {
+    let commands: Vec<serde_json::Value> = BOT_COMMANDS
+        .iter()
+        .map(|(cmd, desc)| {
+            serde_json::json!({
+                "command": cmd,
+                "description": desc
+            })
+        })
+        .collect();
+
+    let body = serde_json::json!({ "commands": commands });
+    let body_bytes =
+        serde_json::to_vec(&body).map_err(|e| format!("Failed to serialize body: {}", e))?;
+
+    let headers = serde_json::json!({ "Content-Type": "application/json" });
+
+    let result = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setMyCommands",
+        &headers.to_string(),
+        Some(&body_bytes),
+        None,
+    );
+
+    match result {
+        Ok(response) => {
+            if response.status != 200 {
+                let body_str = String::from_utf8_lossy(&response.body);
+                return Err(format!("HTTP {}: {}", response.status, body_str));
+            }
+
+            let api_response: TelegramApiResponse<bool> =
+                serde_json::from_slice(&response.body)
+                    .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+            if !api_response.ok {
+                return Err(format!(
+                    "Telegram API error: {}",
+                    api_response
+                        .description
+                        .unwrap_or_else(|| "unknown".to_string())
+                ));
+            }
+
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!(
+                    "Bot command menu registered ({} commands)",
+                    BOT_COMMANDS.len()
+                ),
+            );
+
+            Ok(())
+        }
+        Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
 }
 
 // ============================================================================
@@ -2765,5 +2859,45 @@ mod tests {
     fn test_max_download_size_constant() {
         // Verify the constant is 20 MB, matching the Slack channel limit
         assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_bot_commands_are_valid() {
+        // Telegram enforces: 1-32 lowercase chars, only a-z, 0-9, underscore
+        for (cmd, desc) in BOT_COMMANDS {
+            assert!(
+                !cmd.is_empty() && cmd.len() <= 32,
+                "command '{}' length out of range",
+                cmd
+            );
+            assert!(
+                cmd.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "command '{}' contains invalid characters",
+                cmd
+            );
+            assert!(
+                !desc.is_empty() && desc.len() <= 256,
+                "description for '{}' length out of range",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_bot_commands_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for (cmd, _) in BOT_COMMANDS {
+            assert!(seen.insert(cmd), "duplicate command: {}", cmd);
+        }
+    }
+
+    #[test]
+    fn test_bot_commands_known_set() {
+        let commands: Vec<&str> = BOT_COMMANDS.iter().map(|(c, _)| *c).collect();
+        assert!(commands.contains(&"new"));
+        assert!(commands.contains(&"status"));
+        assert!(commands.contains(&"help"));
+        assert!(commands.contains(&"stop"));
     }
 }
