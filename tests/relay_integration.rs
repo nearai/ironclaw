@@ -31,6 +31,41 @@ fn test_client(base_url: &str) -> RelayClient {
     .expect("client build")
 }
 
+// ── Signing secret fetch ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_get_signing_secret_returns_decoded_bytes() {
+    let secret_hex = hex::encode([1u8; 32]);
+    let secret_hex_clone = secret_hex.clone();
+    let app = Router::new().route(
+        "/relay/signing-secret",
+        get(move || {
+            let s = secret_hex_clone.clone();
+            async move { Json(serde_json::json!({"signing_secret": s})) }
+        }),
+    );
+
+    let base_url = start_server(app).await;
+    let client = test_client(&base_url);
+
+    let secret = client.get_signing_secret().await.unwrap();
+    assert_eq!(secret, vec![1u8; 32]);
+}
+
+#[tokio::test]
+async fn test_get_signing_secret_404_returns_error() {
+    let app = Router::new().route(
+        "/relay/signing-secret",
+        get(|| async { (axum::http::StatusCode::NOT_FOUND, "not found") }),
+    );
+
+    let base_url = start_server(app).await;
+    let client = test_client(&base_url);
+
+    let result = client.get_signing_secret().await;
+    assert!(result.is_err());
+}
+
 // ── Proxy call ──────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]

@@ -324,6 +324,10 @@ pub struct ExtensionManager {
             Option<tokio::sync::mpsc::Sender<crate::channels::relay::client::ChannelEvent>>,
         >,
     >,
+    /// Per-instance callback signing secret fetched from channel-relay at activation.
+    /// Stored here so the web gateway can verify incoming callbacks without
+    /// any env var or shared secret.
+    relay_signing_secret_cache: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     /// When `true`, OAuth flows always return an auth URL to the caller
     /// instead of opening a browser on the server via `open::that()`.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
@@ -410,6 +414,7 @@ impl ExtensionManager {
             gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
             relay_config: crate::config::RelayConfig::from_env(),
             relay_event_tx: Arc::new(tokio::sync::Mutex::new(None)),
+            relay_signing_secret_cache: Arc::new(std::sync::Mutex::new(None)),
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
             pending_telegram_verification: RwLock::new(HashMap::new()),
@@ -516,25 +521,13 @@ impl ExtensionManager {
         Arc::clone(&self.relay_event_tx)
     }
 
-    /// Get the relay signing secret for webhook signature verification.
+    /// Get the per-instance callback signing secret for webhook signature verification.
     ///
-    /// Prefers `OPENCLAW_GATEWAY_TOKEN` (the per-instance token that
-    /// channel-relay stores as `metadata.callback_signing_secret`).
-    /// Falls back to the shared `CHANNEL_RELAY_SIGNING_SECRET` from
-    /// `RelayConfig` for backward compatibility.
+    /// Returns the secret that was fetched from channel-relay's
+    /// `/relay/signing-secret` endpoint during `activate_channel_relay`.
+    /// Returns `None` if the relay channel has not been activated yet.
     pub fn relay_signing_secret(&self) -> Option<Vec<u8>> {
-        // Use the per-instance gateway token when available.
-        if let Ok(token) = std::env::var("OPENCLAW_GATEWAY_TOKEN")
-            && !token.is_empty()
-        {
-            return Some(token.into_bytes());
-        }
-        // Fall back to the shared signing secret from relay config.
-        self.relay_config.as_ref().map(|c| {
-            secrecy::ExposeSecret::expose_secret(&c.signing_secret)
-                .as_bytes()
-                .to_vec()
-        })
+        self.relay_signing_secret_cache.lock().ok()?.clone()
     }
 
     /// Inject a registry entry for testing. The entry is added to the discovery
@@ -3924,6 +3917,15 @@ impl ExtensionManager {
             relay_config.request_timeout_secs,
         )
         .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+
+        // Fetch the per-instance signing secret from channel-relay.
+        // This must succeed — there is no fallback.
+        let signing_secret = client.get_signing_secret().await.map_err(|e| {
+            ExtensionError::Config(format!("Failed to fetch relay signing secret: {e}"))
+        })?;
+        if let Ok(mut cache) = self.relay_signing_secret_cache.lock() {
+            *cache = Some(signing_secret);
+        }
 
         // Create the event channel for webhook callbacks
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);

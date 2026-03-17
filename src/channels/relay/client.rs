@@ -121,10 +121,7 @@ impl RelayClient {
     /// Initiate Slack OAuth. Channel-relay derives all URLs from the trusted
     /// instance_url in chat-api. IronClaw only passes an optional CSRF nonce
     /// for validating the callback — no URLs.
-    pub async fn initiate_oauth(
-        &self,
-        state_nonce: Option<&str>,
-    ) -> Result<String, RelayError> {
+    pub async fn initiate_oauth(&self, state_nonce: Option<&str>) -> Result<String, RelayError> {
         let mut query: Vec<(&str, &str)> = vec![];
         if let Some(nonce) = state_nonce {
             query.push(("state_nonce", nonce));
@@ -252,6 +249,40 @@ impl RelayClient {
         resp.json()
             .await
             .map_err(|e| RelayError::Protocol(e.to_string()))
+    }
+
+    /// Fetch the per-instance callback signing secret from channel-relay.
+    ///
+    /// Calls `GET /relay/signing-secret` (authenticated) and returns the decoded
+    /// 32-byte secret. Called once at activation time; the result is cached in the
+    /// extension manager so subsequent calls to `relay_signing_secret()` use it.
+    pub async fn get_signing_secret(&self) -> Result<Vec<u8>, RelayError> {
+        let resp = self
+            .http
+            .get(format!("{}/relay/signing-secret", self.base_url))
+            .bearer_auth(self.api_key.expose_secret())
+            .send()
+            .await
+            .map_err(|e| RelayError::Network(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(RelayError::Api {
+                status,
+                message: body,
+            });
+        }
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| RelayError::Protocol(e.to_string()))?;
+
+        body.get("signing_secret")
+            .and_then(|v| v.as_str())
+            .and_then(|s| hex::decode(s).ok())
+            .ok_or_else(|| RelayError::Protocol("missing signing_secret in response".to_string()))
     }
 
     /// List active connections for an instance.
