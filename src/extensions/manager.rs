@@ -3857,9 +3857,23 @@ impl ExtensionManager {
         )
         .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
-        // Channel-relay derives all OAuth URLs from the trusted instance_url
-        // in chat-api. IronClaw supplies nothing — it just triggers the flow.
-        match client.initiate_oauth().await {
+        // Generate CSRF nonce — IronClaw validates this on the callback to ensure
+        // the OAuth completion is legitimate. Channel-relay embeds it in the signed
+        // state and appends it to the post-OAuth redirect URL.
+        let state_nonce = uuid::Uuid::new_v4().to_string();
+        let state_key = format!("relay:{}:oauth_state", name);
+        let _ = self.secrets.delete(&self.user_id, &state_key).await;
+        self.secrets
+            .create(
+                &self.user_id,
+                CreateSecretParams::new(&state_key, &state_nonce),
+            )
+            .await
+            .map_err(|e| ExtensionError::AuthFailed(format!("Failed to store OAuth state: {e}")))?;
+
+        // Channel-relay derives all URLs from trusted instance_url in chat-api.
+        // We only pass the nonce for CSRF validation on the callback.
+        match client.initiate_oauth(Some(&state_nonce)).await {
             Ok(auth_url) => Ok(AuthResult::awaiting_authorization(
                 name,
                 ExtensionKind::ChannelRelay,
