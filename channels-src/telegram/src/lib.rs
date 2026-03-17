@@ -410,7 +410,10 @@ fn split_message(text: &str) -> Vec<String> {
         let split_at = window.rfind("\n\n")
             // 2. Single newline
             .or_else(|| window.rfind('\n'))
-            // 3. Sentence-ending punctuation followed by space
+            // 3. Sentence-ending punctuation followed by space.
+            //    Note: this only detects ASCII punctuation (. ! ?), not CJK
+            //    sentence-ending marks (。！？). CJK text falls through to
+            //    word-boundary or hard-cut splitting.
             .or_else(|| {
                 let bytes = window.as_bytes();
                 // Search backwards for '. ', '! ', '? '
@@ -426,6 +429,10 @@ fn split_message(text: &str) -> Vec<String> {
         // Avoid empty chunks (e.g. text starting with \n\n).
         let split_at = if split_at == 0 { window_bytes } else { split_at };
 
+        // Trim whitespace at chunk boundaries for clean Telegram display.
+        // Note: this drops leading/trailing spaces at split points, which is
+        // acceptable for chat messages but means the concatenation of chunks
+        // may not exactly equal the original text when split at spaces.
         chunks.push(remaining[..split_at].trim_end().to_string());
         remaining = remaining[split_at..].trim_start();
     }
@@ -2187,6 +2194,55 @@ mod tests {
         let chunks = split_message(&text);
         for chunk in &chunks {
             assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+        }
+    }
+
+    #[test]
+    fn test_split_message_sentence_boundary() {
+        // Build text that exceeds the limit, with sentence boundaries inside.
+        let sentence = "This is a test sentence. ";
+        let repeat_count = TELEGRAM_MAX_MESSAGE_LEN / sentence.len() + 5;
+        let text: String = sentence.repeat(repeat_count);
+        assert!(text.chars().count() > TELEGRAM_MAX_MESSAGE_LEN);
+
+        let chunks = split_message(&text);
+        assert!(chunks.len() > 1);
+        // First chunk should end at a sentence boundary (trimmed)
+        let first = &chunks[0];
+        assert!(
+            first.ends_with('.'),
+            "First chunk should end at a sentence boundary, got: ...{}",
+            &first[first.len().saturating_sub(20)..]
+        );
+    }
+
+    #[test]
+    fn test_split_message_hard_cut_no_spaces() {
+        // Pathological input: a single huge "word" with no spaces or newlines.
+        let text = "x".repeat(TELEGRAM_MAX_MESSAGE_LEN * 2 + 100);
+        let chunks = split_message(&text);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+        }
+        // Rejoined must preserve all characters
+        let rejoined: String = chunks.concat();
+        assert_eq!(rejoined, text);
+    }
+
+    #[test]
+    fn test_split_message_multibyte_chars() {
+        // Emoji are 4 bytes each. Ensure we don't panic or split mid-character.
+        let emoji = "\u{1F600}"; // 😀
+        let text: String = emoji.repeat(TELEGRAM_MAX_MESSAGE_LEN + 100);
+        assert!(text.chars().count() > TELEGRAM_MAX_MESSAGE_LEN);
+
+        let chunks = split_message(&text);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            // Every char should be a complete emoji
+            assert!(chunk.chars().all(|c| c == '\u{1F600}'));
         }
     }
 
