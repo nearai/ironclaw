@@ -120,15 +120,9 @@ impl RelayClient {
     /// returns the `Location` header (Slack OAuth URL) without following it.
     pub async fn initiate_oauth(
         &self,
-        instance_id: &str,
-        user_id: &str,
         callback_url: &str,
     ) -> Result<String, RelayError> {
-        let query: Vec<(&str, &str)> = vec![
-            ("instance_id", instance_id),
-            ("user_id", user_id),
-            ("callback", callback_url),
-        ];
+        let query: Vec<(&str, &str)> = vec![("callback", callback_url)];
 
         let resp = self
             .http
@@ -173,18 +167,61 @@ impl RelayClient {
     /// Proxy an API call through channel-relay for any provider.
     ///
     /// Calls `POST /proxy/{provider}/{method}?team_id=X&instance_id=Y` with the given JSON body.
+    /// Register a pending approval with channel-relay and receive an opaque token.
+    /// The token is embedded in Slack button values instead of routing fields.
+    pub async fn create_approval(
+        &self,
+        team_id: &str,
+        channel_id: &str,
+        thread_ts: Option<&str>,
+        request_id: &str,
+        sender_id: &str,
+    ) -> Result<String, RelayError> {
+        let mut body = serde_json::json!({
+            "team_id": team_id,
+            "channel_id": channel_id,
+            "request_id": request_id,
+            "sender_id": sender_id,
+        });
+        if let Some(ts) = thread_ts {
+            body["thread_ts"] = serde_json::Value::String(ts.to_string());
+        }
+
+        let resp = self
+            .http
+            .post(format!("{}/approvals", self.base_url))
+            .bearer_auth(self.api_key.expose_secret())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| RelayError::Network(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(RelayError::Api { status, message: body });
+        }
+
+        let result: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| RelayError::Protocol(e.to_string()))?;
+
+        result
+            .get("approval_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| RelayError::Protocol("missing approval_token in response".to_string()))
+    }
+
     pub async fn proxy_provider(
         &self,
         provider: &str,
         team_id: &str,
         method: &str,
         body: serde_json::Value,
-        instance_id: Option<&str>,
     ) -> Result<serde_json::Value, RelayError> {
-        let mut query: Vec<(&str, &str)> = vec![("team_id", team_id)];
-        if let Some(iid) = instance_id {
-            query.push(("instance_id", iid));
-        }
+        let query: Vec<(&str, &str)> = vec![("team_id", team_id)];
         let resp = self
             .http
             .post(format!("{}/proxy/{}/{}", self.base_url, provider, method))

@@ -123,13 +123,7 @@ impl RelayChannel {
         body: serde_json::Value,
     ) -> Result<serde_json::Value, crate::channels::relay::client::RelayError> {
         self.client
-            .proxy_provider(
-                self.provider.as_str(),
-                team_id,
-                method,
-                body,
-                Some(&self.instance_id),
-            )
+            .proxy_provider(self.provider.as_str(), team_id, method, body)
             .await
     }
 }
@@ -311,15 +305,18 @@ impl Channel for RelayChannel {
             .and_then(|v| v.as_str())
             .unwrap_or(&self.team_id);
 
-        // Button value payload (Slack limits button values to 2000 chars;
-        // safe with typical UUIDs but documented here as a constraint)
+        // Register server-side approval record and get opaque token.
+        // The button value contains ONLY the token — no routing fields.
+        let approval_token = self
+            .client
+            .create_approval(team_id, channel_id, thread_id, &request_id, sender_id)
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: self.name().to_string(),
+                reason: format!("Failed to register approval: {e}"),
+            })?;
         let value_payload = serde_json::json!({
-            "instance_id": self.instance_id,
-            "team_id": team_id,
-            "channel_id": channel_id,
-            "thread_ts": thread_id,
-            "request_id": request_id,
-            "sender_id": sender_id,
+            "approval_token": approval_token,
         });
         let value_str = value_payload.to_string();
 

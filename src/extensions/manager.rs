@@ -3850,10 +3850,7 @@ impl ExtensionManager {
         // Use relay config captured at startup
         let relay_config = self.relay_config()?;
 
-        let instance_id = self.relay_instance_id(relay_config);
-        let user_id_uuid = std::env::var("IRONCLAW_USER_ID").unwrap_or_else(|_| {
-            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, self.user_id.as_bytes()).to_string()
-        });
+
 
         let client = crate::channels::relay::RelayClient::new(
             relay_config.url.clone(),
@@ -3893,7 +3890,7 @@ impl ExtensionManager {
         );
 
         match client
-            .initiate_oauth(&instance_id, &user_id_uuid, &callback_url)
+            .initiate_oauth(&callback_url)
             .await
         {
             Ok(auth_url) => Ok(AuthResult::awaiting_authorization(

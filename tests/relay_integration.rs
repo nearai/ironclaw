@@ -60,7 +60,7 @@ async fn test_proxy_provider_sends_correct_payload() {
         "text": "Hello from test",
     });
     let resp = client
-        .proxy_provider("slack", "T123", "chat.postMessage", body, None)
+        .proxy_provider("slack", "T123", "chat.postMessage", body)
         .await
         .unwrap();
     assert_eq!(resp["ok"], true);
