@@ -303,11 +303,22 @@ pub fn is_nearai_companion_server_name(name: &str) -> bool {
 pub fn derive_nearai_companion_mcp_server(
     config: &crate::config::Config,
 ) -> Option<McpServerConfig> {
-    if config.llm.backend != "nearai" {
+    derive_nearai_companion_mcp_server_from_llm(&config.llm)
+}
+
+/// Build the companion chat-api MCP server from an LLM config.
+///
+/// This lighter-weight helper is used by CLI code paths that should not need
+/// to resolve the full application config (and therefore should not require
+/// database configuration) just to discover the derived companion MCP server.
+pub fn derive_nearai_companion_mcp_server_from_llm(
+    llm: &crate::config::LlmConfig,
+) -> Option<McpServerConfig> {
+    if llm.backend != "nearai" {
         return None;
     }
 
-    let base = config.llm.nearai.base_url.trim_end_matches('/');
+    let base = llm.nearai.base_url.trim_end_matches('/');
     let mcp_base = base
         .strip_suffix("/v1")
         .unwrap_or(base)

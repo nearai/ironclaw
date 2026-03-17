@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 
-use crate::config::Config;
+use crate::config::{Config, LlmConfig};
 use crate::db::Database;
 use crate::secrets::SecretsStore;
+use crate::settings::Settings;
 use crate::tools::mcp::{
     McpClient, McpProcessManager, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
@@ -506,54 +507,68 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     // Create client
     let session_manager = Arc::new(McpSessionManager::new());
-
-    // Always check for stored tokens (from either pre-configured OAuth or DCR)
-    let secrets = get_secrets_store().await?;
-    let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
-
-    let client = if server.uses_runtime_auth_source() {
+    let (client, has_tokens) = if server.uses_runtime_auth_source() {
         let process_manager = Arc::new(McpProcessManager::new());
-        let config = crate::config::Config::from_env().await?;
-        let nearai_session = crate::llm::create_session_manager(config.llm.session.clone()).await;
-        create_client_from_config(
-            server.clone(),
-            &session_manager,
-            Some(nearai_session),
-            config.llm.nearai.api_key.clone(),
-            &process_manager,
-            None,
-            "default",
+        let llm = resolve_llm_from_env()?;
+        let nearai_session = crate::llm::create_session_manager(llm.session.clone()).await;
+        (
+            create_client_from_config(
+                server.clone(),
+                &session_manager,
+                Some(nearai_session),
+                llm.nearai.api_key.clone(),
+                &process_manager,
+                None,
+                "default",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?,
+            false,
         )
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?
-    } else if has_tokens {
-        // We have stored tokens, use authenticated client
-        McpClient::new_authenticated(server.clone(), session_manager.clone(), secrets, user_id)
-    } else if server.requires_auth() {
-        // OAuth configured but no tokens - need to authenticate
-        println!();
-        println!(
-            "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
-            name
-        );
-        println!();
-        return Ok(());
     } else {
-        // Use the factory to dispatch on transport type (HTTP, stdio, unix)
-        let process_manager = Arc::new(McpProcessManager::new());
-        let config = crate::config::Config::from_env().await?;
-        let nearai_session = crate::llm::create_session_manager(config.llm.session.clone()).await;
-        create_client_from_config(
-            server.clone(),
-            &session_manager,
-            Some(nearai_session),
-            config.llm.nearai.api_key.clone(),
-            &process_manager,
-            None,
-            "default",
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?
+        // Only initialize the secrets store for non-runtime-auth servers that
+        // can actually use persisted OAuth/DCR tokens.
+        let secrets = get_secrets_store().await?;
+        let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
+
+        if has_tokens {
+            (
+                McpClient::new_authenticated(
+                    server.clone(),
+                    session_manager.clone(),
+                    secrets,
+                    user_id,
+                ),
+                true,
+            )
+        } else if server.requires_auth() {
+            println!();
+            println!(
+                "  ✗ Not authenticated. Run 'ironclaw mcp auth {}' first.",
+                name
+            );
+            println!();
+            return Ok(());
+        } else {
+            // Use the factory to dispatch on transport type (HTTP, stdio, unix)
+            let process_manager = Arc::new(McpProcessManager::new());
+            let llm = resolve_llm_from_env()?;
+            let nearai_session = crate::llm::create_session_manager(llm.session.clone()).await;
+            (
+                create_client_from_config(
+                    server.clone(),
+                    &session_manager,
+                    Some(nearai_session),
+                    llm.nearai.api_key.clone(),
+                    &process_manager,
+                    None,
+                    "default",
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+                false,
+            )
+        }
     };
 
     // Test connection
@@ -667,8 +682,8 @@ async fn load_servers(db: Option<&dyn Database>) -> Result<McpServersFile, confi
         config::load_mcp_servers().await?
     };
 
-    if let Ok(cfg) = Config::from_env().await
-        && let Some(companion) = config::derive_nearai_companion_mcp_server(&cfg)
+    if let Ok(llm) = resolve_llm_from_env()
+        && let Some(companion) = config::derive_nearai_companion_mcp_server_from_llm(&llm)
     {
         servers.insert_if_absent(companion);
     }
@@ -691,6 +706,10 @@ async fn save_servers(
 /// Initialize and return the secrets store.
 async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
     crate::cli::init_secrets_store().await
+}
+
+fn resolve_llm_from_env() -> Result<LlmConfig, crate::error::ConfigError> {
+    LlmConfig::resolve(&Settings::default())
 }
 
 #[cfg(test)]
