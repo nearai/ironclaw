@@ -455,6 +455,11 @@ pub struct AgentSettings {
     /// Maximum tokens per job (0 = unlimited).
     #[serde(default)]
     pub max_tokens_per_job: u64,
+
+    /// User IDs allowed to interact with the agent across all channels.
+    /// Empty list = allow all users (backward compatible).
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
 }
 
 fn default_agent_name() -> String {
@@ -512,6 +517,7 @@ impl Default for AgentSettings {
             auto_approve_tools: false,
             default_timezone: default_timezone(),
             max_tokens_per_job: 0,
+            allowed_users: Vec::new(),
         }
     }
 }

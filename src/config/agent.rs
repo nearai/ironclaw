@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::config::helpers::{parse_bool_env, parse_option_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_option_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -31,6 +31,9 @@ pub struct AgentConfig {
     pub default_timezone: String,
     /// Maximum tokens per job (0 = unlimited).
     pub max_tokens_per_job: u64,
+    /// User IDs allowed to interact with the agent across all channels.
+    /// Empty list = allow all users (backward compatible).
+    pub allowed_users: Vec<String>,
 }
 
 impl AgentConfig {
@@ -53,6 +56,7 @@ impl AgentConfig {
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
             max_tokens_per_job: 0,
+            allowed_users: vec![],
         }
     }
 
@@ -112,6 +116,21 @@ impl AgentConfig {
                 "AGENT_MAX_TOKENS_PER_JOB",
                 settings.agent.max_tokens_per_job,
             )?,
+            allowed_users: {
+                let from_env = optional_env("ALLOWED_USERS")?
+                    .map(|s| {
+                        s.split(',')
+                            .map(|e| e.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if from_env.is_empty() {
+                    settings.agent.allowed_users.clone()
+                } else {
+                    from_env
+                }
+            },
         })
     }
 }
@@ -119,6 +138,7 @@ impl AgentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::ENV_MUTEX;
 
     #[test]
     fn test_default_timezone_rejects_invalid() {
@@ -134,5 +154,22 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    #[test]
+    fn test_allowed_users_defaults_to_empty() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert!(config.allowed_users.is_empty());
+    }
+
+    #[test]
+    fn test_allowed_users_from_settings() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let mut settings = Settings::default();
+        settings.agent.allowed_users = vec!["user1".to_string(), "user2".to_string()];
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert_eq!(config.allowed_users, vec!["user1", "user2"]);
     }
 }

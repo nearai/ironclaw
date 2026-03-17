@@ -693,6 +693,25 @@ impl Agent {
             // Store successfully extracted document text in workspace for indexing
             self.store_extracted_documents(&message).await;
 
+            // Universal user whitelist — silently drop messages from non-whitelisted senders.
+            // Only enforced when the whitelist is non-empty (empty = allow all, backward compatible).
+            // Internal messages (job monitors, heartbeats) always bypass the check.
+            if !self.config.allowed_users.is_empty()
+                && !message.is_internal
+                && !self
+                    .config
+                    .allowed_users
+                    .iter()
+                    .any(|u| u == &message.sender_id)
+            {
+                tracing::info!(
+                    sender_id = %message.sender_id,
+                    channel = %message.channel,
+                    "Dropping message from non-whitelisted user"
+                );
+                continue;
+            }
+
             // Event-triggered routines consume plain user input before it enters
             // the normal chat/tool pipeline. This avoids a duplicate turn where
             // the main agent responds and the routine also fires on the same
