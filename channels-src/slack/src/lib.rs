@@ -29,6 +29,7 @@ use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, StatusUpdate,
 };
+use exports::near::agent::channel_persistence;
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
 /// Slack event wrapper.
@@ -327,11 +328,6 @@ impl Guest for SlackChannel {
 
     fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
         Err("broadcast not yet implemented for Slack channel".to_string())
-    }
-
-    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
-        // Slack doesn't require mark_as_read functionality
-        Ok(())
     }
 
     fn on_shutdown() {
@@ -717,6 +713,12 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
 }
 
 // Export the component
+impl channel_persistence::Guest for SlackChannel {
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        Ok(()) // No-op: Slack does not require post-persistence actions
+    }
+}
+
 export!(SlackChannel);
 
 #[cfg(test)]

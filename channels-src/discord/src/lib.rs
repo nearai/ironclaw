@@ -32,6 +32,7 @@ use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, PollConfig, StatusUpdate,
 };
+use exports::near::agent::channel_persistence;
 use near::agent::channel_host::{self, EmittedMessage};
 
 /// Discord interaction wrapper.
@@ -471,11 +472,6 @@ impl Guest for DiscordChannel {
 
     fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
         Err("broadcast not yet implemented for Discord channel".to_string())
-    }
-
-    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
-        // Discord doesn't require mark_as_read functionality
-        Ok(())
     }
 
     fn on_shutdown() {
@@ -1207,6 +1203,12 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
         status,
         headers_json: headers.to_string(),
         body,
+    }
+}
+
+impl channel_persistence::Guest for DiscordChannel {
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        Ok(()) // No-op: Discord does not support read receipts
     }
 }
 

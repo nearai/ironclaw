@@ -391,20 +391,6 @@ interface channel {
     /// - Err(string): Delivery failure message
     on-respond: func(response: agent-response) -> result<_, string>;
 
-    /// Called after a message has been persisted to the database.
-    ///
-    /// Channels can use this to perform follow-up actions like
-    /// calling external APIs (e.g., WhatsApp mark_as_read).
-    /// This is optional - channels that don't need it can return Ok.
-    ///
-    /// Arguments:
-    /// - metadata-json: The metadata from the persisted message
-    ///
-    /// Returns:
-    /// - Ok: Post-persistence action completed successfully
-    /// - Err(string): Action failure message (does not block the ACK)
-    on-message-persisted: func(metadata-json: string) -> result<_, string>;
-
     /// Notify the channel of agent status changes.
     ///
     /// Called when the agent starts thinking, finishes, or changes state.
@@ -434,10 +420,38 @@ interface channel {
     on-shutdown: func();
 }
 
+/// Optional persistence callbacks for channels.
+///
+/// Channels that need post-persistence notifications (e.g., WhatsApp mark_as_read)
+/// can export this interface. Channels that don't need it can omit this export
+/// and the host will gracefully skip the callback.
+///
+/// This interface is optional for backward compatibility - existing channels
+/// continue to work without implementing it.
+interface channel-persistence {
+    /// Called after a message has been persisted to the database.
+    ///
+    /// Channels can use this to perform follow-up actions like
+    /// calling external APIs (e.g., WhatsApp mark_as_read).
+    ///
+    /// Arguments:
+    /// - metadata-json: The metadata from the persisted message
+    ///
+    /// Returns:
+    /// - Ok: Post-persistence action completed successfully
+    /// - Err(string): Action failure message (does not block the ACK)
+    on-message-persisted: func(metadata-json: string) -> result<_, string>;
+}
+
 /// World definition for sandboxed channels.
 ///
 /// Channels import host capabilities and export the channel interface.
+///
+/// The channel-persistence interface is optional - channels implement it
+/// if they need persistence callbacks (e.g., WhatsApp mark_as_read).
+/// The host detects this at runtime using get_func() which returns Option.
 world sandboxed-channel {
     import channel-host;
     export channel;
+    export channel-persistence;
 }

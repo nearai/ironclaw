@@ -17,4 +17,8 @@ opt-level = "s"
 lto = true
 strip = true
 
+# Specify the default world for cargo-component
+[package.metadata.component]
+target = "near:agent@0.4.0/sandboxed-channel"
+
 [workspace]

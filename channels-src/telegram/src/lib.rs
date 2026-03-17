@@ -33,6 +33,7 @@ use exports::near::agent::channel::{
     AgentResponse, Attachment, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, PollConfig, StatusType, StatusUpdate,
 };
+use exports::near::agent::channel_persistence;
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
 // ============================================================================
@@ -796,11 +797,6 @@ impl Guest for TelegramChannel {
                 }
             }
         }
-    }
-
-    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
-        // Telegram doesn't require mark_as_read functionality
-        Ok(())
     }
 
     fn on_shutdown() {
@@ -2038,6 +2034,12 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
 }
 
 // Export the component
+impl channel_persistence::Guest for TelegramChannel {
+    fn on_message_persisted(_metadata_json: String) -> Result<(), String> {
+        Ok(()) // No-op: Telegram does not require post-persistence actions
+    }
+}
+
 export!(TelegramChannel);
 
 // ============================================================================

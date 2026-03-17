@@ -32,6 +32,7 @@ use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, StatusUpdate,
 };
+use exports::near::agent::channel_persistence;
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
 // ============================================================================
@@ -529,64 +530,78 @@ impl Guest for WhatsAppChannel {
         Err("broadcast not yet implemented for WhatsApp channel".to_string())
     }
 
-    fn on_message_persisted(metadata_json: String) -> Result<(), String> {
-        // Parse metadata to extract phone_number_id and message_id
-        let metadata: WhatsAppMessageMetadata = match serde_json::from_str(&metadata_json) {
-            Ok(m) => m,
-            Err(e) => {
-                // Best-effort: log and return Ok to avoid blocking ACKs
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!("on_message_persisted: failed to parse metadata: {}", e),
-                );
-                return Ok(());
-            }
-        };
-
-        // Check if mark_as_read is enabled (default: true)
-        // We don't have direct config access here, so we check workspace state
-        let mark_as_read = channel_host::workspace_read("channels/whatsapp/mark_as_read")
-            .map(|s| s != "false")
-            .unwrap_or(true);
-
-        if !mark_as_read {
-            channel_host::log(
-                channel_host::LogLevel::Debug,
-                "on_message_persisted: mark_as_read disabled, skipping",
-            );
-            return Ok(());
-        }
-
-        // Call WhatsApp mark_as_read API
-        let result = mark_message_as_read(&metadata.phone_number_id, &metadata.message_id);
-
-        match result {
-            Ok(()) => {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "on_message_persisted: marked message {} as read",
-                        metadata.message_id
-                    ),
-                );
-            }
-            Err(e) => {
-                // Best-effort: log warning but don't fail (would block webhook ACK)
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!("on_message_persisted: mark_as_read failed: {}", e),
-                );
-            }
-        }
-
-        Ok(())
-    }
-
     fn on_shutdown() {
         channel_host::log(
             channel_host::LogLevel::Info,
             "WhatsApp channel shutting down",
         );
+    }
+}
+
+// ============================================================================
+// Persistence Callback Implementation
+// ============================================================================
+
+/// Metadata extracted from persisted message for mark_as_read callback.
+#[derive(Debug, Deserialize)]
+struct PersistedMessageMetadata {
+    phone_number_id: String,
+    message_id: String,
+}
+
+impl channel_persistence::Guest for WhatsAppChannel {
+    /// Called after a message has been persisted to the database.
+    ///
+    /// This callback is used to mark the message as read in WhatsApp,
+    /// removing the "typing..." indicator from the sender's view.
+    fn on_message_persisted(metadata_json: String) -> Result<(), String> {
+        // Check if mark_as_read is enabled
+        let mark_as_read_enabled = match channel_host::workspace_read("channels/whatsapp/mark_as_read") {
+            Some(s) => s == "true",
+            None => return Ok(()), // Default to disabled if not set
+        };
+
+        if !mark_as_read_enabled {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                "mark_as_read disabled, skipping callback",
+            );
+            return Ok(());
+        }
+
+        // Parse metadata to extract phone_number_id and message_id
+        let metadata: PersistedMessageMetadata = match serde_json::from_str(&metadata_json) {
+            Ok(m) => m,
+            Err(e) => {
+                // Metadata parsing failed - log but don't fail the callback
+                // This can happen for messages without proper routing metadata
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("Failed to parse metadata for mark_as_read: {}", e),
+                );
+                return Ok(()); // Return Ok to not block ACK
+            }
+        };
+
+        // Mark the message as read via WhatsApp Cloud API
+        match mark_message_as_read(&metadata.phone_number_id, &metadata.message_id) {
+            Ok(()) => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("Marked message {} as read", metadata.message_id),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // Log error but return Ok to not block message ACK
+                // The message was already persisted, so we don't want to fail the callback
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to mark message as read: {}", e),
+                );
+                Ok(()) // Always return Ok - mark_as_read failure is non-blocking
+            }
+        }
     }
 }
 

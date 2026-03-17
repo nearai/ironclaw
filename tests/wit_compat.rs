@@ -214,9 +214,8 @@ fn instantiate_tool_component(
 
     // If the WIT added/removed/renamed a function, stub registration
     // or instantiation will fail.
-    // Register stubs for both versioned (0.3.0+) and unversioned (pre-0.3.0) interface
-    // paths so that both old and new WASM artifacts can instantiate.
-    for interface in &["near:agent/host", "near:agent/host@0.3.0"] {
+    // Register stubs for versioned (0.4.0) and unversioned interface paths.
+    for interface in &["near:agent/host", "near:agent/host@0.4.0"] {
         let mut root = linker.root();
         if let Ok(mut host) = root.instance(interface) {
             stub_shared_host_functions(&mut host)?;
@@ -252,9 +251,7 @@ fn instantiate_channel_component(
     wasmtime_wasi::add_to_linker_sync(&mut linker)
         .map_err(|e| format!("WASI linker failed: {e}"))?;
 
-    // Register stubs for both versioned (0.3.0+) and unversioned (pre-0.3.0) interface
-    // paths so that both old and new WASM artifacts can instantiate.
-    // Register stubs under both versioned and unversioned interface paths.
+    // Register stubs for versioned (0.4.0) and unversioned interface paths.
     // This helper avoids repeating the stub registration code.
     fn stub_channel_host(
         host: &mut wasmtime::component::LinkerInstance<'_, TestStoreData>,
@@ -308,13 +305,6 @@ fn instantiate_channel_component(
         let mut host = root
             .instance("near:agent/channel-host")
             .map_err(|e| format!("failed to create unversioned channel-host: {e}"))?;
-        stub_channel_host(&mut host)?;
-    }
-    {
-        let mut root = linker.root();
-        let mut host = root
-            .instance("near:agent/channel-host@0.3.0")
-            .map_err(|e| format!("failed to create versioned channel-host@0.3.0: {e}"))?;
         stub_channel_host(&mut host)?;
     }
     {

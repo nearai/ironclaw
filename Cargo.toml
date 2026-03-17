@@ -18,6 +18,10 @@ exclude = [
     "crates/ironclaw_safety/fuzz",
 ]
 
+# Default world for cargo-component builds
+[workspace.metadata.component]
+default_world = "near:agent@0.4.0/sandboxed-channel"
+
 [package]
 name = "ironclaw"
 version = "0.19.0"

@@ -37,7 +37,7 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 use wasmtime::Store;
-use wasmtime::component::Linker;
+use wasmtime::component::{Linker, TypedFunc};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::channels::wasm::capabilities::ChannelCapabilities;
@@ -1140,6 +1140,91 @@ impl WasmChannel {
         Ok(instance)
     }
 
+    /// Call the optional on_message_persisted callback using raw component model API.
+    ///
+    /// This function:
+    /// 1. Instantiates the component with raw Instance access
+    /// 2. Tries to get the optional `on-message-persisted` function
+    /// 3. If it exists, calls it with the metadata_json argument
+    /// 4. Returns Ok(()) if the export doesn't exist (backward compatibility)
+    ///
+    /// This is best-effort - errors are logged but don't propagate to block ACKs.
+    #[allow(clippy::too_many_arguments)]
+    fn call_optional_persistence_callback(
+        runtime: &WasmChannelRuntime,
+        prepared: &PreparedChannelModule,
+        store: &mut Store<ChannelStoreData>,
+        metadata_json: &str,
+    ) -> Result<(), WasmChannelError> {
+        let engine = runtime.engine();
+
+        // Get the compiled component
+        let component = prepared
+            .component()
+            .ok_or_else(|| {
+                WasmChannelError::Compilation("No compiled component available".to_string())
+            })?
+            .clone();
+
+        // Create linker and add host functions
+        let mut linker = Linker::new(engine);
+        Self::add_host_functions(&mut linker)?;
+
+        // Instantiate with raw Instance access (use reborrow to avoid moving store)
+        let instance = linker.instantiate(&mut *store, &component).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("near:agent") || msg.contains("import") {
+                WasmChannelError::Instantiation(format!(
+                    "{msg}. This may indicate a WIT version mismatch — \
+                         the channel was compiled against a different WIT than the host supports \
+                         (host WIT: {}). Rebuild the channel against the current WIT.",
+                    crate::tools::wasm::WIT_CHANNEL_VERSION
+                ))
+            } else {
+                WasmChannelError::Instantiation(msg)
+            }
+        })?;
+
+        // The optional export function name in WIT format
+        // Format: "[interface-name]::[function-name]"
+        // For "near:agent/channel-persistence" interface with "on-message-persisted" function:
+        const PERSISTENCE_FUNC: &str = "near:agent/channel-persistence::on-message-persisted";
+
+        // Try to get the optional function - returns None if not exported (backward compatible)
+        // Component model uses tuples for params/results: (String,) -> (Result<(), String>,)
+        let typed_func: TypedFunc<(String,), (Result<(), String>,)> =
+            match instance.get_typed_func(&mut *store, PERSISTENCE_FUNC) {
+                Ok(func) => func,
+                Err(_) => {
+                    // Channel doesn't export the optional function - backward compatible
+                    tracing::trace!(
+                        channel = %prepared.name,
+                        "on_message_persisted callback not supported (function not found)"
+                    );
+                    return Ok(());
+                }
+            };
+
+        // Call the function with the metadata_json argument
+        let (result,) = typed_func
+            .call(&mut *store, (metadata_json.to_string(),))
+            .map_err(|e| WasmChannelError::Trapped {
+                name: prepared.name.clone(),
+                reason: e.to_string(),
+            })?;
+
+        // Handle the result
+        if let Err(e) = result {
+            tracing::warn!(
+                channel = %prepared.name,
+                error = %e,
+                "on_message_persisted callback returned error (best-effort)"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Map WASM execution errors to our error types.
     fn map_wasm_error(e: anyhow::Error, name: &str, fuel_limit: u64) -> WasmChannelError {
         let error_str = e.to_string();
@@ -1913,14 +1998,15 @@ impl WasmChannel {
                     host_credentials,
                     pairing_store,
                 )?;
-                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
-                let channel_iface = instance.near_agent_channel();
-                let _ = channel_iface
-                    .call_on_message_persisted(&mut store, &metadata_json)
-                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
-
-                Ok::<_, WasmChannelError>(())
+                // Try to call the optional on_message_persisted callback
+                // Returns Ok(()) if the export doesn't exist (backward compatibility)
+                Self::call_optional_persistence_callback(
+                    &runtime,
+                    &prepared,
+                    &mut store,
+                    &metadata_json,
+                )
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
