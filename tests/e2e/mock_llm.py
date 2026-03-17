@@ -25,6 +25,15 @@ DEFAULT_RESPONSE = "I understand your request."
 
 TOOL_CALL_PATTERNS = [
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
+    (
+        re.compile(r"make approval post (?P<label>[a-z0-9_-]+)", re.IGNORECASE),
+        "http",
+        lambda m: {
+            "method": "POST",
+            "url": f"https://example.com/{m.group('label')}",
+            "json": {"label": m.group("label")},
+        },
+    ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
         re.compile(

@@ -135,42 +135,38 @@ async def test_approval_params_toggle(page):
 async def test_waiting_for_approval_message_no_error_prefix(page):
     """Verify that input submitted while awaiting approval shows non-error status with tool context.
 
-    Tests the real flow: show approval card, then attempt to send input while approval is pending.
-    Backend rejects with Pending result (not Error), and message includes tool context.
+    Trigger a real approval-needed tool call, then attempt to send another message while
+    approval is pending. The backend should reject the second input with a non-error
+    status that includes the pending tool context.
     """
-    # First, inject an approval card to simulate the thread being in AwaitingApproval state
-    await page.evaluate("""
-        showApproval({
-            request_id: 'test-req-waiting-approval',
-            thread_id: currentThreadId,
-            tool_name: 'shell',
-            description: 'Execute: echo hello',
-            parameters: '{"command": "echo hello"}'
-        })
-    """)
-
-    # Wait for approval card to be visible (thread is now in AwaitingApproval state)
-    card = page.locator('.approval-card[data-request-id="test-req-waiting-approval"]')
-    await card.wait_for(state="visible", timeout=5000)
-
-    # Record initial message count
-    initial_count = await page.locator(SEL["message_assistant"]).count()
-
-    # Now attempt to send input while approval is pending
-    # (the backend will reject this and return the "Waiting for approval" status message)
+    assistant_messages = page.locator(SEL["message_assistant"])
     chat_input = page.locator(SEL["chat_input"])
-    await chat_input.fill("Test input while awaiting approval")
+
+    # Trigger a real HTTP tool call that pauses for approval in the default E2E harness.
+    await chat_input.fill("make approval post approval-required")
     await chat_input.press("Enter")
 
-    # Wait for the status message from the backend rejection
+    card = page.locator(SEL["approval_card"]).last
+    await card.wait_for(state="visible", timeout=10000)
+
+    tool_name = await card.locator(".approval-tool-name").text_content()
+    desc_text = await card.locator(".approval-description").text_content()
+    assert tool_name == "http"
+    assert desc_text is not None and "HTTP requests to external APIs" in desc_text
+
+    # With the thread now genuinely awaiting approval, the next message should be rejected
+    # as a non-error pending status.
+    initial_count = await assistant_messages.count()
+    await chat_input.fill("send another message now")
+    await chat_input.press("Enter")
+
     await page.wait_for_function(
         f"() => document.querySelectorAll('{SEL['message_assistant']}').length > {initial_count}",
         timeout=10000,
     )
 
-    # Get the new status message
-    last_msg = page.locator(SEL["message_assistant"]).last
-    msg_text = await last_msg.text_content()
+    last_msg = assistant_messages.last.locator(".message-content")
+    msg_text = await last_msg.inner_text()
 
     # Verify no "Error:" prefix
     assert not msg_text.lower().startswith("error:"), (
@@ -183,9 +179,9 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
     )
 
     # Verify it contains the tool name and description
-    assert "shell" in msg_text.lower(), (
-        f"Expected tool name 'shell' in message. Got: {msg_text!r}"
+    assert "http" in msg_text.lower(), (
+        f"Expected tool name 'http' in message. Got: {msg_text!r}"
     )
-    assert "echo hello" in msg_text, (
+    assert "HTTP requests to external APIs" in msg_text, (
         f"Expected tool description in message. Got: {msg_text!r}"
     )
