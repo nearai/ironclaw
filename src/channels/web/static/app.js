@@ -2935,12 +2935,7 @@ function submitConfigureModal(name, fields, options) {
   var btns = overlay ? overlay.querySelectorAll('.configure-actions button') : [];
   btns.forEach(function(b) { b.disabled = true; });
   if (overlay && isTelegram) {
-    const state = options.telegramAutoVerify ? 'waiting' : overlay.dataset.telegramVerificationState;
-    if (state === 'retry' || options.telegramAutoVerify) {
-      setTelegramConfigureState(overlay, fields, 'waiting');
-    } else {
-      setTelegramConfigureState(overlay, fields, 'waiting');
-    }
+    setTelegramConfigureState(overlay, fields, 'waiting');
   }
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
