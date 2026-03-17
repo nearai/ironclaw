@@ -3500,7 +3500,9 @@ name = "ironclaw_safety"
 version = "0.2.0"
 dependencies = [
  "aho-corasick",
+ "async-trait",
  "regex",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
