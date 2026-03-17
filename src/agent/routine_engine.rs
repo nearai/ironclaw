@@ -487,6 +487,7 @@ impl RoutineEngine {
                 send_notification(
                     &self.notify_tx,
                     &routine.notify,
+                    &routine.user_id,
                     &routine.name,
                     status,
                     Some(summary),
