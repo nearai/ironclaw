@@ -3889,11 +3889,8 @@ impl ExtensionManager {
             callback_base, state_nonce
         );
 
-        // Build webhook URL where channel-relay should POST events to this instance
-        let webhook_url = format!("{}{}", callback_base, relay_config.webhook_path);
-
         match client
-            .initiate_oauth(&callback_url, Some(&webhook_url))
+            .initiate_oauth(&callback_url)
             .await
         {
             Ok(auth_url) => Ok(AuthResult::awaiting_authorization(
