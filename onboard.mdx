@@ -1,123 +1,105 @@
 ---
-title: "Quickstart"
-description: "Create your Agent in minutes"
-icon: rocket
+title: "Onboard"
+description: "Configure your agent's main settings"
+icon: cog
 ---
 
-Go to https://agent.near.ai/ and login with your preferred method, then start creating an IronClaw agent.
+The `onboard` command allows you to configure multiple settings of your agent at once, including your inference provider, LLM, tunnels, and channels. It provides a guided experience to help you set up your agent in minutes.
 
+<Note>
+If you haven't set up your agent yet, follow our [Quickstart guide](../quickstart)
+</Note>
+
+<Warning>
+If you are new to IronClaw, we recommend you to configure [channels](./channels/telegram.md), tools, and other settings one at a time instead of 
+all at once through the `onboard` command.
+</Warning>
+
+---
+
+## Onboarding Wizard
+
+If you are new to IronClaw, we recommend you to configure channels, tools, and other settings one at a time instead of all at once through the onboard command.
 
 <Steps>
 
-<Step title="Create the Agent">
+<Step title="Start the Onboarding Wizard">
 
-Creating and deploying your agent is as simple as filling the required billing information, adding a SSH key, and clicking the "Activate Agent" button. The agent will then be automatically created and deployed in a private instance, and you will be able to connect to it through SSH.
-
-<Accordion title="SSH Key">
-
-To use IronClaw, you will need to provide an SSH key. If you don't have one, you can generate it using the following command in your terminal:
+To start the onboarding wizard, run the following command in your terminal:
 
 ```bash
-ssh-keygen -t rsa -b 4096 -C "you@example.com"
-cat ~/.ssh/id_rsa.pub
+ironclaw onboard
 ```
-
-</Accordion>
-
-</Step>
-<Step title="Connect to your Private Instance">
-
-Connect to your agent's private instance through `SSH` using the address provided in the [Agent Dashboard](https://agent.near.ai/):
-
-```bash
-> ssh -p <PORT> liquid-horse@agent2.near.ai
-
-#Linux 522eab21e8e4 6.9.0-dstack #1 SMP PREEMPT_DYNAMIC Thu May 30 14:26:20 UTC 2024 x86_64
-
-#Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent permitted by applicable law.
-agent@1v4d3v23e8f1:~$
-```
-
-<Accordion title="Issues Connecting?">
-Remember to add your SSH key to your device's SSH agent before connecting:
-
-```bash
-ssh-add ~/.ssh/id_rsa
-```
-
-</Accordion>
 
 </Step>
 
-<Step title="Start the Agent">
+<Step title="Select the Database Path">
 
-Once you have successfully connected to your agent's private instance, you can start your agent for the first time
-
-```bash
-ironclaw
-```
-
-<Accordion title="⚠️ Error: Another IronClaw instance is already running">
-
-If you get the error `Error: Another IronClaw instance is already running (PID 38). If this is incorrect, remove the stale PID file: /home/agent/.ironclaw/ironclaw.pid`, simply run the following command to remove the stale PID file and try starting the agent again:
-
-```
-# Remove the stale PID file
-rm /home/agent/.ironclaw/ironclaw.pid
-
-# Then start the agent again
-ironclaw
-```
-
-</Accordion>
-
-Since this is the first time you are starting your agent, it will ask you to configure your inference provider, and the LLM you want to use.
-
-![setup](/images/quickstart/setup-wizard.png)
-
-<Note>
-We recommend using [NEAR AI](https://cloud.near.ai/) as your inference provider for maximum privacy and security, and the `Qwen3-30B` model for its cost-effectiveness
-</Note>
-
-<Accordion title="⚠️ Error: Failed to start webhook server">
-
-If you encounter the error `Error: Channel webhook_server failed to start: Failed to bind to 0.0.0.0:8080: Address already in use (os error 98)`, simply try setting a different HTTP port:
-
-```
-# Change the default HTTP port to 8081
-export HTTP_PORT=8081
-
-# Then start the agent again
-ironclaw
-```
-
-</Accordion>
+The wizard will first ask you to select a path for the agent's database, by default `/home/agent/.ironclaw/ironclaw.db`. This is where the agent will store your configuration.
 
 </Step>
 
-<Step title="Talk with your Agent">
+<Step title="Secrets Management">
 
-Once your agent is up and running, you can start interacting with it through the terminal, simply type your message and the agent will respond
+Choose were to store your master secrets key, which is used to encrypt all your credentials.
 
-![hello-ai](/images/quickstart/hello-ai.png)
-
+The recommended option is to use the system's keyring, but if you are running in an environment without a keyring (like a server or a container), prefer to store the master key in an environment variable
 
 </Step>
 
+<Step title="Inference Provider and LLM">
+
+Built-in providers include Anthropic, OpenAI, Google Gemini, MiniMax, Mistral, and Ollama (local).
+
+We recommend using [NEAR AI](https://cloud.near.ai/) as your inference provider for maximum privacy and security, and the `Qwen3-30B` model to start for its cost-effectiveness.
+
+</Step>
+
+<Step title="Enable Semantics">
+
+Embeddings enable semantic search in your workspace memory, we recommend enabling it.
+
+</Step>
+
+<Step title="Configure Tunnel & Channels">
+
+Tunnels are used to securely expose your agent's API to the internet, which is required for channels to work. We recommend using [ngrok](https://dashboard.ngrok.com/) for its ease of use and reliability.
+
+After configuring your tunnel, you can select which channels you want to enable for your agent, so it can listen and respond to messages from, for example, Telegram, Slack, or Discord. 
+
+You can always add more channels later.
+
+</Step>
+
+<Step title="Tools / Extensions">
+
+You can configure which tools and extensions you want to enable for your agent. They are used by the agent to perform actions, like searching the web, reading and sending emails, using github, and more.
+
+You can always add more tools and extensions later.
+
+</Step>
+
+<Step title="Docker Sandboxing">
+
+IronClaw can execute code, run builds, and use tools inside Docker
+containers. This keeps your system safe -- commands from the LLM run
+in an isolated sandbox with no access to your credentials, limited
+filesystem access, and network traffic restricted to an allowlist.
+
+<Info>
+
+If you are running IronClaw in an environment without Docker (like a server or a container), you can disable sandboxing
+</Info>
+
+</Step>
+
+<Step title="Background Tasks">
+
+Heartbeat runs periodic background tasks (e.g., checking your calendar,
+monitoring for notifications, running scheduled workflows).
+
+We recommend enabling it to unlock the full potential of your agent, but you can always disable it later if you prefer.
+
+</Step>
 
 </Steps>
-
-
----
-
-## Next Steps
-
-Now that you have your agent up and running, it is time to configure a new [channel](./channels/telegram) to interact with your agent from your preferred messaging platform, and add some [tools](./tools/web-search) to give your agent more capabilities.
-
-<Card title="Channels" icon="plug" href="/channels/telegram">
-  Connect your agent to your favorite messaging platform.
-</Card>
-
-<Card title="Tools" icon="wrench" href="#">
-  Soon: Give your agent access to external APIs and services.
-</Card>

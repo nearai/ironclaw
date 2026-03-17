@@ -34,13 +34,20 @@
             "group": "Getting started",
             "pages": [
               "index",
-              "quickstart"
+              "quickstart",
+              "onboard"
             ]
           },
           {
             "group": "Channels",
             "pages": [
               "channels/telegram"
+            ]
+          },
+          {
+            "group": "Extensions (Tools)",
+            "pages": [
+              "channels/web-search"
             ]
           }
         ]
