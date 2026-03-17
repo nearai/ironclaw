@@ -517,7 +517,19 @@ impl ExtensionManager {
     }
 
     /// Get the relay signing secret for webhook signature verification.
+    ///
+    /// Prefers `OPENCLAW_GATEWAY_TOKEN` (the per-instance token that
+    /// channel-relay stores as `metadata.callback_signing_secret`).
+    /// Falls back to the shared `CHANNEL_RELAY_SIGNING_SECRET` from
+    /// `RelayConfig` for backward compatibility.
     pub fn relay_signing_secret(&self) -> Option<Vec<u8>> {
+        // Use the per-instance gateway token when available.
+        if let Ok(token) = std::env::var("OPENCLAW_GATEWAY_TOKEN")
+            && !token.is_empty()
+        {
+            return Some(token.into_bytes());
+        }
+        // Fall back to the shared signing secret from relay config.
         self.relay_config.as_ref().map(|c| {
             secrecy::ExposeSecret::expose_secret(&c.signing_secret)
                 .as_bytes()

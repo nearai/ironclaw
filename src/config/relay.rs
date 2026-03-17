@@ -38,9 +38,10 @@ impl std::fmt::Debug for RelayConfig {
 impl RelayConfig {
     /// Load relay config from environment variables.
     ///
-    /// Returns `None` if any required env var (`CHANNEL_RELAY_URL`,
-    /// `CHANNEL_RELAY_API_KEY`, `CHANNEL_RELAY_SIGNING_SECRET`) is not set,
-    /// making the relay integration opt-in.
+    /// Returns `None` if either of the required env vars (`CHANNEL_RELAY_URL`,
+    /// `CHANNEL_RELAY_API_KEY`) is not set, making the relay integration opt-in.
+    /// `CHANNEL_RELAY_SIGNING_SECRET` is now optional — `OPENCLAW_GATEWAY_TOKEN`
+    /// is preferred as the per-instance callback signing secret.
     pub fn from_env() -> Option<Self> {
         Self::from_env_reader(|key| std::env::var(key).ok())
     }
@@ -66,7 +67,12 @@ impl RelayConfig {
     fn from_env_reader(env: impl Fn(&str) -> Option<String>) -> Option<Self> {
         let url = env("CHANNEL_RELAY_URL")?;
         let api_key = SecretString::from(env("CHANNEL_RELAY_API_KEY")?);
-        let signing_secret = SecretString::from(env("CHANNEL_RELAY_SIGNING_SECRET")?);
+        // CHANNEL_RELAY_SIGNING_SECRET is now optional: OPENCLAW_GATEWAY_TOKEN
+        // is the preferred per-instance signing secret. Fall back to an empty
+        // string so the field is always present in the struct.
+        let signing_secret = SecretString::from(
+            env("CHANNEL_RELAY_SIGNING_SECRET").unwrap_or_default(),
+        );
         Some(Self {
             url,
             api_key,
@@ -92,13 +98,18 @@ mod tests {
     }
 
     #[test]
-    fn from_env_reader_returns_none_without_signing_secret() {
+    fn from_env_reader_loads_without_signing_secret() {
+        // CHANNEL_RELAY_SIGNING_SECRET is now optional — relay config loads
+        // with just URL + API key; signing uses OPENCLAW_GATEWAY_TOKEN instead.
         let config = RelayConfig::from_env_reader(|key| match key {
             "CHANNEL_RELAY_URL" => Some("http://localhost:3001".into()),
             "CHANNEL_RELAY_API_KEY" => Some("test-key".into()),
             _ => None,
         });
-        assert!(config.is_none(), "signing_secret is required");
+        assert!(
+            config.is_some(),
+            "relay config should load without signing_secret"
+        );
     }
 
     #[test]
