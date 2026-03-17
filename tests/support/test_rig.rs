@@ -642,7 +642,6 @@ impl TestRigBuilder {
             },
             transcription: None,
             document_extraction: None,
-            wasm_router: None,
         };
 
         // 7. Create TestChannel and ChannelManager.

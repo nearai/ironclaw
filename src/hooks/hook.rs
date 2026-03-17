@@ -21,6 +21,10 @@ pub enum HookPoint {
     OnSessionEnd,
     /// Transform the final response before completing a turn.
     TransformResponse,
+    /// After a user message is persisted to the database.
+    /// Fired after successful DB persistence. Used by WASM channels to signal
+    /// ACK for webhooks (e.g., WhatsApp mark_as_read callback).
+    OnMessagePersisted,
 }
 
 impl HookPoint {
@@ -33,6 +37,7 @@ impl HookPoint {
             HookPoint::OnSessionStart => "onSessionStart",
             HookPoint::OnSessionEnd => "onSessionEnd",
             HookPoint::TransformResponse => "transformResponse",
+            HookPoint::OnMessagePersisted => "onMessagePersisted",
         }
     }
 }
@@ -72,6 +77,12 @@ pub enum HookEvent {
         thread_id: String,
         response: String,
     },
+    /// A user message was persisted to the database.
+    MessagePersisted {
+        channel: String,
+        message_id: String,
+        metadata: serde_json::Value,
+    },
 }
 
 impl HookEvent {
@@ -84,6 +95,7 @@ impl HookEvent {
             HookEvent::SessionStart { .. } => HookPoint::OnSessionStart,
             HookEvent::SessionEnd { .. } => HookPoint::OnSessionEnd,
             HookEvent::ResponseTransform { .. } => HookPoint::TransformResponse,
+            HookEvent::MessagePersisted { .. } => HookPoint::OnMessagePersisted,
         }
     }
 
@@ -107,6 +119,9 @@ impl HookEvent {
             }
             HookEvent::SessionStart { .. } | HookEvent::SessionEnd { .. } => {
                 // Session events don't have modifiable content
+            }
+            HookEvent::MessagePersisted { .. } => {
+                // MessagePersisted events don't have modifiable content
             }
         }
     }

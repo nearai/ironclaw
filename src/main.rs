@@ -349,6 +349,14 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Register WASM message persisted hook if WASM channels are loaded
+    if let Some(ref state) = wasm_channel_runtime_state {
+        use ironclaw::channels::wasm::MessagePersistedHook;
+        let hook = std::sync::Arc::new(MessagePersistedHook::new(Arc::clone(&state.2)));
+        components.hooks.register(hook).await;
+        tracing::debug!("Registered MessagePersisted hook for WASM channel ACK signaling");
+    }
+
     // Add Signal channel if configured and not CLI-only mode.
     if !cli.cli_only
         && let Some(ref signal_config) = config.channels.signal
@@ -623,11 +631,6 @@ async fn async_main() -> anyhow::Result<()> {
         .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
-    // Clone the router for AgentDeps before we tuple is consumed.
-    let wasm_router = wasm_channel_runtime_state
-        .as_ref()
-        .map(|state| Arc::clone(&state.2));
-
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
@@ -732,7 +735,6 @@ async fn async_main() -> anyhow::Result<()> {
         document_extraction: Some(Arc::new(
             ironclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),
-        wasm_router,
     };
 
     let mut agent = Agent::new(

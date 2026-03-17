@@ -81,6 +81,7 @@
 mod bundled;
 mod capabilities;
 mod error;
+mod hook;
 mod host;
 mod loader;
 mod router;
@@ -97,6 +98,7 @@ mod wrapper;
 pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
 pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
 pub use error::WasmChannelError;
+pub use hook::MessagePersistedHook;
 pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
 pub use loader::{
     DiscoveredChannel, LoadResults, LoadedChannel, WasmChannelLoader, default_channels_dir,

@@ -21,13 +21,14 @@ const DEFAULT_WEBHOOK_TIMEOUT_MS: u64 = 2000;
 const DEFAULT_WEBHOOK_MAX_IN_FLIGHT: usize = 32;
 const MAX_HOOK_TIMEOUT_MS: u64 = 30_000;
 
-const ALL_HOOK_POINTS: [HookPoint; 6] = [
+const ALL_HOOK_POINTS: [HookPoint; 7] = [
     HookPoint::BeforeInbound,
     HookPoint::BeforeToolCall,
     HookPoint::BeforeOutbound,
     HookPoint::OnSessionStart,
     HookPoint::OnSessionEnd,
     HookPoint::TransformResponse,
+    HookPoint::OnMessagePersisted,
 ];
 
 /// Errors while parsing or compiling declarative hook bundles.
@@ -515,6 +516,10 @@ enum OutboundWebhookEventSummary {
     ResponseTransform {
         response_length: usize,
     },
+    MessagePersisted {
+        channel: String,
+        message_id: String,
+    },
 }
 
 #[async_trait]
@@ -634,6 +639,14 @@ fn summarize_webhook_event(event: &HookEvent) -> OutboundWebhookEventSummary {
                 response_length: response.len(),
             }
         }
+        HookEvent::MessagePersisted {
+            channel,
+            message_id,
+            ..
+        } => OutboundWebhookEventSummary::MessagePersisted {
+            channel: channel.clone(),
+            message_id: message_id.clone(),
+        },
     }
 }
 
@@ -880,6 +893,7 @@ fn event_user_id(event: &HookEvent) -> &str {
         | HookEvent::SessionStart { user_id, .. }
         | HookEvent::SessionEnd { user_id, .. }
         | HookEvent::ResponseTransform { user_id, .. } => user_id,
+        HookEvent::MessagePersisted { .. } => "",
     }
 }
 
@@ -893,6 +907,11 @@ fn extract_primary_content(event: &HookEvent) -> String {
             session_id.clone()
         }
         HookEvent::ResponseTransform { response, .. } => response.clone(),
+        HookEvent::MessagePersisted {
+            channel,
+            message_id,
+            ..
+        } => format!("{}:{}", channel, message_id),
     }
 }
 

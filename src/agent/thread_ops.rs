@@ -609,15 +609,16 @@ impl Agent {
             return;
         }
 
-        // Signal ACK to WASM channel router after successful persistence
-        if let Some(router) = self.wasm_router() {
-            let ack_key = format!("{}:{}", channel, message_id);
-            let metadata_json = metadata.to_string();
-            tracing::debug!(
-                ack_key = %ack_key,
-                "Signaling ACK to WASM channel router after message persistence"
-            );
-            router.ack_message(&ack_key, &metadata_json).await;
+        // Signal ACK to WASM channels via hook after successful persistence
+        use crate::hooks::hook::HookEvent;
+        let hooks = self.hooks();
+        let event = HookEvent::MessagePersisted {
+            channel: channel.to_string(),
+            message_id: message_id.to_string(),
+            metadata: metadata.clone(),
+        };
+        if let Err(e) = hooks.run(&event).await {
+            tracing::warn!("MessagePersisted hook failed: {}", e);
         }
     }
 
