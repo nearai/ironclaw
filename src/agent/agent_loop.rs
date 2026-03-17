@@ -56,13 +56,10 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 fn resolve_routine_notification_user(metadata: &serde_json::Value) -> Option<String> {
-    metadata
-        .get("notify_user")
-        .and_then(|value| value.as_str())
-        .or_else(|| metadata.get("owner_id").and_then(|value| value.as_str()))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    resolve_owner_scope_notification_user(
+        metadata.get("notify_user").and_then(|value| value.as_str()),
+        metadata.get("owner_id").and_then(|value| value.as_str()),
+    )
 }
 
 fn trimmed_option(value: Option<&str>) -> Option<String> {
@@ -70,6 +67,13 @@ fn trimmed_option(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn resolve_owner_scope_notification_user(
+    explicit_user: Option<&str>,
+    owner_fallback: Option<&str>,
+) -> Option<String> {
+    trimmed_option(explicit_user).or_else(|| trimmed_option(owner_fallback))
 }
 
 async fn resolve_channel_notification_user(
@@ -91,7 +95,7 @@ async fn resolve_channel_notification_user(
         return Some(target);
     }
 
-    trimmed_option(owner_fallback)
+    resolve_owner_scope_notification_user(explicit_user, owner_fallback)
 }
 
 async fn resolve_routine_notification_target(
@@ -440,14 +444,12 @@ impl Agent {
                         .timezone
                         .clone()
                         .or_else(|| Some(self.config.default_timezone.clone()));
+                    let heartbeat_notify_user = resolve_owner_scope_notification_user(
+                        hb_config.notify_user.as_deref(),
+                        Some(self.owner_id()),
+                    );
                     if let Some(channel) = &hb_config.notify_channel
-                        && let Some(user) = resolve_channel_notification_user(
-                            self.deps.extension_manager.as_ref(),
-                            Some(channel),
-                            hb_config.notify_user.as_deref(),
-                            Some(self.owner_id()),
-                        )
-                        .await
+                        && let Some(user) = heartbeat_notify_user.as_deref()
                     {
                         config = config.with_notify(user, channel);
                     }
@@ -458,21 +460,21 @@ impl Agent {
 
                     // Spawn notification forwarder that routes through channel manager
                     let notify_channel = hb_config.notify_channel.clone();
-                    let notify_user = resolve_channel_notification_user(
+                    let notify_target = resolve_channel_notification_user(
                         self.deps.extension_manager.as_ref(),
                         hb_config.notify_channel.as_deref(),
                         hb_config.notify_user.as_deref(),
                         Some(self.owner_id()),
                     )
                     .await;
+                    let notify_user = heartbeat_notify_user;
                     let channels = self.channels.clone();
-                    let extension_manager = self.deps.extension_manager.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
                             // Try the configured channel first, fall back to
                             // broadcasting on all channels.
                             let targeted_ok = if let Some(ref channel) = notify_channel
-                                && let Some(ref user) = notify_user
+                                && let Some(ref user) = notify_target
                             {
                                 channels
                                     .broadcast(channel, user, response.clone())
@@ -482,16 +484,8 @@ impl Agent {
                                 false
                             };
 
-                            if !targeted_ok
-                                && let Some(user) = resolve_channel_notification_user(
-                                    extension_manager.as_ref(),
-                                    notify_channel.as_deref(),
-                                    None,
-                                    notify_user.as_deref(),
-                                )
-                                .await
-                            {
-                                let results = channels.broadcast_all(&user, response).await;
+                            if !targeted_ok && let Some(ref user) = notify_user {
+                                let results = channels.broadcast_all(user, response).await;
                                 for (ch, result) in results {
                                     if let Err(e) = result {
                                         tracing::warn!(
@@ -567,6 +561,13 @@ impl Agent {
                                 .get("notify_channel")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string());
+                            let fallback_user = resolve_owner_scope_notification_user(
+                                response
+                                    .metadata
+                                    .get("notify_user")
+                                    .and_then(|v| v.as_str()),
+                                response.metadata.get("owner_id").and_then(|v| v.as_str()),
+                            );
                             let Some(user) = resolve_routine_notification_target(
                                 extension_manager.as_ref(),
                                 &response.metadata,
@@ -605,7 +606,7 @@ impl Agent {
                                 false
                             };
 
-                            if !targeted_ok {
+                            if !targeted_ok && let Some(user) = fallback_user {
                                 let results = channels.broadcast_all(&user, response).await;
                                 for (ch, result) in results {
                                     if let Err(e) = result {

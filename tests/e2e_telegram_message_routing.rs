@@ -5,7 +5,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -20,7 +20,7 @@ mod tests {
     use ironclaw::db::{Database, libsql::LibSqlBackend};
     use ironclaw::error::ChannelError;
     use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
-    use tokio::sync::mpsc;
+    use tokio::sync::{Mutex, mpsc};
     use tokio_stream::wrappers::ReceiverStream;
 
     use crate::support::test_channel::{TestChannel, TestChannelHandle};
@@ -62,7 +62,7 @@ mod tests {
         ) -> Result<(), ChannelError> {
             self.captures
                 .lock()
-                .expect("telegram capture lock poisoned")
+                .await
                 .push(("respond".to_string(), response));
             Ok(())
         }
@@ -82,7 +82,7 @@ mod tests {
         ) -> Result<(), ChannelError> {
             self.captures
                 .lock()
-                .expect("telegram capture lock poisoned")
+                .await
                 .push((user_id.to_string(), response));
             Ok(())
         }
@@ -122,11 +122,7 @@ mod tests {
         ) -> Vec<(String, OutgoingResponse)> {
             let deadline = tokio::time::Instant::now() + timeout;
             loop {
-                let snapshot = self
-                    .telegram_captures
-                    .lock()
-                    .expect("telegram capture lock poisoned")
-                    .clone();
+                let snapshot = self.telegram_captures.lock().await.clone();
                 if snapshot.len() >= expected || tokio::time::Instant::now() >= deadline {
                     return snapshot;
                 }
