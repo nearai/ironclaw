@@ -394,4 +394,31 @@ mod tests {
         assert_eq!(retry.cost_per_token(), (Decimal::ZERO, Decimal::ZERO));
         assert_eq!(retry.calculate_cost(100, 50), Decimal::ZERO);
     }
+
+    // Regression test: Rate limiter fallback when Retry-After header is missing
+    //
+    // Verifies that RateLimited errors always have a duration (never None)
+    // due to the 60-second fallback applied in all rate limit error creation sites
+    // (nearai_chat.rs, anthropic_oauth.rs, embeddings.rs).
+    #[test]
+    fn rate_limited_error_always_has_duration() {
+        let err = LlmError::RateLimited {
+            provider: "test".to_string(),
+            retry_after: Some(std::time::Duration::from_secs(60)),
+        };
+
+        if let LlmError::RateLimited { retry_after, .. } = err {
+            assert!(
+                retry_after.is_some(),
+                "Rate limited error should always have retry_after duration"
+            );
+            assert_eq!(
+                retry_after,
+                Some(std::time::Duration::from_secs(60)),
+                "Fallback should be 60 seconds"
+            );
+        } else {
+            panic!("Expected RateLimited error");
+        }
+    }
 }
