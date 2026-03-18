@@ -714,7 +714,7 @@ mod tests {
     fn test_tool_wrapper_approval_with_server_override() {
         use crate::tools::mcp::protocol::McpToolAnnotations;
 
-        // Tool without destructive_hint, but server says "always approve"
+        // Tool without destructive_hint, but server requires approval for all tools
         let client = McpClient::new_with_name("k8s-rw", "http://localhost:8080")
             .with_approval_mode(ApprovalMode::Always);
         let tool = McpTool {
@@ -730,7 +730,7 @@ mod tests {
         };
         assert_eq!(
             wrapper.requires_approval(&serde_json::json!({})),
-            ApprovalRequirement::UnlessAutoApproved,
+            ApprovalRequirement::Always,
         );
 
         // Tool with destructive_hint, but server says "never approve"

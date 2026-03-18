@@ -34,7 +34,7 @@ impl ApprovalMode {
     /// tool-level annotation when the mode is `Auto`.
     pub fn to_requirement(self, tool_destructive_hint: bool) -> ApprovalRequirement {
         match self {
-            Self::Always => ApprovalRequirement::UnlessAutoApproved,
+            Self::Always => ApprovalRequirement::Always,
             Self::Never => ApprovalRequirement::Never,
             Self::Auto => {
                 if tool_destructive_hint {
@@ -843,13 +843,14 @@ mod tests {
 
     #[test]
     fn test_approval_mode_to_requirement() {
+        // "always" requires explicit approval — cannot be auto-approved
         assert_eq!(
             ApprovalMode::Always.to_requirement(false),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Always
         );
         assert_eq!(
             ApprovalMode::Always.to_requirement(true),
-            ApprovalRequirement::UnlessAutoApproved
+            ApprovalRequirement::Always
         );
         assert_eq!(
             ApprovalMode::Never.to_requirement(false),
