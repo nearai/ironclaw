@@ -24,7 +24,9 @@ use crate::agent::routine::{
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
 use crate::db::Database;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str,
+};
 
 // ==================== routine_create ====================
 
@@ -173,6 +175,255 @@ fn advanced_properties() -> Value {
     })
 }
 
+fn manual_request_variant() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Manual routines run only when explicitly fired.",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["manual"],
+                "description": "Manual trigger."
+            }
+        },
+        "required": ["kind"]
+    })
+}
+
+fn cron_request_variant() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Cron routines require request.schedule and may optionally set request.timezone.",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["cron"],
+                "description": "Scheduled trigger."
+            },
+            "schedule": {
+                "type": "string",
+                "description": "Cron expression for request.kind='cron'. Uses 6-field cron: second minute hour day month weekday."
+            },
+            "timezone": {
+                "type": "string",
+                "description": "IANA timezone for request.kind='cron', such as 'America/New_York'."
+            }
+        },
+        "required": ["kind", "schedule"]
+    })
+}
+
+fn message_event_request_variant() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Message-event routines require request.pattern and may optionally filter by request.channel.",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["message_event"],
+                "description": "Pattern-matching message trigger."
+            },
+            "pattern": {
+                "type": "string",
+                "description": "Regex pattern for request.kind='message_event'."
+            },
+            "channel": {
+                "type": "string",
+                "description": "Optional channel filter for request.kind='message_event'."
+            }
+        },
+        "required": ["kind", "pattern"]
+    })
+}
+
+fn system_event_request_variant() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "System-event routines require request.source and request.event_type. request.filters is optional.",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["system_event"],
+                "description": "Structured event trigger."
+            },
+            "source": {
+                "type": "string",
+                "description": "Event source namespace for request.kind='system_event', such as 'github'."
+            },
+            "event_type": {
+                "type": "string",
+                "description": "Event type for request.kind='system_event', such as 'issue.opened'."
+            },
+            "filters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": {
+                    "type": ["string", "number", "boolean"]
+                },
+                "description": "Optional exact-match filters for request.kind='system_event'. Only top-level string, number, and boolean payload fields are matched."
+            }
+        },
+        "required": ["kind", "source", "event_type"]
+    })
+}
+
+fn routine_request_discovery_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Canonical trigger config. Set request.kind first, then follow the matching variant branch below.",
+        "properties": routine_request_properties(),
+        "required": ["kind"],
+        "oneOf": [
+            manual_request_variant(),
+            cron_request_variant(),
+            message_event_request_variant(),
+            system_event_request_variant()
+        ],
+        "examples": [
+            { "kind": "manual" },
+            { "kind": "cron", "schedule": "0 0 9 * * MON-FRI", "timezone": "UTC" },
+            { "kind": "message_event", "pattern": "deploy\\s+prod", "channel": "slack" },
+            { "kind": "system_event", "source": "github", "event_type": "issue.opened", "filters": { "repository": "nearai/ironclaw" } }
+        ]
+    })
+}
+
+fn lightweight_execution_variant() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Default lightweight execution. Applies when execution is omitted or execution.mode='lightweight'.",
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["lightweight"],
+                "description": "Lightweight execution mode."
+            },
+            "context_paths": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Workspace paths to preload for lightweight routines."
+            },
+            "use_tools": {
+                "type": "boolean",
+                "description": "When true, safe non-approval tools are available."
+            },
+            "max_tool_rounds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": crate::agent::routine::MAX_TOOL_ROUNDS_LIMIT,
+                "default": 3,
+                "description": "Only applies when use_tools=true. Runtime-capped to prevent loops."
+            }
+        }
+    })
+}
+
+fn full_job_execution_variant() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Full-job execution. Uses tool_permissions and ignores lightweight-only fields such as use_tools, max_tool_rounds, and context_paths.",
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["full_job"],
+                "description": "Full-job execution mode."
+            },
+            "tool_permissions": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Tools pre-authorized for Always-approval checks."
+            }
+        },
+        "required": ["mode"]
+    })
+}
+
+fn execution_discovery_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Optional execution settings. Omit this block for the default lightweight mode.",
+        "properties": execution_properties(),
+        "oneOf": [
+            lightweight_execution_variant(),
+            full_job_execution_variant()
+        ],
+        "examples": [
+            { "mode": "lightweight", "use_tools": true, "max_tool_rounds": 3 },
+            { "mode": "full_job", "tool_permissions": ["message", "http"] }
+        ]
+    })
+}
+
+fn routine_create_examples() -> Vec<Value> {
+    vec![
+        serde_json::json!({
+            "name": "manual-check",
+            "prompt": "Inspect the repo for issues.",
+            "request": { "kind": "manual" }
+        }),
+        serde_json::json!({
+            "name": "weekday-digest",
+            "prompt": "Prepare the morning digest.",
+            "request": {
+                "kind": "cron",
+                "schedule": "0 0 9 * * MON-FRI",
+                "timezone": "UTC"
+            },
+            "delivery": {
+                "channel": "telegram",
+                "user": "ops-team"
+            }
+        }),
+        serde_json::json!({
+            "name": "deploy-watch",
+            "prompt": "Look for deploy requests.",
+            "request": {
+                "kind": "message_event",
+                "pattern": "deploy\\s+prod",
+                "channel": "slack"
+            },
+            "execution": {
+                "mode": "lightweight",
+                "use_tools": true,
+                "max_tool_rounds": 5
+            }
+        }),
+        serde_json::json!({
+            "name": "issue-watch",
+            "prompt": "Summarize new GitHub issues.",
+            "request": {
+                "kind": "system_event",
+                "source": "github",
+                "event_type": "issue.opened",
+                "filters": { "repository": "nearai/ironclaw" }
+            },
+            "execution": {
+                "mode": "full_job",
+                "tool_permissions": ["message"]
+            }
+        }),
+    ]
+}
+
+fn routine_create_tool_summary() -> ToolDiscoverySummary {
+    ToolDiscoverySummary {
+        always_required: vec!["name".into(), "prompt".into(), "request.kind".into()],
+        conditional_requirements: vec![
+            "request.kind='cron' requires request.schedule.".into(),
+            "request.kind='message_event' requires request.pattern.".into(),
+            "request.kind='system_event' requires request.source and request.event_type.".into(),
+            "execution.mode='full_job' uses tool_permissions and ignores use_tools, max_tool_rounds, and context_paths.".into(),
+        ],
+        notes: vec![
+            "Omitting execution defaults to lightweight mode.".into(),
+            "delivery.user defaults to 'default' when omitted.".into(),
+            "advanced.cooldown_secs defaults to 300.".into(),
+            "Legacy flat aliases are still accepted for compatibility, but grouped fields are preferred.".into(),
+        ],
+        examples: routine_create_examples(),
+    }
+}
+
 fn routine_create_schema(include_compatibility_aliases: bool) -> Value {
     let mut schema = serde_json::json!({
         "type": "object",
@@ -189,16 +440,24 @@ fn routine_create_schema(include_compatibility_aliases: bool) -> Value {
                 "type": "string",
                 "description": "Optional human-readable summary of what the routine does."
             },
-            "request": {
-                "type": "object",
-                "description": "Canonical trigger config. Set request.kind first, then only fill fields that match that kind.",
-                "properties": routine_request_properties(),
-                "required": ["kind"]
+            "request": if include_compatibility_aliases {
+                routine_request_discovery_schema()
+            } else {
+                serde_json::json!({
+                    "type": "object",
+                    "description": "Canonical trigger config. Set request.kind first, then only fill fields that match that kind.",
+                    "properties": routine_request_properties(),
+                    "required": ["kind"]
+                })
             },
-            "execution": {
-                "type": "object",
-                "description": "Optional execution settings. Omit for the default lightweight mode.",
-                "properties": execution_properties()
+            "execution": if include_compatibility_aliases {
+                execution_discovery_schema()
+            } else {
+                serde_json::json!({
+                    "type": "object",
+                    "description": "Optional execution settings. Omit for the default lightweight mode.",
+                    "properties": execution_properties()
+                })
             },
             "delivery": {
                 "type": "object",
@@ -347,6 +606,10 @@ fn routine_create_schema(include_compatibility_aliases: bool) -> Value {
                     { "required": ["request"] },
                     { "required": ["trigger_type"] }
                 ]),
+            );
+            schema_obj.insert(
+                "examples".to_string(),
+                Value::Array(routine_create_examples()),
             );
         }
     } else if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
@@ -796,6 +1059,10 @@ impl Tool for RoutineCreateTool {
 
     fn discovery_schema(&self) -> serde_json::Value {
         routine_create_discovery_schema()
+    }
+
+    fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+        Some(routine_create_tool_summary())
     }
 
     async fn execute(
@@ -1446,6 +1713,36 @@ mod tests {
             .unwrap_or_else(|| panic!("missing nested schema property {object_name}.{name}"))
     }
 
+    fn variant_with_kind<'a>(variants: &'a [Value], kind: &str) -> &'a Value {
+        variants
+            .iter()
+            .find(|variant| {
+                variant
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|properties| properties.get("kind"))
+                    .and_then(|kind_schema| kind_schema.get("enum"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|enums| enums.contains(&Value::String(kind.to_string())))
+            })
+            .unwrap_or_else(|| panic!("missing variant for kind={kind}"))
+    }
+
+    fn variant_with_mode<'a>(variants: &'a [Value], mode: &str) -> &'a Value {
+        variants
+            .iter()
+            .find(|variant| {
+                variant
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .and_then(|properties| properties.get("mode"))
+                    .and_then(|mode_schema| mode_schema.get("enum"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|enums| enums.contains(&Value::String(mode.to_string())))
+            })
+            .unwrap_or_else(|| panic!("missing variant for mode={mode}"))
+    }
+
     #[test]
     fn parses_grouped_manual_lightweight_request() {
         let params = serde_json::json!({
@@ -1770,6 +2067,110 @@ mod tests {
                 "discovery schema should retain legacy alias",
             );
         }
+    }
+
+    #[test]
+    fn routine_create_discovery_schema_splits_request_variants() {
+        let schema = routine_create_discovery_schema();
+        let request = schema_property(&schema, "request");
+        let variants = request
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("request.oneOf variants");
+        assert_eq!(variants.len(), 4usize);
+
+        let cron = variant_with_kind(variants, "cron");
+        let cron_required = cron
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("cron required list");
+        assert!(
+            cron_required.contains(&Value::String("schedule".to_string())),
+            "cron variant should require schedule",
+        );
+
+        let message_event = variant_with_kind(variants, "message_event");
+        let message_required = message_event
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("message_event required list");
+        assert!(
+            message_required.contains(&Value::String("pattern".to_string())),
+            "message_event variant should require pattern",
+        );
+
+        let system_event = variant_with_kind(variants, "system_event");
+        let system_required = system_event
+            .get("required")
+            .and_then(Value::as_array)
+            .expect("system_event required list");
+        assert!(
+            system_required.contains(&Value::String("source".to_string()))
+                && system_required.contains(&Value::String("event_type".to_string())),
+            "system_event variant should require source and event_type",
+        );
+    }
+
+    #[test]
+    fn routine_create_discovery_schema_splits_execution_variants() {
+        let schema = routine_create_discovery_schema();
+        let execution = schema_property(&schema, "execution");
+        let variants = execution
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("execution.oneOf variants");
+        assert_eq!(variants.len(), 2usize);
+
+        let lightweight = variant_with_mode(variants, "lightweight");
+        let lightweight_props = lightweight
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("lightweight properties");
+        assert!(
+            lightweight_props.contains_key("use_tools")
+                && lightweight_props.contains_key("context_paths")
+                && lightweight_props.contains_key("max_tool_rounds"),
+            "lightweight variant should expose lightweight-only fields",
+        );
+
+        let full_job = variant_with_mode(variants, "full_job");
+        let full_job_props = full_job
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("full_job properties");
+        assert!(
+            full_job_props.contains_key("tool_permissions"),
+            "full_job variant should expose tool_permissions",
+        );
+    }
+
+    #[test]
+    fn routine_create_discovery_summary_explains_rules_and_examples() {
+        let summary = routine_create_tool_summary();
+
+        assert_eq!(
+            summary.always_required,
+            vec![
+                "name".to_string(),
+                "prompt".to_string(),
+                "request.kind".to_string()
+            ],
+        );
+        assert!(
+            summary
+                .conditional_requirements
+                .iter()
+                .any(|rule| rule.contains("request.kind='cron'")),
+            "summary should explain cron requirement",
+        );
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|note| note.contains("Legacy flat aliases")),
+            "summary should mention legacy aliases",
+        );
+        assert_eq!(summary.examples.len(), 4usize);
     }
 
     #[test]

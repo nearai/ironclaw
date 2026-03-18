@@ -425,7 +425,7 @@ mod tests {
         }
 
         assert_eq!(routine.notify.channel.as_deref(), Some("telegram"));
-        assert_eq!(routine.notify.user, "ops-team");
+        assert_eq!(routine.notify.user.as_deref(), Some("ops-team"));
         assert_eq!(routine.guardrails.cooldown.as_secs(), 30);
 
         rig.shutdown();
@@ -698,10 +698,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: tool_info_discovery (two-level detail)
+    // Test: tool_info_discovery (three-level detail)
     // -----------------------------------------------------------------------
     // Verifies the tool_info built-in returns:
     // - Default (no include_schema): name, description, parameter names array
+    // - `detail: "summary"`: curated summary guidance
     // - With include_schema: true: adds full typed JSON Schema
 
     #[tokio::test]
@@ -724,13 +725,13 @@ mod tests {
 
         rig.verify_trace_expects(&trace, &responses);
 
-        // tool_info should have been called twice (echo + time), both succeeding.
+        // tool_info should have been called three times (echo + routine_create + time), all succeeding.
         let completed = rig.tool_calls_completed();
         let tool_info_calls: Vec<_> = completed.iter().filter(|(n, _)| n == "tool_info").collect();
         assert_eq!(
             tool_info_calls.len(),
-            2,
-            "Expected 2 tool_info calls, got {tool_info_calls:?}"
+            3,
+            "Expected 3 tool_info calls, got {tool_info_calls:?}"
         );
         assert!(
             tool_info_calls.iter().all(|(_, ok)| *ok),
@@ -740,44 +741,71 @@ mod tests {
         // Verify the results contain expected fields.
         let results = rig.tool_results();
         let info_results: Vec<_> = results.iter().filter(|(n, _)| n == "tool_info").collect();
+        let info_json: Vec<serde_json::Value> = info_results
+            .iter()
+            .map(|(_, preview)| {
+                serde_json::from_str(preview)
+                    .expect("tool_info result preview should be valid JSON")
+            })
+            .collect();
 
         // First call was for "echo" (default, no include_schema) — result should
         // contain "echo" and "parameters" as an array of names (not full schema).
-        let echo_result = info_results
+        let echo_json = info_json
             .iter()
-            .find(|(_, preview)| preview.contains("echo"))
+            .find(|info| info["name"] == "echo")
             .expect("tool_info result should contain 'echo'");
         assert!(
-            echo_result.1.contains("message"),
+            echo_json["parameters"]
+                .as_array()
+                .is_some_and(|params| params.iter().any(|param| param == "message")),
             "echo default result should list 'message' parameter name: {:?}",
-            echo_result.1
+            echo_json
         );
         // Default mode should NOT include the full "schema" key
-        let echo_json: serde_json::Value = serde_json::from_str(&echo_result.1)
-            .expect("echo tool_info result should be valid JSON");
         assert!(
             echo_json.get("schema").is_none(),
             "Default tool_info should not include schema field: {:?}",
-            echo_result.1
+            echo_json
         );
 
-        // Second call was for "time" with include_schema: true — result should
-        // contain "time", "schema" field with full object.
-        let time_result = info_results
+        // Second call was for "routine_create" with detail: "summary" — result
+        // should contain a summary object with rules/examples.
+        let routine_json = info_json
             .iter()
-            .find(|(_, preview)| preview.contains("time"))
+            .find(|info| info["name"] == "routine_create")
+            .expect("tool_info result should contain 'routine_create'");
+        assert!(
+            routine_json.get("summary").is_some(),
+            "detail: summary should include summary field: {:?}",
+            routine_json
+        );
+        assert!(
+            routine_json["summary"]["conditional_requirements"]
+                .as_array()
+                .is_some_and(|rules| rules.iter().any(|rule| {
+                    rule.as_str()
+                        .is_some_and(|rule| rule.contains("request.kind='cron'"))
+                })),
+            "routine_create summary should mention cron requirement: {:?}",
+            routine_json
+        );
+
+        // Third call was for "time" with include_schema: true — result should
+        // contain "time", "schema" field with full object.
+        let time_json = info_json
+            .iter()
+            .find(|info| info["name"] == "time")
             .expect("tool_info result should contain 'time'");
-        let time_json: serde_json::Value = serde_json::from_str(&time_result.1)
-            .expect("time tool_info result should be valid JSON");
         assert!(
             time_json.get("schema").is_some(),
             "include_schema: true should include schema field: {:?}",
-            time_result.1
+            time_json
         );
         assert!(
             time_json["schema"]["properties"].is_object(),
             "schema should have properties: {:?}",
-            time_result.1
+            time_json
         );
 
         rig.shutdown();
