@@ -88,7 +88,8 @@ impl RoutineEngine {
         }
     }
 
-    /// Expose the running count for testing. Not intended for production use.
+    /// Expose the running count for integration tests.
+    #[doc(hidden)]
     pub fn running_count_for_test(&self) -> &Arc<AtomicUsize> {
         &self.running_count
     }
@@ -527,8 +528,8 @@ struct FullJobWatcher {
 impl FullJobWatcher {
     /// Poll interval between DB checks.
     const POLL_INTERVAL: Duration = Duration::from_secs(5);
-    /// Safety ceiling: give up after 24 hours.
-    const MAX_POLLS: u32 = 24 * 60 * 60 / 5;
+    /// Safety ceiling: 24 hours, derived from POLL_INTERVAL.
+    const MAX_POLLS: u32 = (24 * 60 * 60) / Self::POLL_INTERVAL.as_secs() as u32;
 
     fn new(store: Arc<dyn Database>, job_id: Uuid, routine_name: String) -> Self {
         Self {
@@ -543,9 +544,8 @@ impl FullJobWatcher {
         let mut polls = 0u32;
 
         let final_status = loop {
-            tokio::time::sleep(Self::POLL_INTERVAL).await;
-            polls += 1;
-
+            // Check job state before sleeping so we finalize promptly
+            // if the job is already done (e.g. fast-failing jobs).
             match self.store.get_job(self.job_id).await {
                 Ok(Some(job_ctx)) => {
                     if !job_ctx.state.is_active() {
@@ -570,6 +570,7 @@ impl FullJobWatcher {
                 }
             }
 
+            polls += 1;
             if polls >= Self::MAX_POLLS {
                 tracing::error!(
                     routine = %self.routine_name,
@@ -578,6 +579,8 @@ impl FullJobWatcher {
                 );
                 break RunStatus::Failed;
             }
+
+            tokio::time::sleep(Self::POLL_INTERVAL).await;
         };
 
         let summary = format!("Job {} finished ({})", self.job_id, final_status);
@@ -767,8 +770,10 @@ fn sanitize_routine_name(name: &str) -> String {
 ///
 /// Fire-and-forget: creates a job via `Scheduler::dispatch_job` (which handles
 /// creation, metadata, persistence, and scheduling), links the routine run to
-/// the job, and returns immediately. The job runs independently via the
-/// existing Worker/Scheduler with full tool access.
+/// the job, then watches it via `FullJobWatcher` until it reaches a
+/// non-active state (not Pending/InProgress/Stuck). Returns the final
+/// `RunStatus` mapped from the job outcome. This keeps the routine run
+/// active for the full job lifetime so concurrency guardrails apply.
 async fn execute_full_job(
     ctx: &EngineContext,
     routine: &Routine,
