@@ -485,8 +485,6 @@ impl RoutineEngine {
                     routine_id = %run.routine_id,
                     "Routine not found for dispatched run finalization"
                 );
-                // Still decrement running count even if routine is gone
-                self.saturating_decrement_running();
                 return;
             }
             Err(e) => {
@@ -494,7 +492,6 @@ impl RoutineEngine {
                     run_id = %run.id,
                     "Failed to load routine for dispatched run: {}", e
                 );
-                self.saturating_decrement_running();
                 return;
             }
         };
@@ -567,22 +564,10 @@ impl RoutineEngine {
         )
         .await;
 
-        // Decrement running count (saturating to handle process restarts)
-        self.saturating_decrement_running();
-    }
-
-    /// Decrement running_count with saturation to prevent underflow
-    /// (e.g. after a process restart where the counter was reset to 0).
-    fn saturating_decrement_running(&self) {
-        self.running_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                if current > 0 {
-                    Some(current - 1)
-                } else {
-                    Some(0) // Already at zero, no-op
-                }
-            })
-            .ok(); // fetch_update returns Err only if the closure returns None
+        // Note: we do NOT decrement running_count here. In normal flow,
+        // execute_routine() handles that after FullJobWatcher returns.
+        // This sync path only runs for crash recovery (process restarted),
+        // where running_count was already reset to 0.
     }
 
     /// Fire a routine manually (from tool call or CLI).
@@ -762,7 +747,11 @@ impl FullJobWatcher {
             // if the job is already done (e.g. fast-failing jobs).
             match self.store.get_job(self.job_id).await {
                 Ok(Some(job_ctx)) => {
-                    if !job_ctx.state.is_active() {
+                    // Use is_parallel_blocking (Pending/InProgress/Stuck) instead
+                    // of is_active (!is_terminal) because routine jobs typically
+                    // stop at Completed — which is NOT terminal but IS finished
+                    // from an execution standpoint.
+                    if !job_ctx.state.is_parallel_blocking() {
                         break Self::map_job_state(&job_ctx.state);
                     }
                 }
