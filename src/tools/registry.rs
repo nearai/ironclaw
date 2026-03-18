@@ -17,10 +17,10 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool,
-    ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
-    ToolUpgradeTool, WriteFileTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, OpenFileTool, PromptQueue,
+    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
+    TimeTool, ToolActivateTool, ToolApprovalTool, ToolAuthTool, ToolInstallTool, ToolListTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain};
@@ -38,6 +38,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "time",
     "json",
     "http",
+    "open_file",
     "shell",
     "read_file",
     "write_file",
@@ -56,6 +57,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "tool_install",
     "tool_auth",
     "tool_activate",
+    "tool_approval",
     "tool_list",
     "tool_remove",
     "routine_create",
@@ -245,6 +247,12 @@ impl ToolRegistry {
         tracing::debug!("Registered {} built-in tools", self.count());
     }
 
+    /// Register host-local file opener (explicitly opt-in local capability).
+    pub fn register_open_file_tool(&self) {
+        self.register_sync(Arc::new(OpenFileTool::new()));
+        tracing::debug!("Registered open_file tool");
+    }
+
     /// Register the `tool_info` discovery tool.
     ///
     /// Requires `Arc<Self>` so the tool can query the registry for other tools'
@@ -401,6 +409,12 @@ impl ToolRegistry {
         }
 
         tracing::debug!("Registered {} job management tools", job_tool_count);
+    }
+
+    /// Register tool-approval management tool (persistent allowlist controls).
+    pub fn register_tool_approval_tool(self: &Arc<Self>, store: Arc<dyn Database>) {
+        self.register_sync(Arc::new(ToolApprovalTool::new(store, Arc::downgrade(self))));
+        tracing::debug!("Registered tool approval management tool");
     }
 
     /// Register secret management tools (list, delete).

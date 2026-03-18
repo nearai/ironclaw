@@ -8,6 +8,7 @@ mod job;
 mod json;
 mod memory;
 mod message;
+mod open_file;
 pub mod path_utils;
 mod restart;
 pub mod routine;
@@ -15,6 +16,7 @@ pub mod secrets_tools;
 pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
+mod tool_approval;
 mod tool_info;
 
 pub use echo::EchoTool;
@@ -31,6 +33,7 @@ pub use job::{
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use open_file::OpenFileTool;
 pub use restart::RestartTool;
 pub use routine::{
     EventEmitTool, RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool,
@@ -40,6 +43,7 @@ pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
+pub use tool_approval::ToolApprovalTool;
 pub use tool_info::ToolInfoTool;
 mod html_converter;
 pub mod image_analyze;

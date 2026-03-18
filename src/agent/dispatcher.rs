@@ -20,6 +20,7 @@ use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext};
+use crate::tools::builtin::path_utils::looks_like_filesystem_path;
 use crate::tools::redact_params;
 
 /// Result of the agentic loop execution.
@@ -486,6 +487,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         for (idx, original_tc) in tool_calls.iter().enumerate() {
             let mut tc = original_tc.clone();
+
+            if tc.name == "memory_read"
+                && let Some(path) = tc.arguments.get("path").and_then(|v| v.as_str())
+                && looks_like_filesystem_path(path)
+            {
+                tc.name = "read_file".to_string();
+                tc.arguments = serde_json::json!({ "path": path });
+            }
 
             let tool_opt = self.agent.tools().get(&tc.name).await;
             let sensitive = tool_opt

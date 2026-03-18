@@ -7,6 +7,7 @@
 //! - Delegate tasks to other services
 //! - Build new software and tools
 
+pub(crate) mod approval;
 pub mod builder;
 pub mod builtin;
 mod coercion;
