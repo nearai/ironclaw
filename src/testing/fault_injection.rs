@@ -147,8 +147,16 @@ impl FaultInjector {
 
     /// Create a fault injector with random failures at the given rate.
     ///
+    /// # Panics
+    ///
+    /// Panics if `error_rate` is not in `0.0..=1.0` or is NaN.
+    ///
     /// The seed is guarded against zero, which is a fixed point for xorshift.
     pub fn random(error_rate: f64, fault: FaultType, seed: u64) -> Self {
+        assert!(
+            !error_rate.is_nan() && (0.0..=1.0).contains(&error_rate),
+            "error_rate must be in 0.0..=1.0 and not NaN, got {error_rate}"
+        );
         let seed = if seed == 0 { 1 } else { seed };
         Self {
             actions: Vec::new(),
@@ -192,7 +200,7 @@ impl FaultInjector {
                     *state ^= *state << 17;
                     (*state as f64) / (u64::MAX as f64)
                 };
-                if random_val < *error_rate {
+                if random_val <= *error_rate {
                     FaultAction::Fail(fault.clone())
                 } else {
                     FaultAction::Succeed
@@ -353,5 +361,72 @@ mod tests {
             .collect();
 
         assert_eq!(run1, run2, "reset() should reproduce the same sequence");
+    }
+
+    #[test]
+    #[should_panic(expected = "error_rate must be in 0.0..=1.0")]
+    fn random_rejects_error_rate_above_one() {
+        FaultInjector::random(1.5, FaultType::RequestFailed, 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "error_rate must be in 0.0..=1.0")]
+    fn random_rejects_negative_error_rate() {
+        FaultInjector::random(-0.1, FaultType::RequestFailed, 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "error_rate must be in 0.0..=1.0 and not NaN")]
+    fn random_rejects_nan_error_rate() {
+        FaultInjector::random(f64::NAN, FaultType::RequestFailed, 42);
+    }
+
+    #[test]
+    fn error_rate_one_always_fails() {
+        let injector = FaultInjector::random(1.0, FaultType::RequestFailed, 42);
+        for _ in 0..100 {
+            assert!(
+                matches!(injector.next_action(), FaultAction::Fail(_)),
+                "error_rate=1.0 must always produce failures"
+            );
+        }
+    }
+
+    #[test]
+    fn error_rate_zero_never_fails() {
+        let injector = FaultInjector::random(0.0, FaultType::RequestFailed, 42);
+        for _ in 0..100 {
+            assert!(
+                matches!(injector.next_action(), FaultAction::Succeed),
+                "error_rate=0.0 must never produce failures"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delay_action_pauses_execution() {
+        tokio::time::pause();
+        let injector = FaultInjector::sequence([
+            FaultAction::Delay(Duration::from_secs(10)),
+            FaultAction::Succeed,
+        ]);
+
+        // First action is a delay
+        let action = injector.next_action();
+        assert!(matches!(action, FaultAction::Delay(d) if d == Duration::from_secs(10)));
+
+        // Simulate what StubLlm does: sleep then succeed
+        if let FaultAction::Delay(d) = action {
+            let start = tokio::time::Instant::now();
+            tokio::time::sleep(d).await;
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed >= Duration::from_secs(10),
+                "delay should have paused for at least 10s, got {elapsed:?}"
+            );
+        }
+
+        // Next action succeeds
+        assert!(matches!(injector.next_action(), FaultAction::Succeed));
     }
 }
