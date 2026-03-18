@@ -45,6 +45,14 @@ struct PendingAuth {
     task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+struct HostedOAuthFlowStart {
+    name: String,
+    kind: ExtensionKind,
+    auth_url: String,
+    expected_state: String,
+    flow: crate::cli::oauth_defaults::PendingOAuthFlow,
+}
+
 /// Runtime infrastructure needed for hot-activating WASM channels.
 ///
 /// Set after construction via [`ExtensionManager::set_channel_runtime`] once the
@@ -533,7 +541,12 @@ impl ExtensionManager {
     async fn gateway_callback_redirect_uri(&self) -> Option<String> {
         use crate::cli::oauth_defaults;
         if oauth_defaults::use_gateway_callback() {
-            return Some(format!("{}/oauth/callback", oauth_defaults::callback_url()));
+            let callback_url = oauth_defaults::callback_url();
+            return Some(if callback_url.ends_with("/oauth/callback") {
+                callback_url
+            } else {
+                format!("{}/oauth/callback", callback_url.trim_end_matches('/'))
+            });
         }
         // Use gateway_base_url from enable_gateway_mode()
         if let Some(ref base) = *self.gateway_base_url.read().await {
@@ -868,6 +881,70 @@ impl ExtensionManager {
     /// by CSRF `state` parameter and complete the token exchange.
     pub fn pending_oauth_flows(&self) -> &crate::cli::oauth_defaults::PendingOAuthRegistry {
         &self.pending_oauth_flows
+    }
+
+    async fn clear_pending_extension_auth(&self, name: &str) {
+        {
+            let mut pending = self.pending_auth.write().await;
+            if let Some(old) = pending.remove(name)
+                && let Some(handle) = old.task_handle
+            {
+                handle.abort();
+            }
+        }
+
+        let mut flows = self.pending_oauth_flows.write().await;
+        flows.retain(|_, flow| flow.extension_name != name);
+    }
+
+    fn rewrite_oauth_state_param(
+        auth_url: String,
+        expected_state: &str,
+        hosted_state: &str,
+    ) -> String {
+        if hosted_state == expected_state {
+            return auth_url;
+        }
+
+        auth_url.replace(
+            &format!("state={}", urlencoding::encode(expected_state)),
+            &format!("state={}", urlencoding::encode(hosted_state)),
+        )
+    }
+
+    async fn start_gateway_oauth_flow(&self, request: HostedOAuthFlowStart) -> AuthResult {
+        use crate::cli::oauth_defaults;
+
+        oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
+
+        let hosted_state = oauth_defaults::build_platform_state(&request.expected_state);
+        let auth_url = Self::rewrite_oauth_state_param(
+            request.auth_url,
+            &request.expected_state,
+            &hosted_state,
+        );
+
+        self.pending_oauth_flows
+            .write()
+            .await
+            .insert(request.expected_state, request.flow);
+
+        self.pending_auth.write().await.insert(
+            request.name.clone(),
+            PendingAuth {
+                _name: request.name.clone(),
+                _kind: request.kind,
+                created_at: std::time::Instant::now(),
+                task_handle: None,
+            },
+        );
+
+        AuthResult::awaiting_authorization(
+            request.name,
+            request.kind,
+            auth_url,
+            "gateway".to_string(),
+        )
     }
 
     /// Broadcast an extension status change to the web UI via SSE.
@@ -2325,6 +2402,7 @@ impl ExtensionManager {
         use crate::cli::oauth_defaults;
 
         let is_gateway = self.should_use_gateway_mode();
+        self.clear_pending_extension_auth(name).await;
 
         // Build redirect URI: gateway uses the public callback URL,
         // local mode binds a random port.
@@ -2382,19 +2460,8 @@ impl ExtensionManager {
         let code_verifier = oauth_result.code_verifier;
 
         if is_gateway {
-            // Gateway mode: store pending flow for the /oauth/callback handler.
-            oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
-
-            // Platform routing: prepend instance name to state
-            let platform_state = oauth_defaults::build_platform_state(&expected_state);
-            let auth_url = if platform_state != expected_state {
-                oauth_result.url.replace(
-                    &format!("state={}", urlencoding::encode(&expected_state)),
-                    &format!("state={}", urlencoding::encode(&platform_state)),
-                )
-            } else {
-                oauth_result.url
-            };
+            let mut token_exchange_extra_params = HashMap::new();
+            token_exchange_extra_params.insert("resource".to_string(), resource.clone());
 
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
@@ -2413,7 +2480,7 @@ impl ExtensionManager {
                 secrets: Arc::clone(&self.secrets),
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
-                resource: Some(resource),
+                token_exchange_extra_params,
                 client_id_secret_name: if server.oauth.is_none() {
                     Some(server.client_id_secret_name())
                 } else {
@@ -2422,27 +2489,15 @@ impl ExtensionManager {
                 created_at: std::time::Instant::now(),
             };
 
-            self.pending_oauth_flows
-                .write()
-                .await
-                .insert(expected_state, flow);
-
-            self.pending_auth.write().await.insert(
-                name.to_string(),
-                PendingAuth {
-                    _name: name.to_string(),
-                    _kind: ExtensionKind::McpServer,
-                    created_at: std::time::Instant::now(),
-                    task_handle: None,
-                },
-            );
-
-            Ok(AuthResult::awaiting_authorization(
-                name,
-                ExtensionKind::McpServer,
-                auth_url,
-                "gateway".to_string(),
-            ))
+            Ok(self
+                .start_gateway_oauth_flow(HostedOAuthFlowStart {
+                    name: name.to_string(),
+                    kind: ExtensionKind::McpServer,
+                    auth_url: oauth_result.url,
+                    expected_state,
+                    flow,
+                })
+                .await)
         } else {
             // Local mode: return URL for manual opening
             self.pending_auth.write().await.insert(
@@ -2843,9 +2898,10 @@ impl ExtensionManager {
                      Enter it in the Setup tab or set {} env var",
                     name, env_name
                 );
-                // Only mention the Google-specific build flag for Google providers
-                if auth.secret_name.to_lowercase().contains("google") {
-                    msg.push_str(", or build with IRONCLAW_GOOGLE_CLIENT_ID");
+                if let Some(override_env) =
+                    crate::cli::oauth_defaults::builtin_client_id_override_env(&auth.secret_name)
+                {
+                    msg.push_str(&format!(", or build with {override_env}"));
                 }
                 msg.push('.');
                 msg
@@ -2861,20 +2917,7 @@ impl ExtensionManager {
             )
             .await;
 
-        // Cancel any existing pending auth for this tool (frees port 9876 in TCP mode)
-        {
-            let mut pending = self.pending_auth.write().await;
-            if let Some(old) = pending.remove(name)
-                && let Some(handle) = old.task_handle
-            {
-                handle.abort();
-            }
-        }
-        // Also clean up any gateway-mode pending flows for this tool
-        {
-            let mut flows = self.pending_oauth_flows.write().await;
-            flows.retain(|_, flow| flow.extension_name != name);
-        }
+        self.clear_pending_extension_auth(name).await;
 
         let redirect_uri = self
             .gateway_callback_redirect_uri()
@@ -2905,24 +2948,6 @@ impl ExtensionManager {
             .unwrap_or_else(|| name.to_string());
 
         if self.should_use_gateway_mode() {
-            // Gateway mode: store pending flow state for the web gateway's
-            // `/oauth/callback` handler to complete the exchange. No TCP listener
-            // needed — the OAuth provider redirects to the gateway URL.
-            oauth_defaults::sweep_expired_flows(&self.pending_oauth_flows).await;
-
-            // Wrap the CSRF nonce with instance name for platform routing.
-            // Nginx at auth.DOMAIN parses `instance:nonce` to route the callback
-            // to the correct container. The flow is keyed by the raw nonce.
-            let platform_state = oauth_defaults::build_platform_state(&expected_state);
-            let auth_url = if platform_state != expected_state {
-                auth_url.replace(
-                    &format!("state={}", urlencoding::encode(&expected_state)),
-                    &format!("state={}", urlencoding::encode(&platform_state)),
-                )
-            } else {
-                auth_url
-            };
-
             let flow = oauth_defaults::PendingOAuthFlow {
                 extension_name: name.to_string(),
                 display_name: display_name.clone(),
@@ -2940,35 +2965,20 @@ impl ExtensionManager {
                 secrets: Arc::clone(&self.secrets),
                 sse_sender: self.sse_sender.read().await.clone(),
                 gateway_token: self.gateway_token.clone(),
-                resource: None,
+                token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             };
 
-            // Key by raw nonce (without instance prefix) — the callback handler
-            // strips the prefix before lookup.
-            self.pending_oauth_flows
-                .write()
-                .await
-                .insert(expected_state, flow);
-
-            // Register pending auth without a task handle (gateway handles completion)
-            self.pending_auth.write().await.insert(
-                name.to_string(),
-                PendingAuth {
-                    _name: name.to_string(),
-                    _kind: ExtensionKind::WasmTool,
-                    created_at: std::time::Instant::now(),
-                    task_handle: None,
-                },
-            );
-
-            Ok(AuthResult::awaiting_authorization(
-                name,
-                ExtensionKind::WasmTool,
-                auth_url,
-                "gateway".to_string(),
-            ))
+            Ok(self
+                .start_gateway_oauth_flow(HostedOAuthFlowStart {
+                    name: name.to_string(),
+                    kind: ExtensionKind::WasmTool,
+                    auth_url,
+                    expected_state,
+                    flow,
+                })
+                .await)
         } else {
             // TCP listener mode: bind port 9876 and spawn a background task
             // to wait for the callback. This is the original flow for local/desktop use.
@@ -6460,7 +6470,7 @@ mod tests {
                 secrets: Arc::clone(&secrets),
                 sse_sender: None,
                 gateway_token: None,
-                resource: None,
+                token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             },
@@ -6484,7 +6494,7 @@ mod tests {
                 secrets,
                 sse_sender: None,
                 gateway_token: None,
-                resource: None,
+                token_exchange_extra_params: std::collections::HashMap::new(),
                 client_id_secret_name: None,
                 created_at: std::time::Instant::now(),
             },
@@ -6811,6 +6821,32 @@ mod tests {
             mgr.gateway_callback_redirect_uri().await,
             Some("https://my-gateway.example.com/oauth/callback".to_string()),
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_callback_redirect_uri_does_not_duplicate_callback_path_from_env() {
+        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://oauth.test.example/oauth/callback",
+            );
+        }
+
+        let mgr = make_manager_with_tunnel(None);
+        assert_eq!(
+            mgr.gateway_callback_redirect_uri().await,
+            Some("https://oauth.test.example/oauth/callback".to_string()),
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
     }
 
     #[tokio::test]

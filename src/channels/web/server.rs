@@ -555,15 +555,25 @@ async fn oauth_callback_handler(
         }
     };
 
-    // Strip instance prefix from state for registry lookup.
-    // Platform nginx sends `state=instance:nonce` but flows are keyed by nonce only.
-    let lookup_key = oauth_defaults::strip_instance_prefix(&state_param);
+    let decoded_state = match oauth_defaults::decode_hosted_oauth_state(&state_param) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            tracing::warn!(
+                state = %state_param,
+                error = %error,
+                "OAuth callback received with malformed state"
+            );
+            clear_auth_mode(&state).await;
+            return oauth_error_page("IronClaw");
+        }
+    };
+    let lookup_key = decoded_state.flow_id.clone();
 
     let flow = ext_mgr
         .pending_oauth_flows()
         .write()
         .await
-        .remove(lookup_key);
+        .remove(&lookup_key);
 
     let flow = match flow {
         Some(f) => f,
@@ -602,28 +612,11 @@ async fn oauth_callback_handler(
     let exchange_proxy_url = std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL").ok();
 
     let result: Result<(), String> = async {
-        let token_response = if let (Some(proxy_url), None) = (&exchange_proxy_url, &flow.resource)
-        {
-            // Use the platform exchange proxy when configured and no resource
-            // parameter is needed. The proxy holds client_secret server-side so
-            // the container never sees it. MCP flows (resource.is_some()) bypass
-            // the proxy because it doesn't forward the RFC 8707 resource param.
+        let token_response = if let Some(proxy_url) = &exchange_proxy_url {
             let gateway_token = flow.gateway_token.as_deref().unwrap_or_default();
             oauth_defaults::exchange_via_proxy(
                 proxy_url,
                 gateway_token,
-                &code,
-                &flow.redirect_uri,
-                flow.code_verifier.as_deref(),
-                &flow.access_token_field,
-            )
-            .await
-            .map_err(|e| e.to_string())?
-        } else {
-            // Direct token exchange: uses exchange_oauth_code_with_resource so MCP
-            // flows can include the RFC 8707 `resource` parameter to scope the
-            // issued token to the specific MCP server.
-            oauth_defaults::exchange_oauth_code_with_resource(
                 &flow.token_url,
                 &flow.client_id,
                 flow.client_secret.as_deref(),
@@ -631,7 +624,20 @@ async fn oauth_callback_handler(
                 &flow.redirect_uri,
                 flow.code_verifier.as_deref(),
                 &flow.access_token_field,
-                flow.resource.as_deref(),
+                &flow.token_exchange_extra_params,
+            )
+            .await
+            .map_err(|e| e.to_string())?
+        } else {
+            oauth_defaults::exchange_oauth_code_with_params(
+                &flow.token_url,
+                &flow.client_id,
+                flow.client_secret.as_deref(),
+                &code,
+                &flow.redirect_uri,
+                flow.code_verifier.as_deref(),
+                &flow.access_token_field,
+                &flow.token_exchange_extra_params,
             )
             .await
             .map_err(|e| e.to_string())?
@@ -658,10 +664,8 @@ async fn oauth_callback_handler(
         .await
         .map_err(|e| e.to_string())?;
 
-        // For MCP OAuth flows (identified by resource field), persist the
-        // client_id so token refresh works without re-authentication.
-        // The CLI flow stores this in authorize_mcp_server(); the gateway
-        // callback must do the same.
+        // Persist the client_id for flows that need it after the session ends
+        // (for example DCR-based MCP refresh).
         if let Some(ref client_id_secret) = flow.client_id_secret_name {
             let params = crate::secrets::CreateSecretParams::new(client_id_secret, &flow.client_id)
                 .with_provider(flow.provider.as_ref().cloned().unwrap_or_default());
@@ -3236,7 +3240,7 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
-            resource: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             created_at,
         };
@@ -3304,7 +3308,7 @@ mod tests {
             secrets,
             sse_sender: Some(sender),
             gateway_token: None,
-            resource: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             created_at,
         };
@@ -3407,7 +3411,7 @@ mod tests {
             secrets,
             sse_sender: None,
             gateway_token: None,
-            resource: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
             client_id_secret_name: None,
             // Expired — handler will reject after lookup (no network I/O)
             created_at,
@@ -3449,6 +3453,85 @@ mod tests {
         );
 
         // Verify the flow was consumed (removed from registry)
+        assert!(
+            ext_mgr
+                .pending_oauth_flows()
+                .read()
+                .await
+                .get("test_nonce")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oauth_callback_accepts_versioned_hosted_state() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
+
+        let Some(created_at) = expired_flow_created_at() else {
+            eprintln!("Skipping versioned OAuth state test: monotonic uptime below expiry window");
+            return;
+        };
+        let flow = crate::cli::oauth_defaults::PendingOAuthFlow {
+            extension_name: "test_tool".to_string(),
+            display_name: "Test Tool".to_string(),
+            token_url: "https://example.com/token".to_string(),
+            client_id: "client123".to_string(),
+            client_secret: None,
+            redirect_uri: "https://example.com/oauth/callback".to_string(),
+            code_verifier: None,
+            access_token_field: "access_token".to_string(),
+            secret_name: "test_token".to_string(),
+            provider: None,
+            validation_endpoint: None,
+            scopes: vec![],
+            user_id: "test".to_string(),
+            secrets,
+            sse_sender: None,
+            gateway_token: None,
+            token_exchange_extra_params: std::collections::HashMap::new(),
+            client_id_secret_name: None,
+            created_at,
+        };
+
+        ext_mgr
+            .pending_oauth_flows()
+            .write()
+            .await
+            .insert("test_nonce".to_string(), flow);
+
+        let state = test_gateway_state(Some(ext_mgr.clone()));
+        let app = test_oauth_router(state);
+        let versioned_state =
+            crate::cli::oauth_defaults::encode_hosted_oauth_state("test_nonce", Some("myinstance"));
+
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/callback?code=fake_code&state={}",
+                urlencoding::encode(&versioned_state)
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("Authorization Failed"));
         assert!(
             ext_mgr
                 .pending_oauth_flows()
