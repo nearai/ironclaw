@@ -109,7 +109,7 @@ mod tests {
         assert!(has_native_thinking("step-3.5-flash-197b"));
         assert!(has_native_thinking("minimax-m2.5-139b"));
         assert!(has_native_thinking("MiniMax-M2.7"));
-        assert!(has_native_thinking("minimax-m2.7-highspeed"));
+        assert!(has_native_thinking("MiniMax-M2.7-highspeed"));
     }
 
     #[test]
