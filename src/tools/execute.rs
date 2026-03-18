@@ -22,10 +22,12 @@ pub async fn execute_tool_with_safety(
     params: &serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, Error> {
-    debug_assert!(
-        !tool_name.is_empty(),
-        "BUG: execute_tool_with_safety called with empty tool_name"
-    );
+    if tool_name.is_empty() {
+        return Err(crate::error::ToolError::NotFound {
+            name: tool_name.to_string(),
+        }
+        .into());
+    }
     let tool = tools
         .get(tool_name)
         .await
