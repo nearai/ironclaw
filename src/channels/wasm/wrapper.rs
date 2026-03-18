@@ -492,8 +492,16 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 tracing::debug!(body = %truncated, "Response body");
             }
 
-            // Leak detection on response body (best-effort)
-            if let Ok(body_str) = std::str::from_utf8(&body) {
+            // Leak detection on response body (best-effort).
+            //
+            // Telegram `getUpdates` is special: it is inbound polling data, so
+            // user-pasted secrets can legitimately appear in the response body.
+            // Those messages are still checked later by the inbound message
+            // safety layer before they reach the LLM, so we allow the polling
+            // response to continue here to avoid poisoning the offset state.
+            if let Ok(body_str) = std::str::from_utf8(&body)
+                && !should_skip_response_leak_scan(&url)
+            {
                 leak_detector
                     .scan_and_clean(body_str)
                     .map_err(|e| format!("Potential secret leak in response: {}", e))?;
@@ -3122,6 +3130,29 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+fn should_skip_response_leak_scan(url: &str) -> bool {
+    let parsed = match url::Url::parse(url) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+
+    if !parsed
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case("api.telegram.org"))
+    {
+        return false;
+    }
+
+    parsed
+        .path_segments()
+        .and_then(|segments| segments.rev().find(|segment| !segment.is_empty()))
+        .is_some_and(|segment| segment == "getUpdates")
+}
+
 /// Pre-resolve host credentials for all HTTP capability mappings.
 ///
 /// Called once per callback (in async context, before spawn_blocking) so the
@@ -4384,6 +4415,22 @@ mod tests {
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_should_skip_response_leak_scan_only_for_telegram_getupdates() {
+        use super::should_skip_response_leak_scan;
+
+        assert!(should_skip_response_leak_scan(
+            "https://api.telegram.org/bot123/getUpdates?offset=1"
+        ));
+        assert!(!should_skip_response_leak_scan(
+            "https://api.telegram.org/bot123/sendMessage"
+        ));
+        assert!(!should_skip_response_leak_scan(
+            "https://api.example.com/getUpdates"
+        ));
+        assert!(!should_skip_response_leak_scan("not a url"));
     }
 
     /// Verify that WASM HTTP host functions work using a dedicated
