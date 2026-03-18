@@ -454,8 +454,8 @@ impl RoutineEngine {
         }
     }
 
-    /// Finalize a dispatched routine run: update DB, send notification,
-    /// persist to conversation thread, and decrement running count.
+    /// Finalize a dispatched routine run: update DB, update routine runtime,
+    /// persist to conversation thread, and send notification.
     async fn complete_dispatched_run(&self, run: &RoutineRun, status: RunStatus, summary: &str) {
         // Complete the run record in DB
         if let Err(e) = self
@@ -496,22 +496,32 @@ impl RoutineEngine {
             }
         };
 
-        // Update consecutive_failures
+        // Update runtime fields. In crash recovery, execute_routine() never
+        // reached its normal runtime update, so we must advance all fields here.
         let new_failures = if status == RunStatus::Failed {
             routine.consecutive_failures + 1
         } else {
             0
         };
 
-        // Only update consecutive_failures; run_count and next_fire_at were
-        // already set at dispatch time in execute_routine().
+        let now = Utc::now();
+        let next_fire = if let Trigger::Cron {
+            ref schedule,
+            ref timezone,
+        } = routine.trigger
+        {
+            next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None)
+        } else {
+            None
+        };
+
         if let Err(e) = self
             .store
             .update_routine_runtime(
                 routine.id,
-                routine.last_run_at.unwrap_or_else(Utc::now),
-                routine.next_fire_at,
-                routine.run_count, // already incremented at dispatch
+                now,
+                next_fire,
+                routine.run_count + 1,
                 new_failures,
                 &routine.state,
             )
@@ -1617,6 +1627,11 @@ pub fn spawn_cron_ticker(
         // Run one check immediately so routines due at startup don't wait
         // an extra full polling interval.
         engine.check_cron_triggers().await;
+
+        // Recover orphaned runs from a previous process crash. Only runs
+        // at startup — during normal operation FullJobWatcher handles
+        // finalization inline, so running this on every tick would race
+        // with the watcher and cause double-completion/duplicate notifications.
         engine.sync_dispatched_runs().await;
 
         let mut ticker = tokio::time::interval(interval);
@@ -1624,7 +1639,6 @@ pub fn spawn_cron_ticker(
         loop {
             ticker.tick().await;
             engine.check_cron_triggers().await;
-            engine.sync_dispatched_runs().await;
         }
     })
 }
