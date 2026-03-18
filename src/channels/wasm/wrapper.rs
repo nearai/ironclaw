@@ -3131,26 +3131,16 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 }
 
 fn should_skip_response_leak_scan(url: &str) -> bool {
-    let parsed = match url::Url::parse(url) {
-        Ok(parsed) => parsed,
-        Err(_) => return false,
-    };
-
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return false;
-    }
-
-    if !parsed
-        .host_str()
-        .is_some_and(|host| host.eq_ignore_ascii_case("api.telegram.org"))
-    {
-        return false;
-    }
-
-    parsed
-        .path_segments()
-        .and_then(|segments| segments.rev().find(|segment| !segment.is_empty()))
-        .is_some_and(|segment| segment == "getUpdates")
+    url::Url::parse(url).map_or(false, |parsed| {
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed
+                .host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case("api.telegram.org"))
+            && parsed
+                .path_segments()
+                .and_then(|segments| segments.rev().find(|segment| !segment.is_empty()))
+                .is_some_and(|segment| segment == "getUpdates")
+    })
 }
 
 /// Pre-resolve host credentials for all HTTP capability mappings.
