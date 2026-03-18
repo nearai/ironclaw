@@ -75,7 +75,7 @@ pub(crate) fn retry_backoff_delay(attempt: u32) -> Duration {
 
 /// Clamp a provider-suggested retry delay to a safe maximum.
 pub(crate) fn cap_retry_after(duration: Duration) -> Duration {
-    Duration::from_secs(duration.as_secs().min(MAX_RETRY_AFTER_SECS))
+    duration.min(Duration::from_secs(MAX_RETRY_AFTER_SECS))
 }
 
 /// Configuration for the retry decorator.
