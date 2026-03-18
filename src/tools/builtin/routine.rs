@@ -66,7 +66,7 @@ struct NormalizedExecutionRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NormalizedDeliveryRequest {
     channel: Option<String>,
-    user: String,
+    user: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +161,7 @@ fn delivery_properties() -> Value {
         },
         "user": {
             "type": "string",
-            "description": "Default user or target for notifications and routine job message calls. Defaults to 'default'."
+            "description": "Default user or target for notifications and routine job message calls. If omitted, the owner's last-seen notification target is used."
         }
     })
 }
@@ -416,7 +416,7 @@ fn routine_create_tool_summary() -> ToolDiscoverySummary {
         ],
         notes: vec![
             "Omitting execution defaults to lightweight mode.".into(),
-            "delivery.user defaults to 'default' when omitted.".into(),
+            "Omitting delivery.user falls back to the owner's last-seen notification target.".into(),
             "advanced.cooldown_secs defaults to 300.".into(),
             "Legacy flat aliases are still accepted for compatibility, but grouped fields are preferred.".into(),
         ],
@@ -879,8 +879,7 @@ fn parse_routine_execution(params: &Value) -> Result<NormalizedExecutionRequest,
 fn parse_routine_delivery(params: &Value) -> NormalizedDeliveryRequest {
     NormalizedDeliveryRequest {
         channel: string_field(params, "delivery", "channel", &["notify_channel"]),
-        user: string_field(params, "delivery", "user", &["notify_user"])
-            .unwrap_or_else(|| "default".to_string()),
+        user: string_field(params, "delivery", "user", &["notify_user"]),
     }
 }
 
@@ -1102,7 +1101,7 @@ impl Tool for RoutineCreateTool {
             },
             notify: NotifyConfig {
                 channel: normalized.delivery.channel.clone(),
-                user: Some(normalized.delivery.user.clone()),
+                user: normalized.delivery.user.clone(),
                 ..NotifyConfig::default()
             },
             last_run_at: None,
@@ -1766,7 +1765,10 @@ mod tests {
             "expected lightweight execution mode",
         );
         assert_eq!(parsed.cooldown_secs, 300);
-        assert_eq!(parsed.delivery.user.as_str(), "default");
+        assert!(
+            parsed.delivery.user.is_none(),
+            "expected omitted delivery.user to remain unspecified",
+        );
     }
 
     #[test]
@@ -1811,7 +1813,7 @@ mod tests {
             vec!["message".to_string(), "http".to_string()],
         );
         assert_eq!(parsed.delivery.channel.as_deref(), Some("telegram"));
-        assert_eq!(parsed.delivery.user.as_str(), "ops-team");
+        assert_eq!(parsed.delivery.user.as_deref(), Some("ops-team"));
         assert_eq!(parsed.cooldown_secs, 30);
     }
 
@@ -1954,7 +1956,7 @@ mod tests {
             vec!["message".to_string()],
         );
         assert_eq!(parsed.delivery.channel.as_deref(), Some("telegram"));
-        assert_eq!(parsed.delivery.user.as_str(), "123");
+        assert_eq!(parsed.delivery.user.as_deref(), Some("123"));
     }
 
     #[test]
@@ -1986,7 +1988,7 @@ mod tests {
             ),
             "expected mixed cron trigger",
         );
-        assert_eq!(parsed.delivery.user.as_str(), "fallback-user");
+        assert_eq!(parsed.delivery.user.as_deref(), Some("fallback-user"));
         assert_eq!(parsed.cooldown_secs, 45);
     }
 

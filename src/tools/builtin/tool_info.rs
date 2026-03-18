@@ -146,8 +146,11 @@ impl Tool for ToolInfoTool {
                 let summary = tool
                     .discovery_summary()
                     .unwrap_or_else(|| fallback_summary(&schema));
-                info["summary"] =
-                    serde_json::to_value(summary).expect("ToolDiscoverySummary should serialize");
+                info["summary"] = serde_json::to_value(summary).map_err(|err| {
+                    ToolError::ExecutionFailed(format!(
+                        "failed to serialize discovery summary: {err}"
+                    ))
+                })?;
             }
             ToolInfoDetail::Schema => {
                 info["schema"] = schema;
