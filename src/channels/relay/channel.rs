@@ -292,13 +292,6 @@ impl Channel for RelayChannel {
                 name: self.name().to_string(),
                 reason: "Missing channel_id for approval buttons".into(),
             })?;
-        let sender_id = metadata
-            .get("sender_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ChannelError::SendFailed {
-                name: self.name().to_string(),
-                reason: "Missing sender_id for approval buttons".into(),
-            })?;
         let thread_id = metadata.get("thread_id").and_then(|v| v.as_str());
         let team_id = metadata
             .get("team_id")
@@ -654,7 +647,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_send_status_approval_dm_missing_sender_id_errors() {
+    async fn test_send_status_approval_dm_without_sender_id_is_ok() {
         let channel = make_channel();
         let metadata = serde_json::json!({
             "event_type": "direct_message",
@@ -674,8 +667,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("sender_id"),
-            "expected sender_id error, got: {err}"
+            !err.contains("sender_id"),
+            "sender_id should not be required anymore, got: {err}"
         );
     }
 }
