@@ -588,11 +588,13 @@ mod tests {
 
             let schema = tool.parameters_schema();
             assert!(schema["properties"]["query"].is_object());
-            if let Some(required) = schema["required"].as_array() {
-                assert!(required.contains(&"query".into()));
-            } else {
-                assert!(false, "expected query schema to include required array");
-            }
+            assert_eq!(
+                schema["required"]
+                    .as_array()
+                    .map(|required| required.contains(&"query".into())),
+                Some(true),
+                "expected query schema to include required array"
+            );
         }
 
         #[test]
@@ -617,11 +619,13 @@ mod tests {
 
             let schema = tool.parameters_schema();
             assert!(schema["properties"]["path"].is_object());
-            if let Some(required) = schema["required"].as_array() {
-                assert!(required.contains(&"path".into()));
-            } else {
-                assert!(false, "expected path schema to include required array");
-            }
+            assert_eq!(
+                schema["required"]
+                    .as_array()
+                    .map(|required| required.contains(&"path".into())),
+                Some(true),
+                "expected path schema to include required array"
+            );
         }
 
         #[test]

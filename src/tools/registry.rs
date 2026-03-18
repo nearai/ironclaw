@@ -908,7 +908,7 @@ mod tests {
         }
 
         for handle in handles {
-            assert!(handle.await.is_ok(), "task should not panic");
+            assert!(handle.await.is_ok(), "task should not panic"); // safety: test-only assertion
         }
     }
 

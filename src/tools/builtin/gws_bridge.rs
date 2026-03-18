@@ -141,6 +141,13 @@ fn redact_secrets(input: &str) -> String {
     result
 }
 
+fn bridge_enabled_from_env(value: Option<&str>) -> bool {
+    matches!(
+        value.unwrap_or_default().to_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
 #[async_trait]
 impl Tool for GwsBridgeTool {
     fn name(&self) -> &str {
@@ -428,11 +435,4 @@ mod tests {
         assert!(bridge_enabled_from_env(Some("1")));
         assert!(!bridge_enabled_from_env(Some("false")));
     }
-}
-
-fn bridge_enabled_from_env(value: Option<&str>) -> bool {
-    matches!(
-        value.unwrap_or_default().to_lowercase().as_str(),
-        "true" | "1" | "yes" | "on"
-    )
 }
