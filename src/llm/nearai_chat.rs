@@ -22,7 +22,7 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::llm::{costs, session::SessionManager};
+use crate::llm::{costs, retry::cap_retry_after, session::SessionManager};
 
 /// Information about an available model from NEAR AI API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,7 +252,7 @@ impl NearAiChatProvider {
             .and_then(|v| {
                 // Try delay-seconds first (most common from API providers)
                 if let Ok(secs) = v.trim().parse::<u64>() {
-                    return Some(std::time::Duration::from_secs(secs));
+                    return Some(cap_retry_after(std::time::Duration::from_secs(secs)));
                 }
                 // Try HTTP-date (e.g. "Mon, 02 Mar 2026 18:00:00 GMT")
                 if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(v.trim()) {
@@ -260,9 +260,9 @@ impl NearAiChatProvider {
                     let delta = dt.signed_duration_since(now);
                     // Use max(0) so past/present dates yield Duration::ZERO
                     // rather than None (which would cause an immediate retry).
-                    return Some(std::time::Duration::from_secs(
-                        delta.num_seconds().max(0) as u64
-                    ));
+                    return Some(cap_retry_after(std::time::Duration::from_secs(
+                        delta.num_seconds().max(0) as u64,
+                    )));
                 }
                 None
             })
@@ -2306,9 +2306,17 @@ mod tests {
 
     #[test]
     fn test_retry_after_large_number() {
-        // Verify large numbers are accepted
+        // Verify large numbers are capped to the safe maximum
         let duration = parse_retry_after_for_test("3600"); // 1 hour
         assert_eq!(duration, Some(std::time::Duration::from_secs(3600)));
+
+        let huge = parse_retry_after_for_test("18446744073709551615");
+        assert_eq!(
+            huge,
+            Some(std::time::Duration::from_secs(
+                crate::llm::retry::MAX_RETRY_AFTER_SECS
+            ))
+        );
     }
 
     /// Helper function to test Retry-After header parsing logic
@@ -2316,13 +2324,13 @@ mod tests {
     fn parse_retry_after_for_test(header_value: &str) -> Option<std::time::Duration> {
         let trimmed = header_value.trim();
         let parsed = if let Ok(secs) = trimmed.parse::<u64>() {
-            Some(std::time::Duration::from_secs(secs))
+            Some(cap_retry_after(std::time::Duration::from_secs(secs)))
         } else if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(trimmed) {
             let now = chrono::Utc::now();
             let delta = dt.signed_duration_since(now);
-            Some(std::time::Duration::from_secs(
-                delta.num_seconds().max(0) as u64
-            ))
+            Some(cap_retry_after(std::time::Duration::from_secs(
+                delta.num_seconds().max(0) as u64,
+            )))
         } else {
             None
         };

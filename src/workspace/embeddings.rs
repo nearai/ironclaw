@@ -6,6 +6,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::llm::retry::cap_retry_after;
+
 /// Error type for embedding operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
@@ -232,6 +234,7 @@ impl EmbeddingProvider for OpenAiEmbeddings {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(std::time::Duration::from_secs)
+                .map(cap_retry_after)
                 .or(Some(std::time::Duration::from_secs(60)));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
@@ -374,6 +377,7 @@ impl EmbeddingProvider for NearAiEmbeddings {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(std::time::Duration::from_secs)
+                .map(cap_retry_after)
                 .or(Some(std::time::Duration::from_secs(60)));
             return Err(EmbeddingError::RateLimited { retry_after });
         }
@@ -690,6 +694,7 @@ mod tests {
             .parse::<u64>()
             .ok()
             .map(std::time::Duration::from_secs)
+            .map(cap_retry_after)
             .or(Some(std::time::Duration::from_secs(60)))
     }
 }
