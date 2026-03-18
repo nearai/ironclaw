@@ -88,8 +88,7 @@ impl RoutineEngine {
         }
     }
 
-    /// Expose the running count for integration tests.
-    #[cfg(test)]
+    /// Expose the running count for testing. Not intended for production use.
     pub fn running_count_for_test(&self) -> &Arc<AtomicUsize> {
         &self.running_count
     }

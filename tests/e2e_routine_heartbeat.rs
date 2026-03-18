@@ -794,4 +794,201 @@ mod tests {
             "Deleted routine must not fire after cache refresh"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Test: full_job per-routine concurrency blocks second fire (issue #1318)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn full_job_max_concurrent_blocks_second_fire_while_first_active() {
+        use ironclaw::agent::routine::{
+            NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
+        };
+        use ironclaw::error::RoutineError;
+
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        // Stub LLM — fire_manual will be rejected before any LLM call
+        let trace = LlmTrace::single_turn(
+            "stub",
+            "stub",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "ROUTINE_OK".to_string(),
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(4);
+        let tools = Arc::new(ToolRegistry::new());
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None, // no scheduler — rejected before dispatch
+            tools,
+            safety,
+        ));
+
+        // Create a full_job routine with max_concurrent = 1
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "concurrent-guard".to_string(),
+            description: "test max_concurrent for full_job".to_string(),
+            user_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::FullJob {
+                title: "t".to_string(),
+                description: "d".to_string(),
+                max_iterations: 3,
+                tool_permissions: vec![],
+            },
+            guardrails: RoutineGuardrails {
+                cooldown: Duration::from_secs(0),
+                max_concurrent: 1,
+                dedup_window: None,
+            },
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.create_routine(&routine).await.expect("create_routine");
+
+        // Simulate first full_job run still active: the fix keeps the
+        // routine_run in Running state while the linked job executes.
+        let active_run = RoutineRun {
+            id: Uuid::new_v4(),
+            routine_id: routine.id,
+            trigger_type: "cron".to_string(),
+            trigger_detail: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            status: RunStatus::Running,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: Utc::now(),
+        };
+        db.create_routine_run(&active_run)
+            .await
+            .expect("create_routine_run");
+
+        // Attempt to fire the same routine again — must be rejected
+        let result = engine.fire_manual(routine.id, None).await;
+        assert!(
+            matches!(result, Err(RoutineError::MaxConcurrent { .. })),
+            "second fire while first full_job active must be rejected by max_concurrent=1, got: {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: global running_count tracks live full_job runs (issue #1318)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn global_concurrency_counts_live_full_job_runs() {
+        use std::sync::atomic::Ordering;
+
+        let (db, _tmp) = create_test_db().await;
+        let ws = create_workspace(&db);
+
+        let trace = LlmTrace::single_turn(
+            "test-global-limit",
+            "check",
+            vec![TraceStep {
+                request_hint: None,
+                response: TraceResponse::Text {
+                    content: "ROUTINE_OK".to_string(),
+                    input_tokens: 50,
+                    output_tokens: 5,
+                },
+                expected_tool_results: vec![],
+            }],
+        );
+        let llm = Arc::new(TraceLlm::from_trace(trace));
+        let (notify_tx, _notify_rx) = tokio::sync::mpsc::channel(16);
+        let tools = Arc::new(ToolRegistry::new());
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+
+        // Configure global limit of 1
+        let mut config = RoutineConfig::default();
+        config.max_concurrent_routines = 1;
+
+        let engine = Arc::new(RoutineEngine::new(
+            config, db.clone(), llm, ws, notify_tx, None, tools, safety,
+        ));
+
+        // Insert a due cron routine
+        let mut routine = make_routine(
+            "global-limit-test",
+            Trigger::Cron {
+                schedule: "* * * * *".to_string(),
+                timezone: None,
+            },
+            "Check status.",
+        );
+        routine.next_fire_at = Some(Utc::now() - chrono::Duration::minutes(1));
+        db.create_routine(&routine).await.expect("create_routine");
+
+        // Simulate one full_job from another routine holding the global slot.
+        // With the fix, running_count stays elevated for the full job duration.
+        engine
+            .running_count_for_test()
+            .fetch_add(1, Ordering::Relaxed);
+
+        // check_cron_triggers should see global limit hit and skip
+        engine.check_cron_triggers().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let runs = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs");
+        assert!(
+            runs.is_empty(),
+            "cron routine must not fire when global limit is reached by live full_job"
+        );
+
+        // Release the global slot
+        engine
+            .running_count_for_test()
+            .fetch_sub(1, Ordering::Relaxed);
+
+        // Now the routine should fire
+        engine.check_cron_triggers().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Because the first check skipped it, next_fire_at is unchanged —
+        // the second check should see it as still due and fire it.
+        let runs_after = db
+            .list_routine_runs(routine.id, 10)
+            .await
+            .expect("list_routine_runs");
+        assert!(
+            !runs_after.is_empty(),
+            "cron routine should fire after global slot is released"
+        );
+    }
 }
