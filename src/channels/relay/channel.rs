@@ -420,8 +420,8 @@ impl Channel for RelayChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
-        // Nothing to clean up — the event channel will close naturally
-        // when the sender is dropped
+        // Relay cleanup is driven by the extension manager dropping the shared
+        // sender and removing the channel from the channel manager.
         Ok(())
     }
 }

@@ -1,7 +1,7 @@
 //! HTTP client for the channel-relay service.
 //!
 //! Wraps reqwest for all channel-relay API calls: OAuth initiation,
-//! callback registration, and Slack API proxy.
+//! approvals, signing-secret fetch, and Slack API proxy.
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -166,12 +166,10 @@ impl RelayClient {
         }
     }
 
-    /// Proxy an API call through channel-relay for any provider.
+    /// Register a pending approval and return the opaque approval token.
     ///
-    /// Calls `POST /proxy/{provider}/{method}?team_id=X&instance_id=Y` with the given JSON body.
-    /// Register a pending approval with channel-relay and receive an opaque token.
-    /// The token is embedded in Slack button values instead of routing fields.
-    /// Register a pending approval with channel-relay and receive an opaque token.
+    /// Calls `POST /approvals` with the target team/channel/request identifiers.
+    /// The returned token is embedded in Slack button values instead of routing fields.
     /// The relay derives the authorized approver from the connection's authed_user_id.
     pub async fn create_approval(
         &self,
@@ -282,8 +280,19 @@ impl RelayClient {
 
         body.get("signing_secret")
             .and_then(|v| v.as_str())
-            .and_then(|s| hex::decode(s).ok())
             .ok_or_else(|| RelayError::Protocol("missing signing_secret in response".to_string()))
+            .and_then(|raw| {
+                let decoded = hex::decode(raw).map_err(|e| {
+                    RelayError::Protocol(format!("invalid signing_secret hex: {e}"))
+                })?;
+                if decoded.len() != 32 {
+                    return Err(RelayError::Protocol(format!(
+                        "invalid signing_secret length: expected 32 bytes, got {}",
+                        decoded.len()
+                    )));
+                }
+                Ok(decoded)
+            })
     }
 
     /// List active connections for an instance.

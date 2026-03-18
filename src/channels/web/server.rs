@@ -941,13 +941,16 @@ async fn slack_relay_oauth_callback_handler(
     let _ = ext_mgr.secrets().delete(&state.user_id, &state_key).await;
 
     let result: Result<(), String> = async {
+        let store = state.store.as_ref().ok_or_else(|| {
+            "Relay activation requires persistent settings storage; no-db mode is unsupported."
+                .to_string()
+        })?;
+
         // Store team_id in settings
-        if let Some(ref store) = state.store {
-            let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
-            let _ = store
-                .set_setting(&state.user_id, &team_id_key, &serde_json::json!(team_id))
-                .await;
-        }
+        let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
+        let _ = store
+            .set_setting(&state.user_id, &team_id_key, &serde_json::json!(team_id))
+            .await;
 
         // Activate the relay channel
         ext_mgr

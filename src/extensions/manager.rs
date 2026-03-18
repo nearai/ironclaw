@@ -598,6 +598,13 @@ impl ExtensionManager {
         self.relay_signing_secret_cache.lock().ok()?.clone()
     }
 
+    async fn clear_relay_webhook_state(&self) {
+        *self.relay_event_tx.lock().await = None;
+        if let Ok(mut cache) = self.relay_signing_secret_cache.lock() {
+            *cache = None;
+        }
+    }
+
     /// Inject a registry entry for testing. The entry is added to the discovery
     /// cache so it appears in search results alongside built-in entries.
     pub async fn inject_registry_entry(&self, entry: crate::extensions::RegistryEntry) {
@@ -1408,6 +1415,7 @@ impl ExtensionManager {
                 // Remove from active channels
                 self.active_channel_names.write().await.remove(name);
                 self.persist_active_channels().await;
+                self.activation_errors.write().await.remove(name);
 
                 // Remove stored team_id
                 if let Some(ref store) = self.store {
@@ -1416,12 +1424,17 @@ impl ExtensionManager {
                         .await;
                 }
 
-                // Shut down the channel (check both runtime paths for WASM+relay and relay-only modes)
+                // Stop webhook traffic before removing the channel from the managers.
+                self.clear_relay_webhook_state().await;
+
+                // Shut down and remove the channel (check both runtime paths for
+                // WASM+relay and relay-only modes).
                 let mut shut_down = false;
                 if let Some(ref rt) = *self.channel_runtime.read().await
                     && let Some(channel) = rt.channel_manager.get_channel(name).await
                 {
                     let _ = channel.shutdown().await;
+                    rt.channel_manager.remove(name).await;
                     shut_down = true;
                 }
                 if !shut_down
@@ -1429,6 +1442,7 @@ impl ExtensionManager {
                     && let Some(channel) = cm.get_channel(name).await
                 {
                     let _ = channel.shutdown().await;
+                    cm.remove(name).await;
                 }
 
                 Ok(format!("Removed channel relay '{}'", name))
@@ -3970,18 +3984,15 @@ impl ExtensionManager {
     async fn activate_channel_relay(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
         let team_id_key = format!("relay:{}:team_id", name);
 
-        // Get team_id from settings (required — means OAuth was completed)
-        let team_id = if let Some(ref store) = self.store {
-            store
-                .get_setting(&self.user_id, &team_id_key)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let store = self.store.as_ref().ok_or(ExtensionError::AuthRequired)?;
+        let team_id = store
+            .get_setting(&self.user_id, &team_id_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty())
+            .ok_or(ExtensionError::AuthRequired)?;
 
         // Use relay config captured at startup
         let relay_config = self.relay_config()?;
@@ -4000,9 +4011,6 @@ impl ExtensionManager {
         let signing_secret = client.get_signing_secret(&team_id).await.map_err(|e| {
             ExtensionError::Config(format!("Failed to fetch relay signing secret: {e}"))
         })?;
-        if let Ok(mut cache) = self.relay_signing_secret_cache.lock() {
-            *cache = Some(signing_secret);
-        }
 
         // Create the event channel for webhook callbacks
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
@@ -4023,9 +4031,6 @@ impl ExtensionManager {
             "Relay channel activated (callback URL set during OAuth)"
         );
 
-        // Store the event sender so the web gateway's relay webhook endpoint can push events
-        *self.relay_event_tx.lock().await = Some(event_tx);
-
         // Hot-add to channel manager
         let cm_guard = self.relay_channel_manager.read().await;
         let channel_mgr = cm_guard.as_ref().ok_or_else(|| {
@@ -4036,6 +4041,13 @@ impl ExtensionManager {
             .hot_add(Box::new(channel))
             .await
             .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+
+        if let Ok(mut cache) = self.relay_signing_secret_cache.lock() {
+            *cache = Some(signing_secret);
+        }
+
+        // Store the event sender so the web gateway's relay webhook endpoint can push events
+        *self.relay_event_tx.lock().await = Some(event_tx);
 
         // Mark as active
         self.active_channel_names
@@ -4059,11 +4071,11 @@ impl ExtensionManager {
 
     /// Activate a channel-relay extension from stored credentials (for startup reconnect).
     pub async fn activate_stored_relay(&self, name: &str) -> Result<(), ExtensionError> {
+        self.activate_channel_relay(name).await?;
         self.installed_relay_extensions
             .write()
             .await
             .insert(name.to_string());
-        self.activate_channel_relay(name).await?;
         Ok(())
     }
 
@@ -6379,6 +6391,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_activate_channel_relay_without_store_returns_auth_required() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        let err = mgr.activate_channel_relay("slack-relay").await.unwrap_err();
+        assert!(
+            matches!(err, ExtensionError::AuthRequired),
+            "expected AuthRequired, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_remove_relay_shuts_down_via_relay_channel_manager() {
         // Regression: remove() only checked channel_runtime for shutdown, missing
         // relay-only mode where only relay_channel_manager is set.
@@ -6396,6 +6420,10 @@ mod tests {
             .write()
             .await
             .insert("slack-relay".to_string());
+        *mgr.relay_event_tx.lock().await = Some(tokio::sync::mpsc::channel(1).0);
+        if let Ok(mut cache) = mgr.relay_signing_secret_cache.lock() {
+            *cache = Some(vec![9u8; 32]);
+        }
         if let Some(ref store) = mgr.store {
             store
                 .set_setting(
@@ -6421,6 +6449,18 @@ mod tests {
                 .await
                 .contains("slack-relay"),
             "Should be removed from installed set"
+        );
+        assert!(
+            mgr.relay_event_tx.lock().await.is_none(),
+            "relay event sender should be cleared on remove"
+        );
+        assert!(
+            mgr.relay_signing_secret().is_none(),
+            "relay signing secret cache should be cleared on remove"
+        );
+        assert!(
+            cm.get_channel("slack-relay").await.is_none(),
+            "relay channel should be removed from the channel manager"
         );
     }
 

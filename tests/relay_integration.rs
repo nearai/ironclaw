@@ -66,6 +66,46 @@ async fn test_get_signing_secret_404_returns_error() {
     assert!(result.is_err());
 }
 
+#[tokio::test]
+async fn test_get_signing_secret_invalid_hex_returns_protocol_error() {
+    let app = Router::new().route(
+        "/relay/signing-secret",
+        get(|| async { Json(serde_json::json!({"signing_secret": "not-hex"})) }),
+    );
+
+    let base_url = start_server(app).await;
+    let client = test_client(&base_url);
+
+    let err = client
+        .get_signing_secret("T123")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("invalid signing_secret hex"), "got: {err}");
+}
+
+#[tokio::test]
+async fn test_get_signing_secret_wrong_length_returns_protocol_error() {
+    let short_secret_hex = hex::encode([7u8; 31]);
+    let app = Router::new().route(
+        "/relay/signing-secret",
+        get(move || {
+            let s = short_secret_hex.clone();
+            async move { Json(serde_json::json!({"signing_secret": s})) }
+        }),
+    );
+
+    let base_url = start_server(app).await;
+    let client = test_client(&base_url);
+
+    let err = client
+        .get_signing_secret("T123")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("expected 32 bytes"), "got: {err}");
+}
+
 // ── Proxy call ──────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
