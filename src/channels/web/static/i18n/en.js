@@ -366,6 +366,8 @@ I18n.register('en', {
   'settings.noMatchingSettings': 'No settings matching "{query}"',
   'settings.noSettings': 'No settings found',
   'settings.saved': 'Saved',
+  'settings.on': 'On',
+  'settings.off': 'Off',
   'settings.envValue': 'env: {value}',
   'settings.envDefault': 'env default',
   'settings.useEnvDefault': 'use env default',

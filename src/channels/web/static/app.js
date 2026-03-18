@@ -4376,6 +4376,12 @@ function switchSettingsSubtab(subtab) {
   document.querySelectorAll('.settings-subpanel').forEach(function(p) {
     p.classList.toggle('active', p.id === 'settings-' + subtab);
   });
+  // Clear search when switching subtabs so stale filters don't apply
+  var searchInput = document.getElementById('settings-search-input');
+  if (searchInput && searchInput.value) {
+    searchInput.value = '';
+    searchInput.dispatchEvent(new Event('input'));
+  }
   loadSettingsSubtab(subtab);
 }
 
@@ -4531,13 +4537,11 @@ function loadInferenceSettings() {
     };
     // Inject available model IDs as suggestions for the selected_model field
     var modelIds = (modelsData.data || []).map(function(m) { return m.id; }).filter(Boolean);
-    if (modelIds.length > 0) {
-      var llmGroup = INFERENCE_SETTINGS[0];
-      for (var i = 0; i < llmGroup.settings.length; i++) {
-        if (llmGroup.settings[i].key === 'selected_model') {
-          llmGroup.settings[i].suggestions = modelIds;
-          break;
-        }
+    var llmGroup = INFERENCE_SETTINGS[0];
+    for (var i = 0; i < llmGroup.settings.length; i++) {
+      if (llmGroup.settings[i].key === 'selected_model') {
+        llmGroup.settings[i].suggestions = modelIds;
+        break;
       }
     }
     container.innerHTML = '';
@@ -4658,12 +4662,34 @@ function renderStructuredSettingsRow(def, value, activeValue) {
   var placeholderText = activeValue ? I18n.t('settings.envValue', { value: activeValue }) : (def.placeholder || I18n.t('settings.envDefault'));
 
   if (def.type === 'boolean') {
-    var cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = !!value;
-    cb.setAttribute('aria-label', ariaLabel);
-    cb.addEventListener('change', function() { saveSetting(def.key, cb.checked); });
-    inputWrap.appendChild(cb);
+    var boolSel = document.createElement('select');
+    boolSel.className = 'settings-select';
+    boolSel.setAttribute('data-setting-key', def.key);
+    boolSel.setAttribute('aria-label', ariaLabel);
+    var boolDefault = document.createElement('option');
+    boolDefault.value = '';
+    boolDefault.textContent = activeValue !== undefined && activeValue !== null
+      ? '\u2014 ' + I18n.t('settings.envValue', { value: String(activeValue) }) + ' \u2014'
+      : '\u2014 ' + I18n.t('settings.useEnvDefault') + ' \u2014';
+    if (value === null || value === undefined) boolDefault.selected = true;
+    boolSel.appendChild(boolDefault);
+    var boolOn = document.createElement('option');
+    boolOn.value = 'true';
+    boolOn.textContent = I18n.t('settings.on');
+    if (value === true) boolOn.selected = true;
+    boolSel.appendChild(boolOn);
+    var boolOff = document.createElement('option');
+    boolOff.value = 'false';
+    boolOff.textContent = I18n.t('settings.off');
+    if (value === false) boolOff.selected = true;
+    boolSel.appendChild(boolOff);
+    boolSel.addEventListener('change', (function(k, el) {
+      return function() {
+        if (el.value === '') saveSetting(k, null);
+        else saveSetting(k, el.value === 'true');
+      };
+    })(def.key, boolSel));
+    inputWrap.appendChild(boolSel);
   } else if (def.type === 'select' && def.options) {
     var sel = document.createElement('select');
     sel.className = 'settings-select';

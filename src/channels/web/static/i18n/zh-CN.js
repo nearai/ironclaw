@@ -366,6 +366,8 @@ I18n.register('zh-CN', {
   'settings.noMatchingSettings': '没有匹配 "{query}" 的设置',
   'settings.noSettings': '未找到设置',
   'settings.saved': '已保存',
+  'settings.on': '开启',
+  'settings.off': '关闭',
   'settings.envValue': '环境变量: {value}',
   'settings.envDefault': '使用环境变量默认值',
   'settings.useEnvDefault': '使用环境变量默认值',
