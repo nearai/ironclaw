@@ -102,7 +102,6 @@ struct TelegramMessage {
     sticker: Option<TelegramSticker>,
 
     /// Forum topic ID. Present when the message is sent inside a forum topic.
-    /// https://core.telegram.org/bots/api#message
     #[serde(default)]
     message_thread_id: Option<i64>,
 
@@ -206,10 +205,6 @@ struct TelegramChat {
 
     /// Title for groups/channels.
     title: Option<String>,
-
-    /// True when the supergroup has topics (forum mode) enabled.
-    #[serde(default)]
-    is_forum: Option<bool>,
 
     /// Username for private chats.
     username: Option<String>,
@@ -508,8 +503,7 @@ impl Guest for TelegramChannel {
 
             // Delete any existing webhook before polling. Telegram returns success
             // when no webhook exists, so any error here (e.g. 401) means a bad token.
-            delete_webhook()
-                .map_err(|e| format!("Bot token validation failed: {}", e))?;
+            delete_webhook().map_err(|e| format!("Bot token validation failed: {}", e))?;
         }
 
         // Configure polling only if not in webhook mode
@@ -697,7 +691,12 @@ impl Guest for TelegramChannel {
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        send_response(metadata.chat_id, &response, Some(metadata.message_id), metadata.message_thread_id)
+        send_response(
+            metadata.chat_id,
+            &response,
+            Some(metadata.message_id),
+            metadata.message_thread_id,
+        )
     }
 
     fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
@@ -734,8 +733,6 @@ impl Guest for TelegramChannel {
                     "action": "typing"
                 });
 
-                // sendChatAction requires message_thread_id even for the General
-                // topic (id=1), unlike sendMessage which rejects it.
                 if let Some(thread_id) = metadata.message_thread_id {
                     payload["message_thread_id"] = serde_json::Value::Number(thread_id.into());
                 }
@@ -766,9 +763,13 @@ impl Guest for TelegramChannel {
             }
             TelegramStatusAction::Notify(prompt) => {
                 // Send user-visible status updates for actionable events.
-                if let Err(first_err) =
-                    send_message(metadata.chat_id, &prompt, Some(metadata.message_id), None, metadata.message_thread_id)
-                {
+                if let Err(first_err) = send_message(
+                    metadata.chat_id,
+                    &prompt,
+                    Some(metadata.message_id),
+                    None,
+                    metadata.message_thread_id,
+                ) {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
                         &format!(
@@ -777,7 +778,13 @@ impl Guest for TelegramChannel {
                         ),
                     );
 
-                    if let Err(retry_err) = send_message(metadata.chat_id, &prompt, None, None, metadata.message_thread_id) {
+                    if let Err(retry_err) = send_message(
+                        metadata.chat_id,
+                        &prompt,
+                        None,
+                        None,
+                        metadata.message_thread_id,
+                    ) {
                         channel_host::log(
                             channel_host::LogLevel::Debug,
                             &format!(
@@ -822,9 +829,8 @@ impl std::fmt::Display for SendError {
 
 /// Normalize `message_thread_id` for outbound API calls.
 ///
-/// Telegram rejects `sendMessage` (and other send methods) when
-/// `message_thread_id = 1` (the "General" topic). Return `None` in that
-/// case so the field is omitted from the payload.
+/// Telegram rejects `sendMessage` and file-send methods when
+/// `message_thread_id = 1` (the "General" topic), so omit it in that case.
 fn normalize_thread_id(thread_id: Option<i64>) -> Option<i64> {
     thread_id.filter(|&id| id != 1)
 }
@@ -950,19 +956,20 @@ fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
     );
 
     let headers = serde_json::json!({});
-    let result =
-        channel_host::http_request("GET", &get_file_url, &headers.to_string(), None, None);
+    let result = channel_host::http_request("GET", &get_file_url, &headers.to_string(), None, None);
 
     let response = result.map_err(|e| format!("getFile request failed: {}", e))?;
 
     if response.status != 200 {
         let body_str = String::from_utf8_lossy(&response.body);
-        return Err(format!("getFile returned {}: {}", response.status, body_str));
+        return Err(format!(
+            "getFile returned {}: {}",
+            response.status, body_str
+        ));
     }
 
-    let api_response: TelegramApiResponse<TelegramFile> =
-        serde_json::from_slice(&response.body)
-            .map_err(|e| format!("Failed to parse getFile response: {}", e))?;
+    let api_response: TelegramApiResponse<TelegramFile> = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse getFile response: {}", e))?;
 
     if !api_response.ok {
         return Err(format!(
@@ -992,16 +999,12 @@ fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
         file_path
     );
 
-    let result =
-        channel_host::http_request("GET", &download_url, &headers.to_string(), None, None);
+    let result = channel_host::http_request("GET", &download_url, &headers.to_string(), None, None);
 
     let response = result.map_err(|e| format!("File download failed: {}", e))?;
 
     if response.status != 200 {
-        return Err(format!(
-            "File download returned status {}",
-            response.status
-        ));
+        return Err(format!("File download returned status {}", response.status));
     }
 
     // Post-download size guard: Telegram metadata file_size is optional,
@@ -1088,7 +1091,14 @@ fn send_photo(
                 data.len()
             ),
         );
-        return send_document(chat_id, filename, mime_type, data, reply_to_message_id, message_thread_id);
+        return send_document(
+            chat_id,
+            filename,
+            mime_type,
+            data,
+            reply_to_message_id,
+            message_thread_id,
+        );
     }
 
     let boundary = format!("ironclaw-{}", channel_host::now_millis());
@@ -1096,10 +1106,20 @@ fn send_photo(
 
     write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
     if let Some(msg_id) = reply_to_message_id {
-        write_multipart_field(&mut body, &boundary, "reply_to_message_id", &msg_id.to_string());
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "reply_to_message_id",
+            &msg_id.to_string(),
+        );
     }
     if let Some(thread_id) = message_thread_id {
-        write_multipart_field(&mut body, &boundary, "message_thread_id", &thread_id.to_string());
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "message_thread_id",
+            &thread_id.to_string(),
+        );
     }
     write_multipart_file(&mut body, &boundary, "photo", filename, mime_type, data);
     body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
@@ -1151,10 +1171,20 @@ fn send_document(
 
     write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
     if let Some(msg_id) = reply_to_message_id {
-        write_multipart_field(&mut body, &boundary, "reply_to_message_id", &msg_id.to_string());
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "reply_to_message_id",
+            &msg_id.to_string(),
+        );
     }
     if let Some(thread_id) = message_thread_id {
-        write_multipart_field(&mut body, &boundary, "message_thread_id", &thread_id.to_string());
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "message_thread_id",
+            &thread_id.to_string(),
+        );
     }
     write_multipart_file(&mut body, &boundary, "document", filename, mime_type, data);
     body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
@@ -1191,12 +1221,7 @@ fn send_document(
 }
 
 /// Image MIME types that Telegram's sendPhoto API supports.
-const PHOTO_MIME_TYPES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-];
+const PHOTO_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 /// Send a full agent response (attachments + text) to a chat.
 ///
@@ -1218,13 +1243,23 @@ fn send_response(
     }
 
     // Try Markdown, fall back to plain text on parse errors
-    match send_message(chat_id, &response.content, reply_to_message_id, Some("Markdown"), message_thread_id) {
+    match send_message(
+        chat_id,
+        &response.content,
+        reply_to_message_id,
+        Some("Markdown"),
+        message_thread_id,
+    ) {
         Ok(_) => Ok(()),
-        Err(SendError::ParseEntities(_)) => {
-            send_message(chat_id, &response.content, reply_to_message_id, None, message_thread_id)
-                .map(|_| ())
-                .map_err(|e| format!("Plain-text retry also failed: {}", e))
-        }
+        Err(SendError::ParseEntities(_)) => send_message(
+            chat_id,
+            &response.content,
+            reply_to_message_id,
+            None,
+            message_thread_id,
+        )
+        .map(|_| ())
+        .map_err(|e| format!("Plain-text retry also failed: {}", e)),
         Err(e) => Err(e.to_string()),
     }
 }
@@ -1392,7 +1427,10 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
     let context = if retried { " (after retry)" } else { "" };
     channel_host::log(
         channel_host::LogLevel::Info,
-        &format!("Webhook registered successfully{}: {}", context, webhook_url),
+        &format!(
+            "Webhook registered successfully{}: {}",
+            context, webhook_url
+        ),
     );
 
     Ok(())
@@ -1412,7 +1450,7 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
         ),
         None,
         Some("Markdown"),
-        None, // Pairing happens in DMs, not forum topics
+        None,
     )
     .map(|_| ())
     .map_err(|e| e.to_string())
@@ -1494,7 +1532,9 @@ fn extract_attachments(message: &TelegramMessage) -> Vec<InboundAttachment> {
     if let Some(ref doc) = message.document {
         attachments.push(make_inbound_attachment(
             doc.file_id.clone(),
-            doc.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+            doc.mime_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
             doc.file_name.clone(),
             doc.file_size.map(|s| s as u64),
             Some(get_file_url(&doc.file_id)),
@@ -1507,7 +1547,10 @@ fn extract_attachments(message: &TelegramMessage) -> Vec<InboundAttachment> {
     if let Some(ref audio) = message.audio {
         attachments.push(make_inbound_attachment(
             audio.file_id.clone(),
-            audio.mime_type.clone().unwrap_or_else(|| "audio/mpeg".to_string()),
+            audio
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/mpeg".to_string()),
             audio.file_name.clone(),
             audio.file_size.map(|s| s as u64),
             Some(get_file_url(&audio.file_id)),
@@ -1520,7 +1563,10 @@ fn extract_attachments(message: &TelegramMessage) -> Vec<InboundAttachment> {
     if let Some(ref video) = message.video {
         attachments.push(make_inbound_attachment(
             video.file_id.clone(),
-            video.mime_type.clone().unwrap_or_else(|| "video/mp4".to_string()),
+            video
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "video/mp4".to_string()),
             video.file_name.clone(),
             video.file_size.map(|s| s as u64),
             Some(get_file_url(&video.file_id)),
@@ -1745,25 +1791,14 @@ fn handle_message(message: TelegramMessage) {
 
     let is_private = message.chat.chat_type == "private";
 
-    // Owner validation: when owner_id is set, only that user can message
-    let owner_id_str = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
+    let owner_id = channel_host::workspace_read(OWNER_ID_PATH)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<i64>().ok());
+    let is_owner = owner_id == Some(from.id);
 
-    if let Some(ref id_str) = owner_id_str {
-        if let Ok(owner_id) = id_str.parse::<i64>() {
-            if from.id != owner_id {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Dropping message from non-owner user {} (owner: {})",
-                        from.id, owner_id
-                    ),
-                );
-                return;
-            }
-        }
-    } else {
-        // No owner_id: apply authorization based on dm_policy and allow_from
-        // This applies to both private and group chats when owner_id is null
+    if !is_owner {
+        // Non-owner senders remain guests. Apply authorization based on
+        // dm_policy / allow_from before letting them chat in their own scope.
         let dm_policy =
             channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
 
@@ -1830,8 +1865,6 @@ fn handle_message(message: TelegramMessage) {
         }
     }
 
-    let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
-
     // For group chats, only respond if bot was mentioned or respond_to_all is enabled
     if !is_private {
         let respond_to_all = channel_host::workspace_read(RESPOND_TO_ALL_GROUP_PATH)
@@ -1841,6 +1874,7 @@ fn handle_message(message: TelegramMessage) {
 
         if !respond_to_all {
             let has_command = content.starts_with('/');
+            let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
             let has_bot_mention = if bot_username.is_empty() {
                 content.contains('@')
             } else {
@@ -1876,18 +1910,7 @@ fn handle_message(message: TelegramMessage) {
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
 
-    // Compute thread_id for forum topics: "chat_id:topic_id" to prevent
-    // collisions across different groups (topic IDs are only unique per chat).
-    // Only use message_thread_id when the chat is a forum — non-forum groups
-    // also carry message_thread_id for reply threads, which are not topics.
-    let thread_id = if message.chat.is_forum == Some(true) {
-        message.message_thread_id.map(|topic_id| {
-            format!("{}:{}", message.chat.id, topic_id)
-        })
-    } else {
-        None
-    };
-
+    let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
     let content_to_emit = match content_to_emit_for_agent(
         &content,
         if bot_username.is_empty() {
@@ -1907,7 +1930,7 @@ fn handle_message(message: TelegramMessage) {
         user_id: from.id.to_string(),
         user_name: Some(user_name),
         content: content_to_emit,
-        thread_id,
+        thread_id: Some(message.chat.id.to_string()),
         metadata_json,
         attachments,
     });
@@ -2507,7 +2530,11 @@ mod tests {
         assert_eq!(attachments[0].id, "large_id"); // Largest photo
         assert_eq!(attachments[0].mime_type, "image/jpeg");
         assert_eq!(attachments[0].size_bytes, Some(54321));
-        assert!(attachments[0].source_url.as_ref().unwrap().contains("large_id"));
+        assert!(attachments[0]
+            .source_url
+            .as_ref()
+            .unwrap()
+            .contains("large_id"));
     }
 
     #[test]
@@ -2559,9 +2586,7 @@ mod tests {
             attachments[0].filename.as_deref(),
             Some("voice_voice_xyz.ogg")
         );
-        assert!(attachments[0]
-            .extras_json
-            .contains("\"duration_secs\":5"));
+        assert!(attachments[0].extras_json.contains("\"duration_secs\":5"));
     }
 
     #[test]
@@ -2707,119 +2732,38 @@ mod tests {
         };
 
         // PDFs and Office docs should be downloaded
-        assert!(is_downloadable_document(&make("application/pdf", Some("report.pdf"))));
+        assert!(is_downloadable_document(&make(
+            "application/pdf",
+            Some("report.pdf")
+        )));
         assert!(is_downloadable_document(&make(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             Some("doc.docx"),
         )));
-        assert!(is_downloadable_document(&make("text/plain", Some("notes.txt"))));
+        assert!(is_downloadable_document(&make(
+            "text/plain",
+            Some("notes.txt")
+        )));
 
         // Voice, image, audio, video should NOT be downloaded
-        assert!(!is_downloadable_document(&make("audio/ogg", Some("voice_123.ogg"))));
+        assert!(!is_downloadable_document(&make(
+            "audio/ogg",
+            Some("voice_123.ogg")
+        )));
         assert!(!is_downloadable_document(&make("image/jpeg", None)));
-        assert!(!is_downloadable_document(&make("audio/mpeg", Some("song.mp3"))));
-        assert!(!is_downloadable_document(&make("video/mp4", Some("clip.mp4"))));
+        assert!(!is_downloadable_document(&make(
+            "audio/mpeg",
+            Some("song.mp3")
+        )));
+        assert!(!is_downloadable_document(&make(
+            "video/mp4",
+            Some("clip.mp4")
+        )));
     }
 
     #[test]
     fn test_max_download_size_constant() {
         // Verify the constant is 20 MB, matching the Slack channel limit
         assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
-    }
-
-    // === Forum Topics (thread_id) tests ===
-
-    #[test]
-    fn test_parse_forum_message_with_thread_id() {
-        let json = r#"{
-            "message_id": 100,
-            "message_thread_id": 42,
-            "is_topic_message": true,
-            "from": {"id": 1, "is_bot": false, "first_name": "A"},
-            "chat": {"id": -1001234567890, "type": "supergroup", "is_forum": true},
-            "text": "Hello from a topic"
-        }"#;
-        let msg: TelegramMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(msg.message_thread_id, Some(42));
-        assert_eq!(msg.is_topic_message, Some(true));
-        assert_eq!(msg.chat.is_forum, Some(true));
-    }
-
-    #[test]
-    fn test_parse_non_forum_message_backward_compat() {
-        let json = r#"{
-            "message_id": 1,
-            "from": {"id": 1, "is_bot": false, "first_name": "A"},
-            "chat": {"id": 1, "type": "private"},
-            "text": "Hello"
-        }"#;
-        let msg: TelegramMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(msg.message_thread_id, None);
-        assert_eq!(msg.is_topic_message, None);
-        assert_eq!(msg.chat.is_forum, None);
-    }
-
-    #[test]
-    fn test_metadata_with_message_thread_id() {
-        let metadata = TelegramMessageMetadata {
-            chat_id: -1001234567890,
-            message_id: 100,
-            user_id: 42,
-            is_private: false,
-            message_thread_id: Some(7),
-        };
-        let json = serde_json::to_string(&metadata).unwrap();
-        let parsed: TelegramMessageMetadata = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.message_thread_id, Some(7));
-    }
-
-    #[test]
-    fn test_metadata_backward_compat_no_thread_id() {
-        // Old metadata JSON without message_thread_id should deserialize with None
-        let json = r#"{"chat_id":123,"message_id":1,"user_id":42,"is_private":true}"#;
-        let metadata: TelegramMessageMetadata = serde_json::from_str(json).unwrap();
-        assert_eq!(metadata.message_thread_id, None);
-    }
-
-    #[test]
-    fn test_metadata_thread_id_not_serialized_when_none() {
-        let metadata = TelegramMessageMetadata {
-            chat_id: 123,
-            message_id: 1,
-            user_id: 42,
-            is_private: true,
-            message_thread_id: None,
-        };
-        let json = serde_json::to_string(&metadata).unwrap();
-        assert!(!json.contains("message_thread_id"));
-    }
-
-    #[test]
-    fn test_thread_id_composition() {
-        // Verify "chat_id:topic_id" format for forum topics
-        let chat_id: i64 = -1001234567890;
-        let topic_id: i64 = 42;
-        let thread_id = format!("{}:{}", chat_id, topic_id);
-        assert_eq!(thread_id, "-1001234567890:42");
-    }
-
-    #[test]
-    fn test_normalize_thread_id_general_topic() {
-        // General topic (id=1) must be omitted — Telegram rejects sendMessage
-        // with message_thread_id=1.
-        assert_eq!(normalize_thread_id(Some(1)), None);
-    }
-
-    #[test]
-    fn test_normalize_thread_id_regular_topic() {
-        // Non-General topics pass through unchanged
-        assert_eq!(normalize_thread_id(Some(42)), Some(42));
-        assert_eq!(normalize_thread_id(Some(123)), Some(123));
-    }
-
-    #[test]
-    fn test_normalize_thread_id_none() {
-        // None stays None
-        assert_eq!(normalize_thread_id(None), None);
     }
 }

@@ -439,6 +439,7 @@ impl TestHarnessBuilder {
         };
 
         let deps = AgentDeps {
+            owner_id: "default".to_string(),
             store: Some(Arc::clone(&db)),
             llm,
             cheap_llm: None,
@@ -1077,7 +1078,7 @@ mod tests {
             },
             notify: NotifyConfig {
                 channel: None,
-                user: "user1".to_string(),
+                user: Some("user1".to_string()),
                 on_attention: true,
                 on_failure: true,
                 on_success: false,
@@ -1210,7 +1211,7 @@ mod tests {
             },
             notify: NotifyConfig {
                 channel: None,
-                user: "user1".to_string(),
+                user: Some("user1".to_string()),
                 on_attention: false,
                 on_failure: false,
                 on_success: false,

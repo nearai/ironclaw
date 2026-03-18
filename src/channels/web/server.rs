@@ -26,7 +26,6 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
-use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
@@ -36,6 +35,7 @@ use crate::channels::web::handlers::jobs::{
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
     jobs_summary_handler,
 };
+use crate::channels::web::handlers::routines::{routines_delete_handler, routines_toggle_handler};
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
@@ -2298,14 +2298,7 @@ async fn extensions_setup_submit_handler(
             resp.auth_url = result.auth_url.clone();
             resp.verification = result.verification.clone();
             resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
-            if result.verification.is_some() {
-                state.sse.broadcast(SseEvent::AuthRequired {
-                    extension_name: name.clone(),
-                    instructions: resp.instructions.clone(),
-                    auth_url: None,
-                    setup_url: None,
-                });
-            } else {
+            if result.verification.is_none() {
                 // Broadcast auth_completed so the chat UI can dismiss any in-progress
                 // auth card or setup modal that was triggered by tool_auth/tool_activate.
                 state.sse.broadcast(SseEvent::AuthCompleted {
@@ -2523,83 +2516,6 @@ async fn routines_trigger_handler(
         "routine_id": routine_id,
         "run_id": run_id,
     })))
-}
-
-#[derive(Deserialize)]
-struct ToggleRequest {
-    enabled: Option<bool>,
-}
-
-async fn routines_toggle_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(id): Path<String>,
-    body: Option<Json<ToggleRequest>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
-    let mut routine = store
-        .get_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    let was_enabled = routine.enabled;
-    // If a specific value was provided, use it; otherwise toggle.
-    routine.enabled = match body {
-        Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
-        None => !routine.enabled,
-    };
-
-    if routine.enabled
-        && !was_enabled
-        && let Trigger::Cron { schedule, timezone } = &routine.trigger
-    {
-        routine.next_fire_at = next_cron_fire(schedule, timezone.as_deref())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
-
-    store
-        .update_routine(&routine)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(serde_json::json!({
-        "status": if routine.enabled { "enabled" } else { "disabled" },
-        "routine_id": routine_id,
-    })))
-}
-
-async fn routines_delete_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
-
-    let routine_id = Uuid::parse_str(&id)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
-
-    let deleted = store
-        .delete_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    if deleted {
-        Ok(Json(serde_json::json!({
-            "status": "deleted",
-            "routine_id": routine_id,
-        })))
-    } else {
-        Err((StatusCode::NOT_FOUND, "Routine not found".to_string()))
-    }
 }
 
 async fn routines_runs_handler(
@@ -3111,6 +3027,92 @@ mod tests {
             "expected activation failure in message: {:?}",
             parsed
         );
+    }
+
+    #[tokio::test]
+    async fn test_extensions_setup_submit_telegram_verification_does_not_broadcast_auth_required() {
+        use axum::body::Body;
+        use tokio::time::{Duration, timeout};
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        std::fs::write(
+            wasm_channels_dir.path().join("telegram.wasm"),
+            b"\0asm fake",
+        )
+        .expect("write fake telegram wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "telegram",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "telegram_bot_token",
+                        "prompt": "Enter your Telegram Bot API token (from @BotFather)"
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir.path().join("telegram.capabilities.json"),
+            serde_json::to_string(&caps).expect("serialize telegram caps"),
+        )
+        .expect("write telegram caps");
+
+        ext_mgr
+            .set_test_telegram_pending_verification("iclaw-7qk2m9", Some("test_hot_bot"))
+            .await;
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let mut receiver = state.sse.sender().subscribe();
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/setup",
+                post(extensions_setup_submit_handler),
+            )
+            .with_state(state);
+
+        let req_body = serde_json::json!({
+            "secrets": {
+                "telegram_bot_token": "123456789:ABCdefGhI"
+            }
+        });
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/extensions/telegram/setup")
+            .header("content-type", "application/json")
+            .body(Body::from(req_body.to_string()))
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(parsed["success"], serde_json::Value::Bool(true));
+        assert_eq!(parsed["activated"], serde_json::Value::Bool(false));
+        assert_eq!(parsed["verification"]["code"], "iclaw-7qk2m9");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match timeout(remaining, receiver.recv()).await {
+                Ok(Ok(crate::channels::web::types::SseEvent::AuthRequired { .. })) => {
+                    panic!("verification responses should not emit auth_required SSE events")
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
     }
 
     fn expired_flow_created_at() -> Option<std::time::Instant> {

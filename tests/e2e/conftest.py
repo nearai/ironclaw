@@ -15,7 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from helpers import AUTH_TOKEN, wait_for_port_line, wait_for_ready
+from helpers import (
+    AUTH_TOKEN,
+    HTTP_WEBHOOK_SECRET,
+    OWNER_SCOPE_ID,
+    wait_for_port_line,
+    wait_for_ready,
+)
 
 # Project root (two levels up from tests/e2e/)
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -92,6 +98,21 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _reserve_loopback_sockets(count: int) -> list[socket.socket]:
+    """Bind loopback sockets and keep them open until the server starts."""
+    sockets: list[socket.socket] = []
+    try:
+        while len(sockets) < count:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(("127.0.0.1", 0))
+            sockets.append(sock)
+        return sockets
+    except Exception:
+        for sock in sockets:
+            sock.close()
+        raise
+
+
 @pytest.fixture(scope="session")
 def ironclaw_binary():
     """Ensure ironclaw binary is built. Returns the binary path."""
@@ -106,6 +127,21 @@ def ironclaw_binary():
         )
     assert binary.exists(), f"Binary not found at {binary}"
     return str(binary)
+
+
+@pytest.fixture(scope="session")
+def server_ports():
+    """Reserve dynamic ports for the gateway and HTTP webhook channel."""
+    reserved = _reserve_loopback_sockets(2)
+    try:
+        yield {
+            "gateway": reserved[0].getsockname()[1],
+            "http": reserved[1].getsockname()[1],
+            "sockets": reserved,
+        }
+    finally:
+        for sock in reserved:
+            sock.close()
 
 
 @pytest.fixture(scope="session")
@@ -177,10 +213,19 @@ def _wasm_build_symlinks():
 
 
 @pytest.fixture(scope="session")
-async def ironclaw_server(ironclaw_binary, mock_llm_server, wasm_tools_dir):
+async def ironclaw_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    server_ports,
+):
     """Start the ironclaw gateway. Yields the base URL."""
-    gateway_port = _find_free_port()
     home_dir = _HOME_TMPDIR.name
+    gateway_port = server_ports["gateway"]
+    http_port = server_ports["http"]
+    for sock in server_ports["sockets"]:
+        if sock.fileno() != -1:
+            sock.close()
     env = {
         # Minimal env: PATH for process spawning, HOME for Rust/cargo defaults
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -188,11 +233,15 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server, wasm_tools_dir):
         "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
         "RUST_LOG": "ironclaw=info",
         "RUST_BACKTRACE": "1",
+        "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
         "GATEWAY_ENABLED": "true",
         "GATEWAY_HOST": "127.0.0.1",
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": "e2e-tester",
+        "GATEWAY_USER_ID": "e2e-web-sender",
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
+        "HTTP_WEBHOOK_SECRET": HTTP_WEBHOOK_SECRET,
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
@@ -262,15 +311,22 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server, wasm_tools_dir):
 
 
 @pytest.fixture(scope="session")
-async def ironclaw_server_with_webhook_secret(ironclaw_binary, mock_llm_server, wasm_tools_dir):
-    """Start ironclaw with HTTP_WEBHOOK_SECRET configured for webhook tests.
+async def http_channel_server(ironclaw_server, server_ports):
+    """HTTP webhook channel base URL."""
+    base_url = f"http://127.0.0.1:{server_ports['http']}"
+    await wait_for_ready(f"{base_url}/health", timeout=30)
+    return base_url
 
-    Yields a dict with:
-    - 'url': base URL of the gateway
-    - 'secret': the webhook secret value
-    """
+
+@pytest.fixture(scope="session")
+async def http_channel_server_without_secret(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+):
+    """Start the HTTP webhook channel without a configured secret."""
     gateway_port = _find_free_port()
-    webhook_secret = "test-webhook-secret-e2e-12345"
+    http_port = _find_free_port()
     env = {
         # Minimal env: PATH for process spawning, HOME for Rust/cargo defaults
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -282,13 +338,14 @@ async def ironclaw_server_with_webhook_secret(ironclaw_binary, mock_llm_server, 
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
         "GATEWAY_USER_ID": "e2e-tester",
-        "HTTP_WEBHOOK_SECRET": webhook_secret,
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(_DB_TMPDIR.name, "e2e-webhook.db"),
+        "LIBSQL_PATH": os.path.join(_DB_TMPDIR.name, "e2e-webhook-no-secret.db"),
         "SANDBOX_ENABLED": "false",
         "SKILLS_ENABLED": "true",
         "ROUTINES_ENABLED": "false",
@@ -318,13 +375,12 @@ async def ironclaw_server_with_webhook_secret(ironclaw_binary, mock_llm_server, 
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
-    base_url = f"http://127.0.0.1:{gateway_port}"
+    gateway_url = f"http://127.0.0.1:{gateway_port}"
+    http_base_url = f"http://127.0.0.1:{http_port}"
     try:
-        await wait_for_ready(f"{base_url}/api/health", timeout=60)
-        yield {
-            "url": base_url,
-            "secret": webhook_secret,
-        }
+        await wait_for_ready(f"{gateway_url}/api/health", timeout=60)
+        await wait_for_ready(f"{http_base_url}/health", timeout=30)
+        yield http_base_url
     except TimeoutError:
         # Dump stderr so CI logs show why the server failed to start
         returncode = proc.returncode
@@ -337,7 +393,8 @@ async def ironclaw_server_with_webhook_secret(ironclaw_binary, mock_llm_server, 
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
         proc.kill()
         pytest.fail(
-            f"ironclaw server with webhook secret failed to start on port {gateway_port} "
+            f"ironclaw server without webhook secret failed to start on ports "
+            f"gateway={gateway_port}, http={http_port} "
             f"(returncode={returncode}).\nstderr:\n{stderr_text}"
         )
     finally:
