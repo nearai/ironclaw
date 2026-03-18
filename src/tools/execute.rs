@@ -310,7 +310,9 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(crate::error::Error::Tool(crate::error::ToolError::NotFound { .. }))
+                Err(crate::error::Error::Tool(
+                    crate::error::ToolError::NotFound { .. }
+                ))
             ),
             "Empty tool name should return ToolError::NotFound, got: {result:?}"
         );
