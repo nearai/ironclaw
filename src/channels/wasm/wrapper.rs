@@ -3131,7 +3131,7 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 }
 
 fn should_skip_response_leak_scan(url: &str) -> bool {
-    url::Url::parse(url).map_or(false, |parsed| {
+    url::Url::parse(url).is_ok_and(|parsed| {
         matches!(parsed.scheme(), "http" | "https")
             && parsed
                 .host_str()
