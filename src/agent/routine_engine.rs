@@ -784,23 +784,12 @@ async fn execute_lightweight(
         Err(_) => None,
     };
 
-    // Build the user-facing prompt
-    let mut full_prompt = String::new();
-    full_prompt.push_str(prompt);
-
-    if !context_parts.is_empty() {
-        full_prompt.push_str("\n\n---\n\n# Context\n\n");
-        full_prompt.push_str(&context_parts.join("\n\n"));
-    }
-
-    if let Some(state) = &state_content {
-        full_prompt.push_str("\n\n---\n\n# Previous State\n\n");
-        full_prompt.push_str(state);
-    }
-
-    full_prompt.push_str(
-        "\n\n---\n\nIf nothing needs attention, reply EXACTLY with: ROUTINE_OK\n\
-         If something needs attention, provide a concise summary.",
+    let full_prompt = build_lightweight_prompt(
+        prompt,
+        &context_parts,
+        state_content.as_deref(),
+        &routine.notify,
+        use_tools,
     );
 
     // Get system prompt
@@ -842,6 +831,65 @@ async fn execute_lightweight(
         )
         .await
     }
+}
+
+fn build_lightweight_prompt(
+    prompt: &str,
+    context_parts: &[String],
+    state_content: Option<&str>,
+    notify: &NotifyConfig,
+    use_tools: bool,
+) -> String {
+    let mut full_prompt = String::new();
+    full_prompt.push_str(prompt);
+
+    if notify.on_attention {
+        full_prompt.push_str("\n\n---\n\n# Delivery\n\n");
+        full_prompt.push_str(
+            "If you reply with anything other than ROUTINE_OK, the host will deliver your \
+             reply as the routine notification. Return the message exactly as it should be sent.\n",
+        );
+
+        if let Some(channel) = notify.channel.as_deref() {
+            full_prompt.push_str(&format!(
+                "The configured delivery channel for this routine is `{channel}`.\n"
+            ));
+        }
+
+        if let Some(user) = notify.user.as_deref() {
+            full_prompt.push_str(&format!(
+                "The configured delivery target for this routine is `{user}`.\n"
+            ));
+        }
+
+        full_prompt.push_str(
+            "Do not claim you lack messaging integrations or ask the user to set one up when \
+             a plain reply is sufficient.\n",
+        );
+    }
+
+    if !use_tools {
+        full_prompt.push_str(
+            "\nTools are disabled for this routine run. Do not ask to call tools or describe tool limitations unless they prevent a necessary external action.\n",
+        );
+    }
+
+    if !context_parts.is_empty() {
+        full_prompt.push_str("\n\n---\n\n# Context\n\n");
+        full_prompt.push_str(&context_parts.join("\n\n"));
+    }
+
+    if let Some(state) = state_content {
+        full_prompt.push_str("\n\n---\n\n# Previous State\n\n");
+        full_prompt.push_str(state);
+    }
+
+    full_prompt.push_str(
+        "\n\n---\n\nIf nothing needs attention, reply EXACTLY with: ROUTINE_OK\n\
+         If something needs attention, provide a concise summary.",
+    );
+
+    full_prompt
 }
 
 /// Execute a lightweight routine without tool support (original single-call behavior).
@@ -1383,6 +1431,61 @@ mod tests {
             let result = super::sanitize_routine_name(name);
             assert_eq!(result, name, "Should preserve {}", name);
         }
+    }
+
+    #[test]
+    fn test_build_lightweight_prompt_explains_delivery_and_disabled_tools() {
+        let notify = NotifyConfig {
+            channel: Some("telegram".to_string()),
+            user: Some("default".to_string()),
+            on_attention: true,
+            on_failure: true,
+            on_success: false,
+        };
+
+        let prompt = super::build_lightweight_prompt(
+            "Send a Telegram reminder message to the user.",
+            &[],
+            None,
+            &notify,
+            false,
+        );
+
+        assert!(
+            prompt.contains("the host will deliver your reply as the routine notification"),
+            "delivery guidance should explain host delivery: {prompt}",
+        );
+        assert!(
+            prompt.contains("configured delivery channel for this routine is `telegram`"),
+            "delivery guidance should mention telegram channel: {prompt}",
+        );
+        assert!(
+            prompt.contains("Do not claim you lack messaging integrations"),
+            "delivery guidance should suppress fake setup chatter: {prompt}",
+        );
+        assert!(
+            prompt.contains("Tools are disabled for this routine run"),
+            "prompt should explain that tools are disabled: {prompt}",
+        );
+    }
+
+    #[test]
+    fn test_build_lightweight_prompt_skips_delivery_block_when_attention_notifications_disabled() {
+        let notify = NotifyConfig {
+            on_attention: false,
+            ..NotifyConfig::default()
+        };
+
+        let prompt = super::build_lightweight_prompt("Check inbox.", &[], None, &notify, true);
+
+        assert!(
+            !prompt.contains("# Delivery"),
+            "prompt should not include delivery guidance when attention notifications are off: {prompt}",
+        );
+        assert!(
+            !prompt.contains("Tools are disabled for this routine run"),
+            "prompt should not claim tools are disabled when they are enabled: {prompt}",
+        );
     }
 
     #[test]
