@@ -375,16 +375,7 @@ function connectSSE() {
 
   eventSource.addEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
-    // Dismiss whichever UI path was active: auth card (OAuth) or configure modal (setup).
-    removeAuthCard(data.extension_name);
-    closeConfigureModal();
-    showToast(data.message, data.success ? 'success' : 'error');
-    if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
-      addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
-    }
-    // Refresh extensions list so status indicators update
-    if (currentTab === 'settings') refreshCurrentSettingsTab();
-    enableChatInput();
+    handleAuthCompleted(data);
   });
 
   eventSource.addEventListener('extension_status', (e) => {
@@ -4411,7 +4402,8 @@ var INFERENCE_SETTINGS = [
         showWhen: { key: 'llm_backend', value: 'openai_compatible' } },
       { key: 'bedrock_region', label: 'cfg.bedrock_region.label', description: 'cfg.bedrock_region.desc', type: 'text',
         showWhen: { key: 'llm_backend', value: 'bedrock' } },
-      { key: 'bedrock_cross_region', label: 'cfg.bedrock_cross_region.label', description: 'cfg.bedrock_cross_region.desc', type: 'text',
+      { key: 'bedrock_cross_region', label: 'cfg.bedrock_cross_region.label', description: 'cfg.bedrock_cross_region.desc',
+        type: 'select', options: ['us', 'eu', 'apac', 'global'],
         showWhen: { key: 'llm_backend', value: 'bedrock' } },
       { key: 'bedrock_profile', label: 'cfg.bedrock_profile.label', description: 'cfg.bedrock_profile.desc', type: 'text',
         showWhen: { key: 'llm_backend', value: 'bedrock' } },
@@ -4714,6 +4706,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
   } else if (def.type === 'number') {
     var numInp = document.createElement('input');
     numInp.type = 'number';
+    numInp.step = '1';
     numInp.className = 'settings-input';
     numInp.setAttribute('aria-label', ariaLabel);
     numInp.value = (value === null || value === undefined) ? '' : value;
@@ -4721,7 +4714,13 @@ function renderStructuredSettingsRow(def, value, activeValue) {
     if (def.min !== undefined) numInp.min = def.min;
     if (def.max !== undefined) numInp.max = def.max;
     numInp.addEventListener('change', (function(k, el) {
-      return function() { saveSetting(k, el.value === '' ? null : parseFloat(el.value)); };
+      return function() {
+        if (el.value === '') return saveSetting(k, null);
+        var parsed = parseInt(el.value, 10);
+        if (isNaN(parsed)) return;
+        el.value = parsed;
+        saveSetting(k, parsed);
+      };
     })(def.key, numInp));
     inputWrap.appendChild(numInp);
   } else {
