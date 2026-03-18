@@ -1505,7 +1505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advertised_schema_stays_permissive_until_sidecar_override() {
+    async fn test_small_exported_schema_is_advertised_directly() {
         let discovery_schema = serde_json::json!({
             "type": "object",
             "properties": {
