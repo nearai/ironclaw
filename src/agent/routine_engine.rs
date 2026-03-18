@@ -10,6 +10,7 @@
 //! Lightweight routines execute inline (single LLM call, no scheduler slot).
 //! Full-job routines are delegated to the existing `Scheduler`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -31,11 +32,11 @@ use crate::error::RoutineError;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
-use crate::safety::SafetyLayer;
 use crate::tools::{
     ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry, prepare_tool_params,
 };
 use crate::workspace::Workspace;
+use ironclaw_safety::SafetyLayer;
 
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },
@@ -145,6 +146,15 @@ impl RoutineEngine {
     /// message content) so callers never need to clone a full `IncomingMessage`.
     pub async fn check_event_triggers(&self, user_id: &str, channel: &str, content: &str) -> usize {
         let cache = self.event_cache.read().await;
+
+        // Early return if there are no message matchers at all.
+        if !cache
+            .iter()
+            .any(|m| matches!(m, EventMatcher::Message { .. }))
+        {
+            return 0;
+        }
+
         let mut fired = 0;
 
         // Collect routine IDs for batch query
@@ -161,16 +171,9 @@ impl RoutineEngine {
         }
 
         // Single batch query instead of N queries
-        let concurrent_counts = match self
-            .store
-            .count_running_routine_runs_batch(&routine_ids)
-            .await
-        {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::error!("Failed to batch-load concurrent counts: {}", e);
-                return 0;
-            }
+        let concurrent_counts = match self.batch_concurrent_counts(&routine_ids).await {
+            Some(counts) => counts,
+            None => return 0,
         };
 
         for matcher in cache.iter() {
@@ -235,6 +238,15 @@ impl RoutineEngine {
         user_id: Option<&str>,
     ) -> usize {
         let cache = self.event_cache.read().await;
+
+        // Early return if there are no system-event matchers at all.
+        if !cache
+            .iter()
+            .any(|m| matches!(m, EventMatcher::System { .. }))
+        {
+            return 0;
+        }
+
         let mut fired = 0;
 
         // Collect routine IDs for batch query
@@ -251,19 +263,9 @@ impl RoutineEngine {
         }
 
         // Single batch query instead of N queries
-        let concurrent_counts = match self
-            .store
-            .count_running_routine_runs_batch(&routine_ids)
-            .await
-        {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to batch-load concurrent counts for system events: {}",
-                    e
-                );
-                return 0;
-            }
+        let concurrent_counts = match self.batch_concurrent_counts(&routine_ids).await {
+            Some(counts) => counts,
+            None => return 0,
         };
 
         for matcher in cache.iter() {
@@ -335,6 +337,23 @@ impl RoutineEngine {
         }
 
         fired
+    }
+
+    /// Batch-load concurrent run counts for a set of routine IDs.
+    ///
+    /// Returns `None` on database error (already logged).
+    async fn batch_concurrent_counts(&self, routine_ids: &[Uuid]) -> Option<HashMap<Uuid, i64>> {
+        match self
+            .store
+            .count_running_routine_runs_batch(routine_ids)
+            .await
+        {
+            Ok(counts) => Some(counts),
+            Err(e) => {
+                tracing::error!("Failed to batch-load concurrent counts: {}", e);
+                None
+            }
+        }
     }
 
     /// Check all due cron routines and fire them. Called by the cron ticker.
@@ -1041,8 +1060,8 @@ fn handle_text_response(
         };
     }
 
-    // Check for the "nothing to do" sentinel
-    if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
+    // Check for the "nothing to do" sentinel (exact match on trimmed content).
+    if content == "ROUTINE_OK" {
         let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
         return Ok((RunStatus::Ok, None, total_tokens));
     }
@@ -1582,20 +1601,21 @@ mod tests {
 
     #[test]
     fn test_routine_sentinel_detection_exact_match() {
-        // The execute_lightweight_no_tools checks: content == "ROUTINE_OK" || content.contains("ROUTINE_OK")
-        // After trim(), whitespace is removed
+        // Sentinel detection uses exact match on trimmed content to avoid
+        // false positives from substrings like "NOT_ROUTINE_OK".
         let test_cases = vec![
             ("ROUTINE_OK", true),
             ("  ROUTINE_OK  ", true), // After trim, whitespace is removed so matches
-            ("something ROUTINE_OK something", true),
-            ("ROUTINE_OK is done", true),
-            ("done ROUTINE_OK", true),
+            ("something ROUTINE_OK something", false), // substring no longer matches
+            ("ROUTINE_OK is done", false), // substring no longer matches
+            ("done ROUTINE_OK", false), // substring no longer matches
+            ("NOT_ROUTINE_OK", false), // exact match prevents this
             ("no sentinel here", false),
         ];
 
         for (content, should_match) in test_cases {
             let trimmed = content.trim();
-            let matches = trimmed == "ROUTINE_OK" || trimmed.contains("ROUTINE_OK");
+            let matches = trimmed == "ROUTINE_OK";
             assert_eq!(
                 matches, should_match,
                 "Content '{}' sentinel detection should be {}, got {}",
