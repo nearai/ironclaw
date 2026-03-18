@@ -171,19 +171,19 @@ impl RelayClient {
     /// Calls `POST /proxy/{provider}/{method}?team_id=X&instance_id=Y` with the given JSON body.
     /// Register a pending approval with channel-relay and receive an opaque token.
     /// The token is embedded in Slack button values instead of routing fields.
+    /// Register a pending approval with channel-relay and receive an opaque token.
+    /// The relay derives the authorized approver from the connection's authed_user_id.
     pub async fn create_approval(
         &self,
         team_id: &str,
         channel_id: &str,
         thread_ts: Option<&str>,
         request_id: &str,
-        sender_id: &str,
     ) -> Result<String, RelayError> {
         let mut body = serde_json::json!({
             "team_id": team_id,
             "channel_id": channel_id,
             "request_id": request_id,
-            "sender_id": sender_id,
         });
         if let Some(ts) = thread_ts {
             body["thread_ts"] = serde_json::Value::String(ts.to_string());

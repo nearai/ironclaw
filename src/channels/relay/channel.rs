@@ -309,7 +309,7 @@ impl Channel for RelayChannel {
         // The button value contains ONLY the token — no routing fields.
         let approval_token = self
             .client
-            .create_approval(team_id, channel_id, thread_id, &request_id, sender_id)
+            .create_approval(team_id, channel_id, thread_id, &request_id)
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: self.name().to_string(),
