@@ -22,6 +22,10 @@ pub async fn execute_tool_with_safety(
     params: &serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, Error> {
+    debug_assert!(
+        !tool_name.is_empty(),
+        "BUG: execute_tool_with_safety called with empty tool_name"
+    );
     let tool = tools
         .get(tool_name)
         .await
