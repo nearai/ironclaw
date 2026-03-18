@@ -35,7 +35,7 @@ pub async fn execute_tool_with_safety(
             name: tool_name.to_string(),
         })?;
 
-    let normalized_params = prepare_tool_params(tool.as_ref(), params);
+    let normalized_params = prepare_tool_params(tool.as_ref(), &params);
 
     // Validate tool parameters
     let validation = safety.validator().validate_tool_params(&normalized_params);
@@ -422,7 +422,7 @@ mod tests {
             &registry,
             &safety,
             "array_echo",
-            &serde_json::json!({"values": "[\"1\", \"2\", 3]"}),
+            serde_json::json!({"values": "[\"1\", \"2\", 3]"}),
             &test_job_ctx(),
         )
         .await
