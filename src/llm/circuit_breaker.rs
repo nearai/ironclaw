@@ -167,6 +167,12 @@ impl CircuitBreakerProvider {
                 }
             }
             CircuitState::Open => {
+                debug_assert!(
+                    false,
+                    "BUG: record_success() called while circuit breaker is Open — \
+                     check_allowed() was bypassed for provider {}",
+                    self.inner.model_name()
+                );
                 // Shouldn't get here (check_allowed blocks Open), but recover
                 state.state = CircuitState::Closed;
                 state.consecutive_failures = 0;

@@ -22,6 +22,7 @@ use crate::llm::provider::{
     ToolCompletionRequest, ToolCompletionResponse, strip_unsupported_completion_params,
     strip_unsupported_tool_params,
 };
+use crate::llm::retry::cap_retry_after;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth beta requires 2023-06-01; the 2024-10-22 version is not valid with the beta flag.
@@ -150,6 +151,7 @@ impl AnthropicOAuthProvider {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(std::time::Duration::from_secs)
+                .map(cap_retry_after)
                 .or(Some(std::time::Duration::from_secs(60)));
 
             let response_text = response
@@ -766,9 +768,14 @@ mod tests {
 
     #[test]
     fn test_retry_after_large_number() {
-        // Verify large numbers are accepted
+        // Verify large numbers are capped to the safe maximum
         let duration = parse_retry_after_anthropic_for_test("7200"); // 2 hours
-        assert_eq!(duration, Some(std::time::Duration::from_secs(7200)));
+        assert_eq!(
+            duration,
+            Some(std::time::Duration::from_secs(
+                crate::llm::retry::MAX_RETRY_AFTER_SECS
+            ))
+        );
     }
 
     /// Helper function to test Retry-After header parsing logic for Anthropic
@@ -779,6 +786,7 @@ mod tests {
             .parse::<u64>()
             .ok()
             .map(std::time::Duration::from_secs)
+            .map(cap_retry_after)
             .or(Some(std::time::Duration::from_secs(60)))
     }
 }
