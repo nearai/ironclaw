@@ -607,25 +607,25 @@ async fn oauth_callback_handler(
     }
 
     // Exchange the authorization code for tokens.
-    // Use the platform exchange proxy when configured (keeps client_secret off container),
-    // otherwise call the provider's token URL directly.
+    // Use the platform exchange proxy when configured, otherwise call the
+    // provider's token URL directly.
     let exchange_proxy_url = std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL").ok();
 
     let result: Result<(), String> = async {
         let token_response = if let Some(proxy_url) = &exchange_proxy_url {
             let gateway_token = flow.gateway_token.as_deref().unwrap_or_default();
-            oauth_defaults::exchange_via_proxy(
+            oauth_defaults::exchange_via_proxy(oauth_defaults::ProxyTokenExchangeRequest {
                 proxy_url,
                 gateway_token,
-                &flow.token_url,
-                &flow.client_id,
-                flow.client_secret.as_deref(),
-                &code,
-                &flow.redirect_uri,
-                flow.code_verifier.as_deref(),
-                &flow.access_token_field,
-                &flow.token_exchange_extra_params,
-            )
+                token_url: &flow.token_url,
+                client_id: &flow.client_id,
+                client_secret: flow.client_secret.as_deref(),
+                code: &code,
+                redirect_uri: &flow.redirect_uri,
+                code_verifier: flow.code_verifier.as_deref(),
+                access_token_field: &flow.access_token_field,
+                extra_token_params: &flow.token_exchange_extra_params,
+            })
             .await
             .map_err(|e| e.to_string())?
         } else {

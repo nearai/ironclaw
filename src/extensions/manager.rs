@@ -542,10 +542,11 @@ impl ExtensionManager {
         use crate::cli::oauth_defaults;
         if oauth_defaults::use_gateway_callback() {
             let callback_url = oauth_defaults::callback_url();
-            return Some(if callback_url.ends_with("/oauth/callback") {
-                callback_url
+            let normalized_callback_url = callback_url.trim_end_matches('/');
+            return Some(if normalized_callback_url.ends_with("/oauth/callback") {
+                normalized_callback_url.to_string()
             } else {
-                format!("{}/oauth/callback", callback_url.trim_end_matches('/'))
+                format!("{normalized_callback_url}/oauth/callback")
             });
         }
         // Use gateway_base_url from enable_gateway_mode()
@@ -6661,9 +6662,6 @@ mod tests {
     // The root cause was that `should_use_gateway_mode()` only checked the
     // `IRONCLAW_OAUTH_CALLBACK_URL` env var, ignoring `self.tunnel_url`.
 
-    /// Serializes env-mutating tests to prevent parallel races.
-    static GATEWAY_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Build a minimal ExtensionManager with a custom tunnel_url.
     fn make_manager_with_tunnel(tunnel_url: Option<String>) -> ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
@@ -6696,9 +6694,11 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_true_for_tunnel_url() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
-        // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
         }
@@ -6718,7 +6718,9 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_without_tunnel() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -6739,7 +6741,9 @@ mod tests {
 
     #[test]
     fn should_use_gateway_mode_false_for_loopback_tunnel() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
@@ -6767,9 +6771,11 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            let guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+            let guard = crate::config::helpers::ENV_MUTEX
+                .lock()
+                .expect("env mutex poisoned");
             let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
-            // SAFETY: Under GATEWAY_ENV_MUTEX, no concurrent env access.
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
             unsafe {
                 std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
             }
@@ -6782,7 +6788,7 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: Under GATEWAY_ENV_MUTEX (still held by _mutex), no concurrent env access.
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
             unsafe {
                 if let Some(ref val) = self.original {
                     std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
@@ -6823,9 +6829,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn gateway_callback_redirect_uri_does_not_duplicate_callback_path_from_env() {
-        let _guard = GATEWAY_ENV_MUTEX.lock().expect("env mutex poisoned");
+    #[test]
+    fn gateway_callback_redirect_uri_does_not_duplicate_callback_path_from_env() {
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
         let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
         unsafe {
             std::env::set_var(
@@ -6836,7 +6844,35 @@ mod tests {
 
         let mgr = make_manager_with_tunnel(None);
         assert_eq!(
-            mgr.gateway_callback_redirect_uri().await,
+            tokio_test::block_on(mgr.gateway_callback_redirect_uri()),
+            Some("https://oauth.test.example/oauth/callback".to_string()),
+        );
+
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
+
+    #[test]
+    fn gateway_callback_redirect_uri_trims_trailing_slash_from_env_callback() {
+        let _guard = crate::config::helpers::ENV_MUTEX
+            .lock()
+            .expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://oauth.test.example/oauth/callback/",
+            );
+        }
+
+        let mgr = make_manager_with_tunnel(None);
+        assert_eq!(
+            tokio_test::block_on(mgr.gateway_callback_redirect_uri()),
             Some("https://oauth.test.example/oauth/callback".to_string()),
         );
 

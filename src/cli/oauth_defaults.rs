@@ -560,7 +560,13 @@ pub fn encode_hosted_oauth_state(flow_id: &str, instance_name: Option<&str>) -> 
             .unwrap_or_default()
             .as_secs(),
     };
-    let payload_json = serde_json::to_vec(&payload).expect("hosted OAuth state should serialize");
+    let payload_json = match serde_json::to_vec(&payload) {
+        Ok(payload_json) => payload_json,
+        Err(error) => {
+            tracing::warn!(%error, flow_id, "Failed to serialize hosted OAuth state payload");
+            return payload.flow_id;
+        }
+    };
     let payload = URL_SAFE_NO_PAD.encode(&payload_json);
     let checksum = hosted_state_checksum(&payload_json);
     format!("{HOSTED_STATE_PREFIX}.{payload}.{checksum}")
@@ -569,29 +575,23 @@ pub fn encode_hosted_oauth_state(flow_id: &str, instance_name: Option<&str>) -> 
 /// Decode hosted OAuth state in either the new versioned format or the
 /// legacy `instance:nonce`/`nonce` forms.
 pub fn decode_hosted_oauth_state(state: &str) -> Result<DecodedHostedOAuthState, String> {
-    if let Some(rest) = state.strip_prefix(&format!("{HOSTED_STATE_PREFIX}.")) {
-        let (payload_b64, checksum) = rest
-            .rsplit_once('.')
-            .ok_or_else(|| "Malformed hosted OAuth state".to_string())?;
-        let payload_json = URL_SAFE_NO_PAD
-            .decode(payload_b64)
-            .map_err(|_| "Hosted OAuth state payload is not valid base64url".to_string())?;
+    if let Some(rest) = state.strip_prefix(&format!("{HOSTED_STATE_PREFIX}."))
+        && let Some((payload_b64, checksum)) = rest.rsplit_once('.')
+        && let Ok(payload_json) = URL_SAFE_NO_PAD.decode(payload_b64)
+    {
         let expected_checksum = hosted_state_checksum(&payload_json);
         if checksum != expected_checksum {
             return Err("Hosted OAuth state checksum mismatch".to_string());
         }
-
-        let payload: HostedOAuthStatePayload = serde_json::from_slice(&payload_json)
-            .map_err(|_| "Hosted OAuth state payload is not valid JSON".to_string())?;
-        if payload.flow_id.trim().is_empty() {
-            return Err("Hosted OAuth state payload is missing flow_id".to_string());
+        if let Ok(payload) = serde_json::from_slice::<HostedOAuthStatePayload>(&payload_json)
+            && !payload.flow_id.trim().is_empty()
+        {
+            return Ok(DecodedHostedOAuthState {
+                flow_id: payload.flow_id,
+                instance_name: payload.instance_name.filter(|v| !v.is_empty()),
+                is_legacy: false,
+            });
         }
-
-        return Ok(DecodedHostedOAuthState {
-            flow_id: payload.flow_id,
-            instance_name: payload.instance_name.filter(|v| !v.is_empty()),
-            is_legacy: false,
-        });
     }
 
     if let Some((instance_name, flow_id)) = state.split_once(':') {
@@ -640,57 +640,62 @@ pub fn strip_instance_prefix(state: &str) -> &str {
         .unwrap_or(state)
 }
 
+pub struct ProxyTokenExchangeRequest<'a> {
+    pub proxy_url: &'a str,
+    pub gateway_token: &'a str,
+    pub token_url: &'a str,
+    pub client_id: &'a str,
+    pub client_secret: Option<&'a str>,
+    pub code: &'a str,
+    pub redirect_uri: &'a str,
+    pub code_verifier: Option<&'a str>,
+    pub access_token_field: &'a str,
+    pub extra_token_params: &'a HashMap<String, String>,
+}
+
 /// Exchange an OAuth authorization code via the platform's token exchange proxy.
 ///
-/// The proxy holds `client_secret` server-side so the container never sees it.
-/// Authenticated via the gateway auth token (Bearer header).
+/// Authenticated via the gateway auth token (Bearer header). The caller may
+/// either rely on proxy-side secret lookup or forward a `client_secret` when
+/// the provider requires it.
 ///
 /// The proxy expects standard OAuth form params plus optional provider-specific
 /// token params and returns a standard token response such as
 /// `{access_token, refresh_token, expires_in}`.
 pub async fn exchange_via_proxy(
-    proxy_url: &str,
-    gateway_token: &str,
-    token_url: &str,
-    client_id: &str,
-    client_secret: Option<&str>,
-    code: &str,
-    redirect_uri: &str,
-    code_verifier: Option<&str>,
-    access_token_field: &str,
-    extra_token_params: &HashMap<String, String>,
+    request: ProxyTokenExchangeRequest<'_>,
 ) -> Result<OAuthTokenResponse, OAuthCallbackError> {
-    if gateway_token.is_empty() {
+    if request.gateway_token.is_empty() {
         return Err(OAuthCallbackError::Io(
             "Gateway auth token is required for proxy token exchange".to_string(),
         ));
     }
-    let exchange_url = format!("{}/oauth/exchange", proxy_url.trim_end_matches('/'));
+    let exchange_url = format!("{}/oauth/exchange", request.proxy_url.trim_end_matches('/'));
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|e| OAuthCallbackError::Io(format!("Failed to build HTTP client: {}", e)))?;
     let mut params = vec![
-        ("code", code.to_string()),
-        ("redirect_uri", redirect_uri.to_string()),
-        ("token_url", token_url.to_string()),
-        ("client_id", client_id.to_string()),
-        ("access_token_field", access_token_field.to_string()),
+        ("code", request.code.to_string()),
+        ("redirect_uri", request.redirect_uri.to_string()),
+        ("token_url", request.token_url.to_string()),
+        ("client_id", request.client_id.to_string()),
+        ("access_token_field", request.access_token_field.to_string()),
     ];
-    if let Some(verifier) = code_verifier {
+    if let Some(verifier) = request.code_verifier {
         params.push(("code_verifier", verifier.to_string()));
     }
-    if let Some(secret) = client_secret {
+    if let Some(secret) = request.client_secret {
         params.push(("client_secret", secret.to_string()));
     }
-    for (key, value) in extra_token_params {
+    for (key, value) in request.extra_token_params {
         params.push((key.as_str(), value.clone()));
     }
 
     let response = client
         .post(&exchange_url)
-        .bearer_auth(gateway_token)
+        .bearer_auth(request.gateway_token)
         .form(&params)
         .send()
         .await
@@ -713,7 +718,7 @@ pub async fn exchange_via_proxy(
         .map_err(|e| OAuthCallbackError::Io(format!("Failed to parse proxy response: {}", e)))?;
 
     let access_token = token_data
-        .get(access_token_field)
+        .get(request.access_token_field)
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             let fields: Vec<&str> = token_data
@@ -722,7 +727,7 @@ pub async fn exchange_via_proxy(
                 .unwrap_or_default();
             OAuthCallbackError::Io(format!(
                 "No '{}' field in proxy response (fields present: {:?})",
-                access_token_field, fields
+                request.access_token_field, fields
             ))
         })?
         .to_string();
@@ -742,14 +747,10 @@ pub async fn exchange_via_proxy(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
-
     use crate::cli::oauth_defaults::{
         builtin_credentials, callback_host, callback_url, is_loopback_host, landing_html,
     };
-
-    /// Serializes env-mutating tests to prevent parallel races.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::ENV_MUTEX;
 
     #[test]
     fn test_is_loopback_host() {
@@ -1177,6 +1178,17 @@ mod tests {
 
         let decoded = decode_hosted_oauth_state("abc123").expect("legacy raw");
         assert_eq!(decoded.flow_id, "abc123");
+        assert_eq!(decoded.instance_name, None);
+        assert!(decoded.is_legacy);
+    }
+
+    #[test]
+    fn test_decode_hosted_oauth_state_falls_back_for_non_envelope_ic2_prefix() {
+        use crate::cli::oauth_defaults::decode_hosted_oauth_state;
+
+        let decoded =
+            decode_hosted_oauth_state("ic2.provider-owned-state").expect("prefixed fallback");
+        assert_eq!(decoded.flow_id, "ic2.provider-owned-state");
         assert_eq!(decoded.instance_name, None);
         assert!(decoded.is_legacy);
     }
