@@ -60,6 +60,10 @@ pub struct RoutineEngine {
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
     safety: Arc<SafetyLayer>,
+    /// Timestamp when this engine instance was created. Used by
+    /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
+    /// process) from actively-watched runs (from this process).
+    boot_time: chrono::DateTime<Utc>,
 }
 
 impl RoutineEngine {
@@ -85,6 +89,7 @@ impl RoutineEngine {
             scheduler,
             tools,
             safety,
+            boot_time: Utc::now(),
         }
     }
 
@@ -371,11 +376,15 @@ impl RoutineEngine {
         }
     }
 
-    /// Reconcile dispatched full_job routine runs with their linked job outcomes.
+    /// Reconcile orphaned full_job routine runs with their linked job outcomes.
     ///
     /// Called on each cron tick. Finds routine runs that are still `running`
     /// with a linked `job_id`, checks the job state, and finalizes the run
-    /// when the job reaches a terminal or completed state.
+    /// when the job reaches a completed or terminal state.
+    ///
+    /// Only processes runs started **before** this engine's boot time, so it
+    /// never races with `FullJobWatcher` instances from the current process.
+    /// This makes it safe to call on every tick as a crash-recovery mechanism.
     pub async fn sync_dispatched_runs(&self) {
         let runs = match self.store.list_dispatched_routine_runs().await {
             Ok(r) => r,
@@ -385,13 +394,24 @@ impl RoutineEngine {
             }
         };
 
-        if runs.is_empty() {
+        // Only process runs from a previous process instance. Runs started
+        // after boot_time are actively watched by a FullJobWatcher in this
+        // process and should not be finalized here.
+        let orphaned: Vec<_> = runs
+            .into_iter()
+            .filter(|r| r.started_at < self.boot_time)
+            .collect();
+
+        if orphaned.is_empty() {
             return;
         }
 
-        tracing::trace!("Syncing {} dispatched routine runs", runs.len());
+        tracing::info!(
+            "Recovering {} orphaned dispatched routine runs",
+            orphaned.len()
+        );
 
-        for run in runs {
+        for run in orphaned {
             let job_id = match run.job_id {
                 Some(id) => id,
                 None => continue, // Should not happen (query filters), but guard anyway
@@ -1624,20 +1644,22 @@ pub fn spawn_cron_ticker(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // Run one check immediately so routines due at startup don't wait
-        // an extra full polling interval.
-        engine.check_cron_triggers().await;
-
-        // Recover orphaned runs from a previous process crash. Only runs
-        // at startup — during normal operation FullJobWatcher handles
-        // finalization inline, so running this on every tick would race
-        // with the watcher and cause double-completion/duplicate notifications.
+        // Recover orphaned runs from a previous process crash before
+        // dispatching any new work, so we don't confuse fresh dispatches
+        // with crash orphans.
         engine.sync_dispatched_runs().await;
+
+        // Run one cron check immediately so routines due at startup don't
+        // wait an extra full polling interval.
+        engine.check_cron_triggers().await;
 
         let mut ticker = tokio::time::interval(interval);
 
         loop {
             ticker.tick().await;
+            // Sync first: only processes runs from before boot_time, so it
+            // never races with FullJobWatcher instances from this process.
+            engine.sync_dispatched_runs().await;
             engine.check_cron_triggers().await;
         }
     })
