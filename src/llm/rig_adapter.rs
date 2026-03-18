@@ -414,15 +414,20 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
         // seed into the provider-level generator so that the encoding and any
         // provider-specific constraints remain centralized in one place.
         let digest = Sha256::digest(id.as_bytes());
-        let hash_seed = {
+        // Derive a 64-bit value from the first 8 bytes of the digest, then
+        // split it into two usize seeds so we preserve all 64 bits of entropy
+        // even on 32-bit targets.
+        let hash64 = {
             // SHA-256 always produces 32 bytes, so indexing the first 8 is safe.
             let bytes: [u8; 8] = [
                 digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6],
                 digest[7],
             ];
-            u64::from_be_bytes(bytes) as usize
+            u64::from_be_bytes(bytes)
         };
-        return super::provider::generate_tool_call_id(hash_seed, 0);
+        let hi_seed: usize = (hash64 >> 32) as usize;
+        let lo_seed: usize = (hash64 & 0xFFFF_FFFF) as usize;
+        return super::provider::generate_tool_call_id(hi_seed, lo_seed);
     }
 
     // Fallback for missing/empty raw IDs: use the provider-level generator,
