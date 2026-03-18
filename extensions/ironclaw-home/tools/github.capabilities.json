@@ -1,0 +1,59 @@
+{
+  "version": "0.2.0",
+  "wit_version": "0.3.0",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.github.com",
+          "path_prefix": "/",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        }
+      ],
+      "credentials": {
+        "github_token": {
+          "secret_name": "github_token",
+          "location": {
+            "type": "bearer"
+          },
+          "host_patterns": [
+            "api.github.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 3600
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "github_token",
+        "github_*"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "github_token",
+    "display_name": "GitHub",
+    "instructions": "Create a Personal Access Token at github.com/settings/tokens with repo scope, then paste it here.",
+    "setup_url": "https://github.com/settings/tokens",
+    "token_hint": "Starts with 'ghp_' or 'github_pat_'",
+    "env_var": "GITHUB_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "github_token",
+        "prompt": "GitHub Personal Access Token (create one at github.com/settings/tokens with 'repo' scope)"
+      }
+    ]
+  },
+  "config": {
+    "default_limit": 30,
+    "max_limit": 100
+  }
+}
