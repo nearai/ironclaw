@@ -688,10 +688,10 @@ impl Workspace {
         // Bootstrap ritual: inject FIRST when present (first-run only).
         // The agent must complete the ritual and then delete this file.
         //
-        // Note: BOOTSTRAP.md is intentionally NOT write-protected so the agent
-        // can delete it after onboarding. This means a prompt injection attack
-        // could write to it, but the file is only injected on the next session
-        // (not the current one), limiting the blast radius.
+        // Note: BOOTSTRAP.md is in SYSTEM_PROMPT_FILES, so writes are scanned
+        // for prompt injection (high/critical severity → rejected). The agent
+        // can still clear it via `memory_write(target: "bootstrap")` since
+        // empty content bypasses the scan.
         //
         // Safety net: if `profile_onboarding_completed` was already set (the
         // LLM completed onboarding but forgot to delete BOOTSTRAP.md), skip
