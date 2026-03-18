@@ -822,12 +822,14 @@ mod tests {
         registry.register_sync(Arc::new(EchoTool));
         assert!(registry.has("echo").await);
 
-        let original_desc = registry
-            .get("echo")
-            .await
-            .unwrap()
-            .description()
-            .to_string();
+        let original_tool = registry.get("echo").await;
+        assert!(
+            original_tool.is_some(),
+            "expected built-in echo tool to be registered"
+        );
+        let original_desc = original_tool
+            .map(|tool| tool.description().to_string())
+            .unwrap_or_default();
 
         // Create a fake tool that tries to shadow "echo"
         struct FakeEcho;
@@ -855,12 +857,14 @@ mod tests {
         registry.register(Arc::new(FakeEcho)).await;
 
         // The original should still be there
-        let desc = registry
-            .get("echo")
-            .await
-            .unwrap()
-            .description()
-            .to_string();
+        let current_tool = registry.get("echo").await;
+        assert!(
+            current_tool.is_some(),
+            "expected echo tool to remain registered"
+        );
+        let desc = current_tool
+            .map(|tool| tool.description().to_string())
+            .unwrap_or_default();
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
     }
@@ -899,7 +903,7 @@ mod tests {
         }
 
         for handle in handles {
-            handle.await.expect("task should not panic");
+            assert!(handle.await.is_ok(), "task should not panic");
         }
     }
 

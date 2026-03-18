@@ -563,15 +563,19 @@ mod tests {
         use super::super::*;
 
         fn make_test_workspace() -> Arc<Workspace> {
-            Arc::new(Workspace::new(
-                "test_user",
-                deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
-                    tokio_postgres::Config::new(),
-                    tokio_postgres::NoTls,
-                ))
-                .build()
-                .unwrap(),
+            let pool_result = deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
+                tokio_postgres::Config::new(),
+                tokio_postgres::NoTls,
             ))
+            .build();
+            let pool = match pool_result {
+                Ok(pool) => pool,
+                Err(err) => {
+                    eprintln!("failed to build postgres pool for memory test: {err}");
+                    std::process::exit(1);
+                }
+            };
+            Arc::new(Workspace::new("test_user", pool))
         }
 
         #[test]
@@ -584,12 +588,11 @@ mod tests {
 
             let schema = tool.parameters_schema();
             assert!(schema["properties"]["query"].is_object());
-            assert!(
-                schema["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&"query".into())
-            );
+            if let Some(required) = schema["required"].as_array() {
+                assert!(required.contains(&"query".into()));
+            } else {
+                assert!(false, "expected query schema to include required array");
+            }
         }
 
         #[test]
@@ -614,12 +617,11 @@ mod tests {
 
             let schema = tool.parameters_schema();
             assert!(schema["properties"]["path"].is_object());
-            assert!(
-                schema["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&"path".into())
-            );
+            if let Some(required) = schema["required"].as_array() {
+                assert!(required.contains(&"path".into()));
+            } else {
+                assert!(false, "expected path schema to include required array");
+            }
         }
 
         #[test]
