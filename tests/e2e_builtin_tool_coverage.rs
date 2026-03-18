@@ -203,7 +203,44 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 5: routine_manual_create
+    // Test 5: routine_update_fail_delete_fallback
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn routine_update_fail_delete_fallback() {
+        let trace = LlmTrace::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/llm_traces/tools/routine_update_fail_delete_fallback.json"
+        ))
+        .expect("failed to load routine_update_fail_delete_fallback.json");
+
+        let rig = TestRigBuilder::new()
+            .with_trace(trace.clone())
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+
+        rig.send_message("Try converting a routine trigger, then recover by deleting it")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(15)).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        let completed = rig.tool_calls_completed();
+        assert!(
+            completed.iter().any(|(n, ok)| n == "routine_update" && !ok),
+            "routine_update should fail in this regression path: {completed:?}"
+        );
+        assert!(
+            completed.iter().any(|(n, ok)| n == "routine_delete" && *ok),
+            "routine_delete should recover successfully via preserved routine identity: {completed:?}"
+        );
+
+        rig.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 6: routine_manual_create
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -244,7 +281,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: routine_history
+    // Test 7: routine_history
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -281,7 +318,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: routine_system_event_emit
+    // Test 8: routine_system_event_emit
     // -----------------------------------------------------------------------
 
     #[tokio::test]
