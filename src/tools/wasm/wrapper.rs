@@ -482,8 +482,8 @@ pub struct WasmToolWrapper {
 struct WasmToolSchemas {
     /// Compact schema advertised in the main tools array.
     ///
-    /// This stays permissive by default to avoid serializing full exported
-    /// WASM schemas on every LLM call. Sidecars can override it explicitly.
+    /// Uses the extracted WASM schema when it is typed and small enough to
+    /// advertise safely. Sidecars can override it explicitly.
     advertised: serde_json::Value,
     /// Full schema available for discovery and runtime parameter preparation.
     ///
@@ -493,6 +493,8 @@ struct WasmToolSchemas {
 }
 
 impl WasmToolSchemas {
+    const MAX_ADVERTISED_SCHEMA_BYTES: usize = 64 * 1024;
+
     fn permissive_schema() -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -521,9 +523,23 @@ impl WasmToolSchemas {
             .unwrap_or(0)
     }
 
+    fn is_reasonably_small_schema(schema: &serde_json::Value) -> bool {
+        serde_json::to_string(schema)
+            .map(|json| json.len() <= Self::MAX_ADVERTISED_SCHEMA_BYTES)
+            .unwrap_or(false)
+    }
+
     fn new(discovery: serde_json::Value) -> Self {
+        let advertised = if Self::typed_property_count(&discovery) > 0
+            && Self::is_reasonably_small_schema(&discovery)
+        {
+            discovery.clone()
+        } else {
+            Self::permissive_schema()
+        };
+
         Self {
-            advertised: Self::permissive_schema(),
+            advertised,
             discovery,
         }
     }
@@ -1490,7 +1506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advertised_schema_stays_permissive_until_sidecar_override() {
+    async fn test_typed_wasm_schema_is_advertised_to_llm() {
         let discovery_schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -1510,30 +1526,18 @@ mod tests {
         wrapper.schemas = super::WasmToolSchemas::new(discovery_schema.clone());
         wrapper.description = "Search documents".to_string();
 
-        // Advertised schema stays permissive; discovery holds the typed schema
-        assert_eq!(
-            wrapper.parameters_schema(),
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": true
-            })
-        );
+        // Typed discovery schema is advertised directly to the LLM
+        assert_eq!(wrapper.parameters_schema(), discovery_schema);
         assert_eq!(wrapper.discovery_schema(), discovery_schema);
 
         // Raw description is clean — no tool_info hint baked in
         assert!(!wrapper.description().contains("tool_info"));
 
-        // But schema() composes the hint at display time when advertised is permissive
+        // schema() should not compose a tool_info hint when the schema is typed
         let schema = wrapper.schema();
         assert!(
-            schema.description.contains("tool_info"),
-            "schema().description should contain tool_info hint: {}",
-            schema.description
-        );
-        assert!(
-            schema.description.contains("include_schema: true"),
-            "hint should mention include_schema: true: {}",
+            !schema.description.contains("tool_info"),
+            "schema().description should not contain tool_info hint when typed: {}",
             schema.description
         );
 
@@ -1558,11 +1562,44 @@ mod tests {
         );
         assert_eq!(wrapper.discovery_schema(), wrapper.parameters_schema());
 
-        // With typed schema, schema() should NOT include tool_info hint
         let schema = wrapper.schema();
         assert!(
             !schema.description.contains("tool_info"),
             "schema().description should not contain tool_info hint when typed: {}",
+            schema.description
+        );
+    }
+
+    #[tokio::test]
+    async fn test_untyped_wasm_schema_stays_permissive() {
+        let discovery_schema = serde_json::json!({
+            "type": "object",
+            "properties": {}
+        });
+
+        let runtime = Arc::new(WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).unwrap());
+        let prepared = runtime
+            .prepare("search", b"\0asm\x0d\0\x01\0", None)
+            .await
+            .unwrap();
+        let mut wrapper =
+            super::WasmToolWrapper::new(Arc::clone(&runtime), prepared, Capabilities::default());
+        wrapper.schemas = super::WasmToolSchemas::new(discovery_schema);
+        wrapper.description = "Search documents".to_string();
+
+        assert_eq!(
+            wrapper.parameters_schema(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            })
+        );
+
+        let schema = wrapper.schema();
+        assert!(
+            schema.description.contains("tool_info"),
+            "schema().description should contain tool_info hint when untyped: {}",
             schema.description
         );
     }

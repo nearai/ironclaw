@@ -152,8 +152,8 @@ impl WasmToolLoader {
                             tracing::warn!(
                                 tool = name,
                                 ?errors,
-                                "Invalid parameters schema in capabilities.json, \
-                                 using permissive fallback"
+                                "Invalid parameters schema in capabilities.json; \
+                                 falling back to permissive parameters"
                             );
                             None
                         }
@@ -171,14 +171,16 @@ impl WasmToolLoader {
                             tool = name,
                             path = %cap_path.display(),
                             "Capabilities file missing \"parameters\" field; \
-                             tool will accept any JSON object (permissive fallback)"
+                             tool will rely on the WASM export schema if present, \
+                             otherwise use permissive parameters"
                         );
                     }
                     (caps, oauth, desc, params)
                 } else {
                     tracing::warn!(
                         path = %cap_path.display(),
-                        "Capabilities file not found, using default (no permissions)"
+                        "Capabilities file not found, using default (no permissions) and \
+                         relying on the WASM export schema if present"
                     );
                     (Capabilities::default(), None, None, None)
                 }
