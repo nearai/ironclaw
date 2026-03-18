@@ -88,6 +88,12 @@ impl RoutineEngine {
         }
     }
 
+    /// Expose the running count for integration tests.
+    #[doc(hidden)]
+    pub fn running_count_for_test(&self) -> &Arc<AtomicUsize> {
+        &self.running_count
+    }
+
     /// Refresh the in-memory event trigger cache from DB.
     pub async fn refresh_event_cache(&self) {
         match self.store.list_event_routines().await {
@@ -508,6 +514,88 @@ impl RoutineEngine {
     }
 }
 
+/// Watches a dispatched full_job until the linked scheduler job completes.
+///
+/// Polls `store.get_job(job_id)` at a fixed interval until the job leaves
+/// an active state (Pending/InProgress/Stuck). Maps the final `JobState` to
+/// a `RunStatus` for the routine run.
+struct FullJobWatcher {
+    store: Arc<dyn Database>,
+    job_id: Uuid,
+    routine_name: String,
+}
+
+impl FullJobWatcher {
+    /// Poll interval between DB checks.
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    /// Safety ceiling: 24 hours, derived from POLL_INTERVAL.
+    const MAX_POLLS: u32 = (24 * 60 * 60) / Self::POLL_INTERVAL.as_secs() as u32;
+
+    fn new(store: Arc<dyn Database>, job_id: Uuid, routine_name: String) -> Self {
+        Self {
+            store,
+            job_id,
+            routine_name,
+        }
+    }
+
+    /// Block until the linked job finishes and return the mapped status + summary.
+    async fn wait_for_completion(&self) -> (RunStatus, Option<String>) {
+        let mut polls = 0u32;
+
+        let final_status = loop {
+            // Check job state before sleeping so we finalize promptly
+            // if the job is already done (e.g. fast-failing jobs).
+            match self.store.get_job(self.job_id).await {
+                Ok(Some(job_ctx)) => {
+                    if !job_ctx.state.is_active() {
+                        break Self::map_job_state(&job_ctx.state);
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        routine = %self.routine_name,
+                        job_id = %self.job_id,
+                        "full_job disappeared from DB while polling"
+                    );
+                    break RunStatus::Failed;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        routine = %self.routine_name,
+                        job_id = %self.job_id,
+                        "Error polling full_job state: {}", e
+                    );
+                    break RunStatus::Failed;
+                }
+            }
+
+            polls += 1;
+            if polls >= Self::MAX_POLLS {
+                tracing::error!(
+                    routine = %self.routine_name,
+                    job_id = %self.job_id,
+                    "full_job timed out after 24 hours, treating as failed"
+                );
+                break RunStatus::Failed;
+            }
+
+            tokio::time::sleep(Self::POLL_INTERVAL).await;
+        };
+
+        let summary = format!("Job {} finished ({})", self.job_id, final_status);
+        (final_status, Some(summary))
+    }
+
+    fn map_job_state(state: &crate::context::JobState) -> RunStatus {
+        use crate::context::JobState;
+        match state {
+            JobState::Failed | JobState::Cancelled => RunStatus::Failed,
+            _ => RunStatus::Ok, // Completed / Submitted / Accepted
+        }
+    }
+}
+
 /// Shared context passed to the execution function.
 struct EngineContext {
     config: RoutineConfig,
@@ -682,8 +770,10 @@ fn sanitize_routine_name(name: &str) -> String {
 ///
 /// Fire-and-forget: creates a job via `Scheduler::dispatch_job` (which handles
 /// creation, metadata, persistence, and scheduling), links the routine run to
-/// the job, and returns immediately. The job runs independently via the
-/// existing Worker/Scheduler with full tool access.
+/// the job, then watches it via `FullJobWatcher` until it reaches a
+/// non-active state (not Pending/InProgress/Stuck). Returns the final
+/// `RunStatus` mapped from the job outcome. This keeps the routine run
+/// active for the full job lifetime so concurrency guardrails apply.
 async fn execute_full_job(
     ctx: &EngineContext,
     routine: &Routine,
@@ -738,13 +828,15 @@ async fn execute_full_job(
         routine = %routine.name,
         job_id = %job_id,
         max_iterations = max_iterations,
-        "Dispatched full job for routine"
+        "Dispatched full job for routine, watching for completion"
     );
 
-    let summary = format!(
-        "Dispatched job {job_id} for full execution with tool access (max_iterations: {max_iterations})"
-    );
-    Ok((RunStatus::Ok, Some(summary), None))
+    // Watch the job until it finishes — keeps the routine run active
+    // so concurrency guardrails (running_count, routine_runs status)
+    // remain enforced for the full job lifetime.
+    let watcher = FullJobWatcher::new(ctx.store.clone(), job_id, routine.name.clone());
+    let (status, summary) = watcher.wait_for_completion().await;
+    Ok((status, summary, None))
 }
 
 /// Execute a lightweight routine with optional tool support.
