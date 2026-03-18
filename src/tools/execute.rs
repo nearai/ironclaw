@@ -22,10 +22,6 @@ pub async fn execute_tool_with_safety(
     params: &serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, Error> {
-    debug_assert!(
-        !tool_name.is_empty(),
-        "BUG: execute_tool_with_safety called with empty tool_name"
-    );
     let tool = tools
         .get(tool_name)
         .await
@@ -297,8 +293,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_empty_tool_name_returns_not_found() {
-        // Regression: execute_tool_with_safety must reject empty tool names before
-        // even attempting a registry lookup (the debug_assert guards this invariant).
+        // Regression: execute_tool_with_safety must reject empty tool names
+        // gracefully via ToolError::NotFound (not a panic).
         let registry = registry_with(vec![]).await;
         let safety = test_safety();
 
