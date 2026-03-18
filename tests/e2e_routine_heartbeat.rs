@@ -933,11 +933,20 @@ mod tests {
         }));
 
         // Configure global limit of 1
-        let mut config = RoutineConfig::default();
-        config.max_concurrent_routines = 1;
+        let config = RoutineConfig {
+            max_concurrent_routines: 1,
+            ..RoutineConfig::default()
+        };
 
         let engine = Arc::new(RoutineEngine::new(
-            config, db.clone(), llm, ws, notify_tx, None, tools, safety,
+            config,
+            db.clone(),
+            llm,
+            ws,
+            notify_tx,
+            None,
+            tools,
+            safety,
         ));
 
         // Insert a due cron routine
