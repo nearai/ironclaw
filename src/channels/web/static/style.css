@@ -4156,3 +4156,222 @@ mark {
   padding: 4px 8px;
   background: var(--bg-secondary);
 }
+
+/* Omnisearch Command Palette */
+
+.omnisearch-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10001;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 15vh;
+  opacity: 1;
+  transition: opacity 0.15s ease;
+}
+
+.omnisearch-overlay.hidden {
+  display: none;
+}
+
+.omnisearch-backdrop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.omnisearch-modal {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  max-width: 640px;
+  width: 90vw;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: omnisearch-enter 0.15s ease;
+}
+
+@keyframes omnisearch-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.omnisearch-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.omnisearch-icon {
+  font-size: 18px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+#omnisearch-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 15px;
+  font-family: inherit;
+  min-width: 0;
+}
+
+#omnisearch-input::placeholder {
+  color: var(--text-secondary);
+}
+
+.omnisearch-hotkey {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  line-height: 1.4;
+}
+
+.omnisearch-results {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 4px 0;
+}
+
+.omnisearch-category {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 10px 16px 4px;
+}
+
+.omnisearch-result-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 16px;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 0.1s ease;
+}
+
+.omnisearch-result-item:hover,
+.omnisearch-result-item.selected {
+  background: var(--bg-tertiary);
+}
+
+.omnisearch-result-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.omnisearch-result-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.omnisearch-result-score {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.omnisearch-result-time {
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.omnisearch-result-snippet {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.omnisearch-footer {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.omnisearch-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  gap: 8px;
+}
+
+.omnisearch-spinner::before {
+  content: '';
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: omnisearch-spin 0.6s linear infinite;
+}
+
+@keyframes omnisearch-spin {
+  to { transform: rotate(360deg); }
+}
+
+.omnisearch-empty,
+.omnisearch-error {
+  text-align: center;
+  padding: 24px 16px;
+  font-size: 13px;
+}
+
+.omnisearch-empty {
+  color: var(--text-secondary);
+}
+
+.omnisearch-error {
+  color: var(--danger);
+}
