@@ -615,7 +615,7 @@ mod tests {
 
     /// Regression test: stuck_duration must be measured from the Stuck transition
     /// timestamp, not from started_at. A job that ran for 2 hours before becoming
-    /// stuck (just now) should NOT be detected with a 5-minute threshold.
+    /// stuck (just now) should report a near-zero stuck_duration, not 2 hours.
     #[tokio::test]
     async fn stuck_duration_measured_from_stuck_transition_not_started_at() {
         let cm = Arc::new(ContextManager::new(10));
@@ -642,8 +642,9 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        // With a 5-minute threshold, the job should NOT be detected as stuck
-        // because it only became Stuck moments ago (even though started_at is 2h ago).
+        // The job IS detected because it's explicitly in Stuck state (which is
+        // always returned regardless of threshold), but its stuck_duration should
+        // be near-zero since it only just became Stuck (not 2h from started_at).
         let repair = DefaultSelfRepair::new(cm, Duration::from_secs(300), 3);
         let stuck = repair.detect_stuck_jobs().await;
 

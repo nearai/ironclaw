@@ -231,6 +231,11 @@ impl ContextManager {
                     return true;
                 }
                 // Detect InProgress jobs that have been running beyond the elapsed threshold.
+                // NOTE: `started_at` is set on the first transition to InProgress and is
+                // NOT reset when a job recovers from Stuck back to InProgress. This means
+                // a recovered job may be re-detected on the next scan. A future improvement
+                // could track `in_progress_since` or use the most recent StateTransition
+                // with `to == InProgress` to avoid false positives on recovered jobs.
                 if c.state == crate::context::JobState::InProgress
                     && let Some(threshold) = elapsed_threshold
                     && let Some(started) = c.started_at
