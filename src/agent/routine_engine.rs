@@ -23,7 +23,7 @@ use crate::agent::Scheduler;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
 };
-use crate::channels::{IncomingMessage, OutgoingResponse};
+use crate::channels::OutgoingResponse;
 use crate::config::RoutineConfig;
 use crate::context::JobContext;
 use crate::db::Database;
@@ -135,9 +135,9 @@ impl RoutineEngine {
 
     /// Check incoming message against event triggers. Returns number of routines fired.
     ///
-    /// Called synchronously from the main loop after handle_message(). The actual
-    /// execution is spawned async so this returns quickly.
-    pub async fn check_event_triggers(&self, message: &IncomingMessage) -> usize {
+    /// Accepts only the three fields needed for matching (user scope, channel,
+    /// message content) so callers never need to clone a full `IncomingMessage`.
+    pub async fn check_event_triggers(&self, user_id: &str, channel: &str, content: &str) -> usize {
         let cache = self.event_cache.read().await;
         let mut fired = 0;
 
@@ -173,7 +173,7 @@ impl RoutineEngine {
                 EventMatcher::System { .. } => continue,
             };
 
-            if routine.user_id != message.user_id {
+            if routine.user_id != user_id {
                 continue;
             }
 
@@ -181,13 +181,13 @@ impl RoutineEngine {
             if let Trigger::Event {
                 channel: Some(ch), ..
             } = &routine.trigger
-                && ch != &message.channel
+                && ch != channel
             {
                 continue;
             }
 
             // Regex match
-            if !re.is_match(&message.content) {
+            if !re.is_match(content) {
                 continue;
             }
 
@@ -210,7 +210,7 @@ impl RoutineEngine {
                 continue;
             }
 
-            let detail = truncate(&message.content, 200);
+            let detail = truncate(content, 200);
             self.spawn_fire(routine.clone(), "event", Some(detail));
             fired += 1;
         }

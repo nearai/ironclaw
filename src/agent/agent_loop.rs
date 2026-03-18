@@ -7,7 +7,6 @@
 //! - `commands` - System commands and job handlers
 //! - `thread_ops` - Thread/session operations (user input, undo, approval, persistence)
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -114,28 +113,6 @@ async fn resolve_routine_notification_target(
     .await
 }
 
-fn routine_trigger_message<'a>(
-    message: &'a IncomingMessage,
-    submission: &'a Submission,
-) -> Option<Cow<'a, IncomingMessage>> {
-    if message.is_internal {
-        return None;
-    }
-
-    match submission {
-        Submission::UserInput { content } => {
-            if content == &message.content {
-                Some(Cow::Borrowed(message))
-            } else {
-                let mut rewritten = message.clone();
-                rewritten.content = content.clone();
-                Some(Cow::Owned(rewritten))
-            }
-        }
-        _ => None,
-    }
-}
-
 fn should_fallback_routine_notification(error: &ChannelError) -> bool {
     !matches!(error, ChannelError::MissingRoutingTarget { .. })
 }
@@ -187,7 +164,7 @@ pub struct Agent {
     /// Shared routine-engine slot used for internal event matching and for exposing
     /// the engine to gateway/manual trigger entry points.
     pub(super) routine_engine_slot:
-        Option<Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>>,
+        Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
 }
 
 impl Agent {
@@ -252,21 +229,21 @@ impl Agent {
             heartbeat_config,
             hygiene_config,
             routine_config,
-            routine_engine_slot: Some(Arc::new(tokio::sync::RwLock::new(None))),
+            routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
-    /// Set the routine engine slot for exposing the engine to the gateway.
+    /// Replace the routine-engine slot with a shared one so the gateway and
+    /// agent reference the same engine.
     pub fn set_routine_engine_slot(
         &mut self,
         slot: Arc<tokio::sync::RwLock<Option<Arc<crate::agent::routine_engine::RoutineEngine>>>>,
     ) {
-        self.routine_engine_slot = Some(slot);
+        self.routine_engine_slot = slot;
     }
 
     async fn routine_engine(&self) -> Option<Arc<crate::agent::routine_engine::RoutineEngine>> {
-        let slot = self.routine_engine_slot.as_ref()?;
-        slot.read().await.clone()
+        self.routine_engine_slot.read().await.clone()
     }
 
     // Convenience accessors
@@ -662,9 +639,7 @@ impl Agent {
                     // via a local to use in the message loop below.
 
                     // Expose engine to gateway for manual triggering
-                    if let Some(ref slot) = self.routine_engine_slot {
-                        *slot.write().await = Some(Arc::clone(&engine));
-                    }
+                    *self.routine_engine_slot.write().await = Some(Arc::clone(&engine));
 
                     tracing::debug!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
@@ -1035,10 +1010,13 @@ impl Agent {
             message.content.len()
         );
 
-        if let Some(trigger_message) = routine_trigger_message(message, &submission)
+        if !message.is_internal
+            && let Submission::UserInput { ref content } = submission
             && let Some(engine) = self.routine_engine().await
         {
-            let fired = engine.check_event_triggers(trigger_message.as_ref()).await;
+            let fired = engine
+                .check_event_triggers(&message.user_id, &message.channel, content)
+                .await;
             if fired > 0 {
                 tracing::debug!(
                     channel = %message.channel,
@@ -1137,11 +1115,10 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_routine_notification_user, routine_trigger_message,
-        should_fallback_routine_notification, truncate_for_preview,
+        resolve_routine_notification_user, should_fallback_routine_notification,
+        truncate_for_preview,
     };
-    use crate::{agent::submission::Submission, channels::IncomingMessage, error::ChannelError};
-    use std::borrow::Cow;
+    use crate::error::ChannelError;
 
     #[test]
     fn test_truncate_short_input() {
@@ -1234,46 +1211,6 @@ mod tests {
         });
 
         assert_eq!(resolve_routine_notification_user(&metadata), None); // safety: test-only assertion
-    }
-
-    #[test]
-    fn routine_trigger_message_borrows_original_user_input() {
-        let message = IncomingMessage::new("test", "user1", "bug: original");
-        let submission = Submission::UserInput {
-            content: "bug: original".to_string(),
-        };
-
-        let trigger_message = routine_trigger_message(&message, &submission)
-            .expect("user input should be routable for event trigger checks");
-
-        assert!(matches!(trigger_message, Cow::Borrowed(_)));
-        assert_eq!(trigger_message.as_ref().content, "bug: original");
-    }
-
-    #[test]
-    fn routine_trigger_message_uses_modified_user_input_content() {
-        let message = IncomingMessage::new("test", "user1", "redacted");
-        let submission = Submission::UserInput {
-            content: "bug: original".to_string(),
-        };
-
-        let trigger_message = routine_trigger_message(&message, &submission)
-            .expect("user input should be routable for event trigger checks");
-
-        assert!(matches!(trigger_message, Cow::Owned(_)));
-        assert_eq!(trigger_message.as_ref().content, "bug: original");
-        assert_eq!(trigger_message.as_ref().channel, "test");
-        assert_eq!(trigger_message.as_ref().user_id, "user1");
-    }
-
-    #[test]
-    fn routine_trigger_message_skips_internal_messages() {
-        let message = IncomingMessage::new("test", "user1", "bug: original").into_internal();
-        let submission = Submission::UserInput {
-            content: "bug: original".to_string(),
-        };
-
-        assert!(routine_trigger_message(&message, &submission).is_none());
     }
 
     #[test]
