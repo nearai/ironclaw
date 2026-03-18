@@ -605,15 +605,7 @@ mod tests {
             ),
             (
                 "event_emit",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "event_source": { "type": "string", "description": "Event source" },
-                        "event_type": { "type": "string", "description": "Event type" },
-                        "payload": { "type": "object", "description": "Event payload", "properties": {} }
-                    },
-                    "required": ["event_source", "event_type"]
-                }),
+                crate::tools::builtin::routine::event_emit_parameters_schema(),
             ),
             // Job tools with complex deps
             (
