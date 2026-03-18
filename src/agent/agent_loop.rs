@@ -22,7 +22,7 @@ use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
-use crate::error::Error;
+use crate::error::{ChannelError, Error};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
@@ -54,10 +54,75 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     }
 }
 
+#[cfg(test)]
+fn resolve_routine_notification_user(metadata: &serde_json::Value) -> Option<String> {
+    resolve_owner_scope_notification_user(
+        metadata.get("notify_user").and_then(|value| value.as_str()),
+        metadata.get("owner_id").and_then(|value| value.as_str()),
+    )
+}
+
+fn trimmed_option(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn resolve_owner_scope_notification_user(
+    explicit_user: Option<&str>,
+    owner_fallback: Option<&str>,
+) -> Option<String> {
+    trimmed_option(explicit_user).or_else(|| trimmed_option(owner_fallback))
+}
+
+async fn resolve_channel_notification_user(
+    extension_manager: Option<&Arc<ExtensionManager>>,
+    channel: Option<&str>,
+    explicit_user: Option<&str>,
+    owner_fallback: Option<&str>,
+) -> Option<String> {
+    if let Some(user) = trimmed_option(explicit_user) {
+        return Some(user);
+    }
+
+    if let Some(channel_name) = trimmed_option(channel)
+        && let Some(extension_manager) = extension_manager
+        && let Some(target) = extension_manager
+            .notification_target_for_channel(&channel_name)
+            .await
+    {
+        return Some(target);
+    }
+
+    resolve_owner_scope_notification_user(explicit_user, owner_fallback)
+}
+
+async fn resolve_routine_notification_target(
+    extension_manager: Option<&Arc<ExtensionManager>>,
+    metadata: &serde_json::Value,
+) -> Option<String> {
+    resolve_channel_notification_user(
+        extension_manager,
+        metadata
+            .get("notify_channel")
+            .and_then(|value| value.as_str()),
+        metadata.get("notify_user").and_then(|value| value.as_str()),
+        metadata.get("owner_id").and_then(|value| value.as_str()),
+    )
+    .await
+}
+
+fn should_fallback_routine_notification(error: &ChannelError) -> bool {
+    !matches!(error, ChannelError::MissingRoutingTarget { .. })
+}
+
 /// Core dependencies for the agent.
 ///
 /// Bundles the shared components to reduce argument count.
 pub struct AgentDeps {
+    /// Resolved durable owner scope for the instance.
+    pub owner_id: String,
     pub store: Option<Arc<dyn Database>>,
     pub llm: Arc<dyn LlmProvider>,
     /// Cheap/fast LLM for lightweight tasks (heartbeat, routing, evaluation).
@@ -102,6 +167,18 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub(super) fn owner_id(&self) -> &str {
+        if let Some(workspace) = self.deps.workspace.as_ref() {
+            debug_assert_eq!(
+                workspace.user_id(),
+                self.deps.owner_id,
+                "workspace.user_id() must stay aligned with deps.owner_id"
+            );
+        }
+
+        &self.deps.owner_id
+    }
+
     /// Create a new agent.
     ///
     /// Optionally accepts pre-created `ContextManager` and `SessionManager` for sharing
@@ -264,6 +341,7 @@ impl Agent {
         ));
         let repair_interval = self.config.repair_check_interval;
         let repair_channels = self.channels.clone();
+        let repair_owner_id = self.owner_id().to_string();
         let repair_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(repair_interval).await;
@@ -311,7 +389,9 @@ impl Agent {
 
                     if let Some(msg) = notification {
                         let response = OutgoingResponse::text(format!("Self-Repair: {}", msg));
-                        let _ = repair_channels.broadcast_all("default", response).await;
+                        let _ = repair_channels
+                            .broadcast_all(&repair_owner_id, response)
+                            .await;
                     }
                 }
 
@@ -325,7 +405,9 @@ impl Agent {
                                 "Self-Repair: Tool '{}' repaired: {}",
                                 tool.name, message
                             ));
-                            let _ = repair_channels.broadcast_all("default", response).await;
+                            let _ = repair_channels
+                                .broadcast_all(&repair_owner_id, response)
+                                .await;
                         }
                         Ok(result) => {
                             tracing::info!("Tool repair result: {:?}", result);
@@ -362,8 +444,12 @@ impl Agent {
                         .timezone
                         .clone()
                         .or_else(|| Some(self.config.default_timezone.clone()));
-                    if let (Some(user), Some(channel)) =
-                        (&hb_config.notify_user, &hb_config.notify_channel)
+                    let heartbeat_notify_user = resolve_owner_scope_notification_user(
+                        hb_config.notify_user.as_deref(),
+                        Some(self.owner_id()),
+                    );
+                    if let Some(channel) = &hb_config.notify_channel
+                        && let Some(user) = heartbeat_notify_user.as_deref()
                     {
                         config = config.with_notify(user, channel);
                     }
@@ -374,15 +460,22 @@ impl Agent {
 
                     // Spawn notification forwarder that routes through channel manager
                     let notify_channel = hb_config.notify_channel.clone();
-                    let notify_user = hb_config.notify_user.clone();
+                    let notify_target = resolve_channel_notification_user(
+                        self.deps.extension_manager.as_ref(),
+                        hb_config.notify_channel.as_deref(),
+                        hb_config.notify_user.as_deref(),
+                        Some(self.owner_id()),
+                    )
+                    .await;
+                    let notify_user = heartbeat_notify_user;
                     let channels = self.channels.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
-                            let user = notify_user.as_deref().unwrap_or("default");
-
                             // Try the configured channel first, fall back to
                             // broadcasting on all channels.
-                            let targeted_ok = if let Some(ref channel) = notify_channel {
+                            let targeted_ok = if let Some(ref channel) = notify_channel
+                                && let Some(ref user) = notify_target
+                            {
                                 channels
                                     .broadcast(channel, user, response.clone())
                                     .await
@@ -391,7 +484,7 @@ impl Agent {
                                 false
                             };
 
-                            if !targeted_ok {
+                            if !targeted_ok && let Some(ref user) = notify_user {
                                 let results = channels.broadcast_all(user, response).await;
                                 for (ch, result) in results {
                                     if let Err(e) = result {
@@ -460,32 +553,60 @@ impl Agent {
 
                     // Spawn notification forwarder (mirrors heartbeat pattern)
                     let channels = self.channels.clone();
+                    let extension_manager = self.deps.extension_manager.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
-                            let user = response
-                                .metadata
-                                .get("notify_user")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("default")
-                                .to_string();
                             let notify_channel = response
                                 .metadata
                                 .get("notify_channel")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string());
+                            let fallback_user = resolve_owner_scope_notification_user(
+                                response
+                                    .metadata
+                                    .get("notify_user")
+                                    .and_then(|v| v.as_str()),
+                                response.metadata.get("owner_id").and_then(|v| v.as_str()),
+                            );
+                            let Some(user) = resolve_routine_notification_target(
+                                extension_manager.as_ref(),
+                                &response.metadata,
+                            )
+                            .await
+                            else {
+                                tracing::warn!(
+                                    notify_channel = ?notify_channel,
+                                    "Skipping routine notification with no explicit target or owner scope"
+                                );
+                                continue;
+                            };
 
                             // Try the configured channel first, fall back to
                             // broadcasting on all channels.
                             let targeted_ok = if let Some(ref channel) = notify_channel {
-                                channels
-                                    .broadcast(channel, &user, response.clone())
-                                    .await
-                                    .is_ok()
+                                match channels.broadcast(channel, &user, response.clone()).await {
+                                    Ok(()) => true,
+                                    Err(e) => {
+                                        let should_fallback =
+                                            should_fallback_routine_notification(&e);
+                                        tracing::warn!(
+                                            channel = %channel,
+                                            user = %user,
+                                            error = %e,
+                                            should_fallback,
+                                            "Failed to send routine notification to configured channel"
+                                        );
+                                        if !should_fallback {
+                                            continue;
+                                        }
+                                        false
+                                    }
+                                }
                             } else {
                                 false
                             };
 
-                            if !targeted_ok {
+                            if !targeted_ok && let Some(user) = fallback_user {
                                 let results = channels.broadcast_all(&user, response).await;
                                 for (ch, result) in results {
                                     if let Err(e) = result {
@@ -572,6 +693,29 @@ impl Agent {
             // Store successfully extracted document text in workspace for indexing
             self.store_extracted_documents(&message).await;
 
+            // Event-triggered routines consume plain user input before it enters
+            // the normal chat/tool pipeline. This avoids a duplicate turn where
+            // the main agent responds and the routine also fires on the same
+            // inbound message.
+            if !message.is_internal
+                && matches!(
+                    SubmissionParser::parse(&message.content),
+                    Submission::UserInput { .. }
+                )
+                && let Some(ref engine) = routine_engine_for_loop
+            {
+                let fired = engine.check_event_triggers(&message).await;
+                if fired > 0 {
+                    tracing::debug!(
+                        channel = %message.channel,
+                        user = %message.user_id,
+                        fired,
+                        "Consumed inbound user message with matching event-triggered routine(s)"
+                    );
+                    continue;
+                }
+            }
+
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
@@ -642,14 +786,6 @@ impl Agent {
                             "Failed to send error response to channel"
                         );
                     }
-                }
-            }
-
-            // Check event triggers (cheap in-memory regex, fires async if matched)
-            if let Some(ref engine) = routine_engine_for_loop {
-                let fired = engine.check_event_triggers(&message).await;
-                if fired > 0 {
-                    tracing::debug!("Fired {} event-triggered routines", fired);
                 }
             }
         }
@@ -750,14 +886,25 @@ impl Agent {
             "Message details"
         );
 
+        // Internal messages (e.g. job-monitor notifications) are already
+        // rendered text and should be forwarded directly to the user without
+        // entering the normal user-input pipeline (LLM/tool loop).
+        // The `is_internal` field and `into_internal()` setter are pub(crate),
+        // so external channels cannot spoof this flag.
+        if message.is_internal {
+            tracing::debug!(
+                message_id = %message.id,
+                channel = %message.channel,
+                "Forwarding internal message"
+            );
+            return Ok(Some(message.content.clone()));
+        }
+
         // Set message tool context for this turn (current channel and target)
         // For Signal, use signal_target from metadata (group:ID or phone number),
         // otherwise fall back to user_id
         let target = message
-            .metadata
-            .get("signal_target")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .routing_target()
             .unwrap_or_else(|| message.user_id.clone());
         self.tools()
             .set_message_tool_context(Some(message.channel.clone()), Some(target))
@@ -797,7 +944,7 @@ impl Agent {
         }
 
         // Hydrate thread from DB if it's a historical thread not in memory
-        if let Some(ref external_thread_id) = message.thread_id {
+        if let Some(external_thread_id) = message.conversation_scope() {
             tracing::trace!(
                 message_id = %message.id,
                 thread_id = %external_thread_id,
@@ -818,7 +965,7 @@ impl Agent {
             .resolve_thread(
                 &message.user_id,
                 &message.channel,
-                message.thread_id.as_deref(),
+                message.conversation_scope(),
             )
             .await;
         tracing::debug!(
@@ -971,7 +1118,11 @@ impl Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_for_preview;
+    use super::{
+        resolve_routine_notification_user, should_fallback_routine_notification,
+        truncate_for_preview,
+    };
+    use crate::error::ChannelError;
 
     #[test]
     fn test_truncate_short_input() {
@@ -1033,5 +1184,56 @@ mod tests {
         let result = truncate_for_preview(input, 8);
         // 'h','e','l','l','o',' ','世','界' = 8 chars
         assert_eq!(result, "hello 世界...");
+    }
+
+    #[test]
+    fn resolve_routine_notification_user_prefers_explicit_target() {
+        let metadata = serde_json::json!({
+            "notify_user": "12345",
+            "owner_id": "owner-scope",
+        });
+
+        let resolved = resolve_routine_notification_user(&metadata);
+        assert_eq!(resolved.as_deref(), Some("12345")); // safety: test-only assertion
+    }
+
+    #[test]
+    fn resolve_routine_notification_user_falls_back_to_owner_scope() {
+        let metadata = serde_json::json!({
+            "notify_user": null,
+            "owner_id": "owner-scope",
+        });
+
+        let resolved = resolve_routine_notification_user(&metadata);
+        assert_eq!(resolved.as_deref(), Some("owner-scope")); // safety: test-only assertion
+    }
+
+    #[test]
+    fn resolve_routine_notification_user_rejects_missing_values() {
+        let metadata = serde_json::json!({
+            "notify_user": "   ",
+        });
+
+        assert_eq!(resolve_routine_notification_user(&metadata), None); // safety: test-only assertion
+    }
+
+    #[test]
+    fn targeted_routine_notifications_do_not_fallback_without_owner_route() {
+        let error = ChannelError::MissingRoutingTarget {
+            name: "telegram".to_string(),
+            reason: "No stored owner routing target for channel 'telegram'.".to_string(),
+        };
+
+        assert!(!should_fallback_routine_notification(&error)); // safety: test-only assertion
+    }
+
+    #[test]
+    fn targeted_routine_notifications_may_fallback_for_other_errors() {
+        let error = ChannelError::SendFailed {
+            name: "telegram".to_string(),
+            reason: "timeout talking to channel".to_string(),
+        };
+
+        assert!(should_fallback_routine_notification(&error)); // safety: test-only assertion
     }
 }

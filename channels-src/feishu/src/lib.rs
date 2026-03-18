@@ -33,8 +33,8 @@ use serde::{Deserialize, Serialize};
 
 // Re-export generated types
 use exports::near::agent::channel::{
-    AgentResponse, Attachment, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, PollConfig, StatusUpdate,
+    AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
+    OutgoingHttpResponse, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage};
 
@@ -207,7 +207,7 @@ struct FeishuApiResponse<T> {
 }
 
 /// Tenant access token response.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct TenantAccessTokenData {
     tenant_access_token: String,
     expire: i64,
@@ -268,7 +268,7 @@ fn default_api_base() -> String {
 
 struct FeishuChannel;
 
-export_sandboxed_channel!(FeishuChannel);
+export!(FeishuChannel);
 
 impl Guest for FeishuChannel {
     fn on_start(config_json: String) -> Result<ChannelConfig, String> {
@@ -373,10 +373,7 @@ impl Guest for FeishuChannel {
                     channel_host::LogLevel::Info,
                     "Handling URL verification challenge",
                 );
-                return json_response(
-                    200,
-                    serde_json::json!({ "challenge": challenge }),
-                );
+                return json_response(200, serde_json::json!({ "challenge": challenge }));
             }
         }
 
@@ -467,7 +464,10 @@ fn handle_message_event(event_data: &serde_json::Value) {
             if !allow_list.is_empty() && !allow_list.iter().any(|id| id == sender_id) {
                 channel_host::log(
                     channel_host::LogLevel::Debug,
-                    &format!("Ignoring message from user not in allow_from: {}", sender_id),
+                    &format!(
+                        "Ignoring message from user not in allow_from: {}",
+                        sender_id
+                    ),
                 );
                 return;
             }
@@ -475,19 +475,15 @@ fn handle_message_event(event_data: &serde_json::Value) {
     }
 
     // DM pairing check for p2p chats.
-    let chat_type = msg_event
-        .message
-        .chat_type
-        .as_deref()
-        .unwrap_or("unknown");
+    let chat_type = msg_event.message.chat_type.as_deref().unwrap_or("unknown");
 
     if chat_type == "p2p" {
-        let dm_policy = channel_host::workspace_read(DM_POLICY_PATH)
-            .unwrap_or_else(|| "pairing".to_string());
+        let dm_policy =
+            channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
 
         if dm_policy == "pairing" {
             let sender_name = sender_id.to_string();
-            match channel_host::pairing_is_allowed("feishu", sender_id, &sender_name) {
+            match channel_host::pairing_is_allowed("feishu", sender_id, Some(&sender_name)) {
                 Ok(true) => {}
                 Ok(false) => {
                     // Upsert a pairing request.
@@ -538,8 +534,7 @@ fn handle_message_event(event_data: &serde_json::Value) {
         chat_type: chat_type.to_string(),
     };
 
-    let metadata_json =
-        serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+    let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
 
     // Determine thread ID from reply chain.
     let thread_id = msg_event
@@ -550,7 +545,7 @@ fn handle_message_event(event_data: &serde_json::Value) {
         .map(|s| s.to_string());
 
     // Emit message to the agent.
-    channel_host::emit_message(EmittedMessage {
+    channel_host::emit_message(&EmittedMessage {
         user_id: sender_id.to_string(),
         user_name: None,
         content: text,
@@ -597,10 +592,7 @@ fn send_reply(message_id: &str, content: &str) -> Result<(), String> {
 
     let token = get_valid_token(&api_base)?;
 
-    let url = format!(
-        "{}/open-apis/im/v1/messages/{}/reply",
-        api_base, message_id
-    );
+    let url = format!("{}/open-apis/im/v1/messages/{}/reply", api_base, message_id);
 
     let body = ReplyMessageBody {
         msg_type: "text".to_string(),
@@ -619,7 +611,7 @@ fn send_reply(message_id: &str, content: &str) -> Result<(), String> {
         "POST",
         &url,
         &headers.to_string(),
-        Some(&body_json),
+        Some(body_json.as_bytes()),
         Some(10_000),
     );
 
@@ -679,7 +671,7 @@ fn send_message(receive_id: &str, receive_id_type: &str, content: &str) -> Resul
         "POST",
         &url,
         &headers.to_string(),
-        Some(&body_json),
+        Some(body_json.as_bytes()),
         Some(10_000),
     );
 
@@ -759,11 +751,12 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
         "Content-Type": "application/json; charset=utf-8",
     });
 
+    let body_bytes = body.to_string();
     let result = channel_host::http_request(
         "POST",
         &url,
         &headers.to_string(),
-        Some(&body.to_string()),
+        Some(body_bytes.as_bytes()),
         Some(10_000),
     );
 
@@ -801,10 +794,7 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
 
             channel_host::log(
                 channel_host::LogLevel::Debug,
-                &format!(
-                    "Tenant access token refreshed, expires in {}s",
-                    data.expire
-                ),
+                &format!("Tenant access token refreshed, expires in {}s", data.expire),
             );
 
             Ok(data.tenant_access_token)

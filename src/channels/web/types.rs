@@ -410,6 +410,40 @@ pub struct TransitionInfo {
 
 // --- Extensions ---
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionActivationStatus {
+    Installed,
+    Configured,
+    Pairing,
+    Active,
+    Failed,
+}
+
+pub fn classify_wasm_channel_activation(
+    ext: &crate::extensions::InstalledExtension,
+    has_paired: bool,
+    has_owner_binding: bool,
+) -> Option<ExtensionActivationStatus> {
+    if ext.kind != crate::extensions::ExtensionKind::WasmChannel {
+        return None;
+    }
+
+    Some(if ext.activation_error.is_some() {
+        ExtensionActivationStatus::Failed
+    } else if !ext.authenticated {
+        ExtensionActivationStatus::Installed
+    } else if ext.active {
+        if has_paired || has_owner_binding {
+            ExtensionActivationStatus::Active
+        } else {
+            ExtensionActivationStatus::Pairing
+        }
+    } else {
+        ExtensionActivationStatus::Configured
+    })
+}
+
 #[derive(Debug, Serialize)]
 pub struct ExtensionInfo {
     pub name: String,
@@ -428,9 +462,9 @@ pub struct ExtensionInfo {
     /// Whether this extension has an auth configuration (OAuth or manual token).
     #[serde(default)]
     pub has_auth: bool,
-    /// WASM channel activation status: "installed", "configured", "active", "failed".
+    /// WASM channel activation status.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub activation_status: Option<String>,
+    pub activation_status: Option<ExtensionActivationStatus>,
     /// Human-readable error when activation_status is "failed".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
@@ -503,6 +537,9 @@ pub struct ActionResponse {
     /// Whether the channel was successfully activated after setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
+    /// Pending manual verification challenge (for Telegram owner binding, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<crate::extensions::VerificationChallenge>,
 }
 
 impl ActionResponse {
@@ -514,6 +551,7 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
+            verification: None,
         }
     }
 
@@ -525,6 +563,7 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
+            verification: None,
         }
     }
 }

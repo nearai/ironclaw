@@ -5,6 +5,8 @@
 //! extracted into a standalone crate. Resolution logic (reading env vars,
 //! settings) lives in `crate::config::llm`.
 
+use std::path::PathBuf;
+
 use secrecy::SecretString;
 
 use crate::llm::registry::ProviderProtocol;
@@ -85,6 +87,13 @@ pub struct RegistryProviderConfig {
     /// OAuth token for providers that support Bearer auth (e.g. Anthropic via `claude login`).
     /// When set, the provider factory routes to the OAuth-specific provider implementation.
     pub oauth_token: Option<SecretString>,
+    /// When true, route OpenAI-compatible traffic to the Codex ChatGPT
+    /// Responses API provider instead of rig-core's Chat Completions path.
+    pub is_codex_chatgpt: bool,
+    /// OAuth refresh token for Codex ChatGPT token refresh.
+    pub refresh_token: Option<SecretString>,
+    /// Path to Codex auth.json for persisting refreshed tokens.
+    pub auth_path: Option<PathBuf>,
     /// Prompt cache retention (Anthropic-specific).
     pub cache_retention: CacheRetention,
     /// Parameter names that this provider does not support (e.g., `["temperature"]`).
@@ -129,6 +138,30 @@ pub struct LlmConfig {
     /// Default: 120. Increase for local LLMs (Ollama, vLLM, LM Studio) that
     /// need more time for prompt evaluation on consumer hardware.
     pub request_timeout_secs: u64,
+    /// Generic cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
+    /// Works with any backend. Set via `LLM_CHEAP_MODEL` env var.
+    /// When set, takes priority over the NearAI-specific `NEARAI_CHEAP_MODEL`.
+    pub cheap_model: Option<String>,
+    /// Enable cascade mode for smart routing (retry with primary if cheap model
+    /// response seems uncertain). Default: true. Set via `SMART_ROUTING_CASCADE`.
+    pub smart_routing_cascade: bool,
+}
+
+impl LlmConfig {
+    /// Resolve the effective cheap model name.
+    ///
+    /// Resolution order:
+    /// 1. `LLM_CHEAP_MODEL` (generic, works with any backend)
+    /// 2. `NEARAI_CHEAP_MODEL` (NearAI-only, backward compatibility)
+    pub fn cheap_model_name(&self) -> Option<&str> {
+        self.cheap_model.as_deref().or_else(|| {
+            if self.backend == "nearai" {
+                self.nearai.cheap_model.as_deref()
+            } else {
+                None
+            }
+        })
+    }
 }
 
 /// NEAR AI configuration.
@@ -162,4 +195,43 @@ pub struct NearAiConfig {
     pub failover_cooldown_threshold: u32,
     /// Enable cascade mode for smart routing. Default: true.
     pub smart_routing_cascade: bool,
+}
+
+impl NearAiConfig {
+    /// Create a minimal config suitable for listing available models.
+    ///
+    /// Reads `NEARAI_API_KEY` from the environment and selects the
+    /// appropriate base URL (cloud-api when API key is present,
+    /// private.near.ai for session-token auth).
+    pub(crate) fn for_model_discovery() -> Self {
+        let api_key = std::env::var("NEARAI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .map(SecretString::from);
+
+        let default_base = if api_key.is_some() {
+            "https://cloud-api.near.ai"
+        } else {
+            "https://private.near.ai"
+        };
+        let base_url =
+            std::env::var("NEARAI_BASE_URL").unwrap_or_else(|_| default_base.to_string());
+
+        Self {
+            model: String::new(),
+            cheap_model: None,
+            base_url,
+            api_key,
+            fallback_model: None,
+            max_retries: 3,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
+            smart_routing_cascade: true,
+        }
+    }
 }

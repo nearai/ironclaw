@@ -227,6 +227,7 @@ impl Store {
                     job_id: row.get("id"),
                     state,
                     user_id: row.get::<_, String>("user_id"),
+                    requester_id: None,
                     conversation_id: row.get("conversation_id"),
                     title: row.get("title"),
                     description: row.get("description"),
