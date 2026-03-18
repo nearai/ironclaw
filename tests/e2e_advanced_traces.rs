@@ -442,6 +442,9 @@ mod advanced {
             other => panic!("expected event trigger, got {other:?}"),
         }
 
+        rig.clear().await;
+        let llm_calls_before = rig.llm_call_count();
+
         rig.send_incoming(IncomingMessage::new(
             "telegram",
             "test-user",
@@ -451,8 +454,18 @@ mod advanced {
 
         let runs = wait_for_routine_run(rig.database(), routine.id, TIMEOUT).await;
         assert_eq!(runs[0].trigger_type, "event");
+        assert_eq!(
+            rig.llm_call_count(),
+            llm_calls_before + 1,
+            "matching event message should only trigger the routine LLM call"
+        );
 
-        let responses = rig.wait_for_responses(3, TIMEOUT).await;
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert_eq!(
+            responses.len(),
+            1,
+            "expected only the routine notification after the matching event"
+        );
         assert!(
             responses.iter().any(|response| {
                 response
@@ -505,6 +518,9 @@ mod advanced {
             other => panic!("expected event trigger, got {other:?}"),
         }
 
+        rig.clear().await;
+        let llm_calls_before = rig.llm_call_count();
+
         rig.send_incoming(IncomingMessage::new(
             "telegram",
             "test-user",
@@ -514,6 +530,22 @@ mod advanced {
 
         let runs = wait_for_routine_run(rig.database(), routine.id, TIMEOUT).await;
         assert_eq!(runs[0].trigger_type, "event");
+        assert_eq!(
+            rig.llm_call_count(),
+            llm_calls_before + 1,
+            "matching event message should only trigger the routine LLM call"
+        );
+
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+        assert_eq!(
+            responses.len(),
+            1,
+            "expected only the routine notification after the matching event"
+        );
+        assert!(
+            responses[0].content.contains("Bug report detected"),
+            "expected routine notification, got: {responses:?}"
+        );
 
         rig.shutdown();
     }

@@ -140,12 +140,14 @@ impl AppBuilder {
         self.handles = Some(handles);
 
         // Post-init: migrate disk config, reload config from DB, attach session, cleanup
-        if let Err(e) = crate::bootstrap::migrate_disk_to_db(db.as_ref(), "default").await {
+        if let Err(e) =
+            crate::bootstrap::migrate_disk_to_db(db.as_ref(), &self.config.owner_id).await
+        {
             tracing::warn!("Disk-to-DB settings migration failed: {}", e);
         }
 
         let toml_path = self.toml_path.as_deref();
-        match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
+        match Config::from_db_with_toml(db.as_ref(), &self.config.owner_id, toml_path).await {
             Ok(db_config) => {
                 self.config = db_config;
                 tracing::debug!("Configuration reloaded from database");
@@ -158,7 +160,9 @@ impl AppBuilder {
             }
         }
 
-        self.session.attach_store(db.clone(), "default").await;
+        self.session
+            .attach_store(db.clone(), &self.config.owner_id)
+            .await;
 
         // Fire-and-forget housekeeping — no need to block startup.
         let db_cleanup = db.clone();
@@ -193,9 +197,10 @@ impl AppBuilder {
                 let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                     self.db.as_ref().map(|db| db.as_ref() as _);
                 let toml_path = self.toml_path.as_deref();
+                let owner_id = self.config.owner_id.clone();
                 if let Err(e) = self
                     .config
-                    .re_resolve_llm(store, "default", toml_path)
+                    .re_resolve_llm(store, &owner_id, toml_path)
                     .await
                 {
                     tracing::warn!(
@@ -224,15 +229,17 @@ impl AppBuilder {
 
         if let Some(ref secrets) = store {
             // Inject LLM API keys from encrypted storage
-            crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), "default").await;
+            crate::config::inject_llm_keys_from_secrets(secrets.as_ref(), &self.config.owner_id)
+                .await;
 
             // Re-resolve only the LLM config with newly available keys.
             let store: Option<&(dyn crate::db::SettingsStore + Sync)> =
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
+            let owner_id = self.config.owner_id.clone();
             if let Err(e) = self
                 .config
-                .re_resolve_llm(store, "default", toml_path)
+                .re_resolve_llm(store, &owner_id, toml_path)
                 .await
             {
                 tracing::warn!("Failed to re-resolve LLM config after secret injection: {e}");
@@ -304,7 +311,7 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db("default", db.clone())
+            let mut ws = Workspace::new_with_db(&self.config.owner_id, db.clone())
                 .with_search_config(&self.config.search);
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings(emb.clone());
@@ -469,9 +476,10 @@ impl AppBuilder {
             let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
             let pm = Arc::clone(&mcp_process_manager);
+            let owner_id = self.config.owner_id.clone();
             async move {
                 let servers_result = if let Some(ref d) = db {
-                    load_mcp_servers_from_db(d.as_ref(), "default").await
+                    load_mcp_servers_from_db(d.as_ref(), &owner_id).await
                 } else {
                     crate::tools::mcp::config::load_mcp_servers().await
                 };
@@ -491,6 +499,7 @@ impl AppBuilder {
                             let secrets = secrets_store.clone();
                             let tools = Arc::clone(&tools);
                             let pm = Arc::clone(&pm);
+                            let owner_id = owner_id.clone();
 
                             join_set.spawn(async move {
                                 let server_name = server.name.clone();
@@ -500,7 +509,7 @@ impl AppBuilder {
                                     &mcp_sm,
                                     &pm,
                                     secrets,
-                                    "default",
+                                    &owner_id,
                                 )
                                 .await
                                 {
@@ -642,7 +651,7 @@ impl AppBuilder {
                 self.config.wasm.tools_dir.clone(),
                 self.config.channels.wasm_channels_dir.clone(),
                 self.config.tunnel.public_url.clone(),
-                "default".to_string(),
+                self.config.owner_id.clone(),
                 self.db.clone(),
                 catalog_entries.clone(),
             ));

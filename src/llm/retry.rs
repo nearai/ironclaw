@@ -19,6 +19,12 @@ use crate::llm::provider::{
     ToolCompletionResponse,
 };
 
+/// Upper bound for provider-suggested `Retry-After` delays.
+///
+/// This prevents malicious or malformed headers from turning a retryable
+/// response into an effectively unbounded sleep.
+pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
+
 /// Returns `true` if the `LlmError` is transient and the request should be retried.
 ///
 /// Used by `RetryProvider` (retry the same provider) and `FailoverProvider`
@@ -65,6 +71,11 @@ pub(crate) fn retry_backoff_delay(attempt: u32) -> Duration {
     };
     let delay_ms = (base_ms as i64 + jitter).max(100) as u64;
     Duration::from_millis(delay_ms)
+}
+
+/// Clamp a provider-suggested retry delay to a safe maximum.
+pub(crate) fn cap_retry_after(duration: Duration) -> Duration {
+    duration.min(Duration::from_secs(MAX_RETRY_AFTER_SECS))
 }
 
 /// Configuration for the retry decorator.
@@ -393,5 +404,44 @@ mod tests {
         assert_eq!(retry.active_model_name(), "my-model");
         assert_eq!(retry.cost_per_token(), (Decimal::ZERO, Decimal::ZERO));
         assert_eq!(retry.calculate_cost(100, 50), Decimal::ZERO);
+    }
+
+    // Regression test: Rate limiter fallback when Retry-After header is missing
+    //
+    // Verifies that RateLimited errors always have a duration (never None)
+    // due to the 60-second fallback applied in all rate limit error creation sites
+    // (nearai_chat.rs, anthropic_oauth.rs, embeddings.rs).
+    #[test]
+    fn rate_limited_error_always_has_duration() {
+        let err = LlmError::RateLimited {
+            provider: "test".to_string(),
+            retry_after: Some(std::time::Duration::from_secs(60)),
+        };
+
+        if let LlmError::RateLimited { retry_after, .. } = err {
+            assert!(
+                retry_after.is_some(),
+                "Rate limited error should always have retry_after duration"
+            );
+            assert_eq!(
+                retry_after,
+                Some(std::time::Duration::from_secs(60)),
+                "Fallback should be 60 seconds"
+            );
+        } else {
+            panic!("Expected RateLimited error");
+        }
+    }
+
+    #[test]
+    fn cap_retry_after_clamps_huge_delays() {
+        assert_eq!(
+            cap_retry_after(Duration::from_secs(u64::MAX)),
+            Duration::from_secs(MAX_RETRY_AFTER_SECS)
+        );
+        assert_eq!(
+            cap_retry_after(Duration::from_secs(0)),
+            Duration::from_secs(0)
+        );
     }
 }

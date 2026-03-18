@@ -44,20 +44,30 @@ fn default_tools_dir() -> PathBuf {
 }
 
 impl WasmConfig {
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
+        let ws = &settings.wasm;
         Ok(Self {
-            enabled: parse_bool_env("WASM_ENABLED", true)?,
+            enabled: parse_bool_env("WASM_ENABLED", ws.enabled)?,
             tools_dir: optional_env("WASM_TOOLS_DIR")?
                 .map(PathBuf::from)
+                .or_else(|| ws.tools_dir.clone())
                 .unwrap_or_else(default_tools_dir),
             default_memory_limit: parse_optional_env(
                 "WASM_DEFAULT_MEMORY_LIMIT",
-                10 * 1024 * 1024,
+                ws.default_memory_limit,
             )?,
-            default_timeout_secs: parse_optional_env("WASM_DEFAULT_TIMEOUT_SECS", 60)?,
-            default_fuel_limit: parse_optional_env("WASM_DEFAULT_FUEL_LIMIT", 10_000_000)?,
-            cache_compiled: parse_bool_env("WASM_CACHE_COMPILED", true)?,
-            cache_dir: optional_env("WASM_CACHE_DIR")?.map(PathBuf::from),
+            default_timeout_secs: parse_optional_env(
+                "WASM_DEFAULT_TIMEOUT_SECS",
+                ws.default_timeout_secs,
+            )?,
+            default_fuel_limit: parse_optional_env(
+                "WASM_DEFAULT_FUEL_LIMIT",
+                ws.default_fuel_limit,
+            )?,
+            cache_compiled: parse_bool_env("WASM_CACHE_COMPILED", ws.cache_compiled)?,
+            cache_dir: optional_env("WASM_CACHE_DIR")?
+                .map(PathBuf::from)
+                .or_else(|| ws.cache_dir.clone()),
         })
     }
 
@@ -79,5 +89,38 @@ impl WasmConfig {
             cache_dir: self.cache_dir.clone(),
             optimization_level: wasmtime::OptLevel::Speed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::helpers::ENV_MUTEX;
+    use crate::settings::Settings;
+
+    #[test]
+    fn resolve_falls_back_to_settings() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let mut settings = Settings::default();
+        settings.wasm.default_memory_limit = 42;
+        settings.wasm.cache_compiled = false;
+
+        let cfg = WasmConfig::resolve(&settings).expect("resolve");
+        assert_eq!(cfg.default_memory_limit, 42);
+        assert!(!cfg.cache_compiled);
+    }
+
+    #[test]
+    fn env_overrides_settings() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let mut settings = Settings::default();
+        settings.wasm.default_fuel_limit = 42;
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("WASM_DEFAULT_FUEL_LIMIT", "7") };
+        let cfg = WasmConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("WASM_DEFAULT_FUEL_LIMIT") };
+
+        assert_eq!(cfg.default_fuel_limit, 7);
     }
 }

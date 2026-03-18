@@ -10,16 +10,17 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::channels::ChannelManager;
 use crate::channels::wasm::{
-    RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime,
+    LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
+    WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key,
 };
+use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
     ActivateResult, AuthResult, ConfigureResult, ExtensionError, ExtensionKind, ExtensionSource,
     InstallResult, InstalledExtension, RegistryEntry, ResultSource, SearchResult, ToolAuthState,
-    UpgradeOutcome, UpgradeResult,
+    UpgradeOutcome, UpgradeResult, VerificationChallenge,
 };
 use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
@@ -56,7 +57,259 @@ struct ChannelRuntimeState {
     wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 }
 
+#[cfg(test)]
+type TestWasmChannelLoader =
+    Arc<dyn Fn(&str) -> Result<LoadedChannel, ExtensionError> + Send + Sync>;
+#[cfg(test)]
+type TestTelegramBindingResolver =
+    Arc<dyn Fn(&str, Option<i64>) -> Result<TelegramBindingResult, ExtensionError> + Send + Sync>;
+
+const TELEGRAM_OWNER_BIND_TIMEOUT_SECS: u64 = 120;
+const TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS: u64 = 300;
+const TELEGRAM_GET_UPDATES_TIMEOUT_SECS: u64 = 25;
+const TELEGRAM_OWNER_BIND_CODE_LEN: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TelegramBindingData {
+    owner_id: i64,
+    bot_username: Option<String>,
+    binding_state: TelegramOwnerBindingState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramOwnerBindingState {
+    Existing,
+    VerifiedNow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingTelegramVerificationChallenge {
+    code: String,
+    bot_username: Option<String>,
+    expires_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TelegramBindingResult {
+    Bound(TelegramBindingData),
+    Pending(VerificationChallenge),
+}
+
+fn telegram_request_error(action: &'static str, error: &reqwest::Error) -> ExtensionError {
+    tracing::warn!(
+        action,
+        status = error.status().map(|status| status.as_u16()),
+        is_timeout = error.is_timeout(),
+        is_connect = error.is_connect(),
+        "Telegram API request failed"
+    );
+    ExtensionError::Other(format!("Telegram {action} request failed"))
+}
+
+fn telegram_response_parse_error(action: &'static str, error: &reqwest::Error) -> ExtensionError {
+    tracing::warn!(
+        action,
+        status = error.status().map(|status| status.as_u16()),
+        is_timeout = error.is_timeout(),
+        "Telegram API response parse failed"
+    );
+    ExtensionError::Other(format!("Failed to parse Telegram {action} response"))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramGetMeResponse {
+    ok: bool,
+    #[serde(default)]
+    result: Option<TelegramGetMeUser>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramGetMeUser {
+    #[serde(default)]
+    username: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramGetUpdatesResponse {
+    ok: bool,
+    #[serde(default)]
+    result: Vec<TelegramUpdate>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramApiOkResponse {
+    ok: bool,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramUpdate {
+    update_id: i64,
+    #[serde(default)]
+    message: Option<TelegramMessage>,
+    #[serde(default)]
+    edited_message: Option<TelegramMessage>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramMessage {
+    chat: TelegramChat,
+    #[serde(default)]
+    from: Option<TelegramUser>,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramChat {
+    #[serde(rename = "type")]
+    chat_type: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramUser {
+    id: i64,
+    is_bot: bool,
+}
+
+fn build_wasm_channel_runtime_config_updates(
+    tunnel_url: Option<&str>,
+    webhook_secret: Option<&str>,
+    owner_id: Option<i64>,
+) -> HashMap<String, serde_json::Value> {
+    let mut config_updates = HashMap::new();
+
+    if let Some(tunnel_url) = tunnel_url {
+        config_updates.insert(
+            "tunnel_url".to_string(),
+            serde_json::Value::String(tunnel_url.to_string()),
+        );
+    }
+
+    if let Some(secret) = webhook_secret {
+        config_updates.insert(
+            "webhook_secret".to_string(),
+            serde_json::Value::String(secret.to_string()),
+        );
+    }
+
+    if let Some(owner_id) = owner_id {
+        config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
+    }
+
+    config_updates
+}
+
+fn channel_auth_instructions(
+    channel_name: &str,
+    secret: &crate::channels::wasm::SecretSetupSchema,
+) -> String {
+    if channel_name == TELEGRAM_CHANNEL_NAME && secret.name == "telegram_bot_token" {
+        return format!(
+            "{} After you submit it, IronClaw will show a one-time verification code. Send `/start CODE` to your bot in Telegram and IronClaw will finish setup automatically.",
+            secret.prompt
+        );
+    }
+
+    secret.prompt.clone()
+}
+
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn generate_telegram_verification_code() -> String {
+    use rand::Rng;
+    rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(TELEGRAM_OWNER_BIND_CODE_LEN)
+        .map(char::from)
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn telegram_verification_deep_link(bot_username: Option<&str>, code: &str) -> Option<String> {
+    bot_username
+        .filter(|username| !username.trim().is_empty())
+        .map(|username| format!("https://t.me/{username}?start={code}"))
+}
+
+fn telegram_verification_instructions(bot_username: Option<&str>, code: &str) -> String {
+    if let Some(username) = bot_username.filter(|username| !username.trim().is_empty()) {
+        return format!(
+            "Send `/start {code}` to @{username} in Telegram. IronClaw will finish setup automatically."
+        );
+    }
+
+    format!("Send `/start {code}` to your Telegram bot. IronClaw will finish setup automatically.")
+}
+
+fn telegram_message_matches_verification_code(text: &str, code: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed == code
+        || trimmed == format!("/start {code}")
+        || trimmed
+            .split_whitespace()
+            .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+            .any(|token| token == code)
+}
+
+async fn send_telegram_text_message(
+    client: &reqwest::Client,
+    endpoint: &str,
+    chat_id: i64,
+    text: &str,
+) -> Result<(), ExtensionError> {
+    let response = client
+        .post(endpoint)
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+        }))
+        .send()
+        .await
+        .map_err(|e| telegram_request_error("sendMessage", &e))?;
+
+    if !response.status().is_success() {
+        return Err(ExtensionError::Other(format!(
+            "Telegram sendMessage failed (HTTP {})",
+            response.status()
+        )));
+    }
+
+    let payload: TelegramApiOkResponse = response
+        .json()
+        .await
+        .map_err(|e| telegram_response_parse_error("sendMessage", &e))?;
+    if !payload.ok {
+        return Err(ExtensionError::Other(payload.description.unwrap_or_else(
+            || "Telegram sendMessage returned ok=false".to_string(),
+        )));
+    }
+
+    Ok(())
+}
+
 /// Central manager for extension lifecycle operations.
+///
+/// # Initialization Order
+///
+/// Relay-channel restoration depends on a channel manager being injected first.
+/// Call one of the following before `restore_relay_channels()`:
+///
+/// 1. [`ExtensionManager::set_channel_runtime`] (also sets relay manager), or
+/// 2. [`ExtensionManager::set_relay_channel_manager`].
+///
+/// If `restore_relay_channels()` runs first, each restore attempt fails with
+/// "Channel manager not initialized" and channels remain inactive.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
     discovery: OnlineDiscovery,
@@ -115,6 +368,11 @@ pub struct ExtensionManager {
     /// The gateway's own base URL for building OAuth redirect URIs.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
     gateway_base_url: RwLock<Option<String>>,
+    pending_telegram_verification: RwLock<HashMap<String, PendingTelegramVerificationChallenge>>,
+    #[cfg(test)]
+    test_wasm_channel_loader: RwLock<Option<TestWasmChannelLoader>>,
+    #[cfg(test)]
+    test_telegram_binding_resolver: RwLock<Option<TestTelegramBindingResolver>>,
 }
 
 /// Sanitize a URL for logging by removing query parameters and credentials.
@@ -190,7 +448,45 @@ impl ExtensionManager {
             relay_config: crate::config::RelayConfig::from_env(),
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
+            pending_telegram_verification: RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            test_wasm_channel_loader: RwLock::new(None),
+            #[cfg(test)]
+            test_telegram_binding_resolver: RwLock::new(None),
         }
+    }
+
+    #[cfg(test)]
+    async fn set_test_wasm_channel_loader(&self, loader: TestWasmChannelLoader) {
+        *self.test_wasm_channel_loader.write().await = Some(loader);
+    }
+
+    #[cfg(test)]
+    async fn set_test_telegram_binding_resolver(&self, resolver: TestTelegramBindingResolver) {
+        *self.test_telegram_binding_resolver.write().await = Some(resolver);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_test_telegram_pending_verification(
+        &self,
+        code: &str,
+        bot_username: Option<&str>,
+    ) {
+        let code = code.to_string();
+        let bot_username = bot_username.map(str::to_string);
+        self.set_test_telegram_binding_resolver(Arc::new(move |_token, existing_owner_id| {
+            if existing_owner_id.is_some() {
+                return Err(ExtensionError::Other(
+                    "unexpected existing owner binding".to_string(),
+                ));
+            }
+            Ok(TelegramBindingResult::Pending(VerificationChallenge {
+                code: code.clone(),
+                instructions: telegram_verification_instructions(bot_username.as_deref(), &code),
+                deep_link: telegram_verification_deep_link(bot_username.as_deref(), &code),
+            }))
+        }))
+        .await;
     }
 
     /// Enable gateway mode so OAuth flows return auth URLs to the frontend
@@ -298,14 +594,6 @@ impl ExtensionManager {
         });
     }
 
-    /// Set just the channel manager for relay channel hot-activation.
-    ///
-    /// Call this when WASM channel runtime is not available but relay channels
-    /// still need to be hot-added.
-    pub async fn set_relay_channel_manager(&self, channel_manager: Arc<ChannelManager>) {
-        *self.relay_channel_manager.write().await = Some(channel_manager);
-    }
-
     async fn current_channel_owner_id(&self, name: &str) -> Option<i64> {
         {
             let rt_guard = self.channel_runtime.read().await;
@@ -334,6 +622,137 @@ impl ExtensionManager {
         }
     }
 
+    async fn set_channel_owner_id(&self, name: &str, owner_id: i64) -> Result<(), ExtensionError> {
+        if let Some(store) = self.store.as_ref() {
+            store
+                .set_setting(
+                    &self.user_id,
+                    &format!("channels.wasm_channel_owner_ids.{name}"),
+                    &serde_json::json!(owner_id),
+                )
+                .await
+                .map_err(|e| ExtensionError::Config(e.to_string()))?;
+        }
+
+        let mut rt_guard = self.channel_runtime.write().await;
+        if let Some(rt) = rt_guard.as_mut() {
+            rt.wasm_channel_owner_ids.insert(name.to_string(), owner_id);
+        }
+
+        Ok(())
+    }
+
+    async fn load_channel_runtime_config_overrides(
+        &self,
+        name: &str,
+    ) -> HashMap<String, serde_json::Value> {
+        let mut overrides = HashMap::new();
+
+        if name == TELEGRAM_CHANNEL_NAME
+            && let Some(store) = self.store.as_ref()
+            && let Ok(Some(serde_json::Value::String(username))) = store
+                .get_setting(&self.user_id, &bot_username_setting_key(name))
+                .await
+            && !username.trim().is_empty()
+        {
+            overrides.insert("bot_username".to_string(), serde_json::json!(username));
+        }
+
+        overrides
+    }
+
+    pub async fn has_wasm_channel_owner_binding(&self, name: &str) -> bool {
+        self.current_channel_owner_id(name).await.is_some()
+    }
+
+    pub(crate) async fn notification_target_for_channel(&self, name: &str) -> Option<String> {
+        self.current_channel_owner_id(name)
+            .await
+            .map(|owner_id| owner_id.to_string())
+    }
+
+    async fn get_pending_telegram_verification(
+        &self,
+        name: &str,
+    ) -> Option<PendingTelegramVerificationChallenge> {
+        let now = unix_timestamp_secs();
+        let mut guard = self.pending_telegram_verification.write().await;
+        let challenge = guard.get(name).cloned()?;
+        if challenge.expires_at_unix <= now {
+            guard.remove(name);
+            return None;
+        }
+        Some(challenge)
+    }
+
+    async fn set_pending_telegram_verification(
+        &self,
+        name: &str,
+        challenge: PendingTelegramVerificationChallenge,
+    ) {
+        self.pending_telegram_verification
+            .write()
+            .await
+            .insert(name.to_string(), challenge);
+    }
+
+    async fn clear_pending_telegram_verification(&self, name: &str) {
+        self.pending_telegram_verification
+            .write()
+            .await
+            .remove(name);
+    }
+
+    async fn issue_telegram_verification_challenge(
+        &self,
+        client: &reqwest::Client,
+        name: &str,
+        bot_token: &str,
+        bot_username: Option<&str>,
+    ) -> Result<VerificationChallenge, ExtensionError> {
+        let delete_webhook_url = format!("https://api.telegram.org/bot{bot_token}/deleteWebhook");
+        let delete_webhook_resp = client
+            .post(&delete_webhook_url)
+            .query(&[("drop_pending_updates", "true")])
+            .send()
+            .await
+            .map_err(|e| telegram_request_error("deleteWebhook", &e))?;
+        if !delete_webhook_resp.status().is_success() {
+            return Err(ExtensionError::Other(format!(
+                "Telegram deleteWebhook failed (HTTP {})",
+                delete_webhook_resp.status()
+            )));
+        }
+
+        let challenge = PendingTelegramVerificationChallenge {
+            code: generate_telegram_verification_code(),
+            bot_username: bot_username.map(str::to_string),
+            expires_at_unix: unix_timestamp_secs() + TELEGRAM_OWNER_BIND_CHALLENGE_TTL_SECS,
+        };
+        self.set_pending_telegram_verification(name, challenge.clone())
+            .await;
+
+        Ok(VerificationChallenge {
+            code: challenge.code.clone(),
+            instructions: telegram_verification_instructions(
+                challenge.bot_username.as_deref(),
+                &challenge.code,
+            ),
+            deep_link: telegram_verification_deep_link(
+                challenge.bot_username.as_deref(),
+                &challenge.code,
+            ),
+        })
+    }
+
+    /// Set just the channel manager for relay channel hot-activation.
+    ///
+    /// Call this when WASM channel runtime is not available but relay channels
+    /// still need to be hot-added.
+    pub async fn set_relay_channel_manager(&self, channel_manager: Arc<ChannelManager>) {
+        *self.relay_channel_manager.write().await = Some(channel_manager);
+    }
+
     /// Check if a channel name corresponds to a relay extension (has stored stream token).
     pub async fn is_relay_channel(&self, name: &str) -> bool {
         self.secrets
@@ -346,7 +765,10 @@ impl ExtensionManager {
     ///
     /// Loads the persisted active channel list, filters to relay types (those with
     /// a stored stream token), and activates each via `activate_stored_relay()`.
-    /// Skips channels that are already active. Call this after `set_relay_channel_manager()`.
+    /// Skips channels that are already active.
+    ///
+    /// Call this only after `set_relay_channel_manager()` or `set_channel_runtime()`.
+    /// Otherwise, each activation attempt fails with "Channel manager not initialized".
     pub async fn restore_relay_channels(&self) {
         let persisted = self.load_persisted_active_channels().await;
         let already_active = self.active_channel_names.read().await.clone();
@@ -726,7 +1148,7 @@ impl ExtensionManager {
                             active,
                             tools: Vec::new(),
                             needs_setup: auth_state == ToolAuthState::NeedsSetup,
-                            has_auth: false,
+                            has_auth: auth_state != ToolAuthState::NoAuth,
                             installed: true,
                             activation_error,
                             version,
@@ -2818,7 +3240,7 @@ impl ExtensionManager {
         Ok(AuthResult::awaiting_token(
             name,
             ExtensionKind::WasmChannel,
-            secret.prompt.clone(),
+            channel_auth_instructions(name, secret),
             cap_file.setup.setup_url.clone(),
         ))
     }
@@ -3021,7 +3443,13 @@ impl ExtensionManager {
 
         // Verify runtime infrastructure is available and clone Arcs so we don't
         // hold the RwLock guard across awaits.
-        let (channel_runtime, channel_manager, pairing_store, wasm_channel_router) = {
+        let (
+            channel_runtime,
+            channel_manager,
+            pairing_store,
+            wasm_channel_router,
+            wasm_channel_owner_ids,
+        ) = {
             let rt_guard = self.channel_runtime.read().await;
             let rt = rt_guard.as_ref().ok_or_else(|| {
                 ExtensionError::ActivationFailed("WASM channel runtime not configured".to_string())
@@ -3031,6 +3459,7 @@ impl ExtensionManager {
                 Arc::clone(&rt.channel_manager),
                 Arc::clone(&rt.pairing_store),
                 Arc::clone(&rt.wasm_channel_router),
+                rt.wasm_channel_owner_ids.clone(),
             )
         };
 
@@ -3054,20 +3483,62 @@ impl ExtensionManager {
             None
         };
 
-        let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
-            self.store.as_ref().map(|db| Arc::clone(db) as _);
-        let loader = WasmChannelLoader::new(
-            Arc::clone(&channel_runtime),
-            Arc::clone(&pairing_store),
-            settings_store,
-        )
-        .with_secrets_store(Arc::clone(&self.secrets));
-        let loaded = loader
-            .load_from_files(name, &wasm_path, cap_path_option)
-            .await
-            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+        #[cfg(test)]
+        let loaded = if let Some(loader) = self.test_wasm_channel_loader.read().await.as_ref() {
+            loader(name)?
+        } else {
+            let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
+                self.store.as_ref().map(|db| Arc::clone(db) as _);
+            let loader = WasmChannelLoader::new(
+                Arc::clone(&channel_runtime),
+                Arc::clone(&pairing_store),
+                settings_store,
+                self.user_id.clone(),
+            )
+            .with_secrets_store(Arc::clone(&self.secrets));
+            loader
+                .load_from_files(name, &wasm_path, cap_path_option)
+                .await
+                .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?
+        };
 
+        #[cfg(not(test))]
+        let loaded = {
+            let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
+                self.store.as_ref().map(|db| Arc::clone(db) as _);
+            let loader = WasmChannelLoader::new(
+                Arc::clone(&channel_runtime),
+                Arc::clone(&pairing_store),
+                settings_store,
+                self.user_id.clone(),
+            )
+            .with_secrets_store(Arc::clone(&self.secrets));
+            loader
+                .load_from_files(name, &wasm_path, cap_path_option)
+                .await
+                .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?
+        };
+
+        self.complete_loaded_wasm_channel_activation(
+            name,
+            loaded,
+            &channel_manager,
+            &wasm_channel_router,
+            wasm_channel_owner_ids.get(name).copied(),
+        )
+        .await
+    }
+
+    async fn complete_loaded_wasm_channel_activation(
+        &self,
+        requested_name: &str,
+        loaded: LoadedChannel,
+        channel_manager: &Arc<ChannelManager>,
+        wasm_channel_router: &Arc<WasmChannelRouter>,
+        owner_id: Option<i64>,
+    ) -> Result<ActivateResult, ExtensionError> {
         let channel_name = loaded.name().to_string();
+        let owner_actor_id = owner_id.map(|id| id.to_string());
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
@@ -3081,29 +3552,20 @@ impl ExtensionManager {
             .ok()
             .map(|s| s.expose().to_string());
 
-        let channel_arc = Arc::new(loaded.channel);
+        let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id));
 
         // Inject runtime config (tunnel_url, webhook_secret, owner_id)
         {
-            let mut config_updates = std::collections::HashMap::new();
-
-            if let Some(ref tunnel_url) = self.tunnel_url {
-                config_updates.insert(
-                    "tunnel_url".to_string(),
-                    serde_json::Value::String(tunnel_url.clone()),
-                );
-            }
-
-            if let Some(ref secret) = webhook_secret {
-                config_updates.insert(
-                    "webhook_secret".to_string(),
-                    serde_json::Value::String(secret.clone()),
-                );
-            }
-
-            if let Some(owner_id) = self.current_channel_owner_id(&channel_name).await {
-                config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
-            }
+            let resolved_owner_id = owner_id.or(self.current_channel_owner_id(&channel_name).await);
+            let mut config_updates = build_wasm_channel_runtime_config_updates(
+                self.tunnel_url.as_deref(),
+                webhook_secret.as_deref(),
+                resolved_owner_id,
+            );
+            config_updates.extend(
+                self.load_channel_runtime_config_overrides(&channel_name)
+                    .await,
+            );
 
             if !config_updates.is_empty() {
                 channel_arc.update_config(config_updates).await;
@@ -3220,7 +3682,7 @@ impl ExtensionManager {
             name: channel_name,
             kind: ExtensionKind::WasmChannel,
             tools_loaded: Vec::new(),
-            message: format!("Channel '{}' activated and running", name),
+            message: format!("Channel '{}' activated and running", requested_name),
         })
     }
 
@@ -3300,6 +3762,14 @@ impl ExtensionManager {
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
 
+        let mut config_updates = build_wasm_channel_runtime_config_updates(
+            self.tunnel_url.as_deref(),
+            None,
+            self.current_channel_owner_id(name).await,
+        );
+        config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
+        let mut should_rerun_on_start = false;
+
         // Refresh webhook secret
         if let Ok(secret) = self
             .secrets
@@ -3309,14 +3779,11 @@ impl ExtensionManager {
             router
                 .update_secret(name, secret.expose().to_string())
                 .await;
-
-            // Also inject the webhook_secret into the channel's runtime config
-            let mut config_updates = std::collections::HashMap::new();
             config_updates.insert(
                 "webhook_secret".to_string(),
                 serde_json::Value::String(secret.expose().to_string()),
             );
-            existing_channel.update_config(config_updates).await;
+            should_rerun_on_start = true;
         }
 
         // Refresh signature key
@@ -3356,19 +3823,14 @@ impl ExtensionManager {
             }
         }
 
-        // Refresh tunnel_url in case it wasn't set at startup
-        if let Some(ref tunnel_url) = self.tunnel_url {
-            let mut config_updates = std::collections::HashMap::new();
-            config_updates.insert(
-                "tunnel_url".to_string(),
-                serde_json::Value::String(tunnel_url.clone()),
-            );
+        if !config_updates.is_empty() {
             existing_channel.update_config(config_updates).await;
+            should_rerun_on_start = true;
         }
 
         // Re-call on_start() to trigger webhook registration with the
         // now-available credentials (e.g., setWebhook for Telegram).
-        if cred_count > 0 {
+        if cred_count > 0 || should_rerun_on_start {
             match existing_channel.call_on_start().await {
                 Ok(_config) => {
                     tracing::info!(
@@ -3719,6 +4181,320 @@ impl ExtensionManager {
         }
     }
 
+    async fn configure_telegram_binding(
+        &self,
+        name: &str,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Result<TelegramBindingResult, ExtensionError> {
+        let explicit_token = secrets
+            .get("telegram_bot_token")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let bot_token = if let Some(token) = explicit_token.clone() {
+            token
+        } else {
+            match self
+                .secrets
+                .get_decrypted(&self.user_id, "telegram_bot_token")
+                .await
+            {
+                Ok(secret) => {
+                    let token = secret.expose().trim().to_string();
+                    if token.is_empty() {
+                        return Err(ExtensionError::ValidationFailed(
+                            "Telegram bot token is required before owner verification".to_string(),
+                        ));
+                    }
+                    token
+                }
+                Err(crate::secrets::SecretError::NotFound(_)) => {
+                    return Err(ExtensionError::ValidationFailed(
+                        "Telegram bot token is required before owner verification".to_string(),
+                    ));
+                }
+                Err(err) => {
+                    return Err(ExtensionError::Config(format!(
+                        "Failed to read stored Telegram bot token: {err}"
+                    )));
+                }
+            }
+        };
+
+        let existing_owner_id = self.current_channel_owner_id(name).await;
+        let binding = self
+            .resolve_telegram_binding(name, &bot_token, existing_owner_id)
+            .await?;
+
+        match &binding {
+            TelegramBindingResult::Bound(data) => {
+                self.set_channel_owner_id(name, data.owner_id).await?;
+                if let Some(username) = data.bot_username.as_deref()
+                    && let Some(store) = self.store.as_ref()
+                {
+                    store
+                        .set_setting(
+                            &self.user_id,
+                            &bot_username_setting_key(name),
+                            &serde_json::json!(username),
+                        )
+                        .await
+                        .map_err(|e| ExtensionError::Config(e.to_string()))?;
+                }
+            }
+            TelegramBindingResult::Pending(challenge) => {
+                if let Some(deep_link) = challenge.deep_link.as_deref()
+                    && let Some(username) = deep_link
+                        .strip_prefix("https://t.me/")
+                        .and_then(|rest| rest.split('?').next())
+                        .filter(|value| !value.trim().is_empty())
+                    && let Some(store) = self.store.as_ref()
+                {
+                    store
+                        .set_setting(
+                            &self.user_id,
+                            &bot_username_setting_key(name),
+                            &serde_json::json!(username),
+                        )
+                        .await
+                        .map_err(|e| ExtensionError::Config(e.to_string()))?;
+                }
+            }
+        }
+
+        Ok(binding)
+    }
+
+    async fn resolve_telegram_binding(
+        &self,
+        name: &str,
+        bot_token: &str,
+        existing_owner_id: Option<i64>,
+    ) -> Result<TelegramBindingResult, ExtensionError> {
+        #[cfg(test)]
+        if let Some(resolver) = self.test_telegram_binding_resolver.read().await.as_ref() {
+            return resolver(bot_token, existing_owner_id);
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+
+        let get_me_url = format!("https://api.telegram.org/bot{bot_token}/getMe");
+        let get_me_resp = client
+            .get(&get_me_url)
+            .send()
+            .await
+            .map_err(|e| telegram_request_error("getMe", &e))?;
+        let get_me_status = get_me_resp.status();
+        if !get_me_status.is_success() {
+            return Err(ExtensionError::ValidationFailed(format!(
+                "Telegram token validation failed (HTTP {get_me_status})"
+            )));
+        }
+
+        let get_me: TelegramGetMeResponse = get_me_resp
+            .json()
+            .await
+            .map_err(|e| telegram_response_parse_error("getMe", &e))?;
+        if !get_me.ok {
+            return Err(ExtensionError::ValidationFailed(
+                get_me
+                    .description
+                    .unwrap_or_else(|| "Telegram getMe returned ok=false".to_string()),
+            ));
+        }
+
+        let bot_username = get_me
+            .result
+            .and_then(|result| result.username)
+            .filter(|username| !username.trim().is_empty());
+
+        if let Some(owner_id) = existing_owner_id {
+            self.clear_pending_telegram_verification(name).await;
+            return Ok(TelegramBindingResult::Bound(TelegramBindingData {
+                owner_id,
+                bot_username: bot_username.clone(),
+                binding_state: TelegramOwnerBindingState::Existing,
+            }));
+        }
+
+        let pending_challenge = self.get_pending_telegram_verification(name).await;
+
+        let challenge = if let Some(challenge) = pending_challenge {
+            challenge
+        } else {
+            return Ok(TelegramBindingResult::Pending(
+                self.issue_telegram_verification_challenge(
+                    &client,
+                    name,
+                    bot_token,
+                    bot_username.as_deref(),
+                )
+                .await?,
+            ));
+        };
+
+        let now = unix_timestamp_secs();
+        if challenge.expires_at_unix <= now {
+            self.clear_pending_telegram_verification(name).await;
+            return Ok(TelegramBindingResult::Pending(
+                self.issue_telegram_verification_challenge(
+                    &client,
+                    name,
+                    bot_token,
+                    bot_username.as_deref(),
+                )
+                .await?,
+            ));
+        }
+
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(TELEGRAM_OWNER_BIND_TIMEOUT_SECS);
+        let mut offset = 0_i64;
+
+        while std::time::Instant::now() < deadline {
+            let remaining_secs = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs()
+                .max(1);
+            let poll_timeout_secs = TELEGRAM_GET_UPDATES_TIMEOUT_SECS.min(remaining_secs);
+
+            let resp = client
+                .get(format!(
+                    "https://api.telegram.org/bot{bot_token}/getUpdates"
+                ))
+                .query(&[
+                    ("offset", offset.to_string()),
+                    ("timeout", poll_timeout_secs.to_string()),
+                    (
+                        "allowed_updates",
+                        "[\"message\",\"edited_message\"]".to_string(),
+                    ),
+                ])
+                .send()
+                .await
+                .map_err(|e| telegram_request_error("getUpdates", &e))?;
+
+            if !resp.status().is_success() {
+                return Err(ExtensionError::Other(format!(
+                    "Telegram getUpdates failed (HTTP {})",
+                    resp.status()
+                )));
+            }
+
+            let updates: TelegramGetUpdatesResponse = resp
+                .json()
+                .await
+                .map_err(|e| telegram_response_parse_error("getUpdates", &e))?;
+
+            if !updates.ok {
+                return Err(ExtensionError::Other(updates.description.unwrap_or_else(
+                    || "Telegram getUpdates returned ok=false".to_string(),
+                )));
+            }
+
+            let mut bound_owner_id = None;
+            for update in updates.result {
+                offset = offset.max(update.update_id + 1);
+                let message = update.message.or(update.edited_message);
+                if let Some(message) = message
+                    && message.chat.chat_type == "private"
+                    && let Some(from) = message.from
+                    && !from.is_bot
+                    && let Some(text) = message.text.as_deref()
+                    && telegram_message_matches_verification_code(text, &challenge.code)
+                {
+                    bound_owner_id = Some(from.id);
+                }
+            }
+
+            if let Some(owner_id) = bound_owner_id {
+                if let Err(err) = send_telegram_text_message(
+                    &client,
+                    &format!("https://api.telegram.org/bot{bot_token}/sendMessage"),
+                    owner_id,
+                    "Verification received. Finishing setup...",
+                )
+                .await
+                {
+                    tracing::warn!(
+                        channel = name,
+                        owner_id,
+                        error = %err,
+                        "Failed to send Telegram verification acknowledgment"
+                    );
+                }
+
+                self.clear_pending_telegram_verification(name).await;
+                if offset > 0 {
+                    let _ = client
+                        .get(format!(
+                            "https://api.telegram.org/bot{bot_token}/getUpdates"
+                        ))
+                        .query(&[("offset", offset.to_string()), ("timeout", "0".to_string())])
+                        .send()
+                        .await;
+                }
+
+                return Ok(TelegramBindingResult::Bound(TelegramBindingData {
+                    owner_id,
+                    bot_username,
+                    binding_state: TelegramOwnerBindingState::VerifiedNow,
+                }));
+            }
+        }
+
+        self.clear_pending_telegram_verification(name).await;
+        Err(ExtensionError::ValidationFailed(
+            "Telegram owner verification timed out. Request a new code and try again.".to_string(),
+        ))
+    }
+
+    async fn notify_telegram_owner_verified(
+        &self,
+        channel_name: &str,
+        binding: Option<&TelegramBindingData>,
+    ) {
+        let Some(binding) = binding else {
+            return;
+        };
+        if binding.binding_state != TelegramOwnerBindingState::VerifiedNow {
+            return;
+        }
+
+        let channel_manager = {
+            let rt_guard = self.channel_runtime.read().await;
+            rt_guard.as_ref().map(|rt| Arc::clone(&rt.channel_manager))
+        };
+        let Some(channel_manager) = channel_manager else {
+            tracing::debug!(
+                channel = channel_name,
+                owner_id = binding.owner_id,
+                "Skipping Telegram owner confirmation message because channel runtime is unavailable"
+            );
+            return;
+        };
+
+        if let Err(err) = channel_manager
+            .broadcast(
+                channel_name,
+                &binding.owner_id.to_string(),
+                OutgoingResponse::text(
+                    "Telegram owner verified. This bot is now active and ready for you.",
+                ),
+            )
+            .await
+        {
+            tracing::warn!(
+                channel = channel_name,
+                owner_id = binding.owner_id,
+                error = %err,
+                "Failed to send Telegram owner verification confirmation"
+            );
+        }
+    }
+
     /// Save setup secrets for an extension, validating names against the capabilities schema.
     ///
     /// Configure secrets for an extension: validate, store, auto-generate, and activate.
@@ -3904,6 +4680,26 @@ impl ExtensionManager {
             }
         }
 
+        let mut telegram_binding = None;
+        if kind == ExtensionKind::WasmChannel && name == TELEGRAM_CHANNEL_NAME {
+            match self.configure_telegram_binding(name, secrets).await? {
+                TelegramBindingResult::Bound(binding) => {
+                    telegram_binding = Some(binding);
+                }
+                TelegramBindingResult::Pending(verification) => {
+                    return Ok(ConfigureResult {
+                        message: format!(
+                            "Configuration saved for '{}'. {}",
+                            name, verification.instructions
+                        ),
+                        activated: false,
+                        auth_url: None,
+                        verification: Some(verification),
+                    });
+                }
+            }
+        }
+
         // For tools, save and attempt auto-activation, then check auth.
         if kind == ExtensionKind::WasmTool {
             match self.activate_wasm_tool(name).await {
@@ -3955,6 +4751,7 @@ impl ExtensionManager {
                         message,
                         activated: true,
                         auth_url,
+                        verification: None,
                     });
                 }
                 Err(e) => {
@@ -3967,6 +4764,7 @@ impl ExtensionManager {
                         message: format!("Configuration saved for '{}'.", name),
                         activated: false,
                         auth_url: None,
+                        verification: None,
                     });
                 }
             }
@@ -3984,6 +4782,7 @@ impl ExtensionManager {
                     message: format!("Configuration saved for '{}'.", name),
                     activated: false,
                     auth_url: None,
+                    verification: None,
                 });
             }
         };
@@ -3992,13 +4791,26 @@ impl ExtensionManager {
             Ok(result) => {
                 self.activation_errors.write().await.remove(name);
                 self.broadcast_extension_status(name, "active", None).await;
-                Ok(ConfigureResult {
-                    message: format!(
+                if name == TELEGRAM_CHANNEL_NAME {
+                    self.notify_telegram_owner_verified(name, telegram_binding.as_ref())
+                        .await;
+                }
+                let message = if name == TELEGRAM_CHANNEL_NAME {
+                    format!(
+                        "Configuration saved, Telegram owner verified, and '{}' activated. {}",
+                        name, result.message
+                    )
+                } else {
+                    format!(
                         "Configuration saved and '{}' activated. {}",
                         name, result.message
-                    ),
+                    )
+                };
+                Ok(ConfigureResult {
+                    message,
                     activated: true,
                     auth_url: None,
+                    verification: None,
                 })
             }
             Err(e) => {
@@ -4021,6 +4833,7 @@ impl ExtensionManager {
                     ),
                     activated: false,
                     auth_url: None,
+                    verification: None,
                 })
             }
         }
@@ -4380,13 +5193,101 @@ fn combine_install_errors(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
     use std::sync::Arc;
 
+    use async_trait::async_trait;
+    use futures::stream;
+
+    use crate::channels::wasm::{
+        ChannelCapabilities, LoadedChannel, PreparedChannelModule, WasmChannel, WasmChannelRouter,
+        WasmChannelRuntime, WasmChannelRuntimeConfig, bot_username_setting_key,
+    };
+    use crate::channels::{
+        Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    };
     use crate::extensions::ExtensionManager;
     use crate::extensions::manager::{
-        FallbackDecision, combine_install_errors, fallback_decision, infer_kind_from_url,
+        ChannelRuntimeState, FallbackDecision, TelegramBindingData, TelegramBindingResult,
+        TelegramOwnerBindingState, build_wasm_channel_runtime_config_updates,
+        combine_install_errors, fallback_decision, infer_kind_from_url, send_telegram_text_message,
+        telegram_message_matches_verification_code,
     };
-    use crate::extensions::{ExtensionError, ExtensionKind, ExtensionSource, InstallResult};
+    use crate::extensions::{
+        ExtensionError, ExtensionKind, ExtensionSource, InstallResult, VerificationChallenge,
+    };
+    use crate::pairing::PairingStore;
+
+    fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.into())
+        }
+    }
+
+    fn require_eq<T>(actual: T, expected: T, label: &str) -> Result<(), String>
+    where
+        T: PartialEq + Debug,
+    {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "{label} mismatch: expected {:?}, got {:?}",
+                expected, actual
+            ))
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingChannel {
+        name: String,
+        broadcasts: Arc<tokio::sync::Mutex<Vec<(String, OutgoingResponse)>>>,
+    }
+
+    #[async_trait]
+    impl Channel for RecordingChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&self) -> Result<MessageStream, crate::error::ChannelError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), crate::error::ChannelError> {
+            Ok(())
+        }
+
+        async fn send_status(
+            &self,
+            _status: StatusUpdate,
+            _metadata: &serde_json::Value,
+        ) -> Result<(), crate::error::ChannelError> {
+            Ok(())
+        }
+
+        async fn broadcast(
+            &self,
+            user_id: &str,
+            response: OutgoingResponse,
+        ) -> Result<(), crate::error::ChannelError> {
+            self.broadcasts
+                .lock()
+                .await
+                .push((user_id.to_string(), response));
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_infer_kind_from_url() {
@@ -4769,7 +5670,10 @@ mod tests {
         std::fs::create_dir_all(&channels_dir).ok();
 
         let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
-        let crypto = Arc::new(SecretsCrypto::new(master_key).unwrap());
+        let crypto = Arc::new(
+            SecretsCrypto::new(master_key)
+                .unwrap_or_else(|err| panic!("failed to construct test crypto: {err}")),
+        );
 
         ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
@@ -4784,6 +5688,57 @@ mod tests {
             "test".to_string(),
             None,
             Vec::new(),
+        )
+    }
+
+    fn make_test_loaded_channel(
+        runtime: Arc<WasmChannelRuntime>,
+        name: &str,
+        pairing_store: Arc<PairingStore>,
+    ) -> LoadedChannel {
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            name,
+            format!("Mock channel: {}", name),
+        ));
+        let capabilities =
+            ChannelCapabilities::for_channel(name).with_path(format!("/webhook/{}", name));
+
+        LoadedChannel {
+            channel: WasmChannel::new(
+                runtime,
+                prepared,
+                capabilities,
+                "default",
+                "{}".to_string(),
+                pairing_store,
+                None,
+            ),
+            capabilities_file: None,
+        }
+    }
+
+    #[test]
+    fn test_telegram_hot_activation_runtime_config_includes_owner_id() -> Result<(), String> {
+        let updates = build_wasm_channel_runtime_config_updates(
+            Some("https://example.test"),
+            Some("secret-123"),
+            Some(424242),
+        );
+
+        require_eq(
+            updates.get("tunnel_url"),
+            Some(&serde_json::json!("https://example.test")),
+            "tunnel_url",
+        )?;
+        require_eq(
+            updates.get("webhook_secret"),
+            Some(&serde_json::json!("secret-123")),
+            "webhook_secret",
+        )?;
+        require_eq(
+            updates.get("owner_id"),
+            Some(&serde_json::json!(424242)),
+            "owner_id",
         )
     }
 
@@ -4818,6 +5773,280 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_telegram_hot_activation_configure_uses_mock_loader_and_persists_state()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
+        std::fs::write(channels_dir.join("telegram.wasm"), b"mock")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            channels_dir.join("telegram.capabilities.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "telegram_bot_token",
+                            "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+                            "optional": false
+                        }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                },
+                "config": {
+                    "owner_id": null
+                }
+            }))
+            .map_err(|err| format!("serialize capabilities: {err}"))?,
+        )
+        .map_err(|err| format!("write capabilities: {err}"))?;
+
+        let (db, _db_tmp) = crate::testing::test_db().await;
+        let manager = {
+            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+            use crate::testing::credentials::TEST_CRYPTO_KEY;
+            use crate::tools::ToolRegistry;
+            use crate::tools::mcp::process::McpProcessManager;
+            use crate::tools::mcp::session::McpSessionManager;
+
+            let master_key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
+            let crypto = Arc::new(
+                SecretsCrypto::new(master_key)
+                    .unwrap_or_else(|err| panic!("failed to construct test crypto: {err}")),
+            );
+
+            ExtensionManager::new(
+                Arc::new(McpSessionManager::new()),
+                Arc::new(McpProcessManager::new()),
+                Arc::new(InMemorySecretsStore::new(crypto)),
+                Arc::new(ToolRegistry::new()),
+                None,
+                None,
+                dir.path().join("tools"),
+                channels_dir.clone(),
+                None,
+                "test".to_string(),
+                Some(db),
+                Vec::new(),
+            )
+        };
+
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::with_base_dir(
+            dir.path().join("pairing-state"),
+        ));
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+        manager
+            .set_test_wasm_channel_loader(Arc::new({
+                let runtime = Arc::clone(&runtime);
+                let pairing_store = Arc::clone(&pairing_store);
+                move |name| {
+                    Ok(make_test_loaded_channel(
+                        Arc::clone(&runtime),
+                        name,
+                        Arc::clone(&pairing_store),
+                    ))
+                }
+            }))
+            .await;
+        manager
+            .set_test_telegram_binding_resolver(Arc::new(|_token, existing_owner_id| {
+                if existing_owner_id.is_some() {
+                    return Err(ExtensionError::Other(
+                        "owner binding should be derived during setup".to_string(),
+                    ));
+                }
+                Ok(TelegramBindingResult::Bound(TelegramBindingData {
+                    owner_id: 424242,
+                    bot_username: Some("test_hot_bot".to_string()),
+                    binding_state: TelegramOwnerBindingState::VerifiedNow,
+                }))
+            }))
+            .await;
+
+        manager
+            .activation_errors
+            .write()
+            .await
+            .insert("telegram".to_string(), "stale failure".to_string());
+
+        let result = manager
+            .configure(
+                "telegram",
+                &std::collections::HashMap::from([(
+                    "telegram_bot_token".to_string(),
+                    "123456789:ABCdefGhI".to_string(),
+                )]),
+            )
+            .await
+            .map_err(|err| format!("configure succeeds: {err}"))?;
+
+        require(result.activated, "expected hot activation to succeed")?;
+        require(
+            result.message.contains("activated"),
+            format!("unexpected message: {}", result.message),
+        )?;
+        require(
+            !manager
+                .activation_errors
+                .read()
+                .await
+                .contains_key("telegram"),
+            "successful configure should clear stale activation errors",
+        )?;
+        require(
+            manager
+                .active_channel_names
+                .read()
+                .await
+                .contains("telegram"),
+            "telegram should be marked active after hot activation",
+        )?;
+        require(
+            channel_manager.get_channel("telegram").await.is_some(),
+            "telegram should be hot-added to the running channel manager",
+        )?;
+        require_eq(
+            manager.load_persisted_active_channels().await,
+            vec!["telegram".to_string()],
+            "persisted active channels",
+        )?;
+        require_eq(
+            manager.current_channel_owner_id("telegram").await,
+            Some(424242),
+            "current owner id",
+        )?;
+        require(
+            manager.has_wasm_channel_owner_binding("telegram").await,
+            "telegram should report an explicit owner binding after setup".to_string(),
+        )?;
+        let owner_setting = manager
+            .store
+            .as_ref()
+            .ok_or_else(|| "db-backed manager missing".to_string())?
+            .get_setting("test", "channels.wasm_channel_owner_ids.telegram")
+            .await
+            .map_err(|err| format!("owner_id setting query: {err}"))?;
+        require_eq(
+            owner_setting,
+            Some(serde_json::json!(424242)),
+            "owner setting",
+        )?;
+        let bot_username_setting = manager
+            .store
+            .as_ref()
+            .ok_or_else(|| "db-backed manager missing".to_string())?
+            .get_setting("test", &bot_username_setting_key("telegram"))
+            .await
+            .map_err(|err| format!("bot username setting query: {err}"))?;
+        require_eq(
+            bot_username_setting,
+            Some(serde_json::json!("test_hot_bot")),
+            "bot username setting",
+        )
+    }
+
+    #[tokio::test]
+    async fn test_telegram_hot_activation_returns_verification_challenge_before_binding()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
+        std::fs::write(channels_dir.join("telegram.wasm"), b"mock")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            channels_dir.join("telegram.capabilities.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "telegram_bot_token",
+                            "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+                            "optional": false
+                        }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                }
+            }))
+            .map_err(|err| format!("serialize capabilities: {err}"))?,
+        )
+        .map_err(|err| format!("write capabilities: {err}"))?;
+
+        let manager =
+            make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
+        manager
+            .set_test_telegram_binding_resolver(Arc::new(|_token, existing_owner_id| {
+                if existing_owner_id.is_some() {
+                    return Err(ExtensionError::Other(
+                        "owner binding should not exist before verification".to_string(),
+                    ));
+                }
+                Ok(TelegramBindingResult::Pending(VerificationChallenge {
+                    code: "iclaw-7qk2m9".to_string(),
+                    instructions:
+                        "Send `/start iclaw-7qk2m9` to @test_hot_bot in Telegram. IronClaw will finish setup automatically."
+                            .to_string(),
+                    deep_link: Some("https://t.me/test_hot_bot?start=iclaw-7qk2m9".to_string()),
+                }))
+            }))
+            .await;
+
+        let result = manager
+            .configure(
+                "telegram",
+                &std::collections::HashMap::from([(
+                    "telegram_bot_token".to_string(),
+                    "123456789:ABCdefGhI".to_string(),
+                )]),
+            )
+            .await
+            .map_err(|err| format!("configure returned challenge: {err}"))?;
+
+        require(
+            !result.activated,
+            "expected setup to pause for verification",
+        )?;
+        require(
+            result.verification.as_ref().map(|v| v.code.as_str()) == Some("iclaw-7qk2m9"),
+            "expected verification code in configure result",
+        )?;
+        require(
+            !manager
+                .active_channel_names
+                .read()
+                .await
+                .contains("telegram"),
+            "telegram should not activate until owner verification completes",
+        )
     }
 
     #[cfg(feature = "libsql")]
@@ -4905,6 +6134,104 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_notify_telegram_owner_verified_sends_confirmation_for_new_binding()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let manager =
+            make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
+
+        let channel_manager = Arc::new(ChannelManager::new());
+        let broadcasts = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        channel_manager
+            .add(Box::new(RecordingChannel {
+                name: "telegram".to_string(),
+                broadcasts: Arc::clone(&broadcasts),
+            }))
+            .await;
+
+        manager
+            .channel_runtime
+            .write()
+            .await
+            .replace(ChannelRuntimeState {
+                channel_manager,
+                wasm_channel_runtime: Arc::new(
+                    WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                        .map_err(|err| format!("runtime: {err}"))?,
+                ),
+                pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
+                wasm_channel_router: Arc::new(WasmChannelRouter::new()),
+                wasm_channel_owner_ids: std::collections::HashMap::new(),
+            });
+
+        manager
+            .notify_telegram_owner_verified(
+                "telegram",
+                Some(&TelegramBindingData {
+                    owner_id: 424242,
+                    bot_username: Some("test_hot_bot".to_string()),
+                    binding_state: TelegramOwnerBindingState::VerifiedNow,
+                }),
+            )
+            .await;
+
+        let sent = broadcasts.lock().await;
+        require_eq(sent.len(), 1, "broadcast count")?;
+        require_eq(sent[0].0.clone(), "424242".to_string(), "broadcast user_id")?;
+        require(
+            sent[0].1.content.contains("Telegram owner verified"),
+            "confirmation DM should acknowledge owner verification",
+        )
+    }
+
+    #[tokio::test]
+    async fn test_notify_telegram_owner_verified_skips_existing_binding() -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let manager =
+            make_manager_custom_dirs(dir.path().join("tools"), dir.path().join("channels"));
+
+        let channel_manager = Arc::new(ChannelManager::new());
+        let broadcasts = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        channel_manager
+            .add(Box::new(RecordingChannel {
+                name: "telegram".to_string(),
+                broadcasts: Arc::clone(&broadcasts),
+            }))
+            .await;
+
+        manager
+            .channel_runtime
+            .write()
+            .await
+            .replace(ChannelRuntimeState {
+                channel_manager,
+                wasm_channel_runtime: Arc::new(
+                    WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                        .map_err(|err| format!("runtime: {err}"))?,
+                ),
+                pairing_store: Arc::new(PairingStore::with_base_dir(dir.path().join("pairing"))),
+                wasm_channel_router: Arc::new(WasmChannelRouter::new()),
+                wasm_channel_owner_ids: std::collections::HashMap::new(),
+            });
+
+        manager
+            .notify_telegram_owner_verified(
+                "telegram",
+                Some(&TelegramBindingData {
+                    owner_id: 424242,
+                    bot_username: Some("test_hot_bot".to_string()),
+                    binding_state: TelegramOwnerBindingState::Existing,
+                }),
+            )
+            .await;
+
+        require(
+            broadcasts.lock().await.is_empty(),
+            "existing owner bindings should not trigger another confirmation DM",
+        )
     }
 
     // ── resolve_env_credentials tests ────────────────────────────────────
@@ -5593,6 +6920,141 @@ mod tests {
                 .unwrap_or(true),
             "auth() must not create any secrets — it should be read-only"
         );
+    }
+
+    #[tokio::test]
+    async fn test_telegram_auth_instructions_include_owner_verification_guidance()
+    -> Result<(), String> {
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
+
+        std::fs::write(channels_dir.join("telegram.wasm"), b"\0asm fake")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": "telegram",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "telegram_bot_token",
+                        "prompt": "Enter your Telegram Bot API token (from @BotFather)"
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            channels_dir.join("telegram.capabilities.json"),
+            serde_json::to_string(&caps).map_err(|err| format!("serialize caps: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_manager_custom_dirs(dir.path().join("tools"), channels_dir);
+
+        let result = mgr
+            .auth("telegram")
+            .await
+            .map_err(|err| format!("telegram auth status: {err}"))?;
+        let instructions = result
+            .instructions()
+            .ok_or_else(|| "awaiting token instructions missing".to_string())?;
+
+        require(
+            instructions.contains("Telegram Bot API token"),
+            "telegram auth instructions should still ask for the bot token",
+        )?;
+        require(
+            instructions.contains("one-time verification code")
+                && instructions.contains("/start CODE")
+                && instructions.contains("finish setup automatically"),
+            "telegram auth instructions should explain the owner verification step",
+        )
+    }
+
+    #[tokio::test]
+    async fn test_send_telegram_text_message_posts_expected_payload() -> Result<(), String> {
+        use axum::{Json, Router, extract::State, routing::post};
+
+        let payloads = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+
+        async fn handler(
+            State(payloads): State<Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>>,
+            Json(payload): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            payloads.lock().await.push(payload);
+            Json(serde_json::json!({ "ok": true, "result": {} }))
+        }
+
+        let app = Router::new()
+            .route("/sendMessage", post(handler))
+            .with_state(Arc::clone(&payloads));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| format!("bind listener: {err}"))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|err| format!("listener addr: {err}"))?;
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = reqwest::Client::new();
+        send_telegram_text_message(
+            &client,
+            &format!("http://{addr}/sendMessage"),
+            424242,
+            "Verification received. Finishing setup...",
+        )
+        .await
+        .map_err(|err| format!("send message: {err}"))?;
+
+        let captured = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let maybe_payload = { payloads.lock().await.first().cloned() };
+                if let Some(payload) = maybe_payload {
+                    break payload;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| "timed out waiting for sendMessage payload".to_string())?;
+
+        server.abort();
+
+        require_eq(
+            captured["chat_id"].clone(),
+            serde_json::json!(424242),
+            "chat_id",
+        )?;
+        require_eq(
+            captured["text"].clone(),
+            serde_json::json!("Verification received. Finishing setup..."),
+            "text",
+        )
+    }
+
+    #[test]
+    fn test_telegram_message_matches_verification_code_variants() -> Result<(), String> {
+        require(
+            telegram_message_matches_verification_code("iclaw-7qk2m9", "iclaw-7qk2m9"),
+            "plain verification code should match",
+        )?;
+        require(
+            telegram_message_matches_verification_code("/start iclaw-7qk2m9", "iclaw-7qk2m9"),
+            "/start payload should match",
+        )?;
+        require(
+            telegram_message_matches_verification_code(
+                "Hi! My code is: iclaw-7qk2m9",
+                "iclaw-7qk2m9",
+            ),
+            "conversational message containing the code should match",
+        )?;
+        require(
+            !telegram_message_matches_verification_code("/start something-else", "iclaw-7qk2m9"),
+            "wrong verification code should not match",
+        )
     }
 
     #[tokio::test]

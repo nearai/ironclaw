@@ -94,6 +94,15 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    fn tool_definition(tool: &Arc<dyn Tool>) -> ToolDefinition {
+        let schema = tool.schema();
+        ToolDefinition {
+            name: schema.name,
+            description: schema.description,
+            parameters: schema.parameters,
+        }
+    }
+
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
@@ -206,11 +215,7 @@ impl ToolRegistry {
             .read()
             .await
             .values()
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .map(Self::tool_definition)
             .collect();
         defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         defs
@@ -221,13 +226,7 @@ impl ToolRegistry {
         let tools = self.tools.read().await;
         names
             .iter()
-            .filter_map(|name| {
-                tools.get(*name).map(|tool| ToolDefinition {
-                    name: tool.name().to_string(),
-                    description: tool.description().to_string(),
-                    parameters: tool.parameters_schema(),
-                })
-            })
+            .filter_map(|name| tools.get(*name).map(Self::tool_definition))
             .collect()
     }
 
@@ -282,11 +281,7 @@ impl ToolRegistry {
             .await
             .values()
             .filter(|tool| tool.domain() == domain)
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .map(Self::tool_definition)
             .collect()
     }
 
@@ -312,11 +307,7 @@ impl ToolRegistry {
                     ApprovalRequirement::Never
                 )
             })
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .map(Self::tool_definition)
             .collect();
         defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         defs
@@ -501,9 +492,14 @@ impl ToolRegistry {
     pub async fn register_message_tools(
         &self,
         channel_manager: Arc<crate::channels::ChannelManager>,
+        extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     ) {
         use crate::tools::builtin::MessageTool;
-        let tool = Arc::new(MessageTool::new(channel_manager));
+        let mut tool = MessageTool::new(channel_manager);
+        if let Some(extension_manager) = extension_manager {
+            tool = tool.with_extension_manager(extension_manager);
+        }
+        let tool = Arc::new(tool);
         *self.message_tool.write().await = Some(Arc::clone(&tool));
         self.tools
             .write()
@@ -783,6 +779,7 @@ impl std::fmt::Debug for ToolRegistry {
 mod tests {
     use super::*;
     use crate::tools::registry::EchoTool;
+    use crate::tools::tool::ToolDiscoverySummary;
 
     #[tokio::test]
     async fn test_register_and_get() {
@@ -811,6 +808,71 @@ mod tests {
         let defs = registry.tool_definitions().await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn test_tool_definitions_use_tool_schema() {
+        struct DiscoveryTool;
+
+        #[async_trait::async_trait]
+        impl Tool for DiscoveryTool {
+            fn name(&self) -> &str {
+                "discovery_tool"
+            }
+
+            fn description(&self) -> &str {
+                "Discovery test tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                })
+            }
+
+            fn discovery_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "extra": { "type": "string" }
+                    }
+                })
+            }
+
+            fn discovery_summary(&self) -> Option<ToolDiscoverySummary> {
+                Some(ToolDiscoverySummary {
+                    notes: vec!["extra guidance".into()],
+                    ..ToolDiscoverySummary::default()
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(DiscoveryTool)).await;
+
+        let defs = registry.tool_definitions().await;
+        let def = defs
+            .iter()
+            .find(|def| def.name == "discovery_tool")
+            .expect("tool definition should be present");
+        assert!(
+            def.description.contains("tool_info"),
+            "live tool definition should include schema hint: {}",
+            def.description
+        );
+        assert!(def.parameters.get("extra").is_none());
     }
 
     #[tokio::test]
