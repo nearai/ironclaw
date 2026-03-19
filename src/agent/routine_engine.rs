@@ -10,6 +10,7 @@
 //! Lightweight routines execute inline (single LLM call, no scheduler slot).
 //! Full-job routines are delegated to the existing `Scheduler`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -25,17 +26,17 @@ use crate::agent::routine::{
 };
 use crate::channels::OutgoingResponse;
 use crate::config::RoutineConfig;
-use crate::context::JobContext;
+use crate::context::{JobContext, JobState};
 use crate::db::Database;
 use crate::error::RoutineError;
 use crate::llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
 };
-use crate::safety::SafetyLayer;
 use crate::tools::{
     ApprovalContext, ApprovalRequirement, ToolError, ToolRegistry, prepare_tool_params,
 };
 use crate::workspace::Workspace;
+use ironclaw_safety::SafetyLayer;
 
 enum EventMatcher {
     Message { routine: Routine, regex: Regex },
@@ -60,6 +61,10 @@ pub struct RoutineEngine {
     tools: Arc<ToolRegistry>,
     /// Safety layer for tool output sanitization.
     safety: Arc<SafetyLayer>,
+    /// Timestamp when this engine instance was created. Used by
+    /// `sync_dispatched_runs` to distinguish orphaned runs (from a previous
+    /// process) from actively-watched runs (from this process).
+    boot_time: chrono::DateTime<Utc>,
 }
 
 impl RoutineEngine {
@@ -85,6 +90,7 @@ impl RoutineEngine {
             scheduler,
             tools,
             safety,
+            boot_time: Utc::now(),
         }
     }
 
@@ -145,6 +151,15 @@ impl RoutineEngine {
     /// message content) so callers never need to clone a full `IncomingMessage`.
     pub async fn check_event_triggers(&self, user_id: &str, channel: &str, content: &str) -> usize {
         let cache = self.event_cache.read().await;
+
+        // Early return if there are no message matchers at all.
+        if !cache
+            .iter()
+            .any(|m| matches!(m, EventMatcher::Message { .. }))
+        {
+            return 0;
+        }
+
         let mut fired = 0;
 
         // Collect routine IDs for batch query
@@ -161,16 +176,9 @@ impl RoutineEngine {
         }
 
         // Single batch query instead of N queries
-        let concurrent_counts = match self
-            .store
-            .count_running_routine_runs_batch(&routine_ids)
-            .await
-        {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::error!("Failed to batch-load concurrent counts: {}", e);
-                return 0;
-            }
+        let concurrent_counts = match self.batch_concurrent_counts(&routine_ids).await {
+            Some(counts) => counts,
+            None => return 0,
         };
 
         for matcher in cache.iter() {
@@ -235,6 +243,15 @@ impl RoutineEngine {
         user_id: Option<&str>,
     ) -> usize {
         let cache = self.event_cache.read().await;
+
+        // Early return if there are no system-event matchers at all.
+        if !cache
+            .iter()
+            .any(|m| matches!(m, EventMatcher::System { .. }))
+        {
+            return 0;
+        }
+
         let mut fired = 0;
 
         // Collect routine IDs for batch query
@@ -251,19 +268,9 @@ impl RoutineEngine {
         }
 
         // Single batch query instead of N queries
-        let concurrent_counts = match self
-            .store
-            .count_running_routine_runs_batch(&routine_ids)
-            .await
-        {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to batch-load concurrent counts for system events: {}",
-                    e
-                );
-                return 0;
-            }
+        let concurrent_counts = match self.batch_concurrent_counts(&routine_ids).await {
+            Some(counts) => counts,
+            None => return 0,
         };
 
         for matcher in cache.iter() {
@@ -337,6 +344,23 @@ impl RoutineEngine {
         fired
     }
 
+    /// Batch-load concurrent run counts for a set of routine IDs.
+    ///
+    /// Returns `None` on database error (already logged).
+    async fn batch_concurrent_counts(&self, routine_ids: &[Uuid]) -> Option<HashMap<Uuid, i64>> {
+        match self
+            .store
+            .count_running_routine_runs_batch(routine_ids)
+            .await
+        {
+            Ok(counts) => Some(counts),
+            Err(e) => {
+                tracing::error!("Failed to batch-load concurrent counts: {}", e);
+                None
+            }
+        }
+    }
+
     /// Check all due cron routines and fire them. Called by the cron ticker.
     pub async fn check_cron_triggers(&self) {
         let routines = match self.store.list_due_cron_routines().await {
@@ -369,6 +393,230 @@ impl RoutineEngine {
 
             self.spawn_fire(routine, "cron", detail);
         }
+    }
+
+    /// Reconcile orphaned full_job routine runs with their linked job outcomes.
+    ///
+    /// Called on each cron tick. Finds routine runs that are still `running`
+    /// with a linked `job_id`, checks the job state, and finalizes the run
+    /// when the job reaches a completed or terminal state.
+    ///
+    /// Only processes runs started **before** this engine's boot time, so it
+    /// never races with `FullJobWatcher` instances from the current process.
+    /// This makes it safe to call on every tick as a crash-recovery mechanism.
+    pub async fn sync_dispatched_runs(&self) {
+        let runs = match self.store.list_dispatched_routine_runs().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to list dispatched routine runs: {}", e);
+                return;
+            }
+        };
+
+        // Only process runs from a previous process instance. Runs started
+        // after boot_time are actively watched by a FullJobWatcher in this
+        // process and should not be finalized here.
+        let orphaned: Vec<_> = runs
+            .into_iter()
+            .filter(|r| r.started_at < self.boot_time)
+            .collect();
+
+        if orphaned.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            "Recovering {} orphaned dispatched routine runs",
+            orphaned.len()
+        );
+
+        for run in orphaned {
+            let job_id = match run.job_id {
+                Some(id) => id,
+                None => continue, // Should not happen (query filters), but guard anyway
+            };
+
+            // Fetch the linked job
+            let job = match self.store.get_job(job_id).await {
+                Ok(Some(j)) => j,
+                Ok(None) => {
+                    // Orphaned: job record was deleted or never persisted
+                    tracing::warn!(
+                        run_id = %run.id,
+                        job_id = %job_id,
+                        "Linked job not found, marking routine run as failed"
+                    );
+                    self.complete_dispatched_run(
+                        &run,
+                        RunStatus::Failed,
+                        &format!("Linked job {job_id} not found (orphaned)"),
+                    )
+                    .await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        run_id = %run.id,
+                        job_id = %job_id,
+                        "Failed to fetch linked job: {}", e
+                    );
+                    continue;
+                }
+            };
+
+            // Map job state to final run status
+            let final_status = match job.state {
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    Some(RunStatus::Ok)
+                }
+                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                // Pending, InProgress, Stuck — still running
+                _ => None,
+            };
+
+            let status = match final_status {
+                Some(s) => s,
+                None => continue, // Job still active, check again next tick
+            };
+
+            // Build summary
+            let summary = if status == RunStatus::Failed {
+                match self.store.get_agent_job_failure_reason(job_id).await {
+                    Ok(Some(reason)) => format!("Job {job_id} failed: {reason}"),
+                    _ => format!("Job {job_id} {}", job.state),
+                }
+            } else {
+                format!("Job {job_id} completed successfully")
+            };
+
+            self.complete_dispatched_run(&run, status, &summary).await;
+        }
+    }
+
+    /// Finalize a dispatched routine run: update DB, update routine runtime,
+    /// persist to conversation thread, and send notification.
+    async fn complete_dispatched_run(&self, run: &RoutineRun, status: RunStatus, summary: &str) {
+        // Complete the run record in DB
+        if let Err(e) = self
+            .store
+            .complete_routine_run(run.id, status, Some(summary), None)
+            .await
+        {
+            tracing::error!(
+                run_id = %run.id,
+                "Failed to complete dispatched routine run: {}", e
+            );
+            return;
+        }
+
+        tracing::info!(
+            run_id = %run.id,
+            status = %status,
+            "Finalized dispatched routine run"
+        );
+
+        // Load the routine to update consecutive_failures and send notification
+        let routine = match self.store.get_routine(run.routine_id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                tracing::warn!(
+                    run_id = %run.id,
+                    routine_id = %run.routine_id,
+                    "Routine not found for dispatched run finalization"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    run_id = %run.id,
+                    "Failed to load routine for dispatched run: {}", e
+                );
+                return;
+            }
+        };
+
+        // Update runtime fields. In crash recovery, execute_routine() never
+        // reached its normal runtime update, so we must advance all fields here.
+        let new_failures = if status == RunStatus::Failed {
+            routine.consecutive_failures + 1
+        } else {
+            0
+        };
+
+        let now = Utc::now();
+        let next_fire = if let Trigger::Cron {
+            ref schedule,
+            ref timezone,
+        } = routine.trigger
+        {
+            next_cron_fire(schedule, timezone.as_deref()).unwrap_or(None)
+        } else {
+            None
+        };
+
+        if let Err(e) = self
+            .store
+            .update_routine_runtime(
+                routine.id,
+                now,
+                next_fire,
+                routine.run_count + 1,
+                new_failures,
+                &routine.state,
+            )
+            .await
+        {
+            tracing::error!(
+                routine = %routine.name,
+                "Failed to update routine runtime after dispatched run: {}", e
+            );
+        }
+
+        // Persist result to the routine's conversation thread
+        let thread_id = match self
+            .store
+            .get_or_create_routine_conversation(routine.id, &routine.name, &routine.user_id)
+            .await
+        {
+            Ok(conv_id) => {
+                let msg = format!("[dispatched] {}: {}", status, summary);
+                if let Err(e) = self
+                    .store
+                    .add_conversation_message(conv_id, "assistant", &msg)
+                    .await
+                {
+                    tracing::error!(
+                        routine = %routine.name,
+                        "Failed to persist dispatched run message: {}", e
+                    );
+                }
+                Some(conv_id.to_string())
+            }
+            Err(e) => {
+                tracing::error!(
+                    routine = %routine.name,
+                    "Failed to get routine conversation: {}", e
+                );
+                None
+            }
+        };
+
+        // Send notification
+        send_notification(
+            &self.notify_tx,
+            &routine.notify,
+            &routine.user_id,
+            &routine.name,
+            status,
+            Some(summary),
+            thread_id.as_deref(),
+        )
+        .await;
+
+        // Note: we do NOT decrement running_count here. In normal flow,
+        // execute_routine() handles that after FullJobWatcher returns.
+        // This sync path only runs for crash recovery (process restarted),
+        // where running_count was already reset to 0.
     }
 
     /// Fire a routine manually (from tool call or CLI).
@@ -548,7 +796,11 @@ impl FullJobWatcher {
             // if the job is already done (e.g. fast-failing jobs).
             match self.store.get_job(self.job_id).await {
                 Ok(Some(job_ctx)) => {
-                    if !job_ctx.state.is_active() {
+                    // Use is_parallel_blocking (Pending/InProgress/Stuck) instead
+                    // of is_active (!is_terminal) because routine jobs typically
+                    // stop at Completed — which is NOT terminal but IS finished
+                    // from an execution standpoint.
+                    if !job_ctx.state.is_parallel_blocking() {
                         break Self::map_job_state(&job_ctx.state);
                     }
                 }
@@ -816,13 +1068,16 @@ async fn execute_full_job(
             reason: format!("failed to dispatch job: {e}"),
         })?;
 
-    // Link the routine run to the dispatched job
-    if let Err(e) = ctx.store.link_routine_run_to_job(run.id, job_id).await {
-        tracing::error!(
-            routine = %routine.name,
-            "Failed to link run to job: {}", e
-        );
-    }
+    // Link the routine run to the dispatched job.
+    // This MUST succeed — if it fails, sync_dispatched_runs() will never find
+    // this run (it filters on job_id IS NOT NULL), leaving it stuck as 'running'
+    // with running_count permanently elevated.
+    ctx.store
+        .link_routine_run_to_job(run.id, job_id)
+        .await
+        .map_err(|e| RoutineError::Database {
+            reason: format!("failed to link run to job: {e}"),
+        })?;
 
     tracing::info!(
         routine = %routine.name,
@@ -1041,8 +1296,8 @@ fn handle_text_response(
         };
     }
 
-    // Check for the "nothing to do" sentinel
-    if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
+    // Check for the "nothing to do" sentinel (exact match on trimmed content).
+    if content == "ROUTINE_OK" {
         let total_tokens = Some((total_input_tokens + total_output_tokens) as i32);
         return Ok((RunStatus::Ok, None, total_tokens));
     }
@@ -1408,14 +1663,22 @@ pub fn spawn_cron_ticker(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // Run one check immediately so routines due at startup don't wait
-        // an extra full polling interval.
+        // Recover orphaned runs from a previous process crash before
+        // dispatching any new work, so we don't confuse fresh dispatches
+        // with crash orphans.
+        engine.sync_dispatched_runs().await;
+
+        // Run one cron check immediately so routines due at startup don't
+        // wait an extra full polling interval.
         engine.check_cron_triggers().await;
 
         let mut ticker = tokio::time::interval(interval);
 
         loop {
             ticker.tick().await;
+            // Sync first: only processes runs from before boot_time, so it
+            // never races with FullJobWatcher instances from this process.
+            engine.sync_dispatched_runs().await;
             engine.check_cron_triggers().await;
         }
     })
@@ -1582,20 +1845,21 @@ mod tests {
 
     #[test]
     fn test_routine_sentinel_detection_exact_match() {
-        // The execute_lightweight_no_tools checks: content == "ROUTINE_OK" || content.contains("ROUTINE_OK")
-        // After trim(), whitespace is removed
+        // Sentinel detection uses exact match on trimmed content to avoid
+        // false positives from substrings like "NOT_ROUTINE_OK".
         let test_cases = vec![
             ("ROUTINE_OK", true),
             ("  ROUTINE_OK  ", true), // After trim, whitespace is removed so matches
-            ("something ROUTINE_OK something", true),
-            ("ROUTINE_OK is done", true),
-            ("done ROUTINE_OK", true),
+            ("something ROUTINE_OK something", false), // substring no longer matches
+            ("ROUTINE_OK is done", false), // substring no longer matches
+            ("done ROUTINE_OK", false), // substring no longer matches
+            ("NOT_ROUTINE_OK", false), // exact match prevents this
             ("no sentinel here", false),
         ];
 
         for (content, should_match) in test_cases {
             let trimmed = content.trim();
-            let matches = trimmed == "ROUTINE_OK" || trimmed.contains("ROUTINE_OK");
+            let matches = trimmed == "ROUTINE_OK";
             assert_eq!(
                 matches, should_match,
                 "Content '{}' sentinel detection should be {}, got {}",
@@ -1708,5 +1972,87 @@ mod tests {
         assert_eq!(snapshot[0].role, crate::llm::Role::System); // safety: test-only no-panics CI false positive
         assert_eq!(snapshot[1].content, "a"); // safety: test-only no-panics CI false positive
         assert_eq!(snapshot[2].content, "b"); // safety: test-only no-panics CI false positive
+    }
+
+    /// Regression test for #1317: FullJobWatcher maps terminal job states correctly.
+    #[test]
+    fn test_full_job_watcher_state_mapping() {
+        use crate::context::JobState;
+
+        // Failed/Cancelled → RunStatus::Failed
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Failed),
+            RunStatus::Failed
+        );
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Cancelled),
+            RunStatus::Failed
+        );
+
+        // All other non-active states → RunStatus::Ok
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Completed),
+            RunStatus::Ok
+        );
+        assert_eq!(
+            super::FullJobWatcher::map_job_state(&JobState::Accepted),
+            RunStatus::Ok
+        );
+    }
+
+    /// Verify that job state to run status mapping covers all expected cases.
+    #[test]
+    fn test_job_state_to_run_status_mapping() {
+        use crate::context::JobState;
+
+        // Success states
+        for state in [JobState::Completed, JobState::Submitted, JobState::Accepted] {
+            let status = match state {
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    Some(RunStatus::Ok)
+                }
+                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                _ => None,
+            };
+            assert_eq!(
+                status,
+                Some(RunStatus::Ok),
+                "{:?} should map to RunStatus::Ok",
+                state
+            );
+        }
+
+        // Failure states
+        for state in [JobState::Failed, JobState::Cancelled] {
+            let status = match state {
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    Some(RunStatus::Ok)
+                }
+                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                _ => None,
+            };
+            assert_eq!(
+                status,
+                Some(RunStatus::Failed),
+                "{:?} should map to RunStatus::Failed",
+                state
+            );
+        }
+
+        // Active states (should not finalize)
+        for state in [JobState::Pending, JobState::InProgress, JobState::Stuck] {
+            let status = match state {
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    Some(RunStatus::Ok)
+                }
+                JobState::Failed | JobState::Cancelled => Some(RunStatus::Failed),
+                _ => None,
+            };
+            assert_eq!(
+                status, None,
+                "{:?} should not finalize the routine run",
+                state
+            );
+        }
     }
 }

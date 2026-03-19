@@ -10,7 +10,7 @@
 //! - `event_emit` - Emit a structured system event to `system_event`-triggered routines
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -624,7 +624,8 @@ pub(crate) fn routine_create_parameters_schema() -> Value {
 }
 
 fn routine_create_discovery_schema() -> Value {
-    routine_create_schema(true)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| routine_create_schema(true)).clone()
 }
 
 pub(crate) fn routine_update_parameters_schema() -> Value {
@@ -1007,7 +1008,8 @@ pub(crate) fn event_emit_parameters_schema() -> Value {
 }
 
 fn event_emit_discovery_schema() -> Value {
-    event_emit_schema(true)
+    static CACHE: OnceLock<Value> = OnceLock::new();
+    CACHE.get_or_init(|| event_emit_schema(true)).clone()
 }
 
 fn parse_event_emit_args(params: &Value) -> Result<(String, String, Value), ToolError> {

@@ -258,13 +258,6 @@ impl JobContext {
         new_state: JobState,
         reason: Option<String>,
     ) -> Result<(), String> {
-        debug_assert!(
-            self.state.can_transition_to(new_state),
-            "BUG: invalid job state transition {} -> {} for job {}",
-            self.state,
-            new_state,
-            self.job_id
-        );
         if !self.state.can_transition_to(new_state) {
             return Err(format!(
                 "Cannot transition from {} to {}",

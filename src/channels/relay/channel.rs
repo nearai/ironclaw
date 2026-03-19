@@ -265,6 +265,7 @@ impl Channel for RelayChannel {
             tool_name,
             description,
             parameters,
+            allow_always: _,
         } = status
         else {
             return Ok(());
@@ -612,6 +613,7 @@ mod tests {
                     tool_name: "shell".into(),
                     description: "run command".into(),
                     parameters: serde_json::json!({}),
+                    allow_always: true,
                 },
                 &metadata,
             )
@@ -634,6 +636,7 @@ mod tests {
                     tool_name: "shell".into(),
                     description: "run command".into(),
                     parameters: serde_json::json!({}),
+                    allow_always: true,
                 },
                 &metadata,
             )
@@ -660,6 +663,7 @@ mod tests {
                     tool_name: "shell".into(),
                     description: "run command".into(),
                     parameters: serde_json::json!({}),
+                    allow_always: true,
                 },
                 &metadata,
             )
