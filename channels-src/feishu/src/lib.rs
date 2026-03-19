@@ -206,10 +206,20 @@ struct FeishuApiResponse<T> {
     data: Option<T>,
 }
 
-/// Tenant access token response.
+/// Tenant access token response (flat format).
+///
+/// Unlike most Feishu APIs that nest results under `data`, the
+/// `/auth/v3/tenant_access_token/internal` endpoint returns `code`, `msg`,
+/// `tenant_access_token`, and `expire` at the top level.
 #[derive(Debug, Default, Deserialize)]
-struct TenantAccessTokenData {
+struct TenantAccessTokenResponse {
+    #[serde(default)]
+    code: i32,
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
     tenant_access_token: String,
+    #[serde(default)]
     expire: i64,
 }
 
@@ -770,9 +780,8 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
                 ));
             }
 
-            let token_resp: FeishuApiResponse<TenantAccessTokenData> =
-                serde_json::from_slice(&response.body)
-                    .map_err(|e| format!("Failed to parse token response: {}", e))?;
+            let token_resp: TenantAccessTokenResponse = serde_json::from_slice(&response.body)
+                .map_err(|e| format!("Failed to parse token response: {}", e))?;
 
             if token_resp.code != 0 {
                 return Err(format!(
@@ -781,23 +790,26 @@ fn obtain_tenant_token(api_base: &str) -> Result<String, String> {
                 ));
             }
 
-            let data = token_resp
-                .data
-                .ok_or_else(|| "Token response missing data".to_string())?;
+            if token_resp.tenant_access_token.is_empty() {
+                return Err("Token response missing tenant_access_token".to_string());
+            }
 
             // Cache the token with expiry.
             let now = channel_host::now_millis();
-            let expiry = now + (data.expire as u64) * 1000;
+            let expiry = now + (token_resp.expire as u64) * 1000;
 
-            let _ = channel_host::workspace_write(TOKEN_PATH, &data.tenant_access_token);
+            let _ = channel_host::workspace_write(TOKEN_PATH, &token_resp.tenant_access_token);
             let _ = channel_host::workspace_write(TOKEN_EXPIRY_PATH, &expiry.to_string());
 
             channel_host::log(
                 channel_host::LogLevel::Debug,
-                &format!("Tenant access token refreshed, expires in {}s", data.expire),
+                &format!(
+                    "Tenant access token refreshed, expires in {}s",
+                    token_resp.expire
+                ),
             );
 
-            Ok(data.tenant_access_token)
+            Ok(token_resp.tenant_access_token)
         }
         Err(e) => Err(format!("Token exchange request failed: {}", e)),
     }
