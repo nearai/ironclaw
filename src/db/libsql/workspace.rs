@@ -21,9 +21,15 @@ use chrono::Utc;
 
 /// Resolve the embedding dimension from environment variables.
 ///
-/// Mirrors the logic in `config/embeddings.rs`: checks `EMBEDDING_ENABLED`,
-/// reads `EMBEDDING_DIMENSION` or infers from `EMBEDDING_MODEL`.
-/// Returns `None` if embeddings are disabled or not configured.
+/// Reads `EMBEDDING_ENABLED`, `EMBEDDING_DIMENSION`, and `EMBEDDING_MODEL`
+/// from env vars. Returns `None` if embeddings are disabled.
+///
+/// Note: this only reads env vars, not persisted `Settings`, because it runs
+/// during `run_migrations()` before the full config stack is available. Users
+/// who configure embeddings via the settings UI must also set
+/// `EMBEDDING_ENABLED=true` in their environment for the vector index to be
+/// created. The model→dimension mapping is shared with `EmbeddingsConfig` via
+/// `default_dimension_for_model()`.
 pub(crate) fn resolve_embedding_dimension() -> Option<usize> {
     let enabled = std::env::var("EMBEDDING_ENABLED")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
@@ -43,17 +49,9 @@ pub(crate) fn resolve_embedding_dimension() -> Option<usize> {
     let model =
         std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
 
-    let dim = match model.as_str() {
-        "text-embedding-3-small" => 1536,
-        "text-embedding-3-large" => 3072,
-        "text-embedding-ada-002" => 1536,
-        "nomic-embed-text" => 768,
-        "mxbai-embed-large" => 1024,
-        "all-minilm" => 384,
-        _ => 1536,
-    };
-
-    Some(dim)
+    Some(crate::config::embeddings::default_dimension_for_model(
+        &model,
+    ))
 }
 
 impl LibSqlBackend {
@@ -64,9 +62,17 @@ impl LibSqlBackend {
     /// to `BLOB`) to support flexible dimensions. This method restores a
     /// properly-typed `F32_BLOB(N)` column and creates the vector index.
     ///
-    /// Uses `_migrations` version `0` (a reserved metadata row) to track the
-    /// current dimension. If the dimension is unchanged, this is a no-op.
+    /// Tracks the active dimension in `_migrations` version `0` — a reserved
+    /// metadata row where `name` stores the dimension as a string. Version 0
+    /// is never used by incremental migrations (which start at 9), so there
+    /// is no collision. If the stored dimension matches, this is a no-op.
     pub async fn ensure_vector_index(&self, dimension: usize) -> Result<(), DatabaseError> {
+        if dimension == 0 || dimension > 65536 {
+            return Err(DatabaseError::Migration(format!(
+                "ensure_vector_index: dimension {dimension} out of valid range (1..=65536)"
+            )));
+        }
+
         let conn = self.connect().await?;
 
         // Check current dimension from _migrations version=0 (reserved metadata row).
@@ -121,9 +127,15 @@ impl LibSqlBackend {
                 DatabaseError::Migration(format!("Failed to drop old vector index: {e}"))
             })?;
 
-        // 3. Create new table with F32_BLOB(dim)
+        // 3. Drop stale temp table (if a previous attempt crashed) and create fresh
+        tx.execute_batch("DROP TABLE IF EXISTS memory_chunks_new;")
+            .await
+            .map_err(|e| {
+                DatabaseError::Migration(format!("Failed to drop stale memory_chunks_new: {e}"))
+            })?;
+
         let create_sql = format!(
-            "CREATE TABLE IF NOT EXISTS memory_chunks_new (
+            "CREATE TABLE memory_chunks_new (
                 _rowid INTEGER PRIMARY KEY AUTOINCREMENT,
                 id TEXT NOT NULL UNIQUE,
                 document_id TEXT NOT NULL REFERENCES memory_documents(id) ON DELETE CASCADE,
@@ -144,7 +156,7 @@ impl LibSqlBackend {
         //    (they will be re-embedded on next background pass)
         let expected_bytes = dimension * 4;
         let copy_sql = format!(
-            "INSERT OR IGNORE INTO memory_chunks_new
+            "INSERT INTO memory_chunks_new
                 (_rowid, id, document_id, chunk_index, content, embedding, created_at)
              SELECT _rowid, id, document_id, chunk_index, content,
                     CASE WHEN length(embedding) = {expected_bytes} THEN embedding ELSE NULL END,

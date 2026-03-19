@@ -9,7 +9,7 @@ mod agent;
 mod builder;
 mod channels;
 mod database;
-mod embeddings;
+pub(crate) mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
