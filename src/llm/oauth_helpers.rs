@@ -387,7 +387,7 @@ mod tests {
         assert!(!is_wildcard_host("localhost"));
     }
 
-    // Safe: #[tokio::test] uses current_thread runtime; the await is a quick TCP bind.
+    // Lock held across await to serialize env-var mutation; the awaited op is a quick local TCP bind.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv4() {
@@ -411,7 +411,7 @@ mod tests {
         );
     }
 
-    // Safe: #[tokio::test] uses current_thread runtime; the await is a quick TCP bind.
+    // Lock held across await to serialize env-var mutation; the awaited op is a quick local TCP bind.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn bind_rejects_wildcard_ipv6() {
