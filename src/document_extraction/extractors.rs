@@ -3,26 +3,26 @@
 use std::io::Read;
 
 /// Extract text from document bytes based on MIME type and optional filename.
-pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<String, String> {
+pub fn extract_text(data: Vec<u8>, mime: &str, filename: Option<&str>) -> Result<String, String> {
     let base_mime = mime.split(';').next().unwrap_or(mime).trim();
 
     match base_mime {
-        // PDF
+        // PDF — pass ownership to avoid an extra copy
         "application/pdf" => extract_pdf(data),
 
         // Office XML formats
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
-            extract_docx(data)
+            extract_docx(&data)
         }
         "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
-            extract_pptx(data)
+            extract_pptx(&data)
         }
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => extract_xlsx(data),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => extract_xlsx(&data),
 
         // Legacy Office (best-effort: treat as binary, try text extraction)
         "application/msword" | "application/vnd.ms-powerpoint" | "application/vnd.ms-excel" => {
             // Legacy binary formats — try to extract any text strings
-            extract_binary_strings(data)
+            extract_binary_strings(&data)
         }
 
         // Plain text family
@@ -44,14 +44,14 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
         | "text/css"
         | "text/x-toml"
         | "text/x-yaml"
-        | "text/x-log" => extract_utf8(data),
+        | "text/x-log" => extract_utf8(&data),
 
         // JSON / XML / YAML application types
         "application/json" | "application/xml" | "application/x-yaml" | "application/yaml"
-        | "application/toml" | "application/x-sh" => extract_utf8(data),
+        | "application/toml" | "application/x-sh" => extract_utf8(&data),
 
         // RTF
-        "application/rtf" | "text/rtf" => extract_rtf(data),
+        "application/rtf" | "text/rtf" => extract_rtf(&data),
 
         // Fallback: try to infer from filename extension
         _ => {
@@ -64,10 +64,13 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
     }
 }
 
-fn extract_pdf(data: &[u8]) -> Result<String, String> {
-    let mut doc = pdf_oxide::PdfDocument::from_bytes(data.to_vec())
+fn extract_pdf(data: Vec<u8>) -> Result<String, String> {
+    let mut doc = pdf_oxide::PdfDocument::from_bytes(data)
         .map_err(|e| format!("PDF extraction failed: {e}"))?;
-    let options = pdf_oxide::converters::ConversionOptions::default();
+    let options = pdf_oxide::converters::ConversionOptions {
+        include_images: false,
+        ..Default::default()
+    };
     doc.to_markdown_all(&options)
         .map(|t| t.trim().to_string())
         .map_err(|e| format!("PDF markdown conversion failed: {e}"))
@@ -436,20 +439,20 @@ fn parse_xlsx_sheet(xml: &str, shared_strings: &[String]) -> String {
 }
 
 /// Try to extract text based on filename extension when MIME type is generic.
-fn try_extract_by_extension(data: &[u8], filename: Option<&str>) -> Option<String> {
+fn try_extract_by_extension(data: Vec<u8>, filename: Option<&str>) -> Option<String> {
     let ext = filename?.rsplit('.').next()?.to_lowercase();
 
     match ext.as_str() {
         "pdf" => extract_pdf(data).ok(),
-        "docx" => extract_docx(data).ok(),
-        "pptx" => extract_pptx(data).ok(),
-        "xlsx" => extract_xlsx(data).ok(),
-        "doc" | "ppt" | "xls" => extract_binary_strings(data).ok(),
-        "rtf" => extract_rtf(data).ok(),
+        "docx" => extract_docx(&data).ok(),
+        "pptx" => extract_pptx(&data).ok(),
+        "xlsx" => extract_xlsx(&data).ok(),
+        "doc" | "ppt" | "xls" => extract_binary_strings(&data).ok(),
+        "rtf" => extract_rtf(&data).ok(),
         "txt" | "csv" | "tsv" | "json" | "xml" | "yaml" | "yml" | "toml" | "md" | "markdown"
         | "py" | "js" | "ts" | "rs" | "go" | "java" | "c" | "cpp" | "h" | "hpp" | "rb" | "sh"
         | "bash" | "zsh" | "fish" | "css" | "html" | "htm" | "sql" | "log" | "ini" | "cfg"
-        | "conf" | "env" | "gitignore" | "dockerfile" => extract_utf8(data).ok(),
+        | "conf" | "env" | "gitignore" | "dockerfile" => extract_utf8(&data).ok(),
         _ => None,
     }
 }
@@ -485,19 +488,19 @@ mod tests {
 
     #[test]
     fn extract_by_extension_txt() {
-        let result = try_extract_by_extension(b"content", Some("notes.txt"));
+        let result = try_extract_by_extension(b"content".to_vec(), Some("notes.txt"));
         assert_eq!(result, Some("content".to_string()));
     }
 
     #[test]
     fn extract_by_extension_unknown() {
-        let result = try_extract_by_extension(b"data", Some("file.xyz"));
+        let result = try_extract_by_extension(b"data".to_vec(), Some("file.xyz"));
         assert!(result.is_none());
     }
 
     #[test]
     fn extract_by_extension_no_filename() {
-        let result = try_extract_by_extension(b"data", None);
+        let result = try_extract_by_extension(b"data".to_vec(), None);
         assert!(result.is_none());
     }
 
@@ -514,5 +517,24 @@ mod tests {
         let xml = r#"<sst><si><t>Name</t></si><si><t>Age</t></si></sst>"#;
         let strings = parse_xlsx_shared_strings(xml);
         assert_eq!(strings, vec!["Name", "Age"]);
+    }
+
+    #[test]
+    fn pdf_extraction_returns_text_not_images() {
+        let pdf_bytes = include_bytes!("../../tests/fixtures/hello.pdf");
+        let result = extract_pdf(pdf_bytes.to_vec()).unwrap();
+        assert!(
+            result.contains("Hello"),
+            "PDF markdown should contain 'Hello', got: {result}"
+        );
+        // Verify images are not embedded in the output
+        assert!(
+            !result.contains("!["),
+            "PDF extraction should not contain markdown images, got: {result}"
+        );
+        assert!(
+            !result.contains("data:image"),
+            "PDF extraction should not contain data URIs, got: {result}"
+        );
     }
 }
