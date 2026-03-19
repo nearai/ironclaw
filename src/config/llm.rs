@@ -86,7 +86,11 @@ impl LlmConfig {
             .iter()
             .find(|p| p.id.to_lowercase() == backend_lower);
 
-        if !is_nearai && !is_bedrock && custom_provider.is_none() && registry.find(&backend_lower).is_none() {
+        if !is_nearai
+            && !is_bedrock
+            && custom_provider.is_none()
+            && registry.find(&backend_lower).is_none()
+        {
             tracing::warn!(
                 "Unknown LLM backend '{}'. Will attempt as openai_compatible fallback.",
                 backend
@@ -1170,7 +1174,10 @@ mod tests {
         assert_eq!(provider.provider_id, "myprovider");
         assert_eq!(provider.base_url, "https://api.example.com/v1");
         assert_eq!(provider.model, "my-model");
-        assert_eq!(provider.protocol, crate::llm::registry::ProviderProtocol::OpenAiCompletions);
+        assert_eq!(
+            provider.protocol,
+            crate::llm::registry::ProviderProtocol::OpenAiCompletions
+        );
     }
 
     #[test]
@@ -1220,7 +1227,10 @@ mod tests {
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
             "groq".to_string(),
-            crate::settings::LlmBuiltinOverride { api_key: None, model: Some("llama-3.1-8b-instant".to_string()) },
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("llama-3.1-8b-instant".to_string()),
+            },
         );
         let settings = Settings {
             llm_backend: Some("groq".to_string()),
@@ -1248,7 +1258,10 @@ mod tests {
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(
             "groq".to_string(),
-            crate::settings::LlmBuiltinOverride { api_key: None, model: Some("llama-3.1-8b-instant".to_string()) },
+            crate::settings::LlmBuiltinOverride {
+                api_key: None,
+                model: Some("llama-3.1-8b-instant".to_string()),
+            },
         );
         let settings = Settings {
             llm_backend: Some("groq".to_string()),
@@ -1292,9 +1305,12 @@ mod tests {
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("provider config should be present");
         use secrecy::ExposeSecret as _;
-        let key = provider.api_key.expect("api_key should be set from builtin override");
+        let key = provider
+            .api_key
+            .expect("api_key should be set from builtin override");
         assert_eq!(
-            key.expose_secret(), "gsk_test_key",
+            key.expose_secret(),
+            "gsk_test_key",
             "builtin override api_key should be used when env var is absent"
         );
     }

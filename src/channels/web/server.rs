@@ -36,6 +36,10 @@ use crate::channels::web::handlers::jobs::{
     jobs_summary_handler,
 };
 use crate::channels::web::handlers::routines::{routines_delete_handler, routines_toggle_handler};
+use crate::channels::web::handlers::settings::{
+    settings_delete_handler, settings_export_handler, settings_get_handler,
+    settings_import_handler, settings_list_handler, settings_set_handler,
+};
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
@@ -312,7 +316,10 @@ pub async fn start_server(
             axum::routing::delete(settings_delete_handler),
         )
         // LLM utilities
-        .route("/api/llm/test_connection", post(llm_test_connection_handler))
+        .route(
+            "/api/llm/test_connection",
+            post(llm_test_connection_handler),
+        )
         .route("/api/llm/list_models", post(llm_list_models_handler))
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
@@ -2513,95 +2520,6 @@ async fn routines_runs_handler(
     })))
 }
 
-// --- Settings handlers ---
-
-async fn settings_list_handler(
-    State(state): State<Arc<GatewayState>>,
-) -> Result<Json<SettingsListResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let rows = store.list_settings(&state.user_id).await.map_err(|e| {
-        tracing::error!("Failed to list settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let settings = rows
-        .into_iter()
-        .map(|r| SettingResponse {
-            key: r.key,
-            value: r.value,
-            updated_at: r.updated_at.to_rfc3339(),
-        })
-        .collect();
-
-    Ok(Json(SettingsListResponse { settings }))
-}
-
-async fn settings_get_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(key): Path<String>,
-) -> Result<Json<SettingResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let row = store
-        .get_setting_full(&state.user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    Ok(Json(SettingResponse {
-        key: row.key,
-        value: row.value,
-        updated_at: row.updated_at.to_rfc3339(),
-    }))
-}
-
-async fn settings_set_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(key): Path<String>,
-    Json(body): Json<SettingWriteRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .set_setting(&state.user_id, &key, &body.value)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to set setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn settings_delete_handler(
-    State(state): State<Arc<GatewayState>>,
-    Path(key): Path<String>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .delete_setting(&state.user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 #[derive(serde::Deserialize)]
 struct TestConnectionRequest {
     adapter: String,
@@ -2634,7 +2552,7 @@ async fn test_provider_connection(req: TestConnectionRequest) -> TestConnectionR
             return TestConnectionResponse {
                 ok: false,
                 message: format!("Failed to build HTTP client: {e}"),
-            }
+            };
         }
     };
 
@@ -2659,7 +2577,12 @@ async fn test_provider_connection(req: TestConnectionRequest) -> TestConnectionR
             }
         }
         "anthropic" => {
-            let url = format!("{base}/messages");
+            let anthropic_base = if base.ends_with("/v1") || base.contains("/v1/") {
+                base.to_string()
+            } else {
+                format!("{base}/v1")
+            };
+            let url = format!("{anthropic_base}/messages");
             let model = req.model.as_deref().unwrap_or("claude-3-haiku-20240307");
             let payload = serde_json::json!({
                 "model": model,
@@ -2700,7 +2623,10 @@ fn interpret_chat_response(
         Ok(r) => {
             let status = r.status();
             if status.is_success() {
-                TestConnectionResponse { ok: true, message: format!("Connected ({})", status) }
+                TestConnectionResponse {
+                    ok: true,
+                    message: format!("Connected ({})", status),
+                }
             } else if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
@@ -2708,11 +2634,18 @@ fn interpret_chat_response(
                     ok: false,
                     message: format!("Authentication failed ({})", status),
                 }
-            } else if status.is_client_error() {
+            } else if status == reqwest::StatusCode::BAD_REQUEST
+                || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+            {
                 // 400/422 = server reachable, likely wrong model name — still a success for connectivity
                 TestConnectionResponse {
                     ok: true,
                     message: format!("Server reachable ({})", status),
+                }
+            } else if status.is_client_error() {
+                TestConnectionResponse {
+                    ok: false,
+                    message: format!("Client error ({})", status),
                 }
             } else {
                 TestConnectionResponse {
@@ -2721,7 +2654,10 @@ fn interpret_chat_response(
                 }
             }
         }
-        Err(e) => TestConnectionResponse { ok: false, message: format!("Connection failed: {e}") },
+        Err(e) => TestConnectionResponse {
+            ok: false,
+            message: format!("Connection failed: {e}"),
+        },
     }
 }
 
@@ -2740,9 +2676,7 @@ struct ListModelsResponse {
     message: String,
 }
 
-async fn llm_list_models_handler(
-    Json(body): Json<ListModelsRequest>,
-) -> Json<ListModelsResponse> {
+async fn llm_list_models_handler(Json(body): Json<ListModelsRequest>) -> Json<ListModelsResponse> {
     Json(fetch_provider_models(body).await)
 }
 
@@ -2757,7 +2691,7 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
                 ok: false,
                 models: vec![],
                 message: format!("Failed to build HTTP client: {e}"),
-            }
+            };
         }
     };
 
@@ -2806,19 +2740,22 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
         }
         _ => {
             // OpenAI-compatible and Anthropic both support GET /models
-            let url = format!("{base}/models");
+            let effective_base =
+                if req.adapter == "anthropic" && !base.ends_with("/v1") && !base.contains("/v1/") {
+                    format!("{base}/v1")
+                } else {
+                    base.to_string()
+                };
+            let url = format!("{effective_base}/models");
             let mut builder = client.get(&url);
-            if let Some(key) = auth {
-                builder = builder.header("Authorization", format!("Bearer {key}"));
-            }
-            // Anthropic also needs the version header and uses x-api-key
             if req.adapter == "anthropic" {
+                // Anthropic requires a version header and uses x-api-key for authentication
+                builder = builder.header("anthropic-version", "2023-06-01");
                 if let Some(key) = auth {
-                    builder = client
-                        .get(&url)
-                        .header("x-api-key", key)
-                        .header("anthropic-version", "2023-06-01");
+                    builder = builder.header("x-api-key", key);
                 }
+            } else if let Some(key) = auth {
+                builder = builder.header("Authorization", format!("Bearer {key}"));
             }
             match builder.send().await {
                 Ok(r) if r.status().is_success() => {
@@ -2860,40 +2797,6 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
             }
         }
     }
-}
-
-async fn settings_export_handler(
-    State(state): State<Arc<GatewayState>>,
-) -> Result<Json<SettingsExportResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
-        tracing::error!("Failed to export settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    Ok(Json(SettingsExportResponse { settings }))
-}
-
-async fn settings_import_handler(
-    State(state): State<Arc<GatewayState>>,
-    Json(body): Json<SettingsImportRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    store
-        .set_all_settings(&state.user_id, &body.settings)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to import settings: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- Gateway control plane handlers ---

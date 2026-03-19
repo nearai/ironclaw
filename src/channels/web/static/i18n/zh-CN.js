@@ -39,6 +39,7 @@ I18n.register('zh-CN', {
   'settings.channels': '频道',
   'settings.networking': '网络',
   'settings.mcp': 'MCP',
+  'settings.providers': '模型提供商',
   
   // 状态
   'status.connected': '已连接',

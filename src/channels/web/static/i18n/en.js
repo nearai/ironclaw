@@ -39,6 +39,7 @@ I18n.register('en', {
   'settings.channels': 'Channels',
   'settings.networking': 'Networking',
   'settings.mcp': 'MCP',
+  'settings.providers': 'Providers',
   
   // Status
   'status.connected': 'Connected',

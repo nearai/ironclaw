@@ -71,9 +71,7 @@ pub async fn settings_set_handler(
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
-        if let Err(status) = guard_active_provider_not_removed(store, &state.user_id, &body.value).await {
-            return Err(status);
-        }
+        guard_active_provider_not_removed(store, &state.user_id, &body.value).await?;
     }
 
     store
@@ -119,17 +117,17 @@ async fn guard_active_provider_not_removed(
         None => return Ok(()),
     };
 
-    let active_was_custom = old_providers.iter().any(|p| {
-        p.get("id").and_then(|v| v.as_str()) == Some(&active_backend)
-    });
+    let active_was_custom = old_providers
+        .iter()
+        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(&active_backend));
     if !active_was_custom {
         return Ok(());
     }
 
     // Reject if the active provider is absent from the new list.
-    let still_present = new_providers.iter().any(|p| {
-        p.get("id").and_then(|v| v.as_str()) == Some(&active_backend)
-    });
+    let still_present = new_providers
+        .iter()
+        .any(|p| p.get("id").and_then(|v| v.as_str()) == Some(&active_backend));
     if !still_present {
         tracing::warn!(
             active_backend = %active_backend,

@@ -149,7 +149,6 @@
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
       <button data-tab="routines" data-i18n="tab.routines">Routines</button>
-      <button data-tab="config" data-i18n="tab.config">Config</button>
       <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
 
@@ -336,6 +335,7 @@
           <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
+          <button class="settings-subtab" data-settings-subtab="providers" data-i18n="settings.providers">Providers</button>
         </div>
         <div class="settings-content">
           <div class="settings-toolbar">
@@ -431,25 +431,23 @@
               </div>
             </div>
           </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Config Tab -->
-  <div class="tab-panel" id="tab-config">
-    <div class="extensions-container">
-      <div class="extensions-section">
-        <div class="config-section-header">
-          <h3 data-i18n="config.modelProviders">Model Providers</h3>
-          <button id="add-provider-btn" class="btn-add-provider" data-i18n="config.addProvider">+ Add Provider</button>
-        </div>
-        <div class="config-notice" id="config-restart-notice" style="display:none">
-          <span>⚠</span>
-          <span data-i18n="config.restartNotice">Changes take effect after restart.</span>
-        </div>
-        <div id="providers-list" class="providers-list">
-          <div class="empty-state" data-i18n="common.loading">Loading...</div>
+          <div class="settings-subpanel" id="settings-providers">
+            <div class="extensions-container">
+              <div class="extensions-section">
+                <div class="config-section-header">
+                  <h3 data-i18n="config.modelProviders">Model Providers</h3>
+                  <button id="add-provider-btn" class="btn-add-provider" data-i18n="config.addProvider">+ Add Provider</button>
+                </div>
+                <div class="config-notice" id="config-restart-notice" style="display:none">
+                  <span>⚠</span>
+                  <span data-i18n="config.restartNotice">Changes take effect after restart.</span>
+                </div>
+                <div id="providers-list" class="providers-list">
+                  <div class="empty-state" data-i18n="common.loading">Loading...</div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

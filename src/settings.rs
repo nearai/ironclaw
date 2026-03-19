@@ -1,7 +1,10 @@
 //! User settings persistence.
 //!
-//! Stores user preferences in ~/.ironclaw/settings.json.
-//! Settings are loaded with env var > settings.json > default priority.
+//! Stores user preferences in `~/.ironclaw` (JSON/TOML) and, for some values,
+//! in the database. At runtime, settings are resolved using the following
+//! precedence: database > environment variables > on-disk config > built-in
+//! defaults. In particular, LLM backend and related settings prefer DB values
+//! over environment variables.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -37,12 +40,15 @@ pub struct CustomLlmProviderSettings {
 ///
 /// Stored as `llm_builtin_overrides` in the settings store, keyed by provider ID
 /// (e.g. `"openai"`, `"gemini"`). Resolved at startup during `LlmConfig::resolve()`.
+///
+/// Note: Environment variables and the global `selected_model` (if set) take
+/// precedence over these per-provider overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LlmBuiltinOverride {
-    /// API key override (takes precedence over env var).
+    /// API key override used when no API key is provided via environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// Default model override (takes precedence over global `selected_model`).
+    /// Default model override used when no global `selected_model` is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }

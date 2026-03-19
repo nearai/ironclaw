@@ -1880,7 +1880,6 @@ function switchTab(tab) {
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
-  if (tab === 'config') loadConfig();
   if (tab === 'settings') {
     loadSettingsSubtab(currentSettingsSubtab);
   } else {
@@ -4606,6 +4605,7 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
   else if (subtab === 'mcp') loadMcpServers();
   else if (subtab === 'skills') loadSkills();
+  else if (subtab === 'providers') loadConfig();
   if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
 }
 
@@ -5553,7 +5553,7 @@ const BUILTIN_PROVIDERS = [
   { id: 'ionet',             name: 'io.net',            adapter: 'open_ai_completions',   base_url: 'https://api.intelligence.io.solutions/api/v1',             builtin: true, default_model: 'deepseek-coder-v2-instruct',                    api_key_required: true,  can_list_models: true  },
   { id: 'cloudflare',        name: 'Cloudflare AI',     adapter: 'open_ai_completions',   base_url: '',                                                         builtin: true, default_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast',      api_key_required: true,  can_list_models: false },
   { id: 'yandex',            name: 'Yandex AI Studio',  adapter: 'open_ai_completions',   base_url: 'https://ai.api.cloud.yandex.net/v1',                       builtin: true, default_model: 'yandexgpt-lite',                                api_key_required: true,  can_list_models: true  },
-  { id: 'bedrock',           name: 'AWS Bedrock',       adapter: 'bedrock',               base_url: '',                                                         builtin: true, default_model: '',                                              api_key_required: false, can_list_models: false },
+  { id: 'bedrock',           name: 'AWS Bedrock',       adapter: 'bedrock',               base_url: '',                                                         builtin: true, default_model: 'anthropic.claude-3-sonnet-20240229-v1:0',      api_key_required: false, can_list_models: false },
 ];
 
 const ADAPTER_LABELS = {
@@ -5680,11 +5680,11 @@ function setActiveProvider(id) {
     (provider && provider.default_model) ||
     null;
   const defaultModel = restoredModel;
-  const modelUpdate = defaultModel
+  const modelUpdate = () => defaultModel
     ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: defaultModel } })
     : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
   apiFetchVoid('/api/settings/llm_backend', { method: 'PUT', body: { value: id } })
-    .then(() => modelUpdate)
+    .then(() => modelUpdate())
     .then(() => {
       _activeLlmBackend = id;
       _selectedModel = defaultModel || '';
@@ -5702,10 +5702,14 @@ function deleteCustomProvider(id) {
     return;
   }
   if (!confirm(I18n.t('config.confirmDeleteProvider', { id }))) return;
+  const originalProviders = _customProviders;
   _customProviders = _customProviders.filter((p) => p.id !== id);
   saveCustomProviders().then(() => {
     renderProviders();
     showToast(I18n.t('config.providerDeleted'));
+  }).catch((e) => {
+    _customProviders = originalProviders;
+    showToast(I18n.t('error.unknown') + ': ' + e.message, 'error');
   });
 }
 
@@ -5738,7 +5742,7 @@ function configureBuiltinProvider(id) {
   if (!p) return;
   _configuringBuiltinId = id;
   const titleEl = document.getElementById('provider-form-title');
-  titleEl.textContent = I18n.t('config.configureProvider') + ': ' + escHtml(p.name || id);
+  titleEl.textContent = I18n.t('config.configureProvider') + ': ' + (p.name || id);
   titleEl.removeAttribute('data-i18n');
   // Hide name/id/adapter rows; show base-url as read-only for reference
   document.getElementById('provider-name-row').style.display = 'none';
@@ -5850,13 +5854,15 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
     const prev = _builtinOverrides[id];
     _builtinOverrides[id] = override;
     const isActive = id === _activeLlmBackend;
-    const modelUpdate = isActive
-      ? (model
-        ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } })
-        : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' }))
-      : Promise.resolve();
+    const modelUpdate = () => {
+      if (!isActive) return Promise.resolve();
+      if (model) {
+        return apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } });
+      }
+      return apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+    };
     apiFetchVoid('/api/settings/llm_builtin_overrides', { method: 'PUT', body: { value: _builtinOverrides } })
-      .then(() => modelUpdate)
+      .then(() => modelUpdate())
       .then(() => {
         if (isActive) _selectedModel = model;
         renderProviders();
@@ -5890,12 +5896,14 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
     const original = _customProviders[idx];
     _customProviders[idx] = { ...original, name, adapter, base_url: baseUrl, default_model: model || undefined, api_key: apiKey || undefined };
     const isActive = _editingProviderId === _activeLlmBackend;
-    const modelUpdate = isActive
-      ? (model
-        ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } })
-        : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' }))
-      : Promise.resolve();
-    saveCustomProviders().then(() => modelUpdate).then(() => {
+    const modelUpdate = () => {
+      if (!isActive) return Promise.resolve();
+      if (model) {
+        return apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: model } });
+      }
+      return apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
+    };
+    saveCustomProviders().then(() => modelUpdate()).then(() => {
       if (isActive) _selectedModel = model;
       renderProviders();
       resetProviderForm();
@@ -5948,6 +5956,7 @@ function resetProviderForm() {
   const idField = document.getElementById('provider-id');
   idField.readOnly = false;
   idField.style.opacity = '';
+  delete idField.dataset.edited;
   const baseUrlField = document.getElementById('provider-base-url');
   baseUrlField.readOnly = false;
   baseUrlField.style.opacity = '';
