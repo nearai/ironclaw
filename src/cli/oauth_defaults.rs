@@ -500,6 +500,14 @@ pub fn use_gateway_callback() -> bool {
         .unwrap_or(false)
 }
 
+/// Returns the configured OAuth token-exchange proxy URL, if any.
+pub fn exchange_proxy_url() -> Option<String> {
+    std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL")
+        .ok()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
 /// Maximum age for pending OAuth flows (5 minutes, matching TCP listener timeout).
 pub const OAUTH_FLOW_EXPIRY: Duration = Duration::from_secs(300);
 

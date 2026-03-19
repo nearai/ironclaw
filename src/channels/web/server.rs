@@ -609,7 +609,7 @@ async fn oauth_callback_handler(
     // Exchange the authorization code for tokens.
     // Use the platform exchange proxy when configured, otherwise call the
     // provider's token URL directly.
-    let exchange_proxy_url = std::env::var("IRONCLAW_OAUTH_EXCHANGE_URL").ok();
+    let exchange_proxy_url = oauth_defaults::exchange_proxy_url();
 
     let result: Result<(), String> = async {
         let token_response = if let Some(proxy_url) = &exchange_proxy_url {
