@@ -40,7 +40,8 @@ async def go_to_channels(page):
     await page.locator(SEL["settings_subpanel"].format(subtab="channels")).wait_for(
         state="visible", timeout=5000
     )
-    await page.locator(SEL["channels_ext_card"]).first.wait_for(
+    # Wait for the Telegram card specifically (built-in cards render first)
+    await page.locator(SEL["channels_ext_card"], has_text="Telegram").wait_for(
         state="visible", timeout=8000
     )
 
@@ -118,7 +119,7 @@ async def test_telegram_setup_modal_shows_bot_token_field(page):
     await page.route("**/api/extensions/telegram/setup", handle_setup)
     await go_to_channels(page)
 
-    card = page.locator(SEL["channels_ext_card"]).first
+    card = page.locator(SEL["channels_ext_card"], has_text="Telegram")
     await card.locator(SEL["ext_configure_btn"], has_text="Setup").click()
 
     modal = page.locator(SEL["configure_modal"])
@@ -210,7 +211,7 @@ async def test_telegram_hot_activation_transitions_installed_to_active(page):
     await page.route("**/api/extensions/telegram/setup", handle_setup)
     await go_to_channels(page)
 
-    card = page.locator(SEL["channels_ext_card"]).first
+    card = page.locator(SEL["channels_ext_card"], has_text="Telegram")
     await card.locator(SEL["ext_configure_btn"], has_text="Setup").click()
 
     modal = page.locator(SEL["configure_modal"])
