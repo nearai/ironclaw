@@ -84,6 +84,13 @@ impl TunnelConfig {
             })
         };
 
+        if public_url.is_some() && provider.is_some() {
+            tracing::warn!(
+                "both TUNNEL_URL and TUNNEL_PROVIDER are configured; \
+                 the managed provider may overwrite the static URL at runtime"
+            );
+        }
+
         Ok(Self {
             public_url,
             provider,

@@ -1,4 +1,6 @@
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env, parse_string_env};
+use crate::config::helpers::{
+    optional_env, parse_bool_env, parse_optional_env, parse_string_env, warn_if_env_shadows,
+};
 use crate::error::ConfigError;
 
 /// Docker sandbox configuration.
@@ -54,6 +56,15 @@ impl Default for SandboxModeConfig {
 impl SandboxModeConfig {
     pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
         let ss = &settings.sandbox;
+        let defaults = crate::settings::SandboxSettings::default();
+        warn_if_env_shadows("SANDBOX_ENABLED", &ss.enabled, &defaults.enabled);
+        warn_if_env_shadows("SANDBOX_POLICY", &ss.policy, &defaults.policy);
+        warn_if_env_shadows(
+            "SANDBOX_TIMEOUT_SECS",
+            &ss.timeout_secs,
+            &defaults.timeout_secs,
+        );
+        warn_if_env_shadows("SANDBOX_IMAGE", &ss.image, &defaults.image);
 
         let extra_domains = optional_env("SANDBOX_EXTRA_DOMAINS")?
             .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())

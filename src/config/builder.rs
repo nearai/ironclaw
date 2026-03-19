@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
+use crate::config::helpers::{
+    optional_env, parse_bool_env, parse_optional_env, warn_if_env_shadows,
+};
 use crate::error::ConfigError;
 
 /// Builder mode configuration.
@@ -34,6 +36,18 @@ impl Default for BuilderModeConfig {
 impl BuilderModeConfig {
     pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
         let bs = &settings.builder;
+        let defaults = crate::settings::BuilderSettings::default();
+        warn_if_env_shadows("BUILDER_ENABLED", &bs.enabled, &defaults.enabled);
+        warn_if_env_shadows(
+            "BUILDER_MAX_ITERATIONS",
+            &bs.max_iterations,
+            &defaults.max_iterations,
+        );
+        warn_if_env_shadows(
+            "BUILDER_TIMEOUT_SECS",
+            &bs.timeout_secs,
+            &defaults.timeout_secs,
+        );
         Ok(Self {
             enabled: parse_bool_env("BUILDER_ENABLED", bs.enabled)?,
             build_dir: optional_env("BUILDER_DIR")?
