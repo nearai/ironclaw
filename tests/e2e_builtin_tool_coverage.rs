@@ -10,7 +10,7 @@ mod support;
 mod tests {
     use std::time::Duration;
 
-    use ironclaw::agent::routine::{RoutineAction, Trigger};
+    use ironclaw::agent::routine::{FullJobPermissionMode, RoutineAction, Trigger};
 
     use crate::support::test_rig::TestRigBuilder;
     use crate::support::trace_llm::LlmTrace;
@@ -359,10 +359,12 @@ mod tests {
             RoutineAction::FullJob {
                 description,
                 tool_permissions,
+                permission_mode,
                 ..
             } => {
                 assert!(description.contains("Summarize the new issue"));
                 assert_eq!(tool_permissions, &vec!["shell".to_string()]);
+                assert_eq!(permission_mode, &FullJobPermissionMode::InheritOwner);
             }
             other => panic!("expected full_job action, got {other:?}"),
         }
@@ -413,6 +415,7 @@ mod tests {
             RoutineAction::FullJob {
                 description,
                 tool_permissions,
+                permission_mode,
                 ..
             } => {
                 assert!(description.contains("Prepare the morning digest"));
@@ -420,6 +423,7 @@ mod tests {
                     tool_permissions,
                     &vec!["message".to_string(), "http".to_string()]
                 );
+                assert_eq!(permission_mode, &FullJobPermissionMode::InheritOwner);
             }
             other => panic!("expected full_job action, got {other:?}"),
         }

@@ -2473,6 +2473,44 @@ async fn routines_detail_handler(
         })
         .collect();
     let routine_info = RoutineInfo::from_routine(&routine);
+    let full_job_permissions = match &routine.action {
+        crate::agent::routine::RoutineAction::FullJob {
+            tool_permissions,
+            permission_mode,
+            ..
+        } => {
+            let owner_settings = crate::agent::routine::load_full_job_permission_settings(
+                store.as_ref(),
+                &routine.user_id,
+            )
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let permission_mode_label = match permission_mode {
+                crate::agent::routine::FullJobPermissionMode::Explicit => "explicit",
+                crate::agent::routine::FullJobPermissionMode::InheritOwner => "inherit_owner",
+            };
+            let default_permission_mode_label = match owner_settings.default_mode {
+                crate::agent::routine::FullJobPermissionDefaultMode::Explicit => "explicit",
+                crate::agent::routine::FullJobPermissionDefaultMode::InheritOwner => {
+                    "inherit_owner"
+                }
+                crate::agent::routine::FullJobPermissionDefaultMode::CopyOwner => "copy_owner",
+            };
+            Some(FullJobPermissionInfo {
+                permission_mode: permission_mode_label.to_string(),
+                default_permission_mode: default_permission_mode_label.to_string(),
+                stored_tool_permissions: tool_permissions.clone(),
+                effective_tool_permissions:
+                    crate::agent::routine::effective_full_job_tool_permissions(
+                        *permission_mode,
+                        tool_permissions,
+                        &owner_settings.owner_allowed_tools,
+                    ),
+                owner_allowed_tools: owner_settings.owner_allowed_tools,
+            })
+        }
+        crate::agent::routine::RoutineAction::Lightweight { .. } => None,
+    };
 
     Ok(Json(RoutineDetailResponse {
         id: routine.id,
@@ -2491,6 +2529,7 @@ async fn routines_detail_handler(
         run_count: routine.run_count,
         consecutive_failures: routine.consecutive_failures,
         created_at: routine.created_at.to_rfc3339(),
+        full_job_permissions,
         recent_runs,
     }))
 }
