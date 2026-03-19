@@ -313,8 +313,11 @@ impl Tool for MemoryWriteTool {
         };
 
         // Sync derived identity documents when the profile is written.
+        // Normalize the path for comparison: trim slashes and collapse doubles,
+        // matching the normalization Workspace::write() applies internally.
+        let normalized_path = path.trim().trim_matches('/').replace("//", "/");
         let mut synced_docs: Vec<&str> = Vec::new();
-        if path == paths::PROFILE {
+        if normalized_path == paths::PROFILE {
             match self.workspace.sync_profile_documents().await {
                 Ok(true) => {
                     tracing::info!("profile write: synced USER.md + assistant-directives.md");

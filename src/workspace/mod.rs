@@ -870,7 +870,8 @@ impl Workspace {
             // exists yet, so the agent knows the target structure for profile.json.
             if bootstrap_injected && !has_profile_doc {
                 parts.push(format!(
-                    "PROFILE JSON SCHEMA:\nWrite to `context/profile.json` using `memory_write` with this exact structure:\n{}\n\n{}\n\n\
+                    "PROFILE ANALYSIS FRAMEWORK:\n{}\n\n\
+                     PROFILE JSON SCHEMA:\nWrite to `context/profile.json` using `memory_write` with this exact structure:\n{}\n\n\
                      If the conversation doesn't reveal enough about a dimension, use defaults/unknown.\n\
                      For personality trait scores: 40-60 is average range. Default to 50 if unclear.\n\
                      Only score above 70 or below 30 with strong evidence.",
@@ -1153,7 +1154,10 @@ impl Workspace {
         let has_profile = self
             .read(paths::PROFILE)
             .await
-            .is_ok_and(|d| !d.content.trim().is_empty());
+            .is_ok_and(|d| {
+                !d.content.trim().is_empty()
+                    && serde_json::from_str::<serde_json::Value>(&d.content).is_ok()
+            });
         if is_fresh_workspace && !has_profile {
             if let Err(e) = self.write(paths::BOOTSTRAP, BOOTSTRAP_SEED).await {
                 tracing::warn!("Failed to seed {}: {}", paths::BOOTSTRAP, e);
@@ -1534,6 +1538,24 @@ mod seed_tests {
         assert!(
             !doc.content.is_empty(),
             "BOOTSTRAP.md should have been seeded"
+        );
+    }
+
+    /// Corrupted (non-JSON) profile.json should NOT suppress bootstrap seeding.
+    #[tokio::test]
+    async fn seed_if_empty_ignores_corrupted_profile() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Pre-create a profile.json with non-JSON garbage.
+        ws.write(paths::PROFILE, "not valid json {{{")
+            .await
+            .expect("write corrupted profile");
+
+        let count = ws.seed_if_empty().await.expect("seed_if_empty");
+        assert!(count > 0, "should have seeded files");
+        assert!(
+            ws.take_bootstrap_pending(),
+            "bootstrap_pending should be set when profile is invalid JSON"
         );
     }
 

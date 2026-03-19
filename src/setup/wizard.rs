@@ -224,13 +224,13 @@ impl SetupWizard {
                     && !b.trim().is_empty()
                 {
                     self.settings.llm_backend = Some(b);
-                } else if std::env::var("NEARAI_API_KEY").is_ok() {
+                } else if std::env::var("NEARAI_API_KEY").is_ok_and(|v| !v.is_empty()) {
                     self.settings.llm_backend = Some("nearai".to_string());
-                } else if std::env::var("ANTHROPIC_API_KEY").is_ok()
-                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
+                } else if std::env::var("ANTHROPIC_API_KEY").is_ok_and(|v| !v.is_empty())
+                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok_and(|v| !v.is_empty())
                 {
                     self.settings.llm_backend = Some("anthropic".to_string());
-                } else if std::env::var("OPENAI_API_KEY").is_ok() {
+                } else if std::env::var("OPENAI_API_KEY").is_ok_and(|v| !v.is_empty()) {
                     self.settings.llm_backend = Some("openai".to_string());
                 }
             }
