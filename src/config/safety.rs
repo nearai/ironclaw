@@ -1,4 +1,4 @@
-use crate::config::helpers::{parse_bool_env, parse_optional_env};
+use crate::config::helpers::{parse_bool_env, parse_optional_env, warn_if_env_shadows};
 use crate::error::ConfigError;
 
 pub use ironclaw_safety::SafetyConfig;
@@ -7,6 +7,17 @@ pub(crate) fn resolve_safety_config(
     settings: &crate::settings::Settings,
 ) -> Result<SafetyConfig, ConfigError> {
     let ss = &settings.safety;
+    let defaults = crate::settings::SafetySettings::default();
+    warn_if_env_shadows(
+        "SAFETY_MAX_OUTPUT_LENGTH",
+        &ss.max_output_length,
+        &defaults.max_output_length,
+    );
+    warn_if_env_shadows(
+        "SAFETY_INJECTION_CHECK_ENABLED",
+        &ss.injection_check_enabled,
+        &defaults.injection_check_enabled,
+    );
     Ok(SafetyConfig {
         max_output_length: parse_optional_env("SAFETY_MAX_OUTPUT_LENGTH", ss.max_output_length)?,
         injection_check_enabled: parse_bool_env(

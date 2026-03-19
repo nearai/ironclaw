@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
+use crate::config::helpers::{
+    optional_env, parse_bool_env, parse_optional_env, warn_if_env_shadows,
+};
 use crate::error::ConfigError;
 
 /// WASM sandbox configuration.
@@ -46,6 +48,18 @@ fn default_tools_dir() -> PathBuf {
 impl WasmConfig {
     pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
         let ws = &settings.wasm;
+        let defaults = crate::settings::WasmSettings::default();
+        warn_if_env_shadows("WASM_ENABLED", &ws.enabled, &defaults.enabled);
+        warn_if_env_shadows(
+            "WASM_DEFAULT_MEMORY_LIMIT",
+            &ws.default_memory_limit,
+            &defaults.default_memory_limit,
+        );
+        warn_if_env_shadows(
+            "WASM_DEFAULT_TIMEOUT_SECS",
+            &ws.default_timeout_secs,
+            &defaults.default_timeout_secs,
+        );
         Ok(Self {
             enabled: parse_bool_env("WASM_ENABLED", ws.enabled)?,
             tools_dir: optional_env("WASM_TOOLS_DIR")?
