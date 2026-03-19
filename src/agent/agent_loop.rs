@@ -560,6 +560,8 @@ impl Agent {
                     // Spawn notification forwarder (mirrors heartbeat pattern)
                     let channels = self.channels.clone();
                     let extension_manager = self.deps.extension_manager.clone();
+                    let session_mgr_for_notify = self.session_manager.clone();
+                    let owner_id_for_notify = self.owner_id().to_string();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
                             let notify_channel = response
@@ -586,6 +588,38 @@ impl Agent {
                                 );
                                 continue;
                             };
+
+                            // Inject notification into the user's Telegram thread so
+                            // that when the user replies, the LLM has context about
+                            // what was notified.
+                            {
+                                let broadcast_channel = notify_channel.as_deref().unwrap_or("telegram");
+                                let (session, thread_id) = session_mgr_for_notify
+                                    .resolve_thread(&owner_id_for_notify, broadcast_channel, None)
+                                    .await;
+                                let mut sess = session.lock().await;
+                                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                    let routine_name = response.metadata
+                                        .get("routine_name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("routine");
+                                    let notification_text = format!(
+                                        "[Notification from '{}'] {}",
+                                        routine_name,
+                                        response.content
+                                    );
+                                    thread.start_turn(&notification_text);
+                                    thread.complete_turn(format!(
+                                        "I sent this notification to you via {}.",
+                                        broadcast_channel
+                                    ));
+                                    tracing::debug!(
+                                        routine = %routine_name,
+                                        thread_id = %thread_id,
+                                        "Injected routine notification into user thread for context"
+                                    );
+                                }
+                            }
 
                             // Try the configured channel first, fall back to
                             // broadcasting on all channels.
