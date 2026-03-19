@@ -21,14 +21,14 @@ permissions:
 
 jobs:
   update-release-pr:
-    if: >
-      (github.event_name == 'pull_request_target' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       startsWith(github.event.pull_request.head.ref, 'release-plz-')) ||
-      github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout base branch
+        if: >
+          github.event_name == 'workflow_dispatch' ||
+          (github.event.pull_request.head.repo.full_name == github.repository &&
+           startsWith(github.event.pull_request.head.ref, 'release-plz-'))
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.event.pull_request.base.ref }}
@@ -36,6 +36,10 @@ jobs:
           fetch-tags: true
 
       - name: Update release-plz PR body with staging batch summary
+        if: >
+          github.event_name == 'workflow_dispatch' ||
+          (github.event.pull_request.head.repo.full_name == github.repository &&
+           startsWith(github.event.pull_request.head.ref, 'release-plz-'))
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_number || github.event.pull_request.number }}

@@ -96,6 +96,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron/heartbeat topic targeting | ✅ | ❌ | Messages land in correct topic |
 | DM topics support | ✅ | ❌ | Agent/topic bindings in DMs and agent-scoped SessionKeys |
 | Persistent ACP topic binding | ✅ | ❌ | ACP harness sessions can pin to Telegram forum or DM topics |
+| Large message auto-split | ✅ | ✅ | Splits at paragraph / sentence / word boundaries to fit Telegram's 4096-char limit |
 
 ### Discord-Specific Features (since Feb 2025)
 
@@ -217,7 +218,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `/subagents spawn` command | ✅ | ❌ | Spawn from chat |
 | Auth profiles | ✅ | ❌ | Multiple auth strategies |
 | Generic API key rotation | ✅ | ❌ | Rotate keys across providers |
-| Stuck loop detection | ✅ | ❌ | Exponential backoff on stuck agent loops |
+| Stuck loop detection | ✅ | 🚧 | Stuck-threshold detection wired (tracks from Stuck transition, not started_at); store + builder wired for persistence and tool repair; exponential backoff not yet implemented |
 | llms.txt discovery | ✅ | ❌ | Auto-discover site metadata |
 | Multiple images per tool call | ✅ | ❌ | Single tool call, multiple images |
 | URL allowlist (web_search/fetch) | ✅ | ❌ | Restrict web tool targets |
@@ -441,6 +442,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `before_message_write` hook | ✅ | ❌ | P2 | Pre-write interception |
 | `onMessage` hook | ✅ | ✅ | - | Routines with event trigger |
 | Structured system-event routines | ✅ | ✅ | P2 | `system_event` trigger + `event_emit` tool for event-driven automation |
+| Per-routine tool access control | ✅ | ✅ | - | `--use-tools` / `--max-tool-rounds` flags on `routines create` and `routines edit`; defaults to 3 rounds when enabling on legacy routines |
 | `onSessionStart` hook | ✅ | ✅ | P2 | |
 | `onSessionEnd` hook | ✅ | ✅ | P2 | |
 | `transcribeAudio` hook | ✅ | ❌ | P3 | |
