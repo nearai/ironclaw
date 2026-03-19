@@ -42,7 +42,7 @@ Start with these deeper docs as needed:
 
 ## Repo-Wide Coding Rules
 
-- No `.unwrap()` or `.expect()` in production code.
+- Avoid `.unwrap()` and `.expect()` in production; prefer proper error handling. They are fine in tests, and in production only for truly infallible invariants (e.g., literals/regexes) with a safety comment.
 - Keep clippy clean with zero warnings.
 - Prefer `crate::` imports for cross-module references.
 - Use strong types and enums over stringly-typed control flow when the shape is known.
