@@ -37,6 +37,7 @@ impl LlmConfig {
             },
             provider: None,
             bedrock: None,
+            aliyun: None,
             request_timeout_secs: 120,
             cheap_model: None,
             smart_routing_cascade: false,
@@ -73,7 +74,12 @@ impl LlmConfig {
         let is_bedrock =
             backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
 
-        if !is_nearai && !is_bedrock && registry.find(&backend_lower).is_none() {
+        if !is_nearai
+            && !is_bedrock
+            && backend_lower != "aliyun"
+            && backend_lower != "coding_plan"
+            && registry.find(&backend_lower).is_none()
+        {
             tracing::warn!(
                 "Unknown LLM backend '{}'. Will attempt as openai_compatible fallback.",
                 backend
@@ -120,8 +126,11 @@ impl LlmConfig {
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
+        // Resolve Aliyun Coding Plan config
+        let is_aliyun = backend_lower == "aliyun" || backend_lower == "coding_plan";
+
         // Resolve registry provider config (for non-NearAI, non-Bedrock backends)
-        let provider = if is_nearai || is_bedrock {
+        let provider = if is_nearai || is_bedrock || is_aliyun {
             None
         } else {
             Some(Self::resolve_registry_provider(
@@ -168,6 +177,25 @@ impl LlmConfig {
             None
         };
 
+        let aliyun = if is_aliyun {
+            let aliyun_base_url = optional_env("ALIYUN_BASE_URL")?;
+            let llm_base_url = optional_env("LLM_BASE_URL")?;
+            let base_url = aliyun_base_url.or(llm_base_url).unwrap_or_else(|| {
+                "https://coding.dashscope.aliyuncs.com/apps/anthropic".to_string()
+            });
+            let aliyun_api_key = optional_env("ALIYUN_API_KEY")?;
+            let llm_api_key = optional_env("LLM_API_KEY")?;
+            let api_key = aliyun_api_key.or(llm_api_key).map(SecretString::from);
+            let model = Self::resolve_model("ALIYUN_MODEL", settings, "qwen3.5-plus")?;
+            Some(AliyunConfig {
+                model,
+                base_url,
+                api_key,
+                timeout_secs: parse_optional_env("ALIYUN_TIMEOUT_SECS", 120)?,
+            })
+        } else {
+            None
+        };
         let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
 
         // Generic cheap model (works with any backend).
@@ -183,6 +211,8 @@ impl LlmConfig {
                 "nearai".to_string()
             } else if is_bedrock {
                 "bedrock".to_string()
+            } else if is_aliyun {
+                "aliyun".to_string()
             } else if let Some(ref p) = provider {
                 p.provider_id.clone()
             } else {
@@ -192,6 +222,7 @@ impl LlmConfig {
             nearai,
             provider,
             bedrock,
+            aliyun,
             request_timeout_secs,
             cheap_model,
             smart_routing_cascade,
