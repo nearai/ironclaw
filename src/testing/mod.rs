@@ -492,6 +492,7 @@ impl TestHarnessBuilder {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            builder: None,
         };
 
         TestHarness {
