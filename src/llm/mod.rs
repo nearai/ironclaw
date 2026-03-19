@@ -43,7 +43,7 @@ pub use config::{
 };
 pub use error::LlmError;
 pub use failover::{CooldownConfig, FailoverProvider};
-pub use nearai_auth::resolve_nearai_bearer_token;
+pub use nearai_auth::{resolve_nearai_bearer_token, resolve_nearai_bearer_token_if_available};
 pub use nearai_chat::{ModelInfo, NearAiChatProvider};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, ImageUrl,

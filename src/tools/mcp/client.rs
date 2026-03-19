@@ -308,12 +308,11 @@ impl McpClient {
                     ));
                 };
 
-                crate::llm::resolve_nearai_bearer_token(
+                crate::llm::resolve_nearai_bearer_token_if_available(
                     self.nearai_api_key.as_ref(),
                     session_manager,
                 )
                 .await
-                .map(Some)
                 .map_err(|e| {
                     ToolError::ExternalService(format!(
                         "Failed to resolve NEAR AI token for MCP server '{}': {}",
@@ -882,6 +881,27 @@ mod tests {
         assert_eq!(
             headers.get("Authorization").map(String::as_str),
             Some("Bearer sess_test_token")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_request_headers_without_nearai_auth_does_not_trigger_login() {
+        use crate::llm::{
+            SessionConfig as NearAiSessionConfig, SessionManager as NearAiSessionManager,
+        };
+
+        let config = McpServerConfig::new("chat_api", "http://localhost:3000/mcp")
+            .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let nearai_session = Arc::new(NearAiSessionManager::new(NearAiSessionConfig::default()));
+
+        let client = McpClient::new_with_config(config)
+            .expect("valid MCP config")
+            .with_nearai_session_manager(nearai_session);
+        let headers = client.build_request_headers().await.expect("headers");
+
+        assert!(
+            !headers.contains_key("Authorization"),
+            "runtime auth should stay absent when no token is available"
         );
     }
 
