@@ -29,6 +29,7 @@ use uuid::Uuid;
 use axum::http::HeaderMap;
 
 use crate::agent::SessionManager;
+use crate::anp::build_agent_description_preview;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
@@ -399,6 +400,10 @@ pub struct GatewayState {
     pub prompt_queue: Option<PromptQueue>,
     /// Durable owner scope for persistence and unauthenticated callback flows.
     pub owner_id: String,
+    /// Stable instance DID exposed through protected API endpoints.
+    pub instance_identity: Option<Arc<crate::did::InstanceIdentity>>,
+    /// Human-readable agent name used when generating ANP previews.
+    pub agent_name: Option<String>,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
@@ -668,6 +673,16 @@ pub async fn start_server(
         .route(
             "/api/settings/{key}",
             axum::routing::delete(settings_delete_handler),
+        )
+        // Instance identity / ANP preview
+        .route("/api/identity", get(identity_handler))
+        .route(
+            "/api/identity/did-document",
+            get(identity_did_document_handler),
+        )
+        .route(
+            "/api/identity/agent-description",
+            get(identity_agent_description_handler),
         )
         // LLM utilities
         .route(
@@ -3219,6 +3234,54 @@ async fn gateway_status_handler(
     })
 }
 
+async fn identity_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<IdentityResponse>, StatusCode> {
+    let identity = state
+        .instance_identity
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    Ok(Json(IdentityResponse {
+        did: identity.did().to_string(),
+        method: identity.method().to_string(),
+        key_id: identity.key_id(),
+        created_at: identity.created_at().to_rfc3339(),
+    }))
+}
+
+async fn identity_did_document_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<crate::did::DidDocument>, StatusCode> {
+    let identity = state
+        .instance_identity
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(Json(identity.document()))
+}
+
+async fn identity_agent_description_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<crate::anp::AgentDescription>, StatusCode> {
+    let identity = state
+        .instance_identity
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let agent_name = state.agent_name.as_deref().unwrap_or("IronClaw");
+    let tool_count = state
+        .tool_registry
+        .as_ref()
+        .map(|registry| registry.count())
+        .unwrap_or(0);
+    let preview = build_agent_description_preview(
+        agent_name,
+        identity.as_ref(),
+        tool_count,
+        state.llm_provider.is_some(),
+    );
+    Ok(Json(preview))
+}
+
 #[derive(serde::Serialize)]
 struct ModelUsageEntry {
     model: String,
@@ -3455,6 +3518,8 @@ mod tests {
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
+            instance_identity: None,
+            agent_name: None,
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,

@@ -14,6 +14,7 @@ use crate::channels::web::auth::MultiAuthState;
 use crate::channels::web::server::{GatewayState, PerUserRateLimiter, RateLimiter, start_server};
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::ws::WsConnectionTracker;
+use crate::did::InstanceIdentity;
 
 /// Builder for constructing a [`GatewayState`] with sensible test defaults.
 ///
@@ -23,6 +24,8 @@ use crate::channels::web::ws::WsConnectionTracker;
 pub struct TestGatewayBuilder {
     msg_tx: Option<mpsc::Sender<IncomingMessage>>,
     llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    instance_identity: Option<Arc<InstanceIdentity>>,
+    agent_name: Option<String>,
     user_id: String,
 }
 
@@ -31,6 +34,8 @@ impl Default for TestGatewayBuilder {
         Self {
             msg_tx: None,
             llm_provider: None,
+            instance_identity: None,
+            agent_name: None,
             user_id: "test-user".to_string(),
         }
     }
@@ -52,6 +57,18 @@ impl TestGatewayBuilder {
     /// Set the LLM provider (needed for OpenAI-compatible API tests).
     pub fn llm_provider(mut self, provider: Arc<dyn crate::llm::LlmProvider>) -> Self {
         self.llm_provider = Some(provider);
+        self
+    }
+
+    /// Set the instance identity exposed by the protected identity API.
+    pub fn instance_identity(mut self, identity: Arc<InstanceIdentity>) -> Self {
+        self.instance_identity = Some(identity);
+        self
+    }
+
+    /// Set the human-readable agent name used in ANP preview responses.
+    pub fn agent_name(mut self, name: impl Into<String>) -> Self {
+        self.agent_name = Some(name.into());
         self
     }
 
@@ -77,6 +94,8 @@ impl TestGatewayBuilder {
             job_manager: None,
             prompt_queue: None,
             owner_id: self.user_id.clone(),
+            instance_identity: self.instance_identity,
+            agent_name: self.agent_name,
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: self.llm_provider,

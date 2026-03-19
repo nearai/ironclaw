@@ -68,6 +68,16 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         )
     );
 
+    print!("  DID:         ");
+    match crate::did::load_or_create_default() {
+        Ok(identity) => println!("{}", identity.did()),
+        Err(e) => println!("error ({})", e),
+    }
+    println!(
+        "  DID Path:    {}",
+        crate::did::default_identity_path().display()
+    );
+
     // Database
     let db_backend = std::env::var("DATABASE_BACKEND")
         .ok()
