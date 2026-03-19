@@ -62,6 +62,14 @@ pub enum RoutinesCommand {
         /// Notification channel
         #[arg(long)]
         notify_channel: Option<String>,
+
+        /// Enable tool access for this routine
+        #[arg(long)]
+        use_tools: bool,
+
+        /// Max tool call rounds (if use_tools is enabled)
+        #[arg(long, default_value = "3")]
+        max_tool_rounds: u32,
     },
 
     /// Edit an existing routine
@@ -90,6 +98,14 @@ pub enum RoutinesCommand {
         /// New cooldown in seconds
         #[arg(long)]
         cooldown: Option<u64>,
+
+        /// Enable/disable tool access
+        #[arg(long)]
+        use_tools: Option<bool>,
+
+        /// New max tool call rounds
+        #[arg(long)]
+        max_tool_rounds: Option<u32>,
     },
 
     /// Enable a routine
@@ -151,6 +167,8 @@ pub async fn run_routines_command(
             timezone,
             cooldown,
             notify_channel,
+            use_tools,
+            max_tool_rounds,
         } => {
             create(
                 &db,
@@ -162,6 +180,8 @@ pub async fn run_routines_command(
                 timezone.as_deref(),
                 cooldown,
                 notify_channel,
+                use_tools,
+                max_tool_rounds,
             )
             .await
         }
@@ -172,6 +192,8 @@ pub async fn run_routines_command(
             description,
             timezone,
             cooldown,
+            use_tools,
+            max_tool_rounds,
         } => {
             edit(
                 &db,
@@ -182,6 +204,8 @@ pub async fn run_routines_command(
                 description.as_deref(),
                 timezone.as_deref(),
                 cooldown,
+                use_tools,
+                max_tool_rounds,
             )
             .await
         }
@@ -313,6 +337,8 @@ async fn create(
     timezone: Option<&str>,
     cooldown_secs: u64,
     notify_channel: Option<String>,
+    use_tools: bool,
+    max_tool_rounds: u32,
 ) -> anyhow::Result<()> {
     validate_timezone_arg(timezone)?;
 
@@ -340,8 +366,8 @@ async fn create(
             prompt: prompt.to_string(),
             context_paths: Vec::new(),
             max_tokens: 4096,
-            use_tools: false,
-            max_tool_rounds: 0,
+            use_tools,
+            max_tool_rounds,
         },
         guardrails: RoutineGuardrails {
             cooldown: std::time::Duration::from_secs(cooldown_secs),
@@ -384,6 +410,8 @@ async fn edit(
     description: Option<&str>,
     timezone: Option<&str>,
     cooldown: Option<u64>,
+    use_tools: Option<bool>,
+    max_tool_rounds: Option<u32>,
 ) -> anyhow::Result<()> {
     let mut routine = require_routine(db, user_id, name).await?;
     validate_timezone_arg(timezone)?;
@@ -441,6 +469,28 @@ async fn edit(
     if let Some(cd) = cooldown {
         routine.guardrails.cooldown = std::time::Duration::from_secs(cd);
         changed = true;
+    }
+
+    if let Some(ut) = use_tools {
+        match &mut routine.action {
+            RoutineAction::Lightweight { use_tools: u, .. } => {
+                *u = ut;
+                changed = true;
+            }
+            _ => anyhow::bail!("Cannot set use_tools on non-lightweight routine"),
+        }
+    }
+
+    if let Some(mtr) = max_tool_rounds {
+        match &mut routine.action {
+            RoutineAction::Lightweight {
+                max_tool_rounds: m, ..
+            } => {
+                *m = mtr;
+                changed = true;
+            }
+            _ => anyhow::bail!("Cannot set max_tool_rounds on non-lightweight routine"),
+        }
     }
 
     if !changed {
