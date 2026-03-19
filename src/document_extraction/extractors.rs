@@ -65,9 +65,12 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
 }
 
 fn extract_pdf(data: &[u8]) -> Result<String, String> {
-    pdf_extract::extract_text_from_mem(data)
+    let mut doc = pdf_oxide::PdfDocument::from_bytes(data.to_vec())
+        .map_err(|e| format!("PDF extraction failed: {e}"))?;
+    let options = pdf_oxide::converters::ConversionOptions::default();
+    doc.to_markdown_all(&options)
         .map(|t| t.trim().to_string())
-        .map_err(|e| format!("PDF extraction failed: {e}"))
+        .map_err(|e| format!("PDF markdown conversion failed: {e}"))
 }
 
 fn extract_docx(data: &[u8]) -> Result<String, String> {

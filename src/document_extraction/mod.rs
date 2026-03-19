@@ -4,7 +4,7 @@
 //! on incoming messages and extracts text content so the LLM can reason about them.
 //!
 //! Supported formats:
-//! - **PDF** — via `pdf-extract`
+//! - **PDF** — via `pdf_oxide` (layout-aware markdown extraction)
 //! - **Office XML** (DOCX, PPTX, XLSX) — ZIP + XML text extraction
 //! - **Plain text** (TXT, CSV, JSON, XML, Markdown, code) — UTF-8 decode
 
