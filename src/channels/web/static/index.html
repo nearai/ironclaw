@@ -95,8 +95,7 @@
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
       <button data-tab="routines" data-i18n="tab.routines">Routines</button>
-      <button data-tab="extensions" data-i18n="tab.extensions">Extensions</button>
-      <button data-tab="skills" data-i18n="tab.skills">Skills</button>
+      <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
 
       <!-- Language Switcher -->
@@ -269,77 +268,125 @@
       </div>
     </div>
 
-    <!-- Extensions Tab -->
-    <div class="tab-panel" id="tab-extensions">
-      <div class="extensions-container">
-        <div class="extensions-section">
-          <h3 data-i18n="extensions.installed">Installed Extensions</h3>
-          <div class="extensions-list" id="extensions-list">
-            <div class="empty-state" data-i18n="common.loading">Loading...</div>
-          </div>
+    <!-- Settings Tab -->
+    <div class="tab-panel" id="tab-settings">
+      <div class="settings-layout">
+        <div class="settings-sidebar">
+          <button class="settings-subtab active" data-settings-subtab="inference" data-i18n="settings.inference">Inference</button>
+          <button class="settings-subtab" data-settings-subtab="agent" data-i18n="settings.agent">Agent</button>
+          <button class="settings-subtab" data-settings-subtab="channels" data-i18n="settings.channels">Channels</button>
+          <button class="settings-subtab" data-settings-subtab="networking" data-i18n="settings.networking">Networking</button>
+          <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
+          <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
+          <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
         </div>
-        <div class="extensions-section" id="available-wasm-section">
-          <h3 data-i18n="extensions.available">Available WASM Extensions</h3>
-          <div class="extensions-list" id="available-wasm-list">
-            <div class="empty-state" data-i18n="common.loading">Loading...</div>
+        <div class="settings-content">
+          <div class="settings-toolbar">
+            <div class="settings-search">
+              <input type="text" id="settings-search-input" data-i18n-placeholder="settings.searchPlaceholder" placeholder="Search settings..." data-i18n-attr="aria-label" data-i18n="settings.searchPlaceholder" aria-label="Search settings...">
+            </div>
+            <button id="settings-export-btn" class="settings-toolbar-btn" data-i18n="settings.export">Export</button>
+            <button id="settings-import-btn" class="settings-toolbar-btn" data-i18n="settings.import">Import</button>
           </div>
-        </div>
-        <div class="extensions-section">
-          <h3 data-i18n="extensions.installWasm">Install WASM Extension</h3>
-          <div class="ext-install-form">
-            <input type="text" id="wasm-install-name" data-i18n-placeholder="common.name" placeholder="Extension name">
-            <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
-            <button id="wasm-install-btn" data-i18n="extensions.install">Install</button>
+          <div class="settings-subpanel active" id="settings-inference">
+            <div class="extensions-container" id="settings-inference-content">
+              <div class="empty-state" data-i18n="common.loading">Loading settings...</div>
+            </div>
           </div>
-        </div>
-        <div class="extensions-section">
-          <h3 data-i18n="mcp.servers">MCP Servers</h3>
-          <div class="extensions-list" id="mcp-servers-list">
-            <div class="empty-state" data-i18n="common.loading">Loading...</div>
+          <div class="settings-subpanel" id="settings-agent">
+            <div class="extensions-container" id="settings-agent-content">
+              <div class="empty-state" data-i18n="common.loading">Loading settings...</div>
+            </div>
           </div>
-          <h4 data-i18n="mcp.addCustom">Add Custom MCP Server</h4>
-          <div class="ext-install-form">
-            <input type="text" id="mcp-install-name" data-i18n-placeholder="common.name" placeholder="Server name">
-            <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
-            <button id="mcp-add-btn" data-i18n="mcp.add">Add</button>
+          <div class="settings-subpanel" id="settings-channels">
+            <div class="extensions-container" id="settings-channels-content">
+              <div class="empty-state" data-i18n="common.loading">Loading channels...</div>
+            </div>
           </div>
-        </div>
-        <div class="extensions-section">
-          <h3 data-i18n="tools.registered">Registered Tools</h3>
-          <table class="tools-table" id="tools-table">
-            <thead><tr><th data-i18n="tools.name">Name</th><th data-i18n="tools.description">Description</th></tr></thead>
-            <tbody id="tools-tbody"></tbody>
-          </table>
-          <div class="empty-state" id="tools-empty" style="display:none" data-i18n="tools.empty">No tools registered</div>
+          <div class="settings-subpanel" id="settings-networking">
+            <div class="extensions-container" id="settings-networking-content">
+              <div class="empty-state" data-i18n="common.loading">Loading...</div>
+            </div>
+          </div>
+          <div class="settings-subpanel" id="settings-extensions">
+            <div class="extensions-container">
+              <div class="extensions-section">
+                <h3 data-i18n="extensions.installed">Installed Extensions</h3>
+                <div class="extensions-list" id="extensions-list">
+                  <div class="empty-state" data-i18n="common.loading">Loading...</div>
+                </div>
+              </div>
+              <div class="extensions-section" id="available-wasm-section">
+                <h3 data-i18n="extensions.available">Available Extensions</h3>
+                <div class="extensions-list" id="available-wasm-list">
+                  <div class="empty-state" data-i18n="common.loading">Loading...</div>
+                </div>
+              </div>
+              <div class="extensions-section">
+                <h3 data-i18n="extensions.installWasm">Install Extension</h3>
+                <div class="ext-install-form">
+                  <input type="text" id="wasm-install-name" data-i18n-placeholder="common.name" placeholder="Extension name">
+                  <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
+                  <button id="wasm-install-btn" data-i18n="extensions.install">Install</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="settings-subpanel" id="settings-mcp">
+            <div class="extensions-container">
+              <div class="extensions-section">
+                <h3 data-i18n="mcp.servers">MCP Servers</h3>
+                <div class="extensions-list" id="mcp-servers-list">
+                  <div class="empty-state" data-i18n="common.loading">Loading...</div>
+                </div>
+                <h4 data-i18n="mcp.addCustom">Add Custom MCP Server</h4>
+                <div class="ext-install-form">
+                  <input type="text" id="mcp-install-name" data-i18n-placeholder="common.name" placeholder="Server name">
+                  <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
+                  <button id="mcp-add-btn" data-i18n="mcp.add">Add</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="settings-subpanel" id="settings-skills">
+            <div class="extensions-container">
+              <div class="extensions-section">
+                <h3 data-i18n="skills.searchClawHub">Search ClawHub</h3>
+                <div class="skill-search-box">
+                  <input type="text" id="skill-search-input" data-i18n-placeholder="skills.searchPlaceholder" placeholder="Search for skills...">
+                  <button id="skill-search-btn" data-i18n="skills.search">Search</button>
+                </div>
+                <div class="extensions-list" id="skill-search-results"></div>
+              </div>
+              <div class="extensions-section">
+                <h3 data-i18n="skills.installed">Installed Skills</h3>
+                <div class="extensions-list" id="skills-list">
+                  <div class="empty-state" data-i18n="skills.loading">Loading skills...</div>
+                </div>
+              </div>
+              <div class="extensions-section">
+                <h3 data-i18n="skills.installByUrl">Install Skill by URL</h3>
+                <div class="ext-install-form">
+                  <input type="text" id="skill-install-name" data-i18n-placeholder="skills.namePlaceholder" placeholder="Skill name or slug">
+                  <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
+                  <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
+  </div>
 
-    <!-- Skills Tab -->
-    <div class="tab-panel" id="tab-skills">
-      <div class="extensions-container">
-        <div class="extensions-section">
-          <h3 data-i18n="skills.searchClawHub">Search ClawHub</h3>
-          <div class="skill-search-box">
-            <input type="text" id="skill-search-input" data-i18n-placeholder="skills.searchPlaceholder" placeholder="Search...">
-            <button id="skill-search-btn" data-i18n="skills.search">Search</button>
-          </div>
-          <div class="extensions-list" id="skill-search-results"></div>
-        </div>
-        <div class="extensions-section">
-          <h3 data-i18n="skills.installed">Installed Skills</h3>
-          <div class="extensions-list" id="skills-list">
-            <div class="empty-state" data-i18n="skills.loading">Loading skills...</div>
-          </div>
-        </div>
-        <div class="extensions-section">
-          <h3 data-i18n="skills.installByUrl">Install Skill by URL</h3>
-          <div class="ext-install-form">
-            <input type="text" id="skill-install-name" data-i18n-placeholder="skills.namePlaceholder" placeholder="Skill name or slug">
-            <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
-            <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
-          </div>
-        </div>
+  <!-- Confirmation Modal -->
+  <div id="confirm-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+    <div class="modal">
+      <h3 id="confirm-modal-title"></h3>
+      <p id="confirm-modal-message"></p>
+      <div class="modal-actions">
+        <button id="confirm-modal-cancel-btn" class="btn-secondary" data-i18n="btn.cancel">Cancel</button>
+        <button id="confirm-modal-btn" class="btn-danger">Confirm</button>
       </div>
     </div>
   </div>
