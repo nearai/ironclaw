@@ -4,7 +4,17 @@
 
 - `AGENTS.md` is the quick-start contract for coding agents. It is not the full architecture spec.
 - Read the relevant subsystem spec before changing a complex area. When a repo spec exists, treat it as authoritative.
-- Start with these deeper docs as needed: `CLAUDE.md`, `src/agent/CLAUDE.md`, `src/channels/web/CLAUDE.md`, `src/db/CLAUDE.md`, `src/llm/CLAUDE.md`, `src/setup/README.md`, `src/tools/README.md`, `src/workspace/README.md`, `src/NETWORK_SECURITY.md`, `tests/e2e/CLAUDE.md`.
+- Start with these deeper docs as needed:
+- `CLAUDE.md`
+- `src/agent/CLAUDE.md`
+- `src/channels/web/CLAUDE.md`
+- `src/db/CLAUDE.md`
+- `src/llm/CLAUDE.md`
+- `src/setup/README.md`
+- `src/tools/README.md`
+- `src/workspace/README.md`
+- `src/NETWORK_SECURITY.md`
+- `tests/e2e/CLAUDE.md`
 
 ## Architecture Mental Model
 
