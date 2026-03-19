@@ -473,8 +473,17 @@ async fn edit(
 
     if let Some(ut) = use_tools {
         match &mut routine.action {
-            RoutineAction::Lightweight { use_tools: u, .. } => {
+            RoutineAction::Lightweight {
+                use_tools: u,
+                max_tool_rounds: m,
+                ..
+            } => {
                 *u = ut;
+                // If tools are being enabled on a legacy routine (rounds 0 or 1),
+                // restore a usable default if the user didn't specify one.
+                if ut && *m <= 1 && max_tool_rounds.is_none() {
+                    *m = 3;
+                }
                 changed = true;
             }
             _ => anyhow::bail!("Cannot set use_tools on non-lightweight routine"),
