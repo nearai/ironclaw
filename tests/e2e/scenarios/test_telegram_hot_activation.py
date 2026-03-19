@@ -34,8 +34,9 @@ _TELEGRAM_ACTIVE = {
 
 
 async def go_to_extensions(page):
-    await page.locator(SEL["tab_button"].format(tab="extensions")).click()
-    await page.locator(SEL["tab_panel"].format(tab="extensions")).wait_for(
+    await page.locator(SEL["tab_button"].format(tab="settings")).click()
+    await page.locator(SEL["settings_subtab"].format(subtab="extensions")).click()
+    await page.locator(SEL["settings_subpanel"].format(subtab="extensions")).wait_for(
         state="visible", timeout=5000
     )
     await page.locator(
