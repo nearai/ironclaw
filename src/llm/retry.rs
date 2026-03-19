@@ -80,9 +80,11 @@ pub(crate) fn cap_retry_after(duration: Duration) -> Duration {
 
 /// Parse a `Retry-After` header value into a capped `Duration`.
 ///
-/// Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date (RFC 2822) formats.
+/// Supports both delay-seconds (RFC 7231 §7.1.3) and HTTP-date formats (RFC 7231
+/// §7.1.1 / IMF-fixdate). The implementation uses `chrono::DateTime::parse_from_rfc2822`,
+/// which also accepts RFC 2822-style dates.
 /// Returns `DEFAULT_RETRY_AFTER` (60 s) if the header is missing or unparseable.
-pub(crate) fn parse_retry_after(header: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {
+pub(crate) fn parse_retry_after(header: Option<&reqwest::header::HeaderValue>) -> Duration {
     header
         .and_then(|v| v.to_str().ok())
         .and_then(|v| {
@@ -98,7 +100,7 @@ pub(crate) fn parse_retry_after(header: Option<&reqwest::header::HeaderValue>) -
             }
             None
         })
-        .or(Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)))
+        .unwrap_or(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
 }
 
 const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
@@ -473,14 +475,14 @@ mod tests {
     #[test]
     fn parse_retry_after_delay_seconds() {
         let val = reqwest::header::HeaderValue::from_static("30");
-        assert_eq!(parse_retry_after(Some(&val)), Some(Duration::from_secs(30)));
+        assert_eq!(parse_retry_after(Some(&val)), Duration::from_secs(30));
     }
 
     #[test]
     fn parse_retry_after_missing_header() {
         assert_eq!(
             parse_retry_after(None),
-            Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
+            Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)
         );
     }
 
@@ -489,7 +491,7 @@ mod tests {
         let val = reqwest::header::HeaderValue::from_static("not-a-number");
         assert_eq!(
             parse_retry_after(Some(&val)),
-            Some(Duration::from_secs(DEFAULT_RETRY_AFTER_SECS))
+            Duration::from_secs(DEFAULT_RETRY_AFTER_SECS)
         );
     }
 
@@ -498,7 +500,24 @@ mod tests {
         let val = reqwest::header::HeaderValue::from_static("999999");
         assert_eq!(
             parse_retry_after(Some(&val)),
-            Some(Duration::from_secs(MAX_RETRY_AFTER_SECS))
+            Duration::from_secs(MAX_RETRY_AFTER_SECS)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        let future = chrono::Utc::now() + chrono::Duration::seconds(30);
+        let date_str = future.to_rfc2822();
+        let val = reqwest::header::HeaderValue::from_str(&date_str).unwrap();
+        let parsed = parse_retry_after(Some(&val));
+        let diff = if parsed > Duration::from_secs(30) {
+            parsed - Duration::from_secs(30)
+        } else {
+            Duration::from_secs(30) - parsed
+        };
+        assert!(
+            diff <= Duration::from_secs(2),
+            "expected ~30s, got {parsed:?} (diff {diff:?}) from header {date_str:?}"
         );
     }
 }
