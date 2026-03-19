@@ -1072,7 +1072,12 @@ impl Agent {
                         "Drain loop: processing merged queued messages"
                     );
 
-                    // Send the completed turn's response/error before starting next
+                    // Send the completed turn's response/error before starting next.
+                    // NOTE: One-shot channels (HttpChannel) key respond() on msg.id
+                    // and will silently drop the second call. This is acceptable —
+                    // the final response is always delivered by the outer handler;
+                    // intermediate drain-loop responses are best-effort for
+                    // streaming channels (WebChannel SSE, WebSocket).
                     let outgoing = match &result {
                         Ok(SubmissionResult::Response { content }) => Some(content.clone()),
                         Ok(SubmissionResult::Error { message }) => Some(message.clone()),

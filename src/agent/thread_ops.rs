@@ -215,22 +215,22 @@ impl Agent {
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     // Re-check state under lock — the turn may have completed
                     // between the snapshot read and this mutable lock acquisition.
-                    if thread.state != ThreadState::Processing {
-                        return Ok(SubmissionResult::ok_with_message(
-                            "Turn just completed. Please re-send your message.",
-                        ));
+                    if thread.state == ThreadState::Processing {
+                        if !thread.queue_message(content.to_string()) {
+                            return Ok(SubmissionResult::error(format!(
+                                "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
+                            )));
+                        }
+                        return Ok(SubmissionResult::Ok {
+                            message: Some(
+                                "Message queued — will be processed after the current turn.".into(),
+                            ),
+                        });
                     }
-                    if !thread.queue_message(content.to_string()) {
-                        return Ok(SubmissionResult::error(format!(
-                            "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
-                        )));
-                    }
+                    // State changed (turn completed) — fall through to process normally.
+                } else {
+                    return Ok(SubmissionResult::error("Thread no longer exists."));
                 }
-                return Ok(SubmissionResult::Ok {
-                    message: Some(
-                        "Message queued — will be processed after the current turn.".into(),
-                    ),
-                });
             }
             ThreadState::AwaitingApproval => {
                 tracing::warn!(
@@ -2057,6 +2057,56 @@ mod tests {
         assert!(thread.pending_messages.is_empty());
         assert!(thread.turns.is_empty());
         assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[test]
+    fn test_processing_arm_thread_gone_returns_error() {
+        // Regression: if the thread disappears between the state snapshot and the
+        // mutable lock, the Processing arm must return an error — not a false
+        // "queued" acknowledgment.
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+        thread.start_turn("working");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+
+        // Simulate the thread disappearing (e.g., /clear racing with queue)
+        session.threads.remove(&thread_id);
+        assert!(!session.threads.contains_key(&thread_id));
+        // The Processing arm should detect this and return an error.
+    }
+
+    #[test]
+    fn test_processing_arm_state_changed_falls_through() {
+        // Regression: if the thread transitions from Processing to Idle between
+        // the state snapshot and the mutable lock, the message must NOT be queued.
+        // Instead it should fall through to normal processing.
+        use crate::agent::session::{Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+        thread.start_turn("working");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        // Simulate the turn completing between snapshot and re-lock
+        thread.complete_turn("done");
+        assert_eq!(thread.state, ThreadState::Idle);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+
+        // When the Processing arm re-checks, it should see Idle and NOT queue.
+        let t = session.threads.get(&thread_id).unwrap();
+        assert_eq!(t.state, ThreadState::Idle);
+        assert!(t.pending_messages.is_empty());
     }
 
     // Helper function to extract the approval message without needing a full Agent instance
