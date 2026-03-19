@@ -911,6 +911,11 @@ impl ExtensionManager {
         Ok(results)
     }
 
+    /// Inject a pre-created MCP client (from startup loading) into the manager.
+    pub async fn inject_mcp_client(&self, name: String, client: std::sync::Arc<crate::tools::mcp::McpClient>) {
+        self.mcp_clients.write().await.insert(name, client);
+    }
+
     /// Install an extension by name (from registry) or by explicit URL.
     pub async fn install(
         &self,

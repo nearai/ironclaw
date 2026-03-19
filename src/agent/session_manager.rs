@@ -116,14 +116,33 @@ impl SessionManager {
             external_thread_id: external_thread_id.map(String::from),
         };
 
+        const THREAD_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
         // Check if we have a mapping
         {
             let thread_map = self.thread_map.read().await;
             if let Some(&thread_id) = thread_map.get(&key) {
-                // Verify thread still exists in session
                 let sess = session.lock().await;
-                if sess.threads.contains_key(&thread_id) {
-                    return (Arc::clone(&session), thread_id);
+                if let Some(thread) = sess.threads.get(&thread_id) {
+                    if external_thread_id.is_none() {
+                        let idle_duration = chrono::Utc::now()
+                            .signed_duration_since(thread.updated_at);
+                        if idle_duration > chrono::Duration::from_std(THREAD_IDLE_TIMEOUT)
+                            .unwrap_or(chrono::Duration::seconds(1800))
+                        {
+                            tracing::info!(
+                                thread_id = %thread_id,
+                                idle_secs = idle_duration.num_seconds(),
+                                "Thread idle timeout exceeded, creating new thread"
+                            );
+                            drop(sess);
+                            drop(thread_map);
+                        } else {
+                            return (Arc::clone(&session), thread_id);
+                        }
+                    } else {
+                        return (Arc::clone(&session), thread_id);
+                    }
                 }
             }
         }
