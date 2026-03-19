@@ -933,18 +933,27 @@ impl Tool for CreateJobTool {
             let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
 
             // Parse optional MCP server filter and iteration cap.
-            let mcp_servers: Option<Vec<String>> = params
-                .get("mcp_servers")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
+            // Validate types: warn if present but wrong type so callers know why it was ignored.
+            let mcp_servers: Option<Vec<String>> = match params.get("mcp_servers") {
+                Some(v) if v.is_array() => v.as_array().map(|arr| {
                     arr.iter()
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect()
-                });
-            let max_iterations: Option<u32> = params
-                .get("max_iterations")
-                .and_then(|v| v.as_u64())
-                .map(|n| n.clamp(1, 500) as u32);
+                }),
+                Some(_) => {
+                    tracing::warn!("mcp_servers parameter is not an array — ignoring");
+                    None
+                }
+                None => None,
+            };
+            let max_iterations: Option<u32> = match params.get("max_iterations") {
+                Some(v) if v.is_u64() || v.is_i64() => v.as_u64().map(|n| n.clamp(1, 500) as u32),
+                Some(_) => {
+                    tracing::warn!("max_iterations parameter is not a number — ignoring");
+                    None
+                }
+                None => None,
+            };
 
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
