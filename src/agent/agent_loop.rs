@@ -1051,6 +1051,7 @@ impl Agent {
                     match &result {
                         Ok(SubmissionResult::NeedApproval { .. })
                         | Ok(SubmissionResult::Interrupted)
+                        | Ok(SubmissionResult::Ok { .. })
                         | Err(_) => break,
                         _ => {}
                     }

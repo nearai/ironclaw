@@ -212,12 +212,19 @@ impl Agent {
         match thread_state {
             ThreadState::Processing => {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id)
-                    && !thread.queue_message(content.to_string())
-                {
-                    return Ok(SubmissionResult::error(format!(
-                        "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
-                    )));
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    // Re-check state under lock — the turn may have completed
+                    // between the snapshot read and this mutable lock acquisition.
+                    if thread.state != ThreadState::Processing {
+                        return Ok(SubmissionResult::ok_with_message(
+                            "Turn just completed. Please re-send your message.",
+                        ));
+                    }
+                    if !thread.queue_message(content.to_string()) {
+                        return Ok(SubmissionResult::error(format!(
+                            "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
+                        )));
+                    }
                 }
                 return Ok(SubmissionResult::Ok {
                     message: Some(
